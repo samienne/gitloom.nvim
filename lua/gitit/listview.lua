@@ -107,7 +107,6 @@ local function refresh_columns(win, model, first, last)
     end
 
     if changed then
-        --local first_visible, last_visible = get_visible_range(win)
         local new_columns = {}
         for i = first, last do
             local item = model.items[i]
@@ -138,10 +137,8 @@ local function fix_width(item, len)
             for _, hl in ipairs(item.highlight) do
                 local start_pos = hl.start_pos
                 local end_pos = hl.end_pos
-                if start_pos >= len then
-                    if end_pos > len then
-                        end_pos = len
-                    end
+                if start_pos < len then
+                    end_pos = math.min(end_pos, len)
 
                     table.insert(highlight, {
                         start_pos = start_pos,
@@ -189,7 +186,7 @@ local function display(buf, model, first, last)
                         line = i - 1,
                         start_pos = offset + hl.start_pos,
                         end_pos = offset + hl.end_pos,
-                        hl = hl.hl
+                        hl = hl.hl,
                     })
                 end
             end
@@ -201,17 +198,16 @@ local function display(buf, model, first, last)
     vim.bo[buf].modifiable = true
     vim.bo[buf].readonly = false
 
+    -- Convert first,last from 1-based inclusive last to 0-based exclusive last.
+    vim.api.nvim_buf_set_lines(buf, first - 1, last, false, lines)
     vim.api.nvim_buf_clear_namespace(buf, namespace, first - 1, last)
 
     for _, hl in ipairs(highlight) do
         vim.api.nvim_buf_set_extmark(buf, namespace, hl.line, hl.start_pos, {
             end_col = hl.end_pos,
-            hl_group = hl.hl
+            hl_group = hl.hl,
         })
     end
-
-    -- Convert first,last from 1-based inclusive last to 0-based exclusive last.
-    vim.api.nvim_buf_set_lines(buf, first - 1, last, false, lines)
     vim.bo[buf].modifiable = false
     vim.bo[buf].readonly = true
 end

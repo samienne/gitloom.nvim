@@ -190,8 +190,8 @@ function M.open(folder, opts)
         palette = {
             date = "Title",
             author = "Comment",
-            message = "WarningMsg",
-            branch = "Comment",
+            branch = "WarningMsg",
+            message = nil,
             tags = "Comment",
         },
     }, opts or {})
@@ -208,12 +208,20 @@ function M.open(folder, opts)
     local palette = opts.palette
 
     local highlight_text = function(text, hl)
+        if text == "" then
+            return {
+                text = text,
+                highlight = {},
+            }
+        end
         return {
             text = text,
             highlight = {
-                start_pos = 0,
-                end_pos = string.len(text),
-                hl = hl,
+                {
+                    start_pos = 0,
+                    end_pos = string.len(text),
+                    hl = hl,
+                },
             }
         }
     end
@@ -228,7 +236,7 @@ function M.open(folder, opts)
                     table.insert(highlight, {
                         start_pos = offset + hl.start_pos,
                         end_pos = offset + hl.end_pos,
-                        hl = hl.highlight
+                        hl = hl.hl
                     })
                 end
                 text = text .. item.text
@@ -239,9 +247,17 @@ function M.open(folder, opts)
 
         return {
             text = text,
-            highlight,
+            highlight = highlight,
         }
     end
+
+    --[[
+    vim.notify(vim.inspect(compose({
+        highlight_text("asdf ", palette.branch),
+        highlight_text("qwer ", palette.tags),
+        highlight_text("zxcv", palette.message),
+    })))
+    ]]--
 
     return listview.open({
         win = opts.win,
