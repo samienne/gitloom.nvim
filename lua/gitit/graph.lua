@@ -133,7 +133,7 @@ local function parse_commit_line(line)
 
     return {
         hash = hash,
-        parent = parents,
+        parents = parents,
         author = author,
         date = date,
         message = subject,
@@ -178,6 +178,27 @@ local function fetch_commits(opts)
     return future
 end
 
+local id = 0
+local function get_next_id()
+    id = id + 1
+    return id
+end
+
+local function refresh_tracks(order, start_pos)
+    start_pos = start_pos or 1
+    for i = start_pos, #order do
+        local item = order.items[i]
+
+        if i == 1 then
+            item.tracks = {
+                { id = get_next_id() },
+            }
+        else
+            local prev = order.items[i - 1]
+
+        end
+    end
+end
 function M.open(folder, opts)
     opts = vim.tbl_deep_extend("force", {
         win = {
@@ -203,6 +224,7 @@ function M.open(folder, opts)
         order = {},
         branches = {},
         heads = {},
+        refresh_scheduled = false,
     }
 
     local palette = opts.palette
@@ -251,19 +273,11 @@ function M.open(folder, opts)
         }
     end
 
-    --[[
-    vim.notify(vim.inspect(compose({
-        highlight_text("asdf ", palette.branch),
-        highlight_text("qwer ", palette.tags),
-        highlight_text("zxcv", palette.message),
-    })))
-    ]]--
-
     return listview.open({
         win = opts.win,
         display = function(item)
             local branches = ""
-            for _, branch in ipairs(item.refs.branches) do
+            for _, branch in ipairs(item.commit.refs.branches or {}) do
                 branches = branches .. "(" .. branch.name .. ")"
             end
             if branches ~= "" then
@@ -271,7 +285,7 @@ function M.open(folder, opts)
             end
 
             local tags = ""
-            for _, tag in ipairs(item.refs.tags) do
+            for _, tag in ipairs(item.commit.refs.tags or {}) do
                 tags = tags .. "[" .. tag.name .. "]"
             end
             if tags ~= "" then
@@ -279,12 +293,12 @@ function M.open(folder, opts)
             end
 
             return {
-                highlight_text(item.date .. " ", palette.date),
-                highlight_text(item.author .. " ", palette.author),
+                highlight_text(item.commit.date .. " ", palette.date),
+                highlight_text(item.commit.author .. " ", palette.author),
                 compose({
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
-                    highlight_text(item.message, palette.message),
+                    highlight_text(item.commit.message, palette.message),
                 }),
             }
         end,
@@ -298,12 +312,47 @@ function M.open(folder, opts)
                 return fetch_commits({
                     branch = opts.branch or { "--all" },
                     on_item = function(item)
-                        if not repo.commits[item.hash] then
+                        --if not repo.commits[item.hash] then
                             -- New commit
-                            repo.commits[item.hash] = item
-                            table.insert(repo.order, item)
-                            controller.insert({ item }, #repo.order)
-                        end
+
+                            local existing = repo.commits[item.hash]
+                            if existing then
+                                existing.author = item.author
+                                existing.date = item.date
+                                existing.refs = item.refs
+                                existing.parents = item.parents
+                                existing.message = item.message
+                                existing.loaded = item.loaded
+
+                                item = existing
+
+                            else
+                                repo.commits[item.hash] = item
+                            end
+
+                            -- Convert parent hashes to references
+                            local newParents = {}
+                            for _,p in ipairs(item.parents) do
+                                local parent = repo.commits[p]
+                                if not parent then
+                                    -- Add a dummy parent if not seen yet
+                                    parent = { hash = p, parents = {}, children = {}, refs = {} }
+                                    repo.commits[p] = parent
+                                end
+
+                                table.insert(parent.children, item)
+                                table.insert(newParents, parent)
+                            end
+
+                            item.parents = newParents
+
+                            local order_item = {
+                                commit = item,
+                                tracks = {},
+                            }
+                            table.insert(repo.order, order_item)
+                            controller.insert({ order_item }, #repo.order)
+                        --end
                     end,
                 })
             end).next(function()

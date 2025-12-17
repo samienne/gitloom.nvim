@@ -217,6 +217,36 @@ local function preserve_cursor_visual_pos(win, buf, fn)
     fn()
 end
 
+local function insert(win, model, items, pos)
+    local lines = {}
+    for i, item in ipairs(items) do
+        local table_item = {
+            index = pos, -- 1-based indexing
+            data = item
+        }
+        table_item.columns = nil
+        table_item.index = pos + i - 1
+
+        if pos then
+            table.insert(model.items, pos, table_item)
+        else
+            table.insert(model.items, table_item)
+        end
+
+        table.insert(lines, "")
+    end
+
+    preserve_cursor_visual_pos(win.win, win.buf, function()
+        local buf = win.buf
+        vim.bo[buf].modifiable = true
+        vim.bo[buf].readonly = false
+        -- Convert first,last from 1-based inclusive last to 0-based exclusive last.
+        vim.api.nvim_buf_set_lines(buf, pos - 1, pos, false, lines)
+        vim.bo[buf].modifiable = false
+        vim.bo[buf].readonly = true
+    end)
+end
+
 function M.open(opts)
     local model = {
         items = {},
@@ -236,33 +266,7 @@ function M.open(opts)
     local controller = {
         -- 1-based indexing
         insert = function(items, pos)
-            local lines = {}
-            for i, item in ipairs(items) do
-                local table_item = {
-                    index = pos, -- 1-based indexing
-                    data = item
-                }
-                table_item.columns = nil
-                table_item.index = pos + i - 1
-
-                if pos then
-                    table.insert(model.items, pos, table_item)
-                else
-                    table.insert(model.items, table_item)
-                end
-
-                table.insert(lines, "")
-            end
-
-            preserve_cursor_visual_pos(win.win, win.buf, function()
-                local buf = win.buf
-                vim.bo[buf].modifiable = true
-                vim.bo[buf].readonly = false
-                -- Convert first,last from 1-based inclusive last to 0-based exclusive last.
-                vim.api.nvim_buf_set_lines(buf, pos - 1, pos, false, lines)
-                vim.bo[buf].modifiable = false
-                vim.bo[buf].readonly = true
-            end)
+            insert(win, model, items, pos)
         end,
         remove = function(pos)
             local item = model.items[pos]
