@@ -128,7 +128,9 @@ local function refresh_columns(win, model, first, last)
 end
 
 local function fix_width(item, len)
-    local strlen = string.len(item.text)
+    local strlen = vim.fn.strdisplaywidth(item.text)
+    --local strlen = string.len(item.text)
+    --vim.str_utfindex(item.text, "utf-8", len, false)
     if strlen == len then
         return item
     elseif strlen < len then
@@ -147,8 +149,6 @@ local function fix_width(item, len)
                     })
                 end
             end
-        else
-            vim.notify(vim.inspect(item))
         end
 
         return {
@@ -157,7 +157,7 @@ local function fix_width(item, len)
         }
     else
         return {
-            text = string.sub(item.text, 1, len),
+            text = string.sub(item.text, 1, vim.str_utfindex(item.text, "utf-8", len, false)),
             highlight = item.highlight
         }
     end
@@ -181,7 +181,7 @@ local function display(buf, model, first, last)
                 local fixed = fix_width(column, model.columns[j])
                 local offset = string.len(line)
                 line = line .. fixed.text
-                for _, hl in ipairs(fixed.highlight) do
+                for _, hl in ipairs(fixed.highlight or {}) do
                     table.insert(highlight, {
                         line = i - 1,
                         start_pos = offset + hl.start_pos,

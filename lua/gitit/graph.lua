@@ -178,27 +178,155 @@ local function fetch_commits(opts)
     return future
 end
 
-local id = 0
+local next_id = 0
 local function get_next_id()
-    id = id + 1
-    return id
+    next_id = next_id + 1
+    return next_id
+end
+
+function table_contains(tbl, item)
+    for _, t in ipairs(tbl) do
+        if item == t then
+            return true
+        end
+    end
+
+    return false
 end
 
 local function refresh_tracks(order, start_pos)
     start_pos = start_pos or 1
     for i = start_pos, #order do
-        local item = order.items[i]
+        local item = order[i]
 
         if i == 1 then
             item.tracks = {
-                { id = get_next_id() },
+                {
+                    id = get_next_id(),
+                    char = "o",
+                    commit = item.commit,
+                    active = true,
+                },
             }
         else
-            local prev = order.items[i - 1]
+            local prev = order[i - 1]
 
+            local newTracks = {}
+            local found = false
+            local merging = 0
+            local splitting = 0
+            local shift_count = 0
+            local merging_id = nil
+            for _, t in ipairs(prev.tracks) do
+                local new_track = nil
+                if table_contains(t.commit.parents, item.commit) then
+                    if t.active then
+                        local already_present = false
+                        for _, t2 in ipairs(newTracks) do
+                            if t2.commit == item.commit then
+                                t2.merging = true
+                                already_present = true
+                                break
+                            end
+                        end
+
+                        found = true
+                        merging = math.max(0, #item.commit.parents - 1)
+                        if already_present then
+                            splitting = math.max(0, splitting - 1)
+                        else
+                            splitting = math.max(0, #item.commit.children - 1)
+                        end
+
+                        -- ┴─┴─┘
+                        new_track = {
+                            id = t.id,
+                            char = already_present and "┘" or (#item.commit.parents > 1) and "M" or "o",
+                            commit = item.commit,
+                            active = not already_present,
+                            merging = already_present or merging > 0 or splitting > 0,
+                        }
+
+                        if merging > 0 then
+                            merging_id = new_track.id
+                        end
+                    else
+                        if merging > 0 and merging_id ~= nil then
+                            merging = merging - 1
+                            new_track = {
+                                id = merging_id,
+                                char = "─",
+                                commit = item.commit,
+                                active = false,
+                                merging = true,
+                            }
+                        else
+                            shift_count = shift_count + 1
+                        end
+                    end
+                elseif t.active then
+                    new_track = {
+                        id = t.id,
+                        char = "│",
+                        commit = t.commit,
+                        active = true,
+                        merging = merging > 0 or splitting > 0,
+                    }
+                end
+
+                if new_track ~= nil then
+                    for i = 1, shift_count do
+                        table.insert(newTracks, {
+                            id = t.id,
+                            char = i == 1 and "┌" or i == shift_count and "┘" or "─",
+                            commit = item.commit,
+                            active = false,
+                            merging = i < shift_count,
+                        })
+                    end
+                    shift_count = 0
+
+                    table.insert(newTracks, new_track)
+                end
+            end
+
+            for i = 1, merging do
+                table.insert(newTracks, {
+                    id = merging_id,
+                    char = "┐",
+                    commit = item.commit,
+                    active = true,
+                    merging = true,
+                })
+            end
+            merging = 0
+
+
+            --[[
+            for _ = 1, merging do
+                table.insert(newTracks, {
+                    id = get_next_id(),
+                    char = "\\",
+                    commit = item.commit,
+                    active = true,
+                })
+            end
+            --]]
+
+            if not found then
+                table.insert(newTracks, {
+                    id = get_next_id(),
+                    char = "o",
+                    commit = item.commit,
+                    active = true,
+                })
+            end
+
+            item.tracks = newTracks
         end
     end
 end
+
 function M.open(folder, opts)
     opts = vim.tbl_deep_extend("force", {
         win = {
@@ -292,9 +420,15 @@ function M.open(folder, opts)
                 tags = tags .. " "
             end
 
+            local tracks = ""
+            for i, t in ipairs(item.tracks) do
+                tracks = tracks .. (t and t.char or " ") .. (t.merging and i < #item.tracks and "─" or " ")
+            end
+            tracks = tracks .. " "
             return {
                 highlight_text(item.commit.date .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
+                tracks,
                 compose({
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
@@ -313,45 +447,46 @@ function M.open(folder, opts)
                     branch = opts.branch or { "--all" },
                     on_item = function(item)
                         --if not repo.commits[item.hash] then
-                            -- New commit
+                        -- New commit
 
-                            local existing = repo.commits[item.hash]
-                            if existing then
-                                existing.author = item.author
-                                existing.date = item.date
-                                existing.refs = item.refs
-                                existing.parents = item.parents
-                                existing.message = item.message
-                                existing.loaded = item.loaded
+                        local existing = repo.commits[item.hash]
+                        if existing then
+                            existing.author = item.author
+                            existing.date = item.date
+                            existing.refs = item.refs
+                            existing.parents = item.parents
+                            existing.message = item.message
+                            existing.loaded = item.loaded
 
-                                item = existing
+                            item = existing
+                        else
+                            repo.commits[item.hash] = item
+                            item.children = {}
+                        end
 
-                            else
-                                repo.commits[item.hash] = item
+                        -- Convert parent hashes to references
+                        local newParents = {}
+                        for _, p in ipairs(item.parents) do
+                            local parent = repo.commits[p]
+                            if not parent then
+                                -- Add a dummy parent if not seen yet
+                                parent = { hash = p, parents = {}, children = {}, refs = {} }
+                                repo.commits[p] = parent
                             end
 
-                            -- Convert parent hashes to references
-                            local newParents = {}
-                            for _,p in ipairs(item.parents) do
-                                local parent = repo.commits[p]
-                                if not parent then
-                                    -- Add a dummy parent if not seen yet
-                                    parent = { hash = p, parents = {}, children = {}, refs = {} }
-                                    repo.commits[p] = parent
-                                end
+                            table.insert(parent.children, item)
+                            table.insert(newParents, parent)
+                        end
 
-                                table.insert(parent.children, item)
-                                table.insert(newParents, parent)
-                            end
+                        item.parents = newParents
 
-                            item.parents = newParents
-
-                            local order_item = {
-                                commit = item,
-                                tracks = {},
-                            }
-                            table.insert(repo.order, order_item)
-                            controller.insert({ order_item }, #repo.order)
+                        local order_item = {
+                            commit = item,
+                            tracks = {},
+                        }
+                        table.insert(repo.order, order_item)
+                        refresh_tracks(repo.order, #repo.order)
+                        controller.insert({ order_item }, #repo.order)
                         --end
                     end,
                 })
