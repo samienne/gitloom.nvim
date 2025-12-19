@@ -151,7 +151,7 @@ local function fetch_commits(opts)
         opts.branch = { opts.branch }
     end
 
-    local command = { "git", "log", "--date-order", "--decorate=full", "--parents", unpack(opts.branch),
+    local command = { "git", "log", "--remotes", "--date-order", "--decorate=full", "--parents", unpack(opts.branch),
         "--pretty=format:%H%x1f%P%x1f%an%x1f%ai%x1f%s%x1f%D" }
     if opts.count then
         table.insert(command, "-n")
@@ -198,7 +198,6 @@ local function refresh_tracks(order, start_pos)
     start_pos = start_pos or 1
     for i = start_pos, #order do
         local item = order[i]
-
         local prev = order[i - 1]
 
         local tracks = prev and prev.tracks or {}
@@ -206,84 +205,65 @@ local function refresh_tracks(order, start_pos)
         local found = false
         local merging = 0
         local splitting = 0
-        local shift_count = 0
         local merging_id = nil
         local new_commits = {}
+        local connections = {}
+        local shift = nil
         for _, t in ipairs(tracks) do
+            if t.connectivity.down then
+                table.insert(connections, t)
+            end
+        end
+
+        for i, t in ipairs(tracks) do
             local new_track = nil
-            if t.parent ~= nil and t.parent == item.commit then
+            if shift then
+                -- Handle shift before anything else
+                shift.count = shift.count + 1
+                new_track = {
+                    id = shift.connection.id,
+                    --override = t.connectivity.down and "E" or "*",
+                    connectivity = {
+                        up = t.connectivity.down,
+                        left = true,
+                        right = not t.connectivity.down,
+                        down = false,
+                    },
+                    has_commit = false,
+                }
+
                 if t.connectivity.down then
-                    --[[
-                    local already_present = false
-                        local present_count = 0
-                        for _, t2 in ipairs(new_tracks) do
-                            if t2.parent == item.commit then
-                                present_count = present_count + 1
-                                already_present = true
-                            end
-                        end
+                    shift = nil
+                end
+            elseif t.connectivity.down and t.parent ~= nil and t.parent == item.commit then
+                found = true
+                merging = math.max(0, #item.commit.parents - 1)
 
-                        already_present = #t.commit.parents <= present_count
-                        --]]
-                    found = true
-                    merging = math.max(0, #item.commit.parents - 1)
+                splitting = math.max(0, splitting - 1)
+                if splitting == 0 then
+                    splitting = #item.commit.children
+                end
 
-                    splitting = math.max(0, splitting - 1)
-                    if splitting == 0 then
-                        splitting = #item.commit.children
-                    end
+                new_track = {
+                    id = t.id,
+                    commit = item.commit,
+                    parent = item.commit.parents[1],
+                    connectivity = {
+                        up = t.connectivity.down,
+                        left = splitting < #item.commit.children,                    -- or merging > 1,
+                        right = splitting > 1 and splitting < #item.commit.children, --or #new_commits > 1,
+                        down = splitting == #item.commit.children,
+                    },
+                    has_commit = splitting == #item.commit.children
+                }
 
-                    --[[
-                    if already_present then
-                        splitting = math.max(0, splitting - 1)
-                    else
-                        splitting = math.max(0, #item.commit.children - 1)
+                for j, p in ipairs(item.commit.parents) do
+                    if j > 1 then
+                        table.insert(new_commits, p)
                     end
-                    --]]
-
-                    local is_merge = #item.commit.parents > 1
-                    new_track = {
-                        id = t.id,
-                        --char = already_present and "┘" or (#item.commit.parents > 1) and "M" or "o",
-                        --override = #item.commit.parents > 1 and "M" or nil,
-                        commit = item.commit,
-                        parent = item.commit.parents[1],
-                        --override = tostring(splitting),
-                        --override = "a",
-                        connectivity = {
-                            up = t.connectivity.down,
-                            left = splitting < #item.commit.children, -- or merging > 1,
-                            right = splitting > 1 and splitting < #item.commit.children, --or #new_commits > 1,
-                            down = splitting == #item.commit.children,
-                        },
-                        --has_commit = not already_present,
-                        has_commit = splitting == #item.commit.children
-                    }
-
-                    for j, p in ipairs(item.commit.parents) do
-                        if j > 1 then
-                            table.insert(new_commits, p)
-                        end
-                    end
-                    if merging > 0 then
-                        merging_id = new_track.id
-                    end
-                else
-                    if merging > 0 and merging_id ~= nil then
-                        merging = merging - 1
-                        new_track = {
-                            id = merging_id,
-                            char = "─",
-                            parent = nil,
-                            connectivity = {
-                                left = true,
-                                right = true,
-                            },
-                            has_commit = false,
-                        }
-                    else
-                        shift_count = shift_count + 1
-                    end
+                end
+                if merging > 0 then
+                    merging_id = new_track.id
                 end
             elseif t.connectivity.down then
                 new_track = {
@@ -298,14 +278,33 @@ local function refresh_tracks(order, start_pos)
                     },
                     has_commit = false,
                 }
+            elseif #connections > 0 then
+                shift = {
+                    connection = connections[1],
+                    count = 1,
+                }
+
+                table.remove(connections, 1)
+
+                new_track = {
+                    id = shift.connection.id,
+                    --override = "*",
+                    connectivity = {
+                        up = false,
+                        left = false,
+                        right = true,
+                        down = true,
+                    },
+                    parent = shift.connection.parent,
+                    has_commit = false,
+                }
             end
 
             if new_track ~= nil then
+                --[[
                 for j = 1, shift_count do
                     table.insert(new_tracks, {
                         id = t.id,
-                        char = j == 1 and "┌" or j == shift_count and "┘" or "─",
-                        --commit = item.commit,
                         connectivity = {
                             left = j > 1,
                             up = j == shift_count,
@@ -316,42 +315,33 @@ local function refresh_tracks(order, start_pos)
                     })
                 end
                 shift_count = 0
+                --]]
 
+                if #connections > 0 and connections[1].id == new_track.id then
+                    table.remove(connections, 1)
+                end
                 table.insert(new_tracks, new_track)
             end
         end
 
-        --[[
-            for j = 1, merging do
+        merging = 0
+
+        if #connections == 0 and shift == nil then
+            for j, commit in ipairs(new_commits) do
                 table.insert(new_tracks, {
                     id = merging_id,
-                    char = "┐",
+                    --override = "a",
                     connectivity = {
                         left = true,
-                        right = j < merging,
+                        right = j < #new_commits,
                         down = true,
                     },
-                    commit = item.commit,
+                    parent = commit,
                     has_commit = false,
                 })
             end
-            --]]
-        merging = 0
-
-        for j, commit in ipairs(new_commits) do
-            table.insert(new_tracks, {
-                id = merging_id,
-                --override = "a",
-                connectivity = {
-                    left = true,
-                    right = j < #new_commits,
-                    down = true,
-                },
-                parent = commit,
-                has_commit = false,
-            })
+            new_commits = {}
         end
-        new_commits = {}
 
         if not found then
             for j, p in ipairs(item.commit.parents) do
@@ -529,6 +519,16 @@ function M.open(folder, opts)
                 tags = tags .. " "
             end
 
+            --[[
+            local symbols = ""
+            for _, symbol in ipairs(item.commit.refs.symbols or {}) do
+                symbols = symbols .. "{" .. symbol.name .. "}"
+            end
+            if symbols ~= "" then
+                symbols = symbols .. " "
+            end
+            --]]
+
             return {
                 highlight_text(item.commit.date .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
@@ -536,6 +536,8 @@ function M.open(folder, opts)
                 compose({
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
+                    --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
+                    --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
                     highlight_text(item.commit.message, palette.message),
                 }),
             }
