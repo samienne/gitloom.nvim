@@ -93,7 +93,7 @@ local function refresh_columns(win, model, first, last)
                 end
 
                 for j = 1, #item.columns do
-                    if not model.columns[j] or string.len(item.columns[j].text) ~= model.columns[j] then
+                    if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[j].text) ~= model.columns[j] then
                         changed = true
                         break
                     end
@@ -113,9 +113,9 @@ local function refresh_columns(win, model, first, last)
             if item then
                 for j, column in ipairs(item.columns) do
                     if #new_columns < j then
-                        table.insert(new_columns, string.len(column.text))
+                        table.insert(new_columns, vim.fn.strdisplaywidth(column.text))
                     else
-                        new_columns[j] = math.max(string.len(column.text), new_columns[j])
+                        new_columns[j] = math.max(vim.fn.strdisplaywidth(column.text), new_columns[j])
                     end
                 end
             end
@@ -127,20 +127,22 @@ local function refresh_columns(win, model, first, last)
     return changed
 end
 
-local function fix_width(item, len)
-    local strlen = vim.fn.strdisplaywidth(item.text)
-    --local strlen = string.len(item.text)
-    --vim.str_utfindex(item.text, "utf-8", len, false)
-    if strlen == len then
+-- Requested width in utf code points
+local function fix_width(item, requested_utf_len)
+    local utf_len = vim.fn.strdisplaywidth(item.text)
+
+    if utf_len == requested_utf_len then
         return item
-    elseif strlen < len then
+    elseif utf_len < requested_utf_len then
         local highlight = {}
         if item.highlight then
+            local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
+
             for _, hl in ipairs(item.highlight) do
                 local start_pos = hl.start_pos
                 local end_pos = hl.end_pos
-                if start_pos < len then
-                    end_pos = math.min(end_pos, len)
+                if start_pos < requested_len then
+                    end_pos = math.min(end_pos, requested_len)
 
                     table.insert(highlight, {
                         start_pos = start_pos,
@@ -152,12 +154,14 @@ local function fix_width(item, len)
         end
 
         return {
-            text = item.text .. string.rep(" ", len - strlen),
+            text = item.text .. string.rep(" ", requested_utf_len - utf_len),
             highlight = highlight,
         }
     else
+        local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
+
         return {
-            text = string.sub(item.text, 1, vim.str_utfindex(item.text, "utf-8", len, false)),
+            text = string.sub(item.text, 1, requested_len),
             highlight = item.highlight
         }
     end

@@ -354,22 +354,10 @@ local function refresh_tracks(order, start_pos)
         new_commits = {}
 
         if not found then
-            --[[
-                table.insert(new_tracks, {
-                    id = get_next_id(),
-                    char = "o",
-                    commit = item.commit,
-                    connectivity = {
-                        down = true,
-                    },
-                    has_commit = true,
-                })
-                --]]
             for j, p in ipairs(item.commit.parents) do
                 table.insert(new_tracks,
                     {
                         id = get_next_id(),
-                        --override = "n",
                         parent = p,
                         connectivity = {
                             down = true,
@@ -404,6 +392,7 @@ local function compose(list)
             text = text .. item
         end
     end
+
     return {
         text = text,
         highlight = highlight,
@@ -435,19 +424,25 @@ local function get_track_chars(tracks)
             char = "─"
         elseif c.left and c.up and not c.right and c.down then
             char = "┤"
+        elseif not c.left and c.up and c.right and c.down then
+            char = "├"
+        elseif c.left and c.up and c.right and not c.down then
+            char = "┴"
+        elseif c.left and not c.up and c.right and c.down then
+            char = "┬"
         elseif c.left and c.up and not c.right and not c.down then
             --char = "┘"
             char = "╯"
         elseif not c.left and not c.up and c.right and c.down then
             --char = "┌"
             char = "╭"
-        elseif c.left and c.up and c.right and not c.down then
-            char = "┴"
         elseif not c.left and c.up and not c.right and not c.down then
             char = "^"
         elseif c.left and not c.up and not c.right and c.down then
             --char = "┐"
             char = "╮"
+        elseif not c.left and not c.up and c.right and c.down then
+            char = "╭"
         else
             vim.notify(vim.inspect(c))
         end
@@ -502,6 +497,7 @@ function M.open(folder, opts)
                 highlight = {},
             }
         end
+
         return {
             text = text,
             highlight = {
@@ -533,18 +529,10 @@ function M.open(folder, opts)
                 tags = tags .. " "
             end
 
-            --[[
-            local tracks = ""
-            for i, t in ipairs(item.tracks) do
-                tracks = tracks .. (t and t.char or " ") .. (t.merging and i < #item.tracks and "─" or " ")
-            end
-            tracks = tracks .. " "
-            --]]
-            local tracks = get_track_chars(item.tracks)
             return {
                 highlight_text(item.commit.date .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
-                tracks,
+                get_track_chars(item.tracks),
                 compose({
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
