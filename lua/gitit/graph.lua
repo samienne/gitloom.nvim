@@ -194,6 +194,63 @@ function table_contains(tbl, item)
     return false
 end
 
+local function inspect_commit(commit)
+    local new_parents = {}
+    for _, p in ipairs(commit.parents or {}) do
+        table.insert(new_parents, p.hash)
+    end
+
+    local new_children = {}
+    for _, c in ipairs(commit.children or {}) do
+        table.insert(new_children, c.hash)
+    end
+
+    local old_parents = commit.parents
+    local old_children = commit.children
+
+    commit.parents = new_parents
+    commit.children = new_children
+
+    local result = vim.inspect(commit)
+
+    commit.parents = old_parents
+    commit.children = old_children
+
+    return result
+end
+
+local function inspect_track(track)
+    local new_parents = {}
+    local commit = track.commit or {}
+    for _, p in ipairs(commit.parents or {}) do
+        table.insert(new_parents, p.hash)
+    end
+
+    local new_children = {}
+    for _, c in ipairs(commit.children or {}) do
+        table.insert(new_children, c.hash)
+    end
+
+    local old_parents = commit.parents
+    local old_children = commit.children
+    local old_commit = track.commit
+    local old_parent = track.parent or {}
+
+    commit.parents = new_parents
+    commit.children = new_children
+    track.commit = commit.hash
+    track.parent = old_parent.hash
+
+    local result = vim.inspect(track)
+
+    commit.parents = old_parents
+    commit.children = old_children
+    track.commit = old_commit
+    track.parent = old_parent
+
+    return result
+end
+
 local function refresh_tracks(order, start_pos)
     start_pos = start_pos or 1
     for i = start_pos, #order do
@@ -213,6 +270,10 @@ local function refresh_tracks(order, start_pos)
             if t.connectivity.down then
                 table.insert(connections, t)
             end
+        end
+        local new_parents = {}
+        for _, p in ipairs(item.commit.parents) do
+            table.insert(new_parents, p)
         end
 
         for i, t in ipairs(tracks) do
@@ -237,32 +298,61 @@ local function refresh_tracks(order, start_pos)
                 end
             elseif t.connectivity.down and t.parent ~= nil and t.parent == item.commit then
                 found = true
-                merging = math.max(0, #item.commit.parents - 1)
+                merging = math.max(0, merging - 1)
+                if merging == 0 then
+                    merging = #item.commit.parents
+                end
 
                 splitting = math.max(0, splitting - 1)
                 if splitting == 0 then
                     splitting = #item.commit.children
                 end
 
+                local parent = nil
+                if #new_parents > 0 then
+                    --parent = new_parents[1]
+                    parent = table.remove(new_parents, 1)
+                end
+
+                if #new_commits > 0 then
+                    table.remove(new_commits, 1)
+                end
+
                 new_track = {
                     id = t.id,
                     commit = item.commit,
-                    parent = item.commit.parents[1],
+                    --override = "*",
+                    --override = tostring(splitting),
+                    parent = parent,
                     connectivity = {
                         up = t.connectivity.down,
-                        left = splitting < #item.commit.children,                    -- or merging > 1,
-                        right = splitting > 1 and splitting < #item.commit.children, --or #new_commits > 1,
-                        down = splitting == #item.commit.children,
+                        left = splitting < #item.commit.children,
+                        right = splitting > 1 and splitting <= #item.commit.children or
+                            merging > 1 and merging <= #item.commit.parents,
+                        --down = splitting == #item.commit.children or merging >= 1,
+                        down = parent ~= nil,
                     },
-                    has_commit = splitting == #item.commit.children
+                    has_commit = splitting == #item.commit.children --or merging == #item.commit.parents
                 }
 
-                for j, p in ipairs(item.commit.parents) do
-                    if j > 1 then
-                        table.insert(new_commits, p)
+                --[[
+                if (new_track.parent ~= nil) ~= new_track.connectivity.down then
+                    if #item.commit.parents > 0 then
+                        vim.notify(inspect_commit(item.commit.parents[1]))
+                    end
+                    vim.notify(inspect_track(new_track))
+                end
+                --]]
+
+                if new_track.has_commit then
+                    for j, p in ipairs(item.commit.parents) do
+                        if j > 1 then
+                            table.insert(new_commits, p)
+                        end
                     end
                 end
-                if merging > 0 then
+
+                if merging > 1 then
                     merging_id = new_track.id
                 end
             elseif t.connectivity.down then
@@ -273,7 +363,7 @@ local function refresh_tracks(order, start_pos)
                     connectivity = {
                         up = true,
                         down = true,
-                        left = splitting > 1 or merging > 0,
+                        left = splitting > 1 or merging > 1,
                         right = splitting > 1 or merging > 1,
                     },
                     has_commit = false,
@@ -320,28 +410,79 @@ local function refresh_tracks(order, start_pos)
                 if #connections > 0 and connections[1].id == new_track.id then
                     table.remove(connections, 1)
                 end
+                --[[
+                for j, p in ipairs(new_parents) do
+                    if p == new_tracks.parent then
+                        vim.notify(inspect_commit(new_parents[j]))
+                        table.remove(new_parents, j)
+                        break
+                    end
+                end
+                --]]
                 table.insert(new_tracks, new_track)
             end
         end
 
         merging = 0
 
-        if #connections == 0 and shift == nil then
-            for j, commit in ipairs(new_commits) do
-                table.insert(new_tracks, {
-                    id = merging_id,
-                    --override = "a",
-                    connectivity = {
-                        left = true,
-                        right = j < #new_commits,
-                        down = true,
-                    },
-                    parent = commit,
-                    has_commit = false,
-                })
+        local commit_found = false
+        for _, t in ipairs(new_tracks) do
+            if t.commit == item.commit then
+                commit_found = true
+                break
             end
-            new_commits = {}
         end
+
+        if not commit_found then
+            merging_id = nil
+            new_commits = {}
+            for _, p in ipairs(item.commit.parents) do
+                table.insert(new_commits, p)
+            end
+        end
+
+        for j, parent in ipairs(new_commits) do
+            local new_track = {
+                id = merging_id or get_next_id(),
+                --override = "a",
+                connectivity = {
+                    left = merging_id ~= nil,
+                    right = j < #new_commits,
+                    down = true,
+                },
+                parent = parent,
+                --commit = merging_id == nil and item.commit,
+                commit = merging_id == nil and item.commit or nil,
+                --has_commit = merging_id == nil,
+                has_commit = merging_id == nil,
+            }
+
+            table.insert(new_tracks, new_track)
+
+            merging_id = new_track.id
+        end
+
+        --[[
+        local item_found = false
+        for _, t in ipairs(new_tracks) do
+            if t.commit == item.commit then
+                item_found = true
+                break
+            end
+        end
+
+        if not item_found then
+            --vim.notify(inspect_commit(item.commit))
+            local s = inspect_commit(item.commit) .. "\n"
+            for _, t in ipairs(new_tracks) do
+                s = s .. inspect_track(t) .. "\n"
+            end
+            vim.notify(s)
+        end
+        --]
+
+        merging_id = nil
+        --[[
 
         if not found then
             for j, p in ipairs(item.commit.parents) do
@@ -359,6 +500,7 @@ local function refresh_tracks(order, start_pos)
                     })
             end
         end
+        --]]
 
         item.tracks = new_tracks
     end
@@ -408,8 +550,6 @@ local function get_track_chars(tracks)
             char = track.override
         elseif track.has_commit then
             char = (#track.commit.parents > 1) and "M" or "o"
-        elseif c.up and c.down then
-            char = "│"
         elseif c.left and c.right and not c.up and not c.down then
             char = "─"
         elseif c.left and c.up and not c.right and c.down then
@@ -433,7 +573,10 @@ local function get_track_chars(tracks)
             char = "╮"
         elseif not c.left and not c.up and c.right and c.down then
             char = "╭"
+        elseif c.up and c.down then
+            char = "│"
         else
+            char = "x"
             vim.notify(vim.inspect(c))
         end
 
@@ -441,8 +584,12 @@ local function get_track_chars(tracks)
         -- ┴─┴─ ┤
         result = result .. char
 
-        if next ~= nil and (track.connectivity.right or next.connectivity.left) then
+        if next ~= nil and (track.connectivity.right and next.connectivity.left) then
             result = result .. "─"
+        elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
+            result = result .. "╴"
+        elseif next ~= nil and (not track.connectivity.right and next.connectivity.left) then
+            result = result .. "╶"
         else
             result = result .. " "
         end
