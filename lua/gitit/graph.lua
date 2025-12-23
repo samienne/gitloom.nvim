@@ -251,8 +251,11 @@ local function inspect_track(track)
     return result
 end
 
-local function handle_commit(track, new_tracks, new_parents, item, space_available)
-    table.insert(new_tracks, {
+---@param state TrackState
+---@param track? Track
+---@param item OrderItem
+local function handle_commit(state, track, item)
+    table.insert(state.new_tracks, {
         id = track and track.id or get_next_id(),
         connectivity = {
             down = #item.commit.parents > 0,
@@ -267,27 +270,29 @@ local function handle_commit(track, new_tracks, new_parents, item, space_availab
 
     for i, p in ipairs(item.commit.parents) do
         if i > 1 then
-            table.insert(new_parents, p)
+            table.insert(state.new_parents, p)
         end
     end
 
     if track and track.connectivity.down then
-        for i = 2, space_available do
-            table.insert(new_tracks, {
+        for i = 2, state.space_available do
+            table.insert(state.new_tracks, {
                 id = track.id,
                 connectivity = {
-                    up = i == space_available,
+                    up = i == state.space_available,
                     down = false,
                     left = true,
-                    right = i < space_available,
+                    right = i < state.space_available,
                 },
             })
         end
     end
 end
 
-local function handle_line(new_tracks, track)
-    table.insert(new_tracks, {
+---@param state TrackState
+---@param track Track
+local function handle_line(state, track)
+    table.insert(state.new_tracks, {
         id = track.id,
         connectivity = {
             up = true,
@@ -297,40 +302,81 @@ local function handle_line(new_tracks, track)
     })
 end
 
+---@class Refs
+---@field branches string[]
+---@field tags string[]
+
+---@class Commit
+---@field hash string
+---@field parents Commit[]
+---@field children Commit[]
+---@field refs Refs
+
+---@class Connectivity
+---@field up boolean
+---@field down boolean
+---@field left boolean
+---@field right boolean
+
+---@class Track
+---@field id integer
+---@field connectivity Connectivity
+---@field has_commit boolean
+---@field commit Commit
+---@field parent Commit
+---@field override? string
+
+---@class TrackState
+---@field tracks Track[]
+---@field space_available integer
+---@field new_tracks Track[]
+---@field new_parents Commit[]
+
+---@class OrderItem
+---@field commit Commit
+---@field tracks Track[]
+
+---@param order OrderItem[]
+---@param start_pos integer
 local function refresh_tracks(order, start_pos)
     start_pos = start_pos or 1
     for i = start_pos, #order do
+        ---@type OrderItem
         local item = order[i]
+        ---@type OrderItem?
         local prev = order[i - 1]
 
-        local tracks = prev and prev.tracks or {}
-        local new_tracks = {}
-        local new_parents = {}
+        ---@type TrackState
+        local state = {
+            new_parents = {},
+            new_tracks = {},
+            space_available = 1,
+            tracks = {}
+        }
 
-        local space_available = 1
-        local active_merge = nil
-        local active_split = nil
+        ---@type Track[]
+        local tracks = prev and prev.tracks or {}
         local handled = false
         for _, t in ipairs(tracks) do
             if t.connectivity.down then
                 if t.parent == item.commit then
-                    handle_commit(t, new_tracks, new_parents, item, space_available)
+                    handle_commit(state, t, item)
                     handled = true
                 else
-                    handle_line(new_tracks, t)
+                    handle_line(state, t)
                 end
 
-                space_available = 1
+                state.space_available = 1
             else
-                space_available = space_available + 1
+                state.space_available = state.space_available + 1
             end
         end
 
         if not handled then
-            handle_commit(nil, new_tracks, new_parents, item, space_available)
+            handle_commit(state, nil, item)
         end
 
-        item.tracks = new_tracks
+        item.tracks = state.new_tracks
     end
 end
 
@@ -359,6 +405,7 @@ local function compose(list)
     }
 end
 
+---@param tracks Track[]
 local function get_track_chars(tracks)
     local result = ""
 
@@ -433,6 +480,7 @@ local function get_track_chars(tracks)
 
     return result
 end
+
 function M.open(folder, opts)
     opts = vim.tbl_deep_extend("force", {
         win = {
