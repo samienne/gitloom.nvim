@@ -126,14 +126,20 @@ local function parse_commit_line(line)
     local subject = fields[5]
     local refs = parse_refs(fields[6])
 
-
     if not hash then
         return
     end
 
+    local new_parents = {}
+    for _, p in ipairs(parents) do
+        if p ~= "" then
+            table.insert(new_parents, p)
+        end
+    end
+
     return {
         hash = hash,
-        parents = parents,
+        parents = new_parents,
         author = author,
         date = date,
         message = subject,
@@ -279,15 +285,9 @@ local function handle_commit(state, track, item)
     end
 
     if not state.split then
-        if #item.commit.children > 1 then
-            state.split = {
-                remaining = #item.commit.children
-            }
-        end
-    end
-
-    if state.split then
-        state.split.remaining = state.split.remaining - 1
+        state.split = {
+            remaining = #item.commit.children
+        }
     end
 
     local splitting_or_merging = state.merge and #state.merge.new_parents > 1 or state.split ~= nil
@@ -301,23 +301,30 @@ local function handle_commit(state, track, item)
 
         local parent = state.merge and table.remove(state.merge.new_parents, 1)
 
-        table.insert(state.new_tracks, {
+        ---@type Track
+        local new_track = {
             id = track_id,
             --override = "*",
             connectivity = {
                 down = parent ~= nil,
                 right = state.merge and #state.merge.new_parents > 0 or i < state.space_available or
-                    state.split and state.split.remaining > 0,
+                    state.split and state.split.remaining > 1 or false,
                 --left = i > 1 or state.split and state.split.remaining == #item.commit.children,
                 left = not has_commit,
-                up = i == state.space_available and track and track.connectivity.down,
+                up = i == state.space_available and track and track.connectivity.down or false,
             },
             parent = parent,
             commit = i == 1 and has_commit and item.commit or nil,
             has_commit = i == 1 and has_commit and item.commit ~= nil,
-        })
+        }
+
+        table.insert(state.new_tracks, new_track)
 
         has_commit = false
+    end
+
+    if state.split and state.split.remaining > 0 then
+        state.split.remaining = state.split.remaining - 1
     end
 
     state.merge_id = splitting_or_merging and track_id or nil
@@ -326,19 +333,27 @@ end
 ---@param state TrackState
 ---@param track Track
 local function handle_line(state, track)
-    local splitting_or_merging = state.merge ~= nil and #state.merge.new_parents > 0 or state.split ~= nil
+    local splitting_or_merging = state.merge and #state.merge.new_parents > 0 or
+        state.split and state.split.remaining > 0 or false
 
     for i = 1, state.space_available do
-        table.insert(state.new_tracks, {
+        ---@type Track
+        local new_track = {
             id = state.merge_id or track.id,
+            --override = "*",
+            --override = state.split and tostring(state.split.remaining) or "-",
             connectivity = {
                 up = i == state.space_available,
                 down = splitting_or_merging and i == state.space_available or i == 1,
-                left = i > 1 or splitting_or_merging,
+                --left = i > 1 or splitting_or_merging,
+                left = #state.new_tracks > 0 and state.new_tracks[#state.new_tracks].connectivity.right or false,
                 right = i < state.space_available or splitting_or_merging,
             },
             parent = track.parent,
-        })
+            has_commit = false,
+        }
+
+        table.insert(state.new_tracks, new_track)
     end
 end
 
@@ -362,7 +377,7 @@ end
 ---@field id integer
 ---@field connectivity Connectivity
 ---@field has_commit boolean
----@field commit Commit
+---@field commit? Commit
 ---@field parent Commit
 ---@field override? string
 
@@ -427,7 +442,8 @@ local function refresh_tracks(order, start_pos)
         -- Add a new track for each new parent that hasn't been handled yet.
         if state.merge then
             for j, p in ipairs(state.merge.new_parents) do
-                table.insert(state.new_tracks, {
+                ---@type Track
+                local new_track = {
                     id = get_next_id(),
                     connectivity = {
                         up = false,
@@ -437,7 +453,9 @@ local function refresh_tracks(order, start_pos)
                     },
                     has_commit = false,
                     parent = p,
-                })
+                }
+
+                table.insert(state.new_tracks, new_track)
             end
         end
 
