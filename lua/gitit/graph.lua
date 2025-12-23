@@ -507,17 +507,24 @@ local function get_track_chars(tracks)
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
-            char = (#track.commit.parents > 1) and "M" or "o"
+            -- "⏺"
+            char = (#track.commit.parents == 0) and "◎" or (#track.commit.parents > 1) and "M" or
+            (#track.commit.children == 0) and "◉" or "○"
+            --"o"
         elseif c.left and c.right and not c.up and not c.down then
             char = "─"
+            -- ═
         elseif c.left and c.up and not c.right and c.down then
             char = "┤"
+            -- ╡
         elseif not c.left and c.up and c.right and c.down then
             char = "├"
         elseif c.left and c.up and c.right and not c.down then
             char = "┴"
+            -- ╧
         elseif c.left and not c.up and c.right and c.down then
             char = "┬"
+            -- ╤─┬
         elseif c.left and c.up and not c.right and not c.down then
             --char = "┘"
             char = "╯"
