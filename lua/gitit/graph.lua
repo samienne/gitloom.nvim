@@ -44,6 +44,27 @@ local function make_future()
     return future, promise
 end
 
+local function highlight_text(text, hl)
+    if text == "" then
+        return {
+            text = text,
+            highlight = {},
+        }
+    end
+
+    return {
+        text = text,
+        highlight = {
+            {
+                start_pos = 0,
+                end_pos = string.len(text),
+                hl = hl,
+            },
+        }
+    }
+end
+
+
 local function fetch_branches(opts)
     opts = opts or {}
 
@@ -469,14 +490,14 @@ local function compose(list)
     for _, item in ipairs(list) do
         if type(item) == "table" then
             local offset = string.len(text)
-            for _, hl in ipairs(item.highlight) do
+            for _, hl in ipairs(item.highlight or {}) do
                 table.insert(highlight, {
                     start_pos = offset + hl.start_pos,
                     end_pos = offset + hl.end_pos,
                     hl = hl.hl
                 })
             end
-            text = text .. item.text
+            text = text .. (item.text or "")
         elseif type(item) == "string" then
             text = text .. item
         end
@@ -489,8 +510,8 @@ local function compose(list)
 end
 
 ---@param tracks Track[]
-local function get_track_chars(tracks)
-    local result = ""
+local function get_track_chars(opts, tracks)
+    local result = {}
 
     for i = 1, #tracks do
         local track = tracks[i]
@@ -509,7 +530,7 @@ local function get_track_chars(tracks)
         elseif track.has_commit then
             -- "⏺"
             char = (#track.commit.parents == 0) and "◎" or (#track.commit.parents > 1) and "M" or
-            (#track.commit.children == 0) and "◉" or "○"
+                (#track.commit.children == 0) and "◉" or "○"
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
             char = "─"
@@ -555,16 +576,16 @@ local function get_track_chars(tracks)
 
         -- "┌"  "┘" or "─",
         -- ┴─┴─ ┤
-        result = result .. char
+        result = compose({ result, highlight_text(char, opts.palette.tracks[track.id % #opts.palette.tracks]) })
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
-            result = result .. "─"
+            result = compose({ result, "─" })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
-            result = result .. "╴"
+            result = compose({ result, "╴" })
         elseif next ~= nil and (not track.connectivity.right and next.connectivity.left) then
-            result = result .. "╶"
+            result = compose({ result, "╶" })
         else
-            result = result .. " "
+            result = compose({ result, " " })
         end
     end
 
@@ -586,6 +607,16 @@ function M.open(folder, opts)
             branch = "WarningMsg",
             message = nil,
             tags = "Comment",
+            tracks = {
+                "String",
+                --"Keyword",
+                "Function",
+                "Constant",
+                "DiagnosticInfo",
+                "DiagnosticHint",
+                "DiagnosticOk",
+                "DiagnosticWarn",
+            },
         },
     }, opts or {})
 
@@ -600,26 +631,6 @@ function M.open(folder, opts)
     }
 
     local palette = opts.palette
-
-    local highlight_text = function(text, hl)
-        if text == "" then
-            return {
-                text = text,
-                highlight = {},
-            }
-        end
-
-        return {
-            text = text,
-            highlight = {
-                {
-                    start_pos = 0,
-                    end_pos = string.len(text),
-                    hl = hl,
-                },
-            }
-        }
-    end
 
     return listview.open({
         win = opts.win,
@@ -653,7 +664,7 @@ function M.open(folder, opts)
             return {
                 highlight_text(item.commit.date .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
-                get_track_chars(item.tracks),
+                get_track_chars(opts, item.tracks),
                 compose({
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
