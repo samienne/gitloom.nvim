@@ -313,14 +313,24 @@ local function handle_commit(state, track, item)
 
     local splitting_or_merging = state.merge and #state.merge.new_parents > 1 or state.split ~= nil
 
-    local track_id = track and track.id or get_next_id()
+    ---@type integer|nil
+    local track_id = track and track.id-- or get_next_id()
 
     for i = 1, state.space_available do
         if i > 1 and not (state.merge and #state.merge.new_parents > 0) and not (state.split and state.split.remaining > 0) then
             break
         end
 
-        local parent = state.merge and table.remove(state.merge.new_parents, 1)
+        local parent = state.merge and table.remove(state.merge.new_parents, 1) or nil
+        if parent ~= nil then
+            if #state.merge.new_parents == #item.commit.parents - 1 then
+                track_id = track and track.id or get_next_id()
+            else
+                track_id = get_next_id()
+            end
+        else
+            track_id = track and track.id
+        end
 
         ---@type Track
         local new_track = {
@@ -395,7 +405,7 @@ end
 ---@field right boolean
 
 ---@class Track
----@field id integer
+---@field id integer|nil
 ---@field connectivity Connectivity
 ---@field has_commit boolean
 ---@field commit? Commit
@@ -576,7 +586,7 @@ local function get_track_chars(opts, tracks)
 
         -- "┌"  "┘" or "─",
         -- ┴─┴─ ┤
-        result = compose({ result, highlight_text(char, opts.palette.tracks[track.id % #opts.palette.tracks]) })
+        result = compose({ result, highlight_text(char, track.id and opts.palette.tracks[track.id % #opts.palette.tracks] or nil) })
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
             result = compose({ result, "─" })
@@ -661,11 +671,18 @@ function M.open(folder, opts)
             end
             --]]
 
+            local tracks = "("
+            for i, t in ipairs(item.tracks) do
+                tracks = tracks .. (i > 1 and ", " or "") .. (t.id or "-")
+            end
+            tracks = tracks .. ")"
+
             return {
                 highlight_text(item.commit.date .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
                 get_track_chars(opts, item.tracks),
                 compose({
+                    tracks,
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
                     --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
