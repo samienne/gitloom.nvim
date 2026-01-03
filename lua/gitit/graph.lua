@@ -285,10 +285,14 @@ local function inspect_track(track)
     return result
 end
 
+---@class HandleCommitOptions
+---@field allow_new_commits boolean
+
+---@param opts HandleCommitOptions
 ---@param state TrackState
 ---@param track? Track
 ---@param item OrderItem
-local function handle_commit(state, track, item)
+local function handle_commit(opts, state, track, item)
     -- We have a completely new commit as not merge or split is happening.
     local has_commit = state.merge == nil and state.split == nil
 
@@ -314,14 +318,14 @@ local function handle_commit(state, track, item)
     local splitting_or_merging = state.merge and #state.merge.new_parents > 1 or state.split ~= nil
 
     ---@type integer|nil
-    local track_id = track and track.id-- or get_next_id()
+    local track_id = track and track.id -- or get_next_id()
 
     for i = 1, state.space_available do
         if i > 1 and not (state.merge and #state.merge.new_parents > 0) and not (state.split and state.split.remaining > 0) then
             break
         end
 
-        local parent = state.merge and table.remove(state.merge.new_parents, 1) or nil
+        local parent = (opts.allow_new_commits or has_commit) and state.merge and table.remove(state.merge.new_parents, 1) or nil
         if parent ~= nil then
             if #state.merge.new_parents == #item.commit.parents - 1 then
                 track_id = track and track.id or get_next_id()
@@ -370,7 +374,8 @@ local function handle_line(state, track)
     for i = 1, state.space_available do
         ---@type Track
         local new_track = {
-            id = state.merge_id or track.id,
+            --id = state.merge_id or track.id,
+            id = track.id,
             --override = "*",
             --override = state.split and tostring(state.split.remaining) or "-",
             connectivity = {
@@ -394,9 +399,12 @@ end
 
 ---@class Commit
 ---@field hash string
----@field parents Commit[]
----@field children Commit[]
+---@field parents Commit[]|string[]
+---@field children Commit[]|string[]
 ---@field refs Refs
+---@field author string
+---@field date string
+---@field message string
 
 ---@class Connectivity
 ---@field up boolean
@@ -431,9 +439,10 @@ end
 ---@field commit Commit
 ---@field tracks Track[]
 
+---@param opts GraphOptions
 ---@param order OrderItem[]
 ---@param start_pos integer
-local function refresh_tracks(order, start_pos)
+local function refresh_tracks(opts, order, start_pos)
     start_pos = start_pos or 1
     for i = start_pos, #order do
         ---@type OrderItem
@@ -454,7 +463,7 @@ local function refresh_tracks(order, start_pos)
         for _, t in ipairs(tracks) do
             if t.connectivity.down then
                 if t.parent == item.commit then
-                    handle_commit(state, t, item)
+                    handle_commit({ allow_new_commits = opts.merge_style == "compact" }, state, t, item)
                     handled = true
                 else
                     handle_line(state, t)
@@ -467,7 +476,7 @@ local function refresh_tracks(order, start_pos)
         end
 
         if not handled then
-            handle_commit(state, nil, item)
+            handle_commit({ allow_new_commits = opts.merge_style == "compact" }, state, nil, item)
         end
 
         -- Add a new track for each new parent that hasn't been handled yet.
@@ -586,7 +595,8 @@ local function get_track_chars(opts, tracks)
 
         -- "┌"  "┘" or "─",
         -- ┴─┴─ ┤
-        result = compose({ result, highlight_text(char, track.id and opts.palette.tracks[track.id % #opts.palette.tracks] or nil) })
+        result = compose({ result, highlight_text(char,
+            track.id and opts.palette.tracks[track.id % #opts.palette.tracks] or nil) })
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
             result = compose({ result, "─" })
@@ -602,6 +612,27 @@ local function get_track_chars(opts, tracks)
     return result
 end
 
+---@class GraphWinOptions
+---@field border string
+---@field width number
+---@field height number
+---@field title string
+---@field footer string
+
+---@class GraphPalette
+---@field date string
+---@field author string
+---@field branch string
+---@field message string
+---@field tags string
+---@field tracks string[]
+
+---@class GraphOptions
+---@field win GraphWinOptions
+---@field palette GraphPalette
+---@field merge_style "compact"|"normal"
+
+---@param opts GraphOptions
 function M.open(folder, opts)
     opts = vim.tbl_deep_extend("force", {
         win = {
@@ -627,11 +658,20 @@ function M.open(folder, opts)
                 "DiagnosticOk",
                 "DiagnosticWarn",
             },
+            merge_style = "normal"
         },
     }, opts or {})
 
     local listview = require("gitit.listview")
 
+    ---@class Repo
+    ---@field commits table<string, Commit>
+    ---@field order Commit[]
+    ---@field branches string[]
+    ---@field heads string[]
+    ---@field refresh_scheduled boolean
+
+    ---@type Repo
     local repo = {
         commits = {},
         order = {},
@@ -700,6 +740,7 @@ function M.open(folder, opts)
             }).next(function()
                 return fetch_commits({
                     branch = opts.branch or { "--all" },
+                    ---@param item Commit
                     on_item = function(item)
                         --if not repo.commits[item.hash] then
                         -- New commit
@@ -712,7 +753,6 @@ function M.open(folder, opts)
                             existing.refs = item.refs
                             existing.parents = item.parents
                             existing.message = item.message
-                            existing.loaded = item.loaded
 
                             item = existing
                         else
@@ -741,7 +781,7 @@ function M.open(folder, opts)
                             tracks = {},
                         }
                         table.insert(repo.order, order_item)
-                        refresh_tracks(repo.order, #repo.order)
+                        refresh_tracks(opts, repo.order, #repo.order)
                         controller.insert({ order_item }, #repo.order)
                         --end
                     end,
