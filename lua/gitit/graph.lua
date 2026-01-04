@@ -330,7 +330,7 @@ local function handle_commit(opts, state, track, item)
         local parent = (opts.allow_merge_on_split or has_commit) and state.merge and
             table.remove(state.merge.new_parents, 1) or nil
         if parent ~= nil then
-            if opts.allow_merge_on_split or #state.merge.new_parents == #item.commit.parents - 1 then
+            if opts.merge_on_separate_line or #state.merge.new_parents == #item.commit.parents - 1 then
                 track_id = track and track.id or get_next_id()
             else
                 track_id = get_next_id()
@@ -410,6 +410,42 @@ local function handle_merge(state, track, item)
         state.merge_id = new_track.id
 
         table.insert(state.new_tracks, new_track)
+    end
+end
+
+---@param state TrackState
+---@param track? Track
+---@param item OrderItem
+local function handle_split(state, track, item)
+    if not state.split then
+        state.split = {
+            remaining = #item.commit.children
+        }
+    end
+
+    for i = 1, state.space_available do
+        ---@type Commit
+        local parent = item.commit
+
+        ---@type Track
+        local new_track = {
+            id = track and track.id,
+            has_commit = false,
+            connectivity = {
+                down = parent ~= nil and i == 1 and state.split.remaining == #item.commit.children,
+                up = i == state.space_available,
+                left = state.split and state.split.remaining < #item.commit.children or false,
+                right = i < state.space_available or state.split.remaining > 1,
+            },
+            parent = parent,
+            commit = nil,
+        }
+
+        table.insert(state.new_tracks, new_track)
+    end
+
+    if state.split and state.split.remaining > 0 then
+        state.split.remaining = state.split.remaining - 1
     end
 end
 
@@ -513,10 +549,11 @@ local function refresh_tracks(opts, order, start_pos)
             if t.connectivity.down then
                 if t.parent == item.commit then
                     if item.type == "commit" then
-                        handle_commit(opts.merge_style, state, t, item
-                        )
+                        handle_commit(opts.merge_style, state, t, item)
                     elseif item.type == "merge" then
                         handle_merge(state, t, item)
+                    elseif item.type == "split" then
+                        handle_split(state, t, item)
                     end
 
                     handled = true
@@ -537,6 +574,7 @@ local function refresh_tracks(opts, order, start_pos)
                     allow_merge_on_split = true,
                     --retain_new_commits = item.type ~= "commit" and opts.merge_style ~= "merge",
                     merge_on_separate_line = false,
+                    split_on_separate_line = false,
                 },
                 state, nil, item
             )
@@ -616,7 +654,7 @@ local function get_track_chars(opts, tracks)
         elseif track.has_commit then
             -- "⏺"
             char = (#track.commit.parents == 0) and "◎" or
-                not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and "M" or
+                not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and opts.icons.merge or
                 (#track.commit.children == 0) and "◉" or "○"
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
@@ -668,7 +706,7 @@ local function get_track_chars(opts, tracks)
 
         -- "┌"  "┘" or "─",
         -- ┴─┴─ ┤
-        result = compose({ result, highlight_text( char, get_highlight(track.id))
+        result = compose({ result, highlight_text(char, get_highlight(track.id))
         })
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
@@ -704,7 +742,10 @@ end
 ---@class MergeStyle
 ---@field allow_merge_on_split boolean
 ---@field merge_on_separate_line boolean
----@field split_in_separate_line boolean
+---@field split_on_separate_line boolean
+
+---@class Icons
+---@field merge? string
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
@@ -712,6 +753,7 @@ end
 -----@field merge_style "compact"|"normal"|"merge"
 ---@field merge_style MergeStyle
 ---@field branches? string|string[]
+---@field icons Icons
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -746,8 +788,11 @@ function M.open(folder, opts)
         --merge_style = "merge"
         merge_style = {
             allow_merge_on_split = false,
-            merge_on_separate_line = true,
-            split_in_separate_line = true,
+            merge_on_separate_line = false,
+            split_on_separate_line = true,
+        },
+        icons = {
+            --merge = "M",
         },
     }
     ---@type GraphOptions
@@ -871,6 +916,19 @@ function M.open(folder, opts)
                         end
 
                         item.parents = newParents
+
+                        if opts.merge_style.split_on_separate_line and #item.children > 1 then
+                            ---@type OrderItem
+                            local split_item = {
+                                type = "split",
+                                commit = item,
+                                tracks = {},
+                            }
+
+                            table.insert(repo.order, split_item)
+                            refresh_tracks(opts, repo.order, #repo.order)
+                            controller.insert({ split_item }, #repo.order)
+                        end
 
                         ---@type OrderItem
                         local order_item = {
