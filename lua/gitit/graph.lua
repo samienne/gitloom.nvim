@@ -285,11 +285,7 @@ local function inspect_track(track)
     return result
 end
 
----@class HandleCommitOptions
----@field allow_new_commits boolean
----@field retain_new_commits boolean
-
----@param opts HandleCommitOptions
+---@param opts MergeStyle
 ---@param state TrackState
 ---@param track? Track
 ---@param item OrderItem
@@ -303,7 +299,7 @@ local function handle_commit(opts, state, track, item)
             new_parents = {},
         }
 
-        if #item.commit.parents > 1 and opts.retain_new_commits then
+        if #item.commit.parents > 1 and opts.merge_on_separate_line then
             table.insert(state.merge.new_parents, item.commit)
             state.merge.remaining = 1
         else
@@ -331,10 +327,10 @@ local function handle_commit(opts, state, track, item)
             break
         end
 
-        local parent = (opts.allow_new_commits or has_commit) and state.merge and
+        local parent = (opts.allow_merge_on_split or has_commit) and state.merge and
             table.remove(state.merge.new_parents, 1) or nil
         if parent ~= nil then
-            if opts.retain_new_commits or #state.merge.new_parents == #item.commit.parents - 1 then
+            if opts.allow_merge_on_split or #state.merge.new_parents == #item.commit.parents - 1 then
                 track_id = track and track.id or get_next_id()
             else
                 track_id = get_next_id()
@@ -517,12 +513,7 @@ local function refresh_tracks(opts, order, start_pos)
             if t.connectivity.down then
                 if t.parent == item.commit then
                     if item.type == "commit" then
-                        handle_commit(
-                            {
-                                allow_new_commits = opts.merge_style == "compact",
-                                retain_new_commits = opts.merge_style == "merge",
-                            },
-                            state, t, item
+                        handle_commit(opts.merge_style, state, t, item
                         )
                     elseif item.type == "merge" then
                         handle_merge(state, t, item)
@@ -543,9 +534,9 @@ local function refresh_tracks(opts, order, start_pos)
             handle_commit(
                 {
                     --allow_new_commits = opts.merge_style == "compact",
-                    allow_new_commits = true,
+                    allow_merge_on_split = true,
                     --retain_new_commits = item.type ~= "commit" and opts.merge_style ~= "merge",
-                    retain_new_commits = false,
+                    merge_on_separate_line = false,
                 },
                 state, nil, item
             )
@@ -625,7 +616,7 @@ local function get_track_chars(opts, tracks)
         elseif track.has_commit then
             -- "⏺"
             char = (#track.commit.parents == 0) and "◎" or
-                opts.merge_style ~= "merge" and (#track.commit.parents > 1) and "M" or
+                not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and "M" or
                 (#track.commit.children == 0) and "◉" or "○"
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
@@ -703,23 +694,29 @@ end
 ---@field footer string
 
 ---@class GraphPalette
----@field date string
----@field author string
----@field branch string
----@field message string
----@field tags string
----@field tracks string[]
+---@field date? string
+---@field author? string
+---@field branch? string
+---@field message? string
+---@field tags? string
+---@field tracks? string[]
+
+---@class MergeStyle
+---@field allow_merge_on_split boolean
+---@field merge_on_separate_line boolean
+---@field split_in_separate_line boolean
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
 ---@field palette GraphPalette
----@field merge_style "compact"|"normal"|"merge"
+-----@field merge_style "compact"|"normal"|"merge"
+---@field merge_style MergeStyle
 ---@field branches? string|string[]
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
     ---@type GraphOptions
-    opts = vim.tbl_deep_extend("force", {
+    local defaults = {
         win = {
             border = "rounded",
             width = 0.80,
@@ -737,15 +734,24 @@ function M.open(folder, opts)
                 --"DiagnosticWarn",
                 "Constant",
                 "String",
+                "Number",
                 --"Keyword",
                 "Function",
                 "DiagnosticInfo",
+                "Identifier",
                 --"DiagnosticHint",
                 --"DiagnosticOk",
             },
         },
-        merge_style = "merge"
-    }, opts or {})
+        --merge_style = "merge"
+        merge_style = {
+            allow_merge_on_split = false,
+            merge_on_separate_line = true,
+            split_in_separate_line = true,
+        },
+    }
+    ---@type GraphOptions
+    opts = vim.tbl_deep_extend("force", defaults, opts or {})
 
     local listview = require("gitit.listview")
 
@@ -876,7 +882,7 @@ function M.open(folder, opts)
                         refresh_tracks(opts, repo.order, #repo.order)
                         controller.insert({ order_item }, #repo.order)
 
-                        if opts.merge_style == "merge" and #item.parents > 1 and #item.children > 0 then
+                        if opts.merge_style.merge_on_separate_line and #item.parents > 1 and #item.children > 0 then
                             ---@type OrderItem
                             local merge_item = {
                                 type = "merge",
