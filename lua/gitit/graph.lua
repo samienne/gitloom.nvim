@@ -54,13 +54,13 @@ local function highlight_text(text, hl)
 
     return {
         text = text,
-        highlight = {
+        highlight = hl and {
             {
                 start_pos = 0,
                 end_pos = string.len(text),
                 hl = hl,
             },
-        }
+        } or nil,
     }
 end
 
@@ -287,6 +287,7 @@ end
 
 ---@class HandleCommitOptions
 ---@field allow_new_commits boolean
+---@field retain_new_commits boolean
 
 ---@param opts HandleCommitOptions
 ---@param state TrackState
@@ -302,8 +303,13 @@ local function handle_commit(opts, state, track, item)
             new_parents = {},
         }
 
-        for _, p in ipairs(item.commit.parents) do
-            table.insert(state.merge.new_parents, p)
+        if #item.commit.parents > 1 and opts.retain_new_commits then
+            table.insert(state.merge.new_parents, item.commit)
+            state.merge.remaining = 1
+        else
+            for _, p in ipairs(item.commit.parents) do
+                table.insert(state.merge.new_parents, p)
+            end
         end
     else
         state.merge.remaining = #state.merge.new_parents
@@ -325,9 +331,10 @@ local function handle_commit(opts, state, track, item)
             break
         end
 
-        local parent = (opts.allow_new_commits or has_commit) and state.merge and table.remove(state.merge.new_parents, 1) or nil
+        local parent = (opts.allow_new_commits or has_commit) and state.merge and
+            table.remove(state.merge.new_parents, 1) or nil
         if parent ~= nil then
-            if #state.merge.new_parents == #item.commit.parents - 1 then
+            if opts.retain_new_commits or #state.merge.new_parents == #item.commit.parents - 1 then
                 track_id = track and track.id or get_next_id()
             else
                 track_id = get_next_id()
@@ -363,6 +370,51 @@ local function handle_commit(opts, state, track, item)
     end
 
     state.merge_id = splitting_or_merging and track_id or nil
+end
+
+---@param state TrackState
+---@param track? Track
+---@param item OrderItem
+local function handle_merge(state, track, item)
+    local new_tracks = {}
+
+    if not state.merge then
+        state.merge = {
+            remaining = #item.commit.parents,
+            new_parents = {},
+        }
+
+        for _, p in ipairs(item.commit.parents) do
+            table.insert(state.merge.new_parents, p)
+        end
+    else
+        state.merge.remaining = #state.merge.new_parents
+    end
+
+    local track_id = track and track.id -- or get_next_id()
+
+    for i = 1, state.space_available do
+        local parent = state.merge and table.remove(state.merge.new_parents, 1) or nil
+
+        ---@type Track
+        local new_track = {
+            id = track_id,
+            --override = "*",
+            has_commit = false,
+            connectivity = {
+                down = parent ~= nil,
+                up = track and track.parent == item.commit or false,
+                left = i > 1,
+                right = state.merge and #state.merge.new_parents > 0 or false,
+            },
+            parent = parent,
+            commit = nil,
+        }
+
+        state.merge_id = new_track.id
+
+        table.insert(state.new_tracks, new_track)
+    end
 end
 
 ---@param state TrackState
@@ -436,7 +488,8 @@ end
 ---@field merge_id? integer
 
 ---@class OrderItem
----@field commit Commit
+---@field type "commit"|"merge"|"split"
+---@field commit? Commit
 ---@field tracks Track[]
 
 ---@param opts GraphOptions
@@ -463,7 +516,18 @@ local function refresh_tracks(opts, order, start_pos)
         for _, t in ipairs(tracks) do
             if t.connectivity.down then
                 if t.parent == item.commit then
-                    handle_commit({ allow_new_commits = opts.merge_style == "compact" }, state, t, item)
+                    if item.type == "commit" then
+                        handle_commit(
+                            {
+                                allow_new_commits = opts.merge_style == "compact",
+                                retain_new_commits = opts.merge_style == "merge",
+                            },
+                            state, t, item
+                        )
+                    elseif item.type == "merge" then
+                        handle_merge(state, t, item)
+                    end
+
                     handled = true
                 else
                     handle_line(state, t)
@@ -476,7 +540,15 @@ local function refresh_tracks(opts, order, start_pos)
         end
 
         if not handled then
-            handle_commit({ allow_new_commits = opts.merge_style == "compact" }, state, nil, item)
+            handle_commit(
+                {
+                    --allow_new_commits = opts.merge_style == "compact",
+                    allow_new_commits = true,
+                    --retain_new_commits = item.type ~= "commit" and opts.merge_style ~= "merge",
+                    retain_new_commits = false,
+                },
+                state, nil, item
+            )
         end
 
         -- Add a new track for each new parent that hasn't been handled yet.
@@ -485,6 +557,7 @@ local function refresh_tracks(opts, order, start_pos)
                 ---@type Track
                 local new_track = {
                     id = get_next_id(),
+                    --override = "*",
                     connectivity = {
                         up = false,
                         left = true,
@@ -528,6 +601,7 @@ local function compose(list)
     }
 end
 
+---@param opts GraphOptions
 ---@param tracks Track[]
 local function get_track_chars(opts, tracks)
     local result = {}
@@ -536,9 +610,11 @@ local function get_track_chars(opts, tracks)
         local track = tracks[i]
         local next = tracks[i + 1]
 
+        ---@type Connectivity
         local c = {
             left = track.connectivity.left,
-            right = track.connectivity.right or next and next.connectivity.left,
+            --right = track.connectivity.right or next and next.connectivity.left,
+            right = track.connectivity.right,
             up = track.connectivity.up,
             down = track.connectivity.down,
         }
@@ -548,7 +624,8 @@ local function get_track_chars(opts, tracks)
             char = track.override
         elseif track.has_commit then
             -- "⏺"
-            char = (#track.commit.parents == 0) and "◎" or (#track.commit.parents > 1) and "M" or
+            char = (#track.commit.parents == 0) and "◎" or
+                opts.merge_style ~= "merge" and (#track.commit.parents > 1) and "M" or
                 (#track.commit.children == 0) and "◉" or "○"
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
@@ -593,13 +670,19 @@ local function get_track_chars(opts, tracks)
             vim.notify(vim.inspect(c))
         end
 
+        ---@return string
+        local get_highlight = function(id)
+            return opts.palette.tracks[(id % #opts.palette.tracks) + 1]
+        end
+
         -- "┌"  "┘" or "─",
         -- ┴─┴─ ┤
-        result = compose({ result, highlight_text(char,
-            track.id and opts.palette.tracks[track.id % #opts.palette.tracks] or nil) })
+        result = compose({ result, highlight_text( char, get_highlight(track.id))
+        })
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
-            result = compose({ result, "─" })
+            local hl = get_highlight(next.id)
+            result = compose({ result, highlight_text("─", hl) })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
             result = compose({ result, "╴" })
         elseif next ~= nil and (not track.connectivity.right and next.connectivity.left) then
@@ -630,10 +713,12 @@ end
 ---@class GraphOptions
 ---@field win GraphWinOptions
 ---@field palette GraphPalette
----@field merge_style "compact"|"normal"
+---@field merge_style "compact"|"normal"|"merge"
+---@field branches? string|string[]
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
+    ---@type GraphOptions
     opts = vim.tbl_deep_extend("force", {
         win = {
             border = "rounded",
@@ -649,17 +734,17 @@ function M.open(folder, opts)
             message = nil,
             tags = "Comment",
             tracks = {
+                --"DiagnosticWarn",
+                "Constant",
                 "String",
                 --"Keyword",
                 "Function",
-                "Constant",
                 "DiagnosticInfo",
-                "DiagnosticHint",
-                "DiagnosticOk",
-                "DiagnosticWarn",
+                --"DiagnosticHint",
+                --"DiagnosticOk",
             },
-            merge_style = "normal"
         },
+        merge_style = "merge"
     }, opts or {})
 
     local listview = require("gitit.listview")
@@ -717,19 +802,24 @@ function M.open(folder, opts)
             end
             tracks = tracks .. ")"
 
-            return {
-                highlight_text(item.commit.date .. " ", palette.date),
-                highlight_text(item.commit.author .. " ", palette.author),
-                get_track_chars(opts, item.tracks),
-                compose({
-                    tracks,
-                    highlight_text(branches, palette.branch),
-                    highlight_text(tags, palette.tags),
-                    --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
-                    --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
-                    highlight_text(item.commit.message, palette.message),
-                }),
-            }
+            if item.type == "commit" then
+                return {
+                    highlight_text(item.commit.date .. " ", palette.date),
+                    highlight_text(item.commit.author .. " ", palette.author),
+                    get_track_chars(opts, item.tracks),
+                    compose({
+                        tracks,
+                        highlight_text(branches, palette.branch),
+                        highlight_text(tags, palette.tags),
+                        --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
+                        --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
+
+                        highlight_text(item.commit.message, palette.message) or "",
+                    }),
+                }
+            else
+                return { "", "", get_track_chars(opts, item.tracks), tracks, "" }
+            end
         end,
         on_controller = function(controller)
             fetch_branches({
@@ -739,7 +829,7 @@ function M.open(folder, opts)
                 end,
             }).next(function()
                 return fetch_commits({
-                    branch = opts.branch or { "--all" },
+                    branch = opts.branches or { "--all" },
                     ---@param item Commit
                     on_item = function(item)
                         --if not repo.commits[item.hash] then
@@ -776,14 +866,28 @@ function M.open(folder, opts)
 
                         item.parents = newParents
 
+                        ---@type OrderItem
                         local order_item = {
+                            type = "commit",
                             commit = item,
                             tracks = {},
                         }
                         table.insert(repo.order, order_item)
                         refresh_tracks(opts, repo.order, #repo.order)
                         controller.insert({ order_item }, #repo.order)
-                        --end
+
+                        if opts.merge_style == "merge" and #item.parents > 1 and #item.children > 0 then
+                            ---@type OrderItem
+                            local merge_item = {
+                                type = "merge",
+                                commit = item,
+                                tracks = {},
+                            }
+
+                            table.insert(repo.order, merge_item)
+                            refresh_tracks(opts, repo.order, #repo.order)
+                            controller.insert({ merge_item }, #repo.order)
+                        end
                     end,
                 })
             end).next(function()

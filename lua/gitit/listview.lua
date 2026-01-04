@@ -129,15 +129,21 @@ end
 
 -- Requested width in utf code points
 local function fix_width(item, requested_utf_len)
-    local utf_len = vim.fn.strdisplaywidth(item.text)
+    local text = item.text or ""
+    local utf_len = vim.fn.strdisplaywidth(text)
 
     if utf_len == requested_utf_len then
         return item
     elseif utf_len < requested_utf_len then
+        return {
+            text = text .. string.rep(" ", requested_utf_len - utf_len),
+            highlight = item.highlight,
+        }
+    else
+        local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
+
         local highlight = {}
         if item.highlight then
-            local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
-
             for _, hl in ipairs(item.highlight) do
                 local start_pos = hl.start_pos
                 local end_pos = hl.end_pos
@@ -153,16 +159,10 @@ local function fix_width(item, requested_utf_len)
             end
         end
 
-        return {
-            text = item.text .. string.rep(" ", requested_utf_len - utf_len),
-            highlight = highlight,
-        }
-    else
-        local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
 
         return {
-            text = string.sub(item.text, 1, requested_len),
-            highlight = item.highlight
+            text = string.sub(text, 1, requested_len),
+            highlight = highlight
         }
     end
 end
