@@ -387,7 +387,7 @@ local function handle_merge(state, track, item)
         state.merge.remaining = #state.merge.new_parents
     end
 
-    local track_id = track and track.id -- or get_next_id()
+    local track_id = track and track.commit == item.commit and track.id or get_next_id()
 
     for i = 1, state.space_available do
         local parent = state.merge and table.remove(state.merge.new_parents, 1) or nil
@@ -400,7 +400,7 @@ local function handle_merge(state, track, item)
             connectivity = {
                 down = parent ~= nil,
                 up = track and track.parent == item.commit or false,
-                left = i > 1,
+                left = state.merge and #state.merge.new_parents < #item.commit.parents - 1 or false,
                 right = state.merge and #state.merge.new_parents > 0 or false,
             },
             parent = parent,
@@ -559,6 +559,16 @@ local function refresh_tracks(opts, order, start_pos)
                     handled = true
                 else
                     handle_line(state, t)
+                end
+
+                state.space_available = 1
+            elseif state.merge and #state.merge.new_parents > 0 then
+                if item.type == "commit" then
+                    handle_commit(opts.merge_style, state, t, item)
+                elseif item.type == "merge" then
+                    handle_merge(state, t, item)
+                elseif item.type == "split" then
+                    handle_split(state, t, item)
                 end
 
                 state.space_available = 1
@@ -788,8 +798,8 @@ function M.open(folder, opts)
         --merge_style = "merge"
         merge_style = {
             allow_merge_on_split = false,
-            merge_on_separate_line = false,
-            split_on_separate_line = true,
+            merge_on_separate_line = true,
+            split_on_separate_line = false,
         },
         icons = {
             --merge = "M",
