@@ -301,17 +301,14 @@ local function handle_commit(opts, state, track, item)
 
         if #item.commit.parents > 1 and opts.merge_on_separate_line then
             table.insert(state.merge.new_parents, item.commit)
-            state.merge.remaining = 1
         else
             for _, p in ipairs(item.commit.parents) do
                 table.insert(state.merge.new_parents, p)
             end
         end
-    else
-        state.merge.remaining = #state.merge.new_parents
     end
 
-    if not state.split then
+    if not state.split and (not opts.split_on_separate_line or #item.commit.children == 1) then
         state.split = {
             remaining = #item.commit.children
         }
@@ -327,7 +324,7 @@ local function handle_commit(opts, state, track, item)
             break
         end
 
-        local parent = (opts.allow_merge_on_split or has_commit) and state.merge and
+        local parent = (opts.allow_merge_on_split or opts.split_on_separate_line or has_commit) and state.merge and
             table.remove(state.merge.new_parents, 1) or nil
         if parent ~= nil then
             if opts.merge_on_separate_line or #state.merge.new_parents == #item.commit.parents - 1 then
@@ -343,6 +340,7 @@ local function handle_commit(opts, state, track, item)
         local new_track = {
             id = track_id,
             --override = "*",
+            --override = state.merge and tostring(#state.merge.new_parents) or nil,
             connectivity = {
                 down = parent ~= nil,
                 right = state.merge and #state.merge.new_parents > 0 or i < state.space_available or
@@ -383,8 +381,6 @@ local function handle_merge(state, track, item)
         for _, p in ipairs(item.commit.parents) do
             table.insert(state.merge.new_parents, p)
         end
-    else
-        state.merge.remaining = #state.merge.new_parents
     end
 
     local track_id = track and track.commit == item.commit and track.id or get_next_id()
@@ -424,13 +420,14 @@ local function handle_split(state, track, item)
     end
 
     for i = 1, state.space_available do
-        ---@type Commit
-        local parent = item.commit
+        ---@type Commit|nil
+        local parent = state.split and state.split.remaining == #item.commit.children and i == 1 and item.commit or nil
 
         ---@type Track
         local new_track = {
             id = track and track.id,
             has_commit = false,
+            --override = state.split and tostring(state.split.remaining) or nil,
             connectivity = {
                 down = parent ~= nil and i == 1 and state.split.remaining == #item.commit.children,
                 up = i == state.space_available,
@@ -461,7 +458,8 @@ local function handle_line(state, track)
             --id = state.merge_id or track.id,
             id = track.id,
             --override = "*",
-            --override = state.split and tostring(state.split.remaining) or "-",
+            --override = state.split and tostring(state.split.remaining) or nil,
+            --override = splitting_or_merging and "*" or nil,
             connectivity = {
                 up = i == state.space_available,
                 down = splitting_or_merging and i == state.space_available or i == 1,
@@ -501,7 +499,7 @@ end
 ---@field connectivity Connectivity
 ---@field has_commit boolean
 ---@field commit? Commit
----@field parent Commit
+---@field parent? Commit
 ---@field override? string
 
 ---@class MergeState
@@ -580,9 +578,7 @@ local function refresh_tracks(opts, order, start_pos)
         if not handled then
             handle_commit(
                 {
-                    --allow_new_commits = opts.merge_style == "compact",
                     allow_merge_on_split = true,
-                    --retain_new_commits = item.type ~= "commit" and opts.merge_style ~= "merge",
                     merge_on_separate_line = false,
                     split_on_separate_line = false,
                 },
@@ -711,7 +707,7 @@ local function get_track_chars(opts, tracks)
 
         ---@return string
         local get_highlight = function(id)
-            return opts.palette.tracks[(id % #opts.palette.tracks) + 1]
+            return id and opts.palette.tracks[(id % #opts.palette.tracks) + 1] or nil
         end
 
         -- "┌"  "┘" or "─",
@@ -798,8 +794,8 @@ function M.open(folder, opts)
         --merge_style = "merge"
         merge_style = {
             allow_merge_on_split = false,
-            merge_on_separate_line = true,
-            split_on_separate_line = false,
+            merge_on_separate_line = false,
+            split_on_separate_line = true,
         },
         icons = {
             --merge = "M",
