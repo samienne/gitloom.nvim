@@ -715,8 +715,17 @@ local function get_track_chars(opts, tracks)
         result = compose({ result, highlight_text(char, get_highlight(track.id))
         })
 
+        local next_track_id = nil
+        for j = i + 1, #tracks do
+            local t = tracks[j]
+            if not t.connectivity.down or not t.connectivity.up or not t.connectivity.left or not t.connectivity.right then
+                next_track_id = t.id
+                break
+            end
+        end
+
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
-            local hl = get_highlight(next.id)
+            local hl = get_highlight(next_track_id)
             result = compose({ result, highlight_text("─", hl) })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
             result = compose({ result, "╴" })
