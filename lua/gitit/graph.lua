@@ -809,6 +809,8 @@ local function display_item(opts, item, selection_state)
     end
     tracks = tracks .. ")"
 
+    tracks = ""
+
     if item.type == "commit" then
         return {
             highlight_text(item.commit.date .. " ", palette.date),
@@ -928,7 +930,8 @@ function M.open(folder, opts)
         cursor = 1
     }
 
-    return listview.open({
+    ---@type ListViewOptions
+    local listview_options = {
         win = opts.win,
         display = function(item)
             return display_item(opts, item, selection_state)
@@ -1019,7 +1022,9 @@ function M.open(folder, opts)
                 --vim.notify(vim.inspect(repo))
             end)
         end,
-    })
+    }
+
+    return listview.open(listview_options)
 end
 
 return M

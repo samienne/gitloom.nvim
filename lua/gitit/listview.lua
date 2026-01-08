@@ -59,7 +59,12 @@ local function create_win(opts)
     return w
 end
 
--- 1-based indexing
+--- 1-based indexing
+---@param win integer
+---@param model ListViewModel
+---@param first integer
+---@param last integer
+---@return boolean
 local function refresh_columns(win, model, first, last)
     first = first or 1
     last = last or #model.items
@@ -127,7 +132,19 @@ local function refresh_columns(win, model, first, last)
     return changed
 end
 
--- Requested width in utf code points
+---@class HighlightInfo
+---@field hl string
+---@field start_pos integer
+---@field end_pos integer
+
+---@class DisplayItem
+---@field text string
+---@field highlight HighlightInfo
+
+--- Requested width in utf code points.
+---@param item DisplayItem
+---@param requested_utf_len integer
+---@return DisplayItem
 local function fix_width(item, requested_utf_len)
     local text = item.text or ""
     local utf_len = vim.fn.strdisplaywidth(text)
@@ -142,6 +159,7 @@ local function fix_width(item, requested_utf_len)
     else
         local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
 
+        ---@type HighlightInfo[]
         local highlight = {}
         if item.highlight then
             for _, hl in ipairs(item.highlight) do
@@ -150,15 +168,17 @@ local function fix_width(item, requested_utf_len)
                 if start_pos < requested_len then
                     end_pos = math.min(end_pos, requested_len)
 
-                    table.insert(highlight, {
+                    ---@type HighlightInfo
+                    local new_highlight = {
                         start_pos = start_pos,
                         end_pos = end_pos,
                         hl = hl.hl
-                    })
+                    }
+
+                    table.insert(highlight, new_highlight)
                 end
             end
         end
-
 
         return {
             text = string.sub(text, 1, requested_len),
@@ -169,7 +189,11 @@ end
 
 local namespace = vim.api.nvim_create_namespace("gitit.listview")
 
--- 1-based indexing, inclusive last
+--- 1-based indexing, inclusive last
+---@param buf integer
+---@param model ListViewModel
+---@param first integer
+---@param last integer
 local function display(buf, model, first, last)
     first = first or 1
     last = last or #model.items
@@ -221,6 +245,10 @@ local function preserve_cursor_visual_pos(win, buf, fn)
     fn()
 end
 
+---@param win any
+---@param model ListViewModel
+---@param items DisplayItem[]
+---@param pos integer
 local function insert(win, model, items, pos)
     local lines = {}
     for i, item in ipairs(items) do
@@ -251,7 +279,30 @@ local function insert(win, model, items, pos)
     end)
 end
 
+---@class ListViewController
+---@field insert fun(items: OrderItem[], pos: integer)
+---@field remove fun(pos: integer)
+
+---@alias DisplayFunction fun(item): DisplayItem[]
+
+---@alias OnRedrawFunction fun(winid: integer, bufnr: integer, top: integer, bottom: integer)
+
+---@alias OnControllerFunction fun(controller: ListViewController)
+
+---@class ListViewModel
+---@field items any
+---@field columns integer[]
+---@field display DisplayFunction
+
+---@class ListViewOptions
+---@field namespace? integer
+---@field display DisplayFunction
+---@field on_redraw? OnRedrawFunction
+---@field on_controller OnControllerFunction
+
+---@param opts ListViewOptions
 function M.open(opts)
+    ---@type ListViewModel
     local model = {
         items = {},
         columns = {},
@@ -267,6 +318,7 @@ function M.open(opts)
 
     local win = create_win(opts or {})
 
+    ---@type ListViewController
     local controller = {
         -- 1-based indexing
         insert = function(items, pos)
