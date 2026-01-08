@@ -96,6 +96,7 @@ local function fetch_branches(opts)
 end
 
 local function parse_refs(str)
+    ---@type Refs
     local result = {
         branches = {},
         tags = {},
@@ -178,7 +179,7 @@ local function fetch_commits(opts)
         opts.branch = { opts.branch }
     end
 
-    local command = { "git", "log", "--remotes", "--date-order", "--decorate=full", "--parents", unpack(opts.branch),
+    local command = { "git", "log", "--remotes", "--topo-order", "--decorate=full", "--parents", unpack(opts.branch),
         "--pretty=format:%H%x1f%P%x1f%an%x1f%ai%x1f%s%x1f%D" }
     if opts.count then
         table.insert(command, "-n")
@@ -421,6 +422,7 @@ local function handle_split(state, track, item)
 
     for i = 1, state.space_available do
         ---@type Commit|nil
+        --local parent = state.split and track and track.parent == item.commit and state.split.remaining == #item.commit.children and i == 1 and item.commit or nil
         local parent = state.split and state.split.remaining == #item.commit.children and i == 1 and item.commit or nil
 
         ---@type Track
@@ -428,6 +430,9 @@ local function handle_split(state, track, item)
             id = track and track.id,
             has_commit = false,
             --override = state.split and tostring(state.split.remaining) or nil,
+            --override = tostring(#item.commit.children),
+            --override = parent and "*" or nil,
+            --override = "*",
             connectivity = {
                 down = parent ~= nil and i == 1 and state.split.remaining == #item.commit.children,
                 up = i == state.space_available,
@@ -453,6 +458,9 @@ local function handle_line(state, track)
         state.split and state.split.remaining > 0 or false
 
     for i = 1, state.space_available do
+        --local split_junction = state.split and state.split.remaining > 0 and i == state.space_available or false
+        --local merge_junction = state.merge and #state.merge.new_parents > 0 and i == 1 or false
+
         ---@type Track
         local new_track = {
             --id = state.merge_id or track.id,
@@ -462,11 +470,12 @@ local function handle_line(state, track)
             --override = splitting_or_merging and "*" or nil,
             connectivity = {
                 up = i == state.space_available,
-                down = splitting_or_merging and i == state.space_available or i == 1,
+                down = splitting_or_merging and i == state.space_available or not splitting_or_merging and i == 1,
                 --left = i > 1 or splitting_or_merging,
                 left = #state.new_tracks > 0 and state.new_tracks[#state.new_tracks].connectivity.right or false,
                 right = i < state.space_available or splitting_or_merging,
             },
+            --parent = i == 1 and track.connectivity.down and track.parent or nil,
             parent = track.parent,
             has_commit = false,
         }
@@ -475,9 +484,13 @@ local function handle_line(state, track)
     end
 end
 
+
+---@class Ref
+---@field name string
+
 ---@class Refs
----@field branches string[]
----@field tags string[]
+---@field branches Ref[]
+---@field tags Ref[]
 
 ---@class Commit
 ---@field hash string
@@ -655,6 +668,7 @@ local function get_track_chars(opts, tracks)
         }
 
         local char = " "
+        local track_id = track.id
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
@@ -665,6 +679,17 @@ local function get_track_chars(opts, tracks)
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
             char = "─"
+            for j = i + 1, #tracks do
+                local t = tracks[j]
+                local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and
+                t.connectivity.right
+                local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
+                t.connectivity.left
+                if not is_cross and not is_jump then
+                    track_id = t.id
+                    break
+                end
+            end
             -- ═
         elseif c.left and c.up and not c.right and c.down then
             char = "┤"
@@ -712,13 +737,17 @@ local function get_track_chars(opts, tracks)
 
         -- "┌"  "┘" or "─",
         -- ┴─┴─ ┤
-        result = compose({ result, highlight_text(char, get_highlight(track.id))
+        result = compose({ result, highlight_text(char, get_highlight(track_id))
         })
 
         local next_track_id = nil
         for j = i + 1, #tracks do
             local t = tracks[j]
-            if not t.connectivity.down or not t.connectivity.up or not t.connectivity.left or not t.connectivity.right then
+            local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and t.connectivity.right
+            local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
+            t.connectivity.left
+            --if not t.connectivity.down or not t.connectivity.up or not t.connectivity.left or not t.connectivity.right then
+            if not is_cross and not is_jump then
                 next_track_id = t.id
                 break
             end
@@ -737,6 +766,67 @@ local function get_track_chars(opts, tracks)
     end
 
     return result
+end
+
+---@class SelectionState
+---@field cursor integer
+
+---@param opts GraphOptions
+---@param item OrderItem
+---@param selection_state SelectionState
+local function display_item(opts, item, selection_state)
+    local palette = opts.palette
+
+    local branches = ""
+    for _, branch in ipairs(item.commit.refs.branches or {}) do
+        branches = branches .. "(" .. branch.name .. ")"
+    end
+    if branches ~= "" then
+        branches = branches .. " "
+    end
+
+    local tags = ""
+    for _, tag in ipairs(item.commit.refs.tags or {}) do
+        tags = tags .. "[" .. tag.name .. "]"
+    end
+    if tags ~= "" then
+        tags = tags .. " "
+    end
+
+    --[[
+            local symbols = ""
+            for _, symbol in ipairs(item.commit.refs.symbols or {}) do
+                symbols = symbols .. "{" .. symbol.name .. "}"
+            end
+            if symbols ~= "" then
+                symbols = symbols .. " "
+            end
+            --]]
+
+    local tracks = "("
+    for i, t in ipairs(item.tracks) do
+        tracks = tracks .. (i > 1 and ", " or "") .. (t.id or "-")
+    end
+    tracks = tracks .. ")"
+
+    if item.type == "commit" then
+        return {
+            highlight_text(item.commit.date .. " ", palette.date),
+            highlight_text(item.commit.author .. " ", palette.author),
+            get_track_chars(opts, item.tracks),
+            compose({
+                tracks,
+                highlight_text(branches, palette.branch),
+                highlight_text(tags, palette.tags),
+                --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
+                --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
+
+                highlight_text(item.commit.message, palette.message) or "",
+            }),
+        }
+    else
+        return { "", "", get_track_chars(opts, item.tracks), tracks, "" }
+    end
 end
 
 ---@class GraphWinOptions
@@ -833,59 +923,15 @@ function M.open(folder, opts)
 
     local palette = opts.palette
 
+    ---@type SelectionState
+    local selection_state = {
+        cursor = 1
+    }
+
     return listview.open({
         win = opts.win,
         display = function(item)
-            local branches = ""
-            for _, branch in ipairs(item.commit.refs.branches or {}) do
-                branches = branches .. "(" .. branch.name .. ")"
-            end
-            if branches ~= "" then
-                branches = branches .. " "
-            end
-
-            local tags = ""
-            for _, tag in ipairs(item.commit.refs.tags or {}) do
-                tags = tags .. "[" .. tag.name .. "]"
-            end
-            if tags ~= "" then
-                tags = tags .. " "
-            end
-
-            --[[
-            local symbols = ""
-            for _, symbol in ipairs(item.commit.refs.symbols or {}) do
-                symbols = symbols .. "{" .. symbol.name .. "}"
-            end
-            if symbols ~= "" then
-                symbols = symbols .. " "
-            end
-            --]]
-
-            local tracks = "("
-            for i, t in ipairs(item.tracks) do
-                tracks = tracks .. (i > 1 and ", " or "") .. (t.id or "-")
-            end
-            tracks = tracks .. ")"
-
-            if item.type == "commit" then
-                return {
-                    highlight_text(item.commit.date .. " ", palette.date),
-                    highlight_text(item.commit.author .. " ", palette.author),
-                    get_track_chars(opts, item.tracks),
-                    compose({
-                        tracks,
-                        highlight_text(branches, palette.branch),
-                        highlight_text(tags, palette.tags),
-                        --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
-                        --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
-
-                        highlight_text(item.commit.message, palette.message) or "",
-                    }),
-                }
-            else
-                return { "", "", get_track_chars(opts, item.tracks), tracks, "" }
-            end
+            return display_item(opts, item, selection_state)
         end,
         on_controller = function(controller)
             fetch_branches({
