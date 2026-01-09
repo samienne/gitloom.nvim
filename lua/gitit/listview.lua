@@ -71,41 +71,45 @@ local function refresh_columns(win, model, first, last)
 
     local changed = false
 
-    for i = first, last do
-        local item = model.items[i]
-
-        if item and not item.columns then
-            item.columns = model.display(item.data)
-            for j, column in ipairs(item.columns) do
-                if type(column) == "string" then
-                    item.columns[j] = {
-                        text = column,
-                        highlight = nil
-                    }
-                end
-            end
-            changed = true
-        end
-    end
-
-    if not changed then
+    for _, field in ipairs({ "above", "line", "text" }) do
         for i = first, last do
             local item = model.items[i]
-
-            if item then
-                if #item.columns ~= #model.columns then
+            if item and not item.columns then
+                item.columns = model.display(item.data)
+                if item.columns[field] then
+                    for j, column in ipairs(item.columns[field]) do
+                        if type(column) == "string" then
+                            item.columns[field][j] = {
+                                text = column,
+                                highlight = nil
+                            }
+                        end
+                    end
                     changed = true
                 end
+            end
+        end
 
-                for j = 1, #item.columns do
-                    if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[j].text) ~= model.columns[j] then
-                        changed = true
-                        break
+        if not changed then
+            for i = first, last do
+                local item = model.items[i]
+                if item.columns[field] then
+                    if item then
+                        if #item.columns[field] ~= #model.columns then
+                            changed = true
+                        end
+
+                        for j = 1, #item.columns[field] do
+                            if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[field][j].text) ~= model.columns[j] then
+                                changed = true
+                                break
+                            end
+                        end
+
+                        if changed then
+                            break
+                        end
                     end
-                end
-
-                if changed then
-                    break
                 end
             end
         end
@@ -115,12 +119,14 @@ local function refresh_columns(win, model, first, last)
         local new_columns = {}
         for i = first, last do
             local item = model.items[i]
-            if item then
-                for j, column in ipairs(item.columns) do
-                    if #new_columns < j then
-                        table.insert(new_columns, vim.fn.strdisplaywidth(column.text))
-                    else
-                        new_columns[j] = math.max(vim.fn.strdisplaywidth(column.text), new_columns[j])
+            for _, field in ipairs({ "above", "line", "text" }) do
+                if item and item.columns[field] then
+                    for j, column in ipairs(item.columns[field]) do
+                        if #new_columns < j then
+                            table.insert(new_columns, vim.fn.strdisplaywidth(column.text))
+                        else
+                            new_columns[j] = math.max(vim.fn.strdisplaywidth(column.text), new_columns[j])
+                        end
                     end
                 end
             end
@@ -140,6 +146,11 @@ end
 ---@class DisplayItem
 ---@field text string
 ---@field highlight HighlightInfo
+
+---@class DisplayElement
+---@field above DisplayItem[]
+---@field line DisplayItem[]
+---@field below DisplayItem[]
 
 --- Requested width in utf code points.
 ---@param item DisplayItem
@@ -205,7 +216,7 @@ local function display(buf, model, first, last)
 
         local line = ""
         if item then
-            for j, column in ipairs(item.columns) do
+            for j, column in ipairs(item.columns.line) do
                 local fixed = fix_width(column, model.columns[j])
                 local offset = string.len(line)
                 line = line .. fixed.text
@@ -283,14 +294,18 @@ end
 ---@field insert fun(items: OrderItem[], pos: integer)
 ---@field remove fun(pos: integer)
 
----@alias DisplayFunction fun(item): DisplayItem[]
+---@alias DisplayFunction fun(item): DisplayElement
 
 ---@alias OnRedrawFunction fun(winid: integer, bufnr: integer, top: integer, bottom: integer)
 
 ---@alias OnControllerFunction fun(controller: ListViewController)
 
+---@class ListItem
+---@field data any
+---@field columns DisplayElement
+---
 ---@class ListViewModel
----@field items any
+---@field items ListItem[]
 ---@field columns integer[]
 ---@field display DisplayFunction
 

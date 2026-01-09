@@ -290,7 +290,7 @@ end
 ---@param state TrackState
 ---@param track? Track
 ---@param item OrderItem
-local function handle_commit(opts, state, track, item)
+local function handle_commit_line(opts, state, track, item)
     -- We have a completely new commit as not merge or split is happening.
     local has_commit = state.merge == nil and state.split == nil
 
@@ -484,6 +484,19 @@ local function handle_line(state, track)
     end
 end
 
+---@param opts MergeStyle
+---@param state TrackState
+---@param track? Track
+---@param item OrderItem
+local function handle_commit(opts, state, track, item)
+    if opts.split_on_separate_line and #item.commit.children > 1 then
+    end
+
+    handle_commit_line(opts, state, track, item)
+
+    if opts.merge_on_separate_line and #item.commit.parents > 1 then
+    end
+end
 
 ---@class Ref
 ---@field name string
@@ -682,9 +695,9 @@ local function get_track_chars(opts, tracks)
             for j = i + 1, #tracks do
                 local t = tracks[j]
                 local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and
-                t.connectivity.right
+                    t.connectivity.right
                 local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
-                t.connectivity.left
+                    t.connectivity.left
                 if not is_cross and not is_jump then
                     track_id = t.id
                     break
@@ -745,7 +758,7 @@ local function get_track_chars(opts, tracks)
             local t = tracks[j]
             local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and t.connectivity.right
             local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
-            t.connectivity.left
+                t.connectivity.left
             --if not t.connectivity.down or not t.connectivity.up or not t.connectivity.left or not t.connectivity.right then
             if not is_cross and not is_jump then
                 next_track_id = t.id
@@ -774,6 +787,7 @@ end
 ---@param opts GraphOptions
 ---@param item OrderItem
 ---@param selection_state SelectionState
+---@return DisplayElement
 local function display_item(opts, item, selection_state)
     local palette = opts.palette
 
@@ -813,21 +827,23 @@ local function display_item(opts, item, selection_state)
 
     if item.type == "commit" then
         return {
-            highlight_text(item.commit.date .. " ", palette.date),
-            highlight_text(item.commit.author .. " ", palette.author),
-            get_track_chars(opts, item.tracks),
-            compose({
-                tracks,
-                highlight_text(branches, palette.branch),
-                highlight_text(tags, palette.tags),
-                --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
-                --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
+            line = {
+                highlight_text(item.commit.date .. " ", palette.date),
+                highlight_text(item.commit.author .. " ", palette.author),
+                get_track_chars(opts, item.tracks),
+                compose({
+                    tracks,
+                    highlight_text(branches, palette.branch),
+                    highlight_text(tags, palette.tags),
+                    --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
+                    --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
 
-                highlight_text(item.commit.message, palette.message) or "",
-            }),
+                    highlight_text(item.commit.message, palette.message) or "",
+                }),
+            }
         }
     else
-        return { "", "", get_track_chars(opts, item.tracks), tracks, "" }
+        return { line = { "", "", get_track_chars(opts, item.tracks), tracks, "" } }
     end
 end
 
@@ -981,6 +997,7 @@ function M.open(folder, opts)
 
                         item.parents = newParents
 
+                        --[[
                         if opts.merge_style.split_on_separate_line and #item.children > 1 then
                             ---@type OrderItem
                             local split_item = {
@@ -993,6 +1010,7 @@ function M.open(folder, opts)
                             refresh_tracks(opts, repo.order, #repo.order)
                             controller.insert({ split_item }, #repo.order)
                         end
+                        --]]
 
                         ---@type OrderItem
                         local order_item = {
@@ -1004,6 +1022,7 @@ function M.open(folder, opts)
                         refresh_tracks(opts, repo.order, #repo.order)
                         controller.insert({ order_item }, #repo.order)
 
+                        --[[
                         if opts.merge_style.merge_on_separate_line and #item.parents > 1 and #item.children > 0 then
                             ---@type OrderItem
                             local merge_item = {
@@ -1016,6 +1035,7 @@ function M.open(folder, opts)
                             refresh_tracks(opts, repo.order, #repo.order)
                             controller.insert({ merge_item }, #repo.order)
                         end
+                        --]]
                     end,
                 })
             end).next(function()
