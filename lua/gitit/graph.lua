@@ -290,32 +290,19 @@ end
 ---@param state TrackState
 ---@param track? Track
 ---@param item OrderItem
-local function handle_commit_line(opts, state, track, item)
-    -- We have a completely new commit as not merge or split is happening.
-    local has_commit = state.merge == nil and state.split == nil
+local function handle_commit(opts, state, track, item)
+    local splitting_or_merging = not opts.merge_on_separate_line and state.merge and #state.merge.new_parents > 1 or
+        not opts.split_on_separate_line and
+        state.split and state.split.remaining > 1
 
-    if not state.merge then
-        state.merge = {
-            remaining = #item.commit.parents,
-            new_parents = {},
-        }
+    local has_commit = state.merge_id == nil and (not track or track and track.parent == item.commit) or false
 
-        if #item.commit.parents > 1 and opts.merge_on_separate_line then
-            table.insert(state.merge.new_parents, item.commit)
-        else
-            for _, p in ipairs(item.commit.parents) do
-                table.insert(state.merge.new_parents, p)
-            end
+    for _, t in ipairs(state.new_tracks) do
+        if t.commit and t.commit == item.commit then
+            has_commit = false
+            break
         end
     end
-
-    if not state.split and (not opts.split_on_separate_line or #item.commit.children == 1) then
-        state.split = {
-            remaining = #item.commit.children
-        }
-    end
-
-    local splitting_or_merging = state.merge and #state.merge.new_parents > 1 or state.split ~= nil
 
     ---@type integer|nil
     local track_id = track and track.id -- or get_next_id()
@@ -340,11 +327,17 @@ local function handle_commit_line(opts, state, track, item)
         ---@type Track
         local new_track = {
             id = track_id,
+            --override = track == nil and "*" or nil,
             --override = "*",
+            --override = opts.merge_on_separate_line and "*" or nil,
             --override = state.merge and tostring(#state.merge.new_parents) or nil,
+            --override = state.split and tostring(state.split.remaining) or nil,
+            --override = tostring(state.space_available),
+            --override = track and track.parent == item.commit and "*" or nil,
             connectivity = {
                 down = parent ~= nil,
-                right = state.merge and #state.merge.new_parents > 0 or i < state.space_available or
+                right = not opts.merge_on_separate_line and state.merge and #state.merge.new_parents > 0 or
+                    i < state.space_available or
                     state.split and state.split.remaining > 1 or false,
                 --left = i > 1 or state.split and state.split.remaining == #item.commit.children,
                 left = not has_commit,
@@ -371,19 +364,6 @@ end
 ---@param track? Track
 ---@param item OrderItem
 local function handle_merge(state, track, item)
-    local new_tracks = {}
-
-    if not state.merge then
-        state.merge = {
-            remaining = #item.commit.parents,
-            new_parents = {},
-        }
-
-        for _, p in ipairs(item.commit.parents) do
-            table.insert(state.merge.new_parents, p)
-        end
-    end
-
     local track_id = track and track.commit == item.commit and track.id or get_next_id()
 
     for i = 1, state.space_available do
@@ -393,10 +373,11 @@ local function handle_merge(state, track, item)
         local new_track = {
             id = track_id,
             --override = "*",
+            --override = parent ~= nil and "*" or nil,
             has_commit = false,
             connectivity = {
                 down = parent ~= nil,
-                up = track and track.parent == item.commit or false,
+                up = track and track.commit == item.commit or false,
                 left = state.merge and #state.merge.new_parents < #item.commit.parents - 1 or false,
                 right = state.merge and #state.merge.new_parents > 0 or false,
             },
@@ -407,6 +388,9 @@ local function handle_merge(state, track, item)
         state.merge_id = new_track.id
 
         table.insert(state.new_tracks, new_track)
+    end
+    if not state.merge or #state.merge.new_parents == 0 then
+        state.merge_id = nil
     end
 end
 
@@ -422,7 +406,6 @@ local function handle_split(state, track, item)
 
     for i = 1, state.space_available do
         ---@type Commit|nil
-        --local parent = state.split and track and track.parent == item.commit and state.split.remaining == #item.commit.children and i == 1 and item.commit or nil
         local parent = state.split and state.split.remaining == #item.commit.children and i == 1 and item.commit or nil
 
         ---@type Track
@@ -447,6 +430,7 @@ local function handle_split(state, track, item)
     end
 
     if state.split and state.split.remaining > 0 then
+        state.merge_id = state.split.remaining > 1 and track and track.id or nil
         state.split.remaining = state.split.remaining - 1
     end
 end
@@ -454,13 +438,10 @@ end
 ---@param state TrackState
 ---@param track Track
 local function handle_line(state, track)
-    local splitting_or_merging = state.merge and #state.merge.new_parents > 0 or
-        state.split and state.split.remaining > 0 or false
+    ---@type boolean
+    local splitting_or_merging = state.merge_id and true or false --state.split and state.split.remaining > 0 or false
 
     for i = 1, state.space_available do
-        --local split_junction = state.split and state.split.remaining > 0 and i == state.space_available or false
-        --local merge_junction = state.merge and #state.merge.new_parents > 0 and i == 1 or false
-
         ---@type Track
         local new_track = {
             --id = state.merge_id or track.id,
@@ -468,6 +449,7 @@ local function handle_line(state, track)
             --override = "*",
             --override = state.split and tostring(state.split.remaining) or nil,
             --override = splitting_or_merging and "*" or nil,
+            --override = tostring(state.space_available),
             connectivity = {
                 up = i == state.space_available,
                 down = splitting_or_merging and i == state.space_available or not splitting_or_merging and i == 1,
@@ -475,7 +457,6 @@ local function handle_line(state, track)
                 left = #state.new_tracks > 0 and state.new_tracks[#state.new_tracks].connectivity.right or false,
                 right = i < state.space_available or splitting_or_merging,
             },
-            --parent = i == 1 and track.connectivity.down and track.parent or nil,
             parent = track.parent,
             has_commit = false,
         }
@@ -484,18 +465,234 @@ local function handle_line(state, track)
     end
 end
 
----@param opts MergeStyle
----@param state TrackState
----@param track? Track
+---@param opts GraphOptions
+---@param tracks Track[]
 ---@param item OrderItem
-local function handle_commit(opts, state, track, item)
-    if opts.split_on_separate_line and #item.commit.children > 1 then
+local function handle_split_line(opts, tracks, item)
+    ---@type TrackState
+    local state = {
+        tracks = tracks,
+        new_tracks = {},
+        merge_id = nil,
+        space_available = 1,
+    }
+
+    if #item.commit.children > 1 then
+        state.split = {
+            remaining = #item.commit.children
+        }
     end
 
-    handle_commit_line(opts, state, track, item)
+    for _, t in ipairs(tracks) do
+        if t.connectivity.down then
+            if t.parent == item.commit then
+                handle_split(state, t, item)
+            else
+                handle_line(state, t)
+            end
 
-    if opts.merge_on_separate_line and #item.commit.parents > 1 then
+            state.space_available = 1
+        else
+            state.space_available = state.space_available + 1
+        end
     end
+
+    return state.new_tracks
+end
+
+---@param opts GraphOptions
+---@param tracks Track[]
+---@param item OrderItem
+local function handle_merge_line(opts, tracks, item)
+    ---@type TrackState
+    local state = {
+        tracks = tracks,
+        new_tracks = {},
+        merge_id = nil,
+        space_available = 1,
+    }
+
+    if #item.commit.parents > 1 then
+        state.merge = {
+            remaining = #item.commit.parents,
+            new_parents = {},
+        }
+
+        for _, p in ipairs(item.commit.parents) do
+            table.insert(state.merge.new_parents, p)
+        end
+    end
+
+    for _, t in ipairs(tracks) do
+        if t.connectivity.down then
+            if t.commit == item.commit then
+                handle_merge(state, t, item)
+            else
+                handle_line(state, t)
+            end
+            state.space_available = 1
+        elseif state.merge and #state.merge.new_parents > 0 then
+            handle_merge(state, t, item)
+            state.space_available = 1
+        else
+            state.space_available = state.space_available + 1
+        end
+    end
+
+    -- Add a new track for each new parent that hasn't been handled yet.
+    if state.merge then
+        for j, p in ipairs(state.merge.new_parents) do
+            ---@type Track
+            local new_track = {
+                id = get_next_id(),
+                --override = "*",
+                connectivity = {
+                    up = false,
+                    left = true,
+                    right = j < #state.merge.new_parents,
+                    down = true,
+                },
+                has_commit = false,
+                parent = p,
+            }
+
+            table.insert(state.new_tracks, new_track)
+        end
+    end
+
+    return state.new_tracks
+end
+
+---@param opts GraphOptions
+---@param tracks Track[]
+---@param item OrderItem
+local function handle_commit_line(opts, tracks, item)
+    ---@type TrackState
+    local state = {
+        tracks = tracks,
+        new_tracks = {},
+        merge_id = nil,
+        space_available = 1,
+    }
+
+    if true or not opts.merge_style.merge_on_separate_line and #item.commit.parents > 1 then
+        state.merge = {
+            remaining = #item.commit.parents,
+            new_parents = {},
+        }
+
+        for _, p in ipairs(item.commit.parents) do
+            table.insert(state.merge.new_parents, p)
+        end
+    end
+
+    if not opts.merge_style.split_on_separate_line and #item.commit.children > 1 or #item.commit.children == 1 then
+        state.split = {
+            remaining = #item.commit.children
+        }
+    end
+
+    local handled = false
+
+    for _, t in ipairs(tracks) do
+        if t.connectivity.down then
+            if t.parent == item.commit then
+                handle_commit(opts.merge_style, state, t, item)
+
+                handled = true
+            else
+                handle_line(state, t)
+            end
+
+            state.space_available = 1
+        elseif state.merge and #state.merge.new_parents > 0 then
+            --handle_commit(opts.merge_style, state, t, item)
+
+            --state.space_available = 1
+            state.space_available = state.space_available + 1
+
+            while state.merge_id and #state.merge.new_parents > 0 and state.space_available > 0 do
+                local parent = table.remove(state.merge.new_parents)
+                state.space_available = state.space_available - 1
+                ---@type Track
+                local new_track = {
+                    id = get_next_id(),
+                    --override = "*",
+                    connectivity = {
+                        up = false,
+                        left = true,
+                        right = #state.merge.new_parents > 1,
+                        down = true,
+                    },
+                    has_commit = false,
+                    parent = parent,
+                }
+
+                table.insert(state.new_tracks, new_track)
+                if #state.merge.new_parents == 0 then
+                    state.merge_id = nil
+                end
+            end
+        else
+            state.space_available = state.space_available + 1
+        end
+    end
+
+    if not handled then
+        state.space_available = 1
+        handle_commit(
+            {
+                allow_merge_on_split = true,
+                merge_on_separate_line = false,
+                split_on_separate_line = false,
+            },
+            state, nil, item
+        )
+    end
+
+    -- Add a new track for each new parent that hasn't been handled yet.
+    if not opts.merge_style.merge_on_separate_line and state.merge then
+        for j, p in ipairs(state.merge.new_parents) do
+            ---@type Track
+            local new_track = {
+                id = get_next_id(),
+                --override = "*",
+                connectivity = {
+                    up = false,
+                    left = true,
+                    right = j < #state.merge.new_parents,
+                    down = true,
+                },
+                has_commit = false,
+                parent = p,
+            }
+
+            table.insert(state.new_tracks, new_track)
+        end
+    end
+
+    return state.new_tracks
+end
+
+---@param opts GraphOptions
+---@param tracks Track[]
+---@param item OrderItem
+---@return Track[]
+local function handle_commit_item(opts, tracks, item)
+    if opts.merge_style.split_on_separate_line and #item.commit.children > 1 then
+        tracks = handle_split_line(opts, tracks, item)
+        item.split = tracks
+    end
+
+    tracks = handle_commit_line(opts, tracks, item)
+    item.tracks = tracks
+
+    if opts.merge_style.merge_on_separate_line and #item.commit.parents > 1 then
+        tracks = handle_merge_line(opts, tracks, item)
+        item.merge = tracks
+    end
+
+    return tracks
 end
 
 ---@class Ref
@@ -547,93 +744,20 @@ end
 ---@field type "commit"|"merge"|"split"
 ---@field commit? Commit
 ---@field tracks Track[]
+---@field split? Track[]
+---@field merge? Track[]
 
 ---@param opts GraphOptions
 ---@param order OrderItem[]
 ---@param start_pos integer
 local function refresh_tracks(opts, order, start_pos)
     start_pos = start_pos or 1
+    local tracks = #order > 0 and start_pos > 1 and (order[start_pos - 1].merge or order[start_pos - 1].tracks) or {}
     for i = start_pos, #order do
         ---@type OrderItem
         local item = order[i]
-        ---@type OrderItem?
-        local prev = order[i - 1]
 
-        ---@type TrackState
-        local state = {
-            new_tracks = {},
-            space_available = 1,
-            tracks = {}
-        }
-
-        ---@type Track[]
-        local tracks = prev and prev.tracks or {}
-        local handled = false
-        for _, t in ipairs(tracks) do
-            if t.connectivity.down then
-                if t.parent == item.commit then
-                    if item.type == "commit" then
-                        handle_commit(opts.merge_style, state, t, item)
-                    elseif item.type == "merge" then
-                        handle_merge(state, t, item)
-                    elseif item.type == "split" then
-                        handle_split(state, t, item)
-                    end
-
-                    handled = true
-                else
-                    handle_line(state, t)
-                end
-
-                state.space_available = 1
-            elseif state.merge and #state.merge.new_parents > 0 then
-                if item.type == "commit" then
-                    handle_commit(opts.merge_style, state, t, item)
-                elseif item.type == "merge" then
-                    handle_merge(state, t, item)
-                elseif item.type == "split" then
-                    handle_split(state, t, item)
-                end
-
-                state.space_available = 1
-            else
-                state.space_available = state.space_available + 1
-            end
-        end
-
-        if not handled then
-            handle_commit(
-                {
-                    allow_merge_on_split = true,
-                    merge_on_separate_line = false,
-                    split_on_separate_line = false,
-                },
-                state, nil, item
-            )
-        end
-
-        -- Add a new track for each new parent that hasn't been handled yet.
-        if state.merge then
-            for j, p in ipairs(state.merge.new_parents) do
-                ---@type Track
-                local new_track = {
-                    id = get_next_id(),
-                    --override = "*",
-                    connectivity = {
-                        up = false,
-                        left = true,
-                        right = j < #state.merge.new_parents,
-                        down = true,
-                    },
-                    has_commit = false,
-                    parent = p,
-                }
-
-                table.insert(state.new_tracks, new_track)
-            end
-        end
-
-        item.tracks = state.new_tracks
+        tracks = handle_commit_item(opts, tracks, item)
     end
 end
 
@@ -817,22 +941,29 @@ local function display_item(opts, item, selection_state)
             end
             --]]
 
-    local tracks = "("
-    for i, t in ipairs(item.tracks) do
-        tracks = tracks .. (i > 1 and ", " or "") .. (t.id or "-")
-    end
-    tracks = tracks .. ")"
+    --tracks = ""
 
-    tracks = ""
+    local get_tracks = function(tracks)
+        local result = "("
+        for i, t in ipairs(tracks) do
+            result = result .. (i > 1 and ", " or "") .. (t.id or "-")
+        end
+        result = result .. ") "
+
+        return highlight_text(result, "Comment")
+    end
+
+
 
     if item.type == "commit" then
-        return {
+        ---@type DisplayElement
+        local element = {
             line = {
                 highlight_text(item.commit.date .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
                 get_track_chars(opts, item.tracks),
                 compose({
-                    tracks,
+                    get_tracks(item.tracks),
                     highlight_text(branches, palette.branch),
                     highlight_text(tags, palette.tags),
                     --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
@@ -842,8 +973,17 @@ local function display_item(opts, item, selection_state)
                 }),
             }
         }
+        if item.split then
+            element.above = { "", "", get_track_chars(opts, item.split), get_tracks(item.split) }
+        end
+
+        if item.merge then
+            element.below = { "", "", get_track_chars(opts, item.merge), get_tracks(item.merge) }
+        end
+
+        return element
     else
-        return { line = { "", "", get_track_chars(opts, item.tracks), tracks, "" } }
+        return { line = { "", "", get_track_chars(opts, item.tracks), "", "" } }
     end
 end
 

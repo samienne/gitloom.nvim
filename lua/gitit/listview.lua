@@ -148,9 +148,9 @@ end
 ---@field highlight HighlightInfo
 
 ---@class DisplayElement
----@field above DisplayItem[]
----@field line DisplayItem[]
----@field below DisplayItem[]
+---@field above? (DisplayItem|string)[]
+---@field line (DisplayItem|string)[]
+---@field below? (DisplayItem|string)[]
 
 --- Requested width in utf code points.
 ---@param item DisplayItem
@@ -198,6 +198,73 @@ local function fix_width(item, requested_utf_len)
     end
 end
 
+---@param item DisplayItem
+local function build_virt_text_chunks(item)
+    local text = item.text
+
+    if not item.highlight then
+        return { { text, nil } }
+    end
+
+    local ranges = vim.deepcopy(item.highlight or {})
+
+    table.sort(ranges, function(a, b)
+        return a.start_pos < b.start_pos
+    end)
+
+    local chunks = {}
+    local pos = 0
+    local len = #text
+
+    for _, h in ipairs(ranges) do
+        local s = h.start_pos
+        local e = h.end_pos
+
+        if s < e and s >= 0 and e <= len then
+            if s > pos then
+                local plain = text:sub(pos + 1, s)
+                table.insert(chunks, { plain, nil })
+            end
+
+            local highlighted = text:sub(s + 1, e)
+            table.insert(chunks, { highlighted, h.hl })
+
+            pos = e
+        end
+    end
+
+    if pos < len then
+        table.insert(chunks, { text.sub(pos + 1, len), nil })
+    end
+
+    return chunks
+end
+
+local function compose(list)
+    local text = ""
+    local highlight = {}
+    for _, item in ipairs(list) do
+        if type(item) == "table" then
+            local offset = string.len(text)
+            for _, hl in ipairs(item.highlight or {}) do
+                table.insert(highlight, {
+                    start_pos = offset + hl.start_pos,
+                    end_pos = offset + hl.end_pos,
+                    hl = hl.hl
+                })
+            end
+            text = text .. (item.text or "")
+        elseif type(item) == "string" then
+            text = text .. item
+        end
+    end
+
+    return {
+        text = text,
+        highlight = highlight,
+    }
+end
+
 local namespace = vim.api.nvim_create_namespace("gitit.listview")
 
 --- 1-based indexing, inclusive last
@@ -211,10 +278,14 @@ local function display(buf, model, first, last)
 
     local lines = {}
     local highlight = {}
+    local virt_lines = {}
+    local virt_lines_below = {}
     for i = first, last do
         local item = model.items[i]
 
         local line = ""
+        local above = {}
+        local below = {}
         if item then
             for j, column in ipairs(item.columns.line) do
                 local fixed = fix_width(column, model.columns[j])
@@ -229,6 +300,32 @@ local function display(buf, model, first, last)
                     })
                 end
             end
+
+            for j, column in ipairs(item.columns.above or {}) do
+                local fixed = fix_width(column, model.columns[j])
+                table.insert(above, fixed)
+            end
+
+            for j, column in ipairs(item.columns.below or {}) do
+                local fixed = fix_width(column, model.columns[j])
+                table.insert(below, fixed)
+            end
+        end
+
+        if #above > 0 then
+            local chunks = build_virt_text_chunks(compose(above))
+            table.insert(virt_lines, {
+                line = i - 1,
+                chunks = chunks
+            })
+        end
+
+        if #below > 0 then
+            local chunks = build_virt_text_chunks(compose(below))
+            table.insert(virt_lines_below, {
+                line = i - 1,
+                chunks = chunks
+            })
         end
 
         table.insert(lines, line)
@@ -247,6 +344,34 @@ local function display(buf, model, first, last)
             hl_group = hl.hl,
         })
     end
+
+    for _, line in ipairs(virt_lines) do
+        vim.api.nvim_buf_set_extmark(buf, namespace, line.line, 0, {
+            virt_lines = { line.chunks },
+            virt_text_pos = "eol",
+            virt_lines_above = true,
+        })
+    end
+
+    for _, line in ipairs(virt_lines_below) do
+        vim.api.nvim_buf_set_extmark(buf, namespace, line.line, 0, {
+            virt_lines = { line.chunks },
+            virt_text_pos = "eol",
+            virt_lines_above = false,
+        })
+    end
+
+    --[[
+    for i = first, last do
+        local item = model.items[i]
+        if item.columns.above then
+            vim.api.nvim_buf_set_extmark(buf, namespace, i, 0, {
+                virt_lines = {
+                },
+            })
+        end
+    end
+    --]]
     vim.bo[buf].modifiable = false
     vim.bo[buf].readonly = true
 end
