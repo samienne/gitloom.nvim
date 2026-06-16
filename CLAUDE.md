@@ -20,6 +20,17 @@ floating window showing the commit DAG as a colored, lane-based graph for the
 repo at Neovim's cwd. Part of the loomworks suite, but **standalone** — its
 only third-party dependency is snacks.nvim.
 
+**Focus and direction.** The product is the graph viewer; other git
+functionality is out of scope except where it falls naturally out of the
+graph or is delegated to another plugin (diffview, etc.). gitloom builds the
+graph itself rather than wrapping `git log --graph` (model ownership), because
+the planned interactive views — collapse / pin / toggle branch visibility,
+with reflow — require owning ordering and layout. The graph algorithm is the
+most developed part of the codebase; the rest of the current surface exists
+mainly to exercise it. The central unsolved problem is commit attribution in
+a shared DAG. See specification.md §1, §10 and ARCHITECTURE.md
+("Model ownership and the view pipeline").
+
 The plugin lives at `C:/src/nvim-plugins/gitloom.nvim` and is loaded via the
 owner's Neovim config (`C:/Users/samie/AppData/Local/nvim`, branch
 `loomworks`) as a lazy.nvim dev plugin: the config's `dev.path` resolver uses

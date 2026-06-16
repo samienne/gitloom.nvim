@@ -7,11 +7,27 @@ it is implemented. Implementation details live in
 This document is authoritative. When behavior changes, update this file
 first (see [CLAUDE.md](CLAUDE.md) → Spec-First Development).
 
-## 1. Scope
+## 1. Purpose and scope
 
-gitloom presents the commit history of a git repository as a lane-based
-graph in a floating window. v0 is **read-only**: it displays the graph and
-nothing else (no checkout, no diff, no actions).
+gitloom's primary goal is to be an excellent **git graph viewer**. The graph
+is the product. Other git functionality is deliberately out of scope, except
+where it falls naturally *out of* the graph (e.g. acting on the commit under
+the cursor) or is delegated to an existing plugin (e.g. opening a diff in
+diffview).
+
+### 1.1 Own the model
+
+gitloom does **not** wrap `git log --graph`. It reads commit and ref data
+from git and builds the commit DAG, the row ordering, and the lane layout
+itself, in memory. Owning the model is a hard requirement, not an
+implementation detail: the planned view features — collapsing, pinning,
+toggling branch visibility, and reflowing (§10) — are only possible if
+gitloom controls ordering and layout rather than delegating them to git.
+
+Today the view is read-only and shows a single fixed projection of the graph.
+The view-transformation features in §10 are the direction this is built
+toward; the current non-graph surface (window, streaming fetch, rendering)
+exists primarily to exercise and validate the graph algorithm.
 
 ## 2. Entry point
 
@@ -160,8 +176,64 @@ command is unimplemented. Until then, the documented defaults always apply to
 `:GitloomGraph`. (Programmatic callers may pass options directly to the graph
 open function.)
 
-## 9. Non-goals (v0)
+## 9. Non-goals
 
-Out of scope for the current version: any repository mutation, diff/patch
-display, commit details pane, search/filter, cursor-driven actions, and
-multi-window layouts. These may be specified in future revisions.
+**Permanently** out of scope: repository mutation of any kind (no checkout,
+commit, rebase, reset). gitloom is a viewer.
+
+Out of scope **for now**, but reasonable later where they arise naturally
+from the graph: acting on the commit/ref under the cursor, and integration
+with external plugins (e.g. opening a diff via diffview). These are secondary
+to the graph itself and must not compromise the model-ownership principle
+(§1.1).
+
+## 10. Planned: view model and transformations
+
+> Status: **direction, not yet implemented.** This section records intended
+> behavior so design and code can converge on it. It does not describe
+> current behavior.
+
+The graph is a *projection* of the full in-memory commit model under a
+**view state**. Changing the view state reflows the graph.
+
+### 10.1 Branch visibility
+
+Each branch (identified by a ref / head) has a visibility mode:
+
+- **visible** — its commits are shown in full.
+- **collapsed** — its commits are represented compactly (conceptually a
+  single row) while connectivity to visible lanes is preserved.
+- **hidden** — its commits are removed from the view.
+
+Toggling a branch's mode reflows the graph to match.
+
+### 10.2 Pinned heads
+
+A branch head may be **pinned**. Pinning guarantees that everything the
+pinned head references (its reachable history, subject to the attribution
+rule in §10.4) stays visible regardless of other visibility settings.
+
+### 10.3 Reflow
+
+Any change to view state produces a freshly computed ordering + lane layout
+over the visible/collapsed commit set — recomputed from scratch, not
+appended. Reflow must be deterministic and stable enough that unaffected
+regions of the graph do not visually churn.
+
+### 10.4 Open design questions
+
+These must be specified before implementation:
+
+- **Commit attribution (the central problem).** Commits are shared across
+  branches in a DAG. Collapsing or hiding "a branch" requires a precise rule
+  for which commits belong to that branch versus are shared with retained
+  branches — e.g. first-parent ownership, or reachable-minus-other-retained-
+  heads. Pinning and hiding both depend on this rule.
+- **Collapsed rendering.** What a collapsed branch's single row shows
+  (summary, commit count) and how merges into/out of it connect to visible
+  lanes.
+- **Hidden connectivity.** Whether a merge from a hidden branch into a
+  visible one leaves a phantom indicator or vanishes entirely.
+- **Scale.** Reading all commits is unbounded in large repositories; the
+  loading strategy (limits, lazy/streamed loading, on-demand reachability)
+  must keep reflow responsive.

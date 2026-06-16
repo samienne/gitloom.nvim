@@ -4,6 +4,21 @@ A git commit-graph viewer for Neovim. Renders the commit DAG as a colored,
 lane-based graph (lazygit/tig style) in a floating window. Part of the
 **loomworks** suite.
 
+## Goals
+
+gitloom's purpose is to be an *excellent git graph viewer* — not a general
+git client. It deliberately builds the graph itself rather than wrapping
+`git log --graph`: it reads all commit and ref data and constructs the DAG,
+ordering, and lane layout in memory. That ownership is what enables the
+planned interactive views — collapsing branches to a single line, pinning
+branch-heads so their history stays visible, and toggling branches between
+fully visible / collapsed / hidden, with the graph reflowing to match.
+
+Other git functionality is out of scope, except where it falls naturally out
+of the graph (acting on the commit under the cursor) or is delegated to
+existing plugins (e.g. opening a diff in diffview). See
+[specification.md](specification.md) §1 and §10.
+
 ## Status
 
 Early development. The graph renderer (async git fetch, DAG construction,
@@ -24,6 +39,15 @@ even though it ships as part of the same suite. See
   so large histories stay responsive
 - **Configurable merge style** — render merges/splits inline or on their
   own virtual lines
+
+### Planned
+
+- **Collapse a branch** to a single line in the view
+- **Pin branch-heads** so everything they reference stays visible
+- **Toggle branch visibility** (visible / collapsed / hidden) with the graph
+  reflowing to match
+- **Graph-initiated actions** and integrations (e.g. diffview) where they
+  arise naturally from the graph
 
 ## Requirements
 

@@ -17,6 +17,50 @@ worth deduplicating, the intended path is to extract a small standalone
 `utils`-style library that both plugins copy or depend on — **not** to make
 gitloom depend on loomworks. Until that exists, keep the vendored copies.
 
+## Model ownership and the view pipeline
+
+gitloom owns its model. It reads raw commit + ref data from git and builds
+the DAG, ordering, and lane layout itself — it does not delegate graph
+drawing or ordering to `git log --graph`. This is what makes the planned view
+transformations (collapse / pin / toggle / reflow — see specification.md §10)
+possible at all.
+
+The intended pipeline separates four concerns:
+
+1. **Repository model** — all fetched commits, refs, and the parent/child
+   graph. The source of truth, independent of how it is displayed.
+2. **View state** — per-branch visibility (visible/collapsed/hidden) and
+   pinned heads.
+3. **View builder** — a `(model, view state) → ordered rows → lane layout`
+   computation. Must be recomputable from scratch so changing view state can
+   *reflow* the graph, not merely append to it.
+4. **Rendering** — the virtualized listview draws whatever rows the view
+   builder produced.
+
+### Current state vs. target
+
+The model and rendering layers exist; the view-state and view-builder layers
+do not yet:
+
+- The repository model exists as `repo.commits` (an identity-stable DAG), but
+  **ordering is currently seeded from `git log --topo-order`**, and layout is
+  computed *incrementally* as commits stream in (`refresh_tracks` appends to
+  `repo.order`).
+- There is no view state and no from-scratch reflow. The view is a single
+  fixed projection.
+
+The refactor toward the target moves ordering ownership out of `git log` and
+into a view builder that recomputes the full ordered row set (and its lane
+layout) from the model plus a view state. The existing lane algorithm
+(`handle_commit_line` / `handle_merge_line` / `handle_split_line`) is the core
+of that builder and is reused as-is; what changes is *what feeds it* — a
+recomputed, filtered, possibly reordered commit set instead of the raw git
+stream.
+
+The central unsolved problem is **commit attribution** (specification.md
+§10.4): deciding which commits "belong to" a branch being collapsed or hidden
+when commits are shared across the DAG.
+
 ## Layers
 
 ```
