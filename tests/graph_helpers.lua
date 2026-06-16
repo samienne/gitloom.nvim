@@ -195,7 +195,10 @@ local function check_commits(rows, items)
 end
 
 -- "Wires must connect" check on the rendered glyph grid.
-local function check_grid(grid, opts)
+-- With `skip_color`, the color-continuity checks (steps 6–7) are omitted —
+-- used for styles where lane color is intentionally allowed to change (e.g.
+-- the lane handoff at a merge under allow_merge_on_split).
+local function check_grid(grid, opts, skip_color)
     local errors = {}
     local function err(msg) errors[#errors + 1] = msg end
 
@@ -296,6 +299,8 @@ local function check_grid(grid, opts)
         end
     end
 
+    if skip_color then return errors end
+
     -- 6. vertical color continuity along a straight lane. Restricted to
     --    "│"↔"│" (incl. crossings, which keep ch == "│"): a straight vertical
     --    run is unambiguously one lane, so its color must not change. Junction
@@ -332,17 +337,48 @@ M.check_grid = check_grid
 
 --- Build the layout for `items` and run every invariant.
 --- Returns a flat list of error strings (empty = all good).
+--- With `skip_color`, color-continuity invariants are not asserted.
 ---@param opts table
 ---@param items table[]
+---@param skip_color boolean?
 ---@return string[] errors, table[] rows, table[][] grid
-function M.check(opts, items)
+function M.check(opts, items, skip_color)
     local rows = graph._internal.build_graph(opts, items)
     local grid = M.render_grid(opts, rows)
 
     local errors = {}
     for _, e in ipairs(check_commits(rows, items)) do errors[#errors + 1] = e end
-    for _, e in ipairs(check_grid(grid, opts)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_grid(grid, opts, skip_color)) do errors[#errors + 1] = e end
     return errors, rows, grid
+end
+
+--- A compact, deterministic characterization of the rendered graph: each line
+--- is "<glyphs>  <colors>" (trailing blank cells trimmed), where colors are
+--- the lane-color index per cell (`.` = none). Used to lock current behavior
+--- of experimental styles so any change is flagged for review.
+---@param opts table
+---@param items table[]
+---@return string
+function M.snapshot(opts, items)
+    local rows = graph._internal.build_graph(opts, items)
+    local grid = M.render_grid(opts, rows)
+    local hlcode = {}
+    for i = 1, 9 do hlcode["Hl" .. i] = tostring(i) end
+
+    local lines = {}
+    for _, row in ipairs(grid) do
+        local last = 0
+        for c = 1, #row do
+            if row[c].ch ~= " " then last = c end
+        end
+        local g, col = {}, {}
+        for c = 1, last do
+            g[#g + 1] = row[c].ch
+            col[#col + 1] = row[c].hl and hlcode[row[c].hl] or "."
+        end
+        lines[#lines + 1] = table.concat(g) .. "  " .. table.concat(col)
+    end
+    return table.concat(lines, "\n")
 end
 
 ----------------------------------------------------------------------

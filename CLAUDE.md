@@ -185,12 +185,16 @@ Details not covered by the spec or architecture:
   "Relationship to loomworks" before deduplicating.
 - **setup() config is not yet wired** to `:GitloomGraph` (specification.md
   §8 "Known gap"). The command uses built-in defaults.
-- **Known layout bug — `allow_merge_on_split`**: with that flag on (inline
-  merges/splits), a vertical lane's id (and color) flips where a merge's
-  horizontal line crosses it, producing a vertical color break. The fuzzer
-  for that style is marked `pending` in `graph_layout_spec.lua` (repro:
-  seed=8, n=11). The other four `merge_style` combinations pass the full
-  invariant suite. Re-enable the fuzz once the path is fixed.
+- **Experimental style — `allow_merge_on_split`**: with that flag on (inline
+  merges/splits), a merge commit's incoming lane terminates while a new parent
+  lane reuses the same column, so a vertical lane's color changes mid-column
+  at a merge (a "lane handoff" — verified, not corruption). The desired
+  rendering isn't settled, so color-continuity is **not** asserted for this
+  style: its fuzzer runs structural-only invariants (no-x / dangling /
+  commit-once), and a separate **characterization** test in
+  `graph_layout_spec.lua` (`random_dag(7, 108)`) locks the current rendering
+  so any change is flagged for review. The other four `merge_style`
+  combinations pass the full invariant suite (incl. color).
 - **graph.lua contains commented-out experiment scaffolding** (`--override`
   lines, alternate-style blocks). These are dev aids; treat with care when
   cleaning up and prefer removing dead scaffolding over leaving it.

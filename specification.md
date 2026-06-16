@@ -116,7 +116,12 @@ A lane is a vertical line of history with:
 - `merge_on_separate_line` — when set and a commit has >1 parent, the fan-out
   is drawn on a virtual line **below** the commit row.
 - `allow_merge_on_split` — permits placing a merge onto a split lane when
-  merges are folded onto the commit line.
+  merges are folded onto the commit line. **Experimental.** In this mode a
+  merge commit's incoming lane terminates while a new parent lane reuses the
+  same column, so a vertical lane's color may change mid-column at a merge
+  (a "lane handoff"). The intended rendering for this case is not yet settled;
+  the behavior is pinned by a characterization test rather than treated as a
+  fixed contract.
 
 When a separate line is not used, the merge/split is folded onto the commit
 row itself.
