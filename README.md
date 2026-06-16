@@ -1,7 +1,7 @@
-# Gitit.nvim
+# Gitloom.nvim
 
-A simple git plugin.
+A simple git plugin. Part of the loomworks suite.
 
 ```lua
-require("gitit").setup({ greeting = "Hey there", bang = true })
+require("gitloom").setup({})
 

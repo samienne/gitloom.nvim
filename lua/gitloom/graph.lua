@@ -1061,7 +1061,7 @@ function M.open(folder, opts)
     ---@type GraphOptions
     opts = vim.tbl_deep_extend("force", defaults, opts or {})
 
-    local listview = require("gitit.listview")
+    local listview = require("gitloom.listview")
 
     ---@class Repo
     ---@field commits table<string, Commit>

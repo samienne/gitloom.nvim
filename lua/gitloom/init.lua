@@ -8,14 +8,14 @@ function M.setup(opts)
     M.config = vim.tbl_extend("force", M.config, opts)
 end
 
-local graph = require("gitit.graph")
+local graph = require("gitloom.graph")
 
-vim.api.nvim_create_user_command("GititGraph", graph.open, {})
+vim.api.nvim_create_user_command("GitloomGraph", graph.open, {})
 
-if vim.g.loaded_gitit then
+if vim.g.loaded_gitloom then
     M.setup()
 end
 
-vim.g.loaded_gitit = true
+vim.g.loaded_gitloom = true
 
 return M

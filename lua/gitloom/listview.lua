@@ -265,7 +265,7 @@ local function compose(list)
     }
 end
 
-local namespace = vim.api.nvim_create_namespace("gitit.listview")
+local namespace = vim.api.nvim_create_namespace("gitloom.listview")
 
 --- 1-based indexing, inclusive last
 ---@param buf integer
