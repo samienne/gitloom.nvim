@@ -5,11 +5,73 @@
 --- build_graph and assert structural + rendered invariants: every commit is
 --- laid out once, and the rendered glyph grid is a well-formed, fully
 --- connected picture with continuous lane colors. See tests/graph_helpers.lua.
+---
+--- Every fixture is run under each merge_style — the options that decide
+--- whether merges/splits get their own virtual line (above/below the commit)
+--- to make room for crossings, or are folded onto the commit line.
 
 local h = require("tests.graph_helpers")
 
-local function assert_ok(items, label)
-    local errors, _, grid = h.check(h.default_opts(), items)
+-- merge_style variants exercised for every fixture. `experimental` styles run
+-- the hand fixtures but skip the fuzzer (see the pending note below): the
+-- allow_merge_on_split path has a known lane-id-across-crossing bug.
+local STYLES = {
+    { name = "split-line",      ms = { split_on_separate_line = true,  merge_on_separate_line = false } },
+    { name = "merge-line",      ms = { split_on_separate_line = false, merge_on_separate_line = true } },
+    { name = "both-lines",      ms = { split_on_separate_line = true,  merge_on_separate_line = true } },
+    { name = "inline",          ms = { split_on_separate_line = false, merge_on_separate_line = false } },
+    { name = "inline+mergesplit", experimental = true, ms = { split_on_separate_line = false, merge_on_separate_line = false, allow_merge_on_split = true } },
+}
+
+local FIXTURES = {
+    {
+        name = "linear",
+        rows = { { "c1", { "c2" } }, { "c2", { "c3" } }, { "c3", {} } },
+    },
+    {
+        name = "diamond",
+        rows = {
+            { "c1", { "c2", "c3" } },
+            { "c2", { "c4" } },
+            { "c3", { "c4" } },
+            { "c4", {} },
+        },
+    },
+    {
+        name = "octopus",
+        rows = {
+            { "c1", { "c2", "c3", "c4" } },
+            { "c2", { "c5" } },
+            { "c3", { "c5" } },
+            { "c4", { "c5" } },
+            { "c5", {} },
+        },
+    },
+    {
+        name = "multiple-roots",
+        rows = {
+            { "c1", { "c2", "c3" } },
+            { "c2", {} },
+            { "c3", {} },
+        },
+    },
+    {
+        name = "interleaved",
+        rows = {
+            { "c1", { "c3" } },
+            { "c2", { "c4" } },
+            { "c3", { "c5" } },
+            { "c4", { "c5" } },
+            { "c5", { "c6", "c7" } }, -- merge AND split
+            { "c6", { "c8" } },
+            { "c7", { "c8" } },
+            { "c8", {} },
+        },
+    },
+}
+
+local function assert_ok(opts, items, label)
+    local errors, _, grid = h.check(opts, items)
     if #errors > 0 then
         local msg = ("\n%s\n--- graph ---\n%s\n--- errors ---\n%s"):format(
             label or "", h.grid_to_string(grid), table.concat(errors, "\n"))
@@ -17,55 +79,41 @@ local function assert_ok(items, label)
     end
 end
 
-describe("graph layout", function()
-    it("lays out a linear history", function()
-        assert_ok(h.dag({
-            { "c1", { "c2" } },
-            { "c2", { "c3" } },
-            { "c3", {} },
-        }), "linear")
-    end)
+for _, style in ipairs(STYLES) do
+    describe("graph layout [" .. style.name .. "]", function()
+        for _, fx in ipairs(FIXTURES) do
+            it("lays out " .. fx.name, function()
+                assert_ok(h.opts(style.ms), h.dag(fx.rows), style.name .. "/" .. fx.name)
+            end)
+        end
 
-    it("lays out a diamond (split + merge)", function()
-        assert_ok(h.dag({
-            { "c1", { "c2", "c3" } }, -- merge of two branches
-            { "c2", { "c4" } },
-            { "c3", { "c4" } },
-            { "c4", {} },             -- root; split point for c2/c3
-        }), "diamond")
+        if style.experimental then
+            -- Known bug: with allow_merge_on_split, a vertical lane's id (and
+            -- thus color) flips where a merge's horizontal line crosses it —
+            -- a vertical color break. Reproduces at seed=8 (n=11). Re-enable
+            -- this as a real fuzz test once the layout path is fixed.
+            pending("produces well-formed graphs for random DAGs (known crossing-id bug)")
+        else
+            it("produces well-formed graphs for random DAGs", function()
+                local opts = h.opts(style.ms)
+                local failures = {}
+                for seed = 1, 60 do
+                    local n = 3 + (seed % 10) -- sizes 3..12
+                    local items = h.dag(h.random_dag(n, seed))
+                    local errors, _, grid = h.check(opts, items)
+                    if #errors > 0 then
+                        failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s"):format(
+                            seed, n, h.grid_to_string(grid), table.concat(errors, "\n"))
+                        if #failures >= 3 then break end -- cap the noise
+                    end
+                end
+                if #failures > 0 then
+                    assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
+                end
+            end)
+        end
     end)
-
-    it("lays out an octopus merge (3 parents)", function()
-        assert_ok(h.dag({
-            { "c1", { "c2", "c3", "c4" } },
-            { "c2", { "c5" } },
-            { "c3", { "c5" } },
-            { "c4", { "c5" } },
-            { "c5", {} },
-        }), "octopus")
-    end)
-
-    it("lays out multiple roots", function()
-        assert_ok(h.dag({
-            { "c1", { "c2", "c3" } },
-            { "c2", {} }, -- root A
-            { "c3", {} }, -- root B
-        }), "multiple-roots")
-    end)
-
-    it("lays out interleaved branches (likely crossings)", function()
-        assert_ok(h.dag({
-            { "c1", { "c3" } },
-            { "c2", { "c4" } },
-            { "c3", { "c5" } },
-            { "c4", { "c5" } },
-            { "c5", { "c6", "c7" } },
-            { "c6", { "c8" } },
-            { "c7", { "c8" } },
-            { "c8", {} },
-        }), "interleaved")
-    end)
-end)
+end
 
 describe("invariant checker self-test", function()
     -- Guards against the checker silently becoming vacuous: it must flag
@@ -106,24 +154,5 @@ describe("invariant checker self-test", function()
     it("flags an unknown glyph", function()
         local errors = h.check_grid(grid({ { "x" } }), opts)
         assert(has(errors, "unknown glyph"), table.concat(errors, "\n"))
-    end)
-end)
-
-describe("graph layout fuzzing", function()
-    it("produces well-formed graphs for random DAGs", function()
-        local failures = {}
-        for seed = 1, 60 do
-            local n = 3 + (seed % 10) -- sizes 3..12
-            local items = h.dag(h.random_dag(n, seed))
-            local errors, _, grid = h.check(h.default_opts(), items)
-            if #errors > 0 then
-                failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s"):format(
-                    seed, n, h.grid_to_string(grid), table.concat(errors, "\n"))
-                if #failures >= 3 then break end -- cap the noise
-            end
-        end
-        if #failures > 0 then
-            assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
-        end
     end)
 end)

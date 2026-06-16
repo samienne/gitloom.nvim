@@ -73,6 +73,17 @@ function M.default_opts()
     }
 end
 
+--- default_opts with the merge_style fields overridden.
+---@param merge_style table?
+---@return table
+function M.opts(merge_style)
+    local o = M.default_opts()
+    if merge_style then
+        o.merge_style = vim.tbl_extend("force", o.merge_style, merge_style)
+    end
+    return o
+end
+
 ----------------------------------------------------------------------
 -- Rendering to a glyph grid
 ----------------------------------------------------------------------
