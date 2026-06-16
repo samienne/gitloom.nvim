@@ -39,23 +39,28 @@ The intended pipeline separates four concerns:
 
 ### Current state vs. target
 
-The model and rendering layers exist; the view-state and view-builder layers
-do not yet:
+The model and rendering layers exist, and the **view-builder seam** is now in
+place; **view state** does not yet exist:
 
-- The repository model exists as `repo.commits` (an identity-stable DAG), but
-  **ordering is currently seeded from `git log --topo-order`**, and layout is
-  computed *incrementally* as commits stream in (`refresh_tracks` appends to
-  `repo.order`).
-- There is no view state and no from-scratch reflow. The view is a single
-  fixed projection.
+- The repository model exists as `repo.commits` (an identity-stable DAG), and
+  **ordering is still seeded from `git log --topo-order`**.
+- Layout is exposed two ways over a shared pure core (`layout_item`):
+  - `build_graph(opts, items)` — lays out an ordered item list **from
+    scratch**, deterministically (fresh lane-id sequence each call). This is
+    the reflow primitive and the test entry point.
+  - `refresh_tracks(opts, order, start_pos)` — the production **incremental**
+    path: a thin adapter that calls `layout_item` for newly streamed commits
+    and assigns the result onto the `OrderItem` in place.
+- There is no view state yet. The view is a single fixed projection, so
+  `build_graph` is currently only driven by tests; production uses the
+  incremental path.
 
-The refactor toward the target moves ordering ownership out of `git log` and
-into a view builder that recomputes the full ordered row set (and its lane
-layout) from the model plus a view state. The existing lane algorithm
-(`handle_commit_line` / `handle_merge_line` / `handle_split_line`) is the core
-of that builder and is reused as-is; what changes is *what feeds it* — a
-recomputed, filtered, possibly reordered commit set instead of the raw git
-stream.
+What remains for the target is **ordering ownership** (move ordering out of
+`git log` into the builder) and a **view state** input (per-branch
+visibility, pinned heads) that `build_graph` reflows against. The lane
+algorithm (`handle_commit_line` / `handle_merge_line` / `handle_split_line`,
+behind `layout_item`) is reused as-is; what changes is *what feeds it* — a
+filtered, possibly reordered commit set instead of the raw git stream.
 
 The central unsolved problem is **commit attribution** (specification.md
 §10.4): deciding which commits "belong to" a branch being collapsed or hidden
@@ -162,8 +167,11 @@ on that row. A `Track` is one vertical lane:
 Track = { id, connectivity = {up,down,left,right}, has_commit, commit?, parent? }
 ```
 
-`refresh_tracks` walks the order from a start index, and for each item
-`handle_commit_item` produces the new lane set from the previous row's lanes:
+`layout_item(opts, prev_tracks, item)` is the pure core: given the previous
+row's carry-over lanes it returns `{ tracks, split?, merge?, carry }` without
+mutating the item or touching the view. Both `build_graph` (from scratch) and
+`refresh_tracks` (incremental) call it. Internally it produces the new lane
+set from the previous row's lanes via:
 
 - `handle_split_line` (optional) — when a commit has multiple children and
   `split_on_separate_line` is set, lanes fan in on a virtual line *above*.
@@ -173,8 +181,9 @@ Track = { id, connectivity = {up,down,left,right}, has_commit, commit?, parent? 
   `merge_on_separate_line` is set, lanes fan out on a virtual line *below*.
 
 These share a `TrackState` (`space_available`, `merge`/`split` bookkeeping,
-`merge_id`). Lane identity (`id`) is allocated by a module-global
-`get_next_id()` counter and drives lane color.
+`merge_id`). Lane identity (`id`) is allocated by a `get_next_id()` counter
+and drives lane color; `reset_ids()` restarts the sequence so each
+`build_graph` (and each opened graph window) is deterministic.
 
 ### Rendering to glyphs
 

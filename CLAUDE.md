@@ -121,20 +121,42 @@ Tests use plenary.busted.
 - `tests/minimal_init.lua` sets up the runtime path (plugin + plenary from
   the lazy.nvim install dir) and disables swap/shada.
 
-Current coverage targets the pure, stable logic:
+Coverage:
 
 - `tests/refs_spec.lua` — `parse_refs`
 - `tests/commit_spec.lua` — `parse_commit_line`
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
+- `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
+  algorithm, tested by **invariants** rather than golden snapshots (so the
+  tests survive visualization changes; see below).
 
-The two pure parsers are exposed for testing via `graph._internal`
-(`require("gitloom.graph")._internal`). This table is **test-only** and not
-part of the public API.
+`graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
+only** (not the public API): `parse_refs`, `parse_commit_line`, `build_graph`,
+`get_track_chars`, `reset_ids`.
 
-Not yet covered (high-value future targets): the lane-layout algorithm
-(`handle_commit_line` / `handle_merge_line` / `handle_split_line`, needs
-`Commit`-graph fixtures) and the listview widget (needs snacks in the test
-runtime).
+### Layout testing approach
+
+The lane algorithm is tested by feeding artificial commit DAGs through
+`build_graph` and asserting properties, not by comparing to fixed rendered
+output. The deliberate choice (see chat history / specification.md §10): the
+plugin will support multiple visualizations, so golden snapshots would be a
+maintenance treadmill. Two layers, both in `graph_helpers.lua`:
+
+- **Model** — every input commit is laid out exactly once (faithfulness vs.
+  the input DAG, which is the oracle — not a re-derivation of the layout).
+- **Rendered grid** — a "wires must connect" check on the actual glyph grid:
+  no unknown glyphs, no dangling left/right or up/down stubs, crossings pass
+  the horizontal wire through a vertical bar, and lane color stays continuous
+  (including across crossings).
+
+Invariants must be **sound** (never flag correct output) before being strict.
+Glyph-level color/continuity is subtle because junction glyphs (`├ ┤ ┬ ┴`,
+turns) are lane *boundaries* where color legitimately changes — only enforce
+continuity where it unambiguously holds (straight `│↔│` runs, and across
+crossings). A `checker self-test` block feeds deliberately broken grids to
+prove the checker still has teeth; keep it passing.
+
+Still uncovered: the listview widget (needs snacks in the test runtime).
 
 ## Key concepts (quick reference)
 
@@ -155,7 +177,8 @@ Details not covered by the spec or architecture:
 
 - **init.lua is a thin facade**; graph.lua holds git I/O + layout + render;
   listview.lua is a git-agnostic reusable widget.
-- **`graph._internal`** exists solely for tests (pure parsers). Do not route
+- **`graph._internal`** exists solely for tests (pure parsers + the
+  `build_graph`/`get_track_chars`/`reset_ids` layout seam). Do not route
   production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua
   and listview.lua, and `make_future` is gitloom's own minimal promise. See

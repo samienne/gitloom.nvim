@@ -1,0 +1,376 @@
+--- Test helpers for the graph layout algorithm.
+---
+--- Provides:
+---   * dag()        — build ordered, wired commit items from a compact spec
+---   * default_opts — a GraphOptions table suitable for layout + rendering
+---   * check()      — run build_graph + all invariants, return a list of errors
+---   * random_dag() — deterministic random closed DAG for fuzzing
+---
+--- The invariants are deliberately written independently of the layout
+--- algorithm. Two layers:
+---   1. model    — commit-once / all-present (faithfulness vs. the input)
+---   2. rendered — a "wires must connect" check on the actual glyph grid:
+---      no unknown glyphs, no dangling left/right or up/down stubs, crossings
+---      pass the horizontal wire through a vertical bar, and color (highlight)
+---      stays continuous along each wire (including across crossings).
+
+local graph = require("gitloom.graph")
+
+local M = {}
+
+----------------------------------------------------------------------
+-- Fixtures
+----------------------------------------------------------------------
+
+--- Build ordered commit items from a compact spec.
+--- Each row is `{ hash, { parent_hash, ... } }`, in display order
+--- (newest first; a commit's parents must appear after it).
+---@param rows table[]
+---@return table[] items  -- { { type = "commit", commit = Commit }, ... }
+function M.dag(rows)
+    local commits = {}
+    local function get(h)
+        if not commits[h] then
+            commits[h] = {
+                hash = h,
+                parents = {},
+                children = {},
+                refs = { branches = {}, tags = {}, symbols = {}, raw = {} },
+                author = "author",
+                date = "date",
+                message = h,
+            }
+        end
+        return commits[h]
+    end
+
+    local items = {}
+    for _, row in ipairs(rows) do
+        local h = row[1]
+        local parents = row[2] or {}
+        local c = get(h)
+        for _, ph in ipairs(parents) do
+            local p = get(ph)
+            table.insert(c.parents, p)
+            table.insert(p.children, c)
+        end
+        items[#items + 1] = { type = "commit", commit = c }
+    end
+    return items
+end
+
+function M.default_opts()
+    return {
+        merge_style = {
+            allow_merge_on_split = false,
+            merge_on_separate_line = false,
+            split_on_separate_line = true,
+        },
+        icons = {},
+        palette = {
+            tracks = { "Hl1", "Hl2", "Hl3", "Hl4", "Hl5", "Hl6" },
+        },
+    }
+end
+
+----------------------------------------------------------------------
+-- Rendering to a glyph grid
+----------------------------------------------------------------------
+
+-- Split a rendered line ({ text, highlight }) into a list of cells,
+-- each { ch = <codepoint>, hl = <highlight group or nil> }.
+local function line_cells(result)
+    local text = result.text or ""
+    local hls = result.highlight or {}
+    local cells = {}
+    local i, n = 1, #text
+    while i <= n do
+        local b = text:byte(i)
+        local len = (b < 0x80) and 1 or (b < 0xE0) and 2 or (b < 0xF0) and 3 or 4
+        local bytepos = i - 1
+        local hl = nil
+        for _, h in ipairs(hls) do
+            if bytepos >= h.start_pos and bytepos < h.end_pos then
+                hl = h.hl
+                break
+            end
+        end
+        cells[#cells + 1] = { ch = text:sub(i, i + len - 1), hl = hl }
+        i = i + len
+    end
+    return cells
+end
+
+--- Render layout rows into a padded 2D grid of cells, in vertical display
+--- order (split line above, commit line, merge line below).
+---@param opts table
+---@param rows table[]  -- build_graph output
+---@return table[][]
+function M.render_grid(opts, rows)
+    local gtc = graph._internal.get_track_chars
+    local lines = {}
+    for _, row in ipairs(rows) do
+        if row.split then lines[#lines + 1] = line_cells(gtc(opts, row.split)) end
+        lines[#lines + 1] = line_cells(gtc(opts, row.tracks))
+        if row.merge then lines[#lines + 1] = line_cells(gtc(opts, row.merge)) end
+    end
+
+    local w = 0
+    for _, l in ipairs(lines) do w = math.max(w, #l) end
+    for _, l in ipairs(lines) do
+        for i = #l + 1, w do l[i] = { ch = " ", hl = nil } end
+    end
+    return lines
+end
+
+function M.grid_to_string(grid)
+    local out = {}
+    for _, row in ipairs(grid) do
+        local s = {}
+        for _, cell in ipairs(row) do s[#s + 1] = cell.ch end
+        out[#out + 1] = table.concat(s)
+    end
+    return table.concat(out, "\n")
+end
+
+----------------------------------------------------------------------
+-- Glyph → edge-stub table
+----------------------------------------------------------------------
+
+local STUBS = {
+    ["│"] = { u = true, d = true },
+    ["─"] = { l = true, r = true },
+    ["├"] = { u = true, d = true, r = true },
+    ["┤"] = { u = true, d = true, l = true },
+    ["┬"] = { l = true, r = true, d = true },
+    ["┴"] = { l = true, r = true, u = true },
+    ["╭"] = { d = true, r = true },
+    ["╮"] = { d = true, l = true },
+    ["╰"] = { u = true, r = true },
+    ["╯"] = { u = true, l = true },
+    ["╴"] = { l = true },
+    ["╶"] = { r = true },
+    ["╵"] = { u = true },
+    ["╷"] = { d = true },
+    ["^"] = { u = true },
+    [" "] = {},
+}
+
+local NODES = { ["○"] = true, ["◉"] = true, ["◎"] = true }
+
+----------------------------------------------------------------------
+-- Invariants
+----------------------------------------------------------------------
+
+-- Faithfulness against the input: every commit laid out exactly once.
+local function check_commits(rows, items)
+    local errors, seen = {}, {}
+    for _, row in ipairs(rows) do
+        for _, t in ipairs(row.tracks) do
+            if t.has_commit and t.commit then
+                if seen[t.commit.hash] then
+                    errors[#errors + 1] = "commit appears twice: " .. t.commit.hash
+                end
+                seen[t.commit.hash] = true
+            end
+        end
+    end
+    for _, it in ipairs(items) do
+        if not seen[it.commit.hash] then
+            errors[#errors + 1] = "commit missing from layout: " .. it.commit.hash
+        end
+    end
+    return errors
+end
+
+-- "Wires must connect" check on the rendered glyph grid.
+local function check_grid(grid, opts)
+    local errors = {}
+    local function err(msg) errors[#errors + 1] = msg end
+
+    local node_chars = {}
+    for k in pairs(NODES) do node_chars[k] = true end
+    if opts.icons and opts.icons.merge then node_chars[opts.icons.merge] = true end
+
+    local rows = #grid
+    local cols = rows > 0 and #grid[1] or 0
+    local function cell(r, c)
+        if r < 1 or r > rows or c < 1 or c > cols then return nil end
+        return grid[r][c]
+    end
+
+    -- 1. classify cells
+    for r = 1, rows do
+        for c = 1, cols do
+            local cl = grid[r][c]
+            cl.node = node_chars[cl.ch] or false
+            cl.stub = STUBS[cl.ch]
+            if not cl.node and not cl.stub then
+                err(("unknown glyph %q at row %d col %d"):format(cl.ch, r, c))
+                cl.stub = {}
+            end
+            cl.stub = cl.stub or {}
+        end
+    end
+
+    -- 2. crossings: a bare "│" with horizontal stubs on both sides carries a
+    --    horizontal wire through it; augment so the wire passes.
+    for r = 1, rows do
+        for c = 1, cols do
+            local cl = grid[r][c]
+            if cl.ch == "│" then
+                local L, R = cell(r, c - 1), cell(r, c + 1)
+                if L and R and L.stub.r and R.stub.l then
+                    cl.crossing = true
+                    cl.stub = { u = true, d = true, l = true, r = true }
+                end
+            end
+        end
+    end
+
+    local function wants(cl, dir) return cl.stub[dir] and not cl.node end
+    local function accepts(cl, dir) return cl.stub[dir] or cl.node end
+
+    -- 3. horizontal agreement
+    for r = 1, rows do
+        for c = 1, cols - 1 do
+            local A, B = grid[r][c], grid[r][c + 1]
+            if wants(A, "r") and not accepts(B, "l") then
+                err(("dangling right at row %d col %d (%q→)"):format(r, c, A.ch))
+            end
+            if wants(B, "l") and not accepts(A, "r") then
+                err(("dangling left at row %d col %d (→%q)"):format(r, c + 1, B.ch))
+            end
+        end
+    end
+
+    -- 4. vertical agreement
+    for r = 1, rows - 1 do
+        for c = 1, cols do
+            local A, B = grid[r][c], grid[r + 1][c]
+            if wants(A, "d") and not accepts(B, "u") then
+                err(("dangling down at row %d col %d (%q)"):format(r, c, A.ch))
+            end
+            if wants(B, "u") and not accepts(A, "d") then
+                err(("dangling up at row %d col %d (%q)"):format(r + 1, c, B.ch))
+            end
+        end
+    end
+
+    -- 5. no floating node (unless the graph is a single commit)
+    local node_count = 0
+    for r = 1, rows do
+        for c = 1, cols do
+            if grid[r][c].node then node_count = node_count + 1 end
+        end
+    end
+    if node_count > 1 then
+        for r = 1, rows do
+            for c = 1, cols do
+                local cl = grid[r][c]
+                if cl.node then
+                    local up, down = cell(r - 1, c), cell(r + 1, c)
+                    local left, right = cell(r, c - 1), cell(r, c + 1)
+                    -- Consecutive commits on a lane stack directly (no "│"
+                    -- between them), so an adjacent node up/down is a valid
+                    -- lane connection.
+                    local connected = (up and (up.stub.d or up.node))
+                        or (down and (down.stub.u or down.node))
+                        or (left and left.stub.r) or (right and right.stub.l)
+                    if not connected then
+                        err(("floating node %q at row %d col %d"):format(cl.ch, r, c))
+                    end
+                end
+            end
+        end
+    end
+
+    -- 6. vertical color continuity along a straight lane. Restricted to
+    --    "│"↔"│" (incl. crossings, which keep ch == "│"): a straight vertical
+    --    run is unambiguously one lane, so its color must not change. Junction
+    --    glyphs (tees/turns) are lane boundaries where color legitimately
+    --    changes, so they are deliberately excluded.
+    for r = 1, rows - 1 do
+        for c = 1, cols do
+            local A, B = grid[r][c], grid[r + 1][c]
+            if A.ch == "│" and B.ch == "│" and A.hl and B.hl and A.hl ~= B.hl then
+                err(("vertical color break at row %d col %d (%s→%s)"):format(r, c, A.hl, B.hl))
+            end
+        end
+    end
+
+    -- 7. horizontal color continuity across a crossing: the horizontal wire's
+    --    id (color) must stay the same as it skips over the vertical bar.
+    for r = 1, rows do
+        for c = 1, cols do
+            if grid[r][c].crossing then
+                local L, R = cell(r, c - 1), cell(r, c + 1)
+                if L and R and L.hl and R.hl and L.hl ~= R.hl then
+                    err(("horizontal color changes across crossing at row %d col %d (%s|%s)")
+                        :format(r, c, L.hl, R.hl))
+                end
+            end
+        end
+    end
+
+    return errors
+end
+
+-- Exposed so a self-test can prove the checker catches broken grids.
+M.check_grid = check_grid
+
+--- Build the layout for `items` and run every invariant.
+--- Returns a flat list of error strings (empty = all good).
+---@param opts table
+---@param items table[]
+---@return string[] errors, table[] rows, table[][] grid
+function M.check(opts, items)
+    local rows = graph._internal.build_graph(opts, items)
+    local grid = M.render_grid(opts, rows)
+
+    local errors = {}
+    for _, e in ipairs(check_commits(rows, items)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_grid(grid, opts)) do errors[#errors + 1] = e end
+    return errors, rows, grid
+end
+
+----------------------------------------------------------------------
+-- Fuzzing
+----------------------------------------------------------------------
+
+-- Deterministic LCG (Park–Miller) so failures reproduce by seed.
+local function make_rng(seed)
+    local s = seed % 2147483647
+    if s <= 0 then s = s + 2147483646 end
+    return function()
+        s = (s * 16807) % 2147483647
+        return s / 2147483647
+    end
+end
+
+--- A random closed DAG of `n` commits in topo order: every non-last commit
+--- has 1–2 parents drawn from later commits; the last commit is a root.
+---@param n integer
+---@param seed integer
+---@return table[] rows  -- dag()-compatible spec
+function M.random_dag(n, seed)
+    local rng = make_rng(seed)
+    local rows = {}
+    for i = 1, n do
+        local parents = {}
+        if i < n then
+            local p1 = i + 1 + math.floor(rng() * (n - i))
+            if p1 > n then p1 = n end
+            parents[1] = "c" .. p1
+            if rng() < 0.30 then
+                local p2 = i + 1 + math.floor(rng() * (n - i))
+                if p2 > n then p2 = n end
+                if p2 ~= p1 then parents[#parents + 1] = "c" .. p2 end
+            end
+        end
+        rows[i] = { "c" .. i, parents }
+    end
+    return rows
+end
+
+return M

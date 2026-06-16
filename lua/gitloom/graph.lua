@@ -212,6 +212,13 @@ local function get_next_id()
     return next_id
 end
 
+--- Reset the lane-id counter. Called at the start of a full layout build
+--- (build_graph) and when a graph window is opened, so lane ids — and thus
+--- colors — are deterministic per build rather than leaking across runs.
+local function reset_ids()
+    next_id = 0
+end
+
 function table_contains(tbl, item)
     for _, t in ipairs(tbl) do
         if item == t then
@@ -674,25 +681,68 @@ local function handle_commit_line(opts, tracks, item)
     return state.new_tracks
 end
 
+---@class LayoutResult
+---@field tracks Track[]       lane state on the commit line
+---@field split? Track[]       lane state on the split (above) line, if any
+---@field merge? Track[]       lane state on the merge (below) line, if any
+---@field carry Track[]        lane state handed to the next item
+
+--- Lay out a single item against the previous item's carry-over lanes.
+--- Pure: it neither mutates `item` nor touches the list view. Callers decide
+--- what to do with the result (assign onto the OrderItem, collect into rows,
+--- etc.). This is the seam the incremental path and full-rebuild path share.
 ---@param opts GraphOptions
----@param tracks Track[]
+---@param prev_tracks Track[]
 ---@param item OrderItem
----@return Track[]
-local function handle_commit_item(opts, tracks, item)
+---@return LayoutResult
+local function layout_item(opts, prev_tracks, item)
+    ---@type LayoutResult
+    local result = { tracks = {}, carry = {} }
+    local tracks = prev_tracks
+
     if opts.merge_style.split_on_separate_line and #item.commit.children > 1 then
         tracks = handle_split_line(opts, tracks, item)
-        item.split = tracks
+        result.split = tracks
     end
 
     tracks = handle_commit_line(opts, tracks, item)
-    item.tracks = tracks
+    result.tracks = tracks
 
     if opts.merge_style.merge_on_separate_line and #item.commit.parents > 1 then
         tracks = handle_merge_line(opts, tracks, item)
-        item.merge = tracks
+        result.merge = tracks
     end
 
-    return tracks
+    result.carry = tracks
+    return result
+end
+
+--- Build the full graph layout from an ordered list of items, from scratch.
+--- Pure and deterministic (fresh lane-id sequence each call). Returns new row
+--- tables (does not mutate the inputs). This is the reflow primitive and the
+--- entry point for tests.
+---@param opts GraphOptions
+---@param items OrderItem[]   ordered items, each carrying a wired `.commit`
+---@return OrderItem[]
+local function build_graph(opts, items)
+    reset_ids()
+
+    local rows = {}
+    local carry = {}
+    for _, item in ipairs(items) do
+        local result = layout_item(opts, carry, item)
+        ---@type OrderItem
+        rows[#rows + 1] = {
+            type = item.type or "commit",
+            commit = item.commit,
+            tracks = result.tracks,
+            split = result.split,
+            merge = result.merge,
+        }
+        carry = result.carry
+    end
+
+    return rows
 end
 
 ---@class Ref
@@ -752,12 +802,16 @@ end
 ---@param start_pos integer
 local function refresh_tracks(opts, order, start_pos)
     start_pos = start_pos or 1
-    local tracks = #order > 0 and start_pos > 1 and (order[start_pos - 1].merge or order[start_pos - 1].tracks) or {}
+    local carry = start_pos > 1 and (order[start_pos - 1].merge or order[start_pos - 1].tracks) or {}
     for i = start_pos, #order do
         ---@type OrderItem
         local item = order[i]
 
-        tracks = handle_commit_item(opts, tracks, item)
+        local result = layout_item(opts, carry, item)
+        item.tracks = result.tracks
+        item.split = result.split
+        item.merge = result.merge
+        carry = result.carry
     end
 end
 
@@ -1063,6 +1117,9 @@ function M.open(folder, opts)
 
     local listview = require("gitloom.listview")
 
+    -- Fresh lane-id sequence per opened graph so colors are deterministic.
+    reset_ids()
+
     ---@class Repo
     ---@field commits table<string, Commit>
     ---@field order Commit[]
@@ -1187,10 +1244,13 @@ function M.open(folder, opts)
     return listview.open(listview_options)
 end
 
--- Pure helpers exposed for testing only. Not part of the public API.
+-- Internal functions exposed for testing only. Not part of the public API.
 M._internal = {
     parse_refs = parse_refs,
     parse_commit_line = parse_commit_line,
+    build_graph = build_graph,
+    get_track_chars = get_track_chars,
+    reset_ids = reset_ids,
 }
 
 return M
