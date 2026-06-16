@@ -1187,4 +1187,10 @@ function M.open(folder, opts)
     return listview.open(listview_options)
 end
 
+-- Pure helpers exposed for testing only. Not part of the public API.
+M._internal = {
+    parse_refs = parse_refs,
+    parse_commit_line = parse_commit_line,
+}
+
 return M
