@@ -687,6 +687,19 @@ end
 ---@field merge? Track[]       lane state on the merge (below) line, if any
 ---@field carry Track[]        lane state handed to the next item
 
+--- Attach the lane-model view (specification.md §5) to each track in a row.
+--- Phase 1: one lane per track, mirroring the current flat fields. Rendering
+--- still reads the flat fields, so this is additive and output-neutral;
+--- later phases decompose crossings/tees into multiple lanes and thread the
+--- child/parent edge so the lane invariants can be checked.
+---@param tracks Track[]?
+local function attach_lanes(tracks)
+    for _, t in ipairs(tracks or {}) do
+        ---@type Lane[]
+        t.lanes = { { id = t.id, parent = t.parent, connectivity = t.connectivity } }
+    end
+end
+
 --- Lay out a single item against the previous item's carry-over lanes.
 --- Pure: it neither mutates `item` nor touches the list view. Callers decide
 --- what to do with the result (assign onto the OrderItem, collect into rows,
@@ -714,6 +727,11 @@ local function layout_item(opts, prev_tracks, item)
     end
 
     result.carry = tracks
+
+    attach_lanes(result.tracks)
+    attach_lanes(result.split)
+    attach_lanes(result.merge)
+
     return result
 end
 
@@ -784,9 +802,11 @@ end
 ---@field commit? Commit
 ---@field parent? Commit
 ---@field override? string
---- NOTE: migrating to a `lanes: Lane[]` cell model (specification.md §5):
---- glyph = union of lanes' connectivity, color = a "top" lane's id. The
---- single-id fields above are the current representation.
+---@field lanes? Lane[]
+--- MIGRATION (specification.md §5): a cell is moving to a `lanes: Lane[]`
+--- model where glyph = union of lanes' connectivity and color = a "top"
+--- lane's id. `lanes` is currently an additive view (one lane per track,
+--- mirroring the flat fields); rendering still reads the flat fields.
 
 ---@class MergeState
 ---@field remaining integer

@@ -154,6 +154,33 @@ describe("graph layout [inline+mergesplit] characterization", function()
     end)
 end)
 
+describe("lane model (phase 1)", function()
+    -- Phase 1 attaches an additive one-lane-per-track view; later phases
+    -- decompose crossings/tees and thread the child/parent edge.
+    it("attaches a one-lane view mirroring each track", function()
+        local _, rows = h.check(h.default_opts(), h.dag({
+            { "c1", { "c2", "c3" } },
+            { "c2", { "c4" } },
+            { "c3", { "c4" } },
+            { "c4", {} },
+        }))
+        local seen = false
+        for _, row in ipairs(rows) do
+            for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
+                for _, t in ipairs(lst) do
+                    assert.is_table(t.lanes)
+                    assert.equals(1, #t.lanes)
+                    assert.equals(t.id, t.lanes[1].id)
+                    assert.equals(t.parent, t.lanes[1].parent)
+                    assert.equals(t.connectivity, t.lanes[1].connectivity)
+                    seen = true
+                end
+            end
+        end
+        assert.is_true(seen)
+    end)
+end)
+
 describe("invariant checker self-test", function()
     -- Guards against the checker silently becoming vacuous: it must flag
     -- the very defects it exists to catch.
