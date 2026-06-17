@@ -96,10 +96,14 @@ Opens the graph for the repository at Neovim's current working directory.
 The footer shows the active mode and whether the graph is mirrored
 (e.g. `Mode: inline  (mirrored)`).
 
+Ref labels are pinned to the right edge of each row, with the message filling
+the gap (truncated with `…`); a `+N` marker stands in for labels that don't fit.
+
 Navigation is line-by-line, with `cursorline` marking the current row. The
-cursor is parked at the commit message; `h`/`l` move a selection across the
-current row's ref decorations and the cursor onto the selected one (the
-substrate for planned per-branch actions; it does nothing on its own yet).
+cursor parks at the commit message; `l` moves the selection right onto the refs
+and `h` moves it back left to the message, with the cursor following the
+selected ref (the substrate for planned per-branch actions; it does nothing on
+its own yet).
 
 ## Configuration
 
@@ -140,6 +144,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
+    message_min = 24,        -- min width kept for the message; refs use the rest
 }
 ```
 
@@ -158,6 +163,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =
   "relative"`). Toggle live with `d`.
+- **`message_min`** — ref labels are pinned to the right edge of the row and use
+  the free width; the message keeps at least `message_min` columns (truncated
+  with `…`), and refs that don't fit collapse into a `+N` marker.
 
 > **Note:** `require("gitloom").setup(opts)` currently stores config but does
 > not yet forward it to `:GitloomGraph` — the command uses the defaults above.

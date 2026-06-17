@@ -47,11 +47,12 @@ relative (§6).
   the **commit message** rather than left at column 0. `h`/`l` move a selection
   across the current row's ref decorations — the branch groups then tags (§6);
   the selected decoration is highlighted (`palette.selected`) **and the cursor
-  moves onto it**. The message is the rightmost selection position (the
-  default); `l` moves toward it, `h` toward the first decoration; selection
-  clamps at the ends and resets to the message when the cursor moves to another
-  row. This selection is the substrate for the planned per-branch actions
-  (collapse / hide / pin, §10); it has no effect yet.
+  moves onto it**. The message is the default position (the cursor parks there);
+  since refs are pinned to the right edge, `l` moves **right** onto the refs
+  (starting at the first) and `h` moves **left** back toward the message.
+  Selection clamps at the last ref and resets to the message when the cursor
+  moves to another row. This selection is the substrate for the planned
+  per-branch actions (collapse / hide / pin, §10); it has no effect yet.
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
 
@@ -244,19 +245,36 @@ A commit row displays, left to right:
    `date_mode` selects which; `d` toggles it live.
 2. author name
 3. graph lanes (glyphs)
-4. ref decorations — a `HEAD` marker on the current branch, then branch
-   groups, then tags as `[name]`. Branch refs (local + remote) that share a
-   **short name** collapse into one group: the name is shown once, followed by
-   the remotes that also point at this commit, as `(name ↑remote1,remote2)`.
-   The name is highlighted when a local branch exists and dimmed when the group
-   is remote-only. A local branch with no matching remotes is just `(name)`.
-   This keeps the common case (a branch plus its remote-tracking copies all at
-   one commit) from repeating the name per remote.
-5. commit subject
+4. commit subject (the message)
+5. ref decorations, pinned to the **right edge** of the row
 
-Columns are width-aligned across visible rows. Each field is colored by its
-`palette` highlight group; lanes are colored by lane id cycled through
-`palette.tracks`.
+The date, author, and graph are width-aligned across visible rows. The message
+and refs share the remaining width **per row** (not as a fixed aligned column,
+so navigation stays line-by-line): the refs are right-aligned at the window
+edge and the message fills the gap, truncated with `…` when it does not fit.
+
+**Ref decorations** — a `HEAD` marker on the current branch, then branch
+groups, then tags as `[name]`. Branch refs (local + remote) that share a
+**short name** collapse into one group: the name is shown once, followed by the
+remotes that also point at this commit, as `(name ↑remote1,remote2)`. The name
+is highlighted when a local branch exists and dimmed when the group is
+remote-only. A local branch with no matching remotes is just `(name)`. This
+keeps the common case (a branch plus its remote-tracking copies all at one
+commit) from repeating the name per remote.
+
+**Ref width budget.** The refs use the row's free width: they may take
+everything the message does not need — its natural width, but never reserving
+more than `message_min` (§8). So refs fill empty space when the message is
+short, while a long message still keeps at least `message_min` columns
+(truncated with `…`). Ref labels are shown in order (leftmost first) until the
+budget is reached; labels that do not fit collapse into a trailing `+N` overflow
+marker. Each field is colored by its `palette` highlight group; lanes are
+colored by lane id cycled through `palette.tracks`.
+
+The `h`/`l` selection (§2) cycles all of a row's ref decorations. One collapsed
+into the `+N` overflow can still be selected, but until it is visible it is not
+highlighted and the cursor falls back to the message (revisited with the §10
+actions).
 
 ## 7. Rendering behavior
 
@@ -274,7 +292,7 @@ Columns are width-aligned across visible rows. Each field is colored by its
 
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, mirror,
-                 date_format, date_mode }
+                 date_format, date_mode, message_min }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 ```
 
@@ -291,6 +309,9 @@ MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate
   `%Y-%m-%d %H:%M`), rendered in the author's local time.
 - `date_mode` — `absolute` (default) or `relative`; selects the initial date
   rendering (§6). Toggle live with `d`.
+- `message_min` — the minimum width always kept for the message (default `24`);
+  the right-pinned refs use the rest of the free width, with overflow becoming
+  `+N` (§6).
 
 ### Known gap: setup() wiring
 
