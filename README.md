@@ -81,7 +81,11 @@ suite. With lazy.nvim:
 ```
 
 Opens the graph for the repository at Neovim's current working directory.
-Press `q` to close.
+
+| Key | Action |
+|-----|--------|
+| `q` | Close the graph |
+| `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 
 ## Configuration
 
