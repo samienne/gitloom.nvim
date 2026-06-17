@@ -170,9 +170,13 @@ them refs → head → commits.
   `HEAD` symref), `refs/tags/*` → `tag`; nil for anything else.
 - `add_ref` / `get_or_create_commit` — resolve a ref's target hash to a
   `Commit` (placeholder if unseen) and link them by reference.
+- `group_refs(refs)` — for display: collapses branch refs (local + remote) that
+  share a short name into one `RefGroup { name, has_local, remotes }`, keeping
+  HEAD and tags separate. Drives the compact `(name ↑remotes)` rendering (§6).
 
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
-and `classify_ref` are pure and exposed via `graph._internal` for testing.
+`classify_ref`, and `group_refs` are pure and exposed via `graph._internal` for
+testing.
 
 ### DAG construction
 

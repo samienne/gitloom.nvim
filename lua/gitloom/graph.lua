@@ -289,6 +289,56 @@ local function format_date(ts, opts)
     return format_absolute(ts, opts.date_format)
 end
 
+--- Group a commit's refs for compact display (specification.md §6). Branch
+--- refs (local + remote) that share a short name collapse into one entry: the
+--- name once, plus the remotes that also point here. A remote ref's name keeps
+--- its `remote/` prefix (classify_ref), so the short name is the part after the
+--- first path component. Tags and the HEAD marker stay separate.
+---@class RefGroup
+---@field name string
+---@field has_local boolean
+---@field remotes string[]
+---@param refs Ref[]?
+---@return { head: boolean, branches: RefGroup[], tags: string[] }
+local function group_refs(refs)
+    local head = false
+    local tags = {}
+    local by_name = {} -- short name -> RefGroup
+    local order = {}   -- short names, first-seen (stable, matches git's order)
+
+    local function group(short)
+        if not by_name[short] then
+            by_name[short] = { name = short, has_local = false, remotes = {} }
+            order[#order + 1] = short
+        end
+        return by_name[short]
+    end
+
+    for _, ref in ipairs(refs or {}) do
+        if ref.kind == "head" then
+            head = true
+        elseif ref.kind == "tag" then
+            tags[#tags + 1] = ref.name
+        elseif ref.kind == "local" then
+            group(ref.name).has_local = true
+        elseif ref.kind == "remote" then
+            -- "origin/feature/foo" -> remote "origin", short "feature/foo".
+            local remote, short = ref.name:match("^([^/]+)/(.+)$")
+            if short then
+                table.insert(group(short).remotes, remote)
+            else
+                group(ref.name) -- malformed; show the raw name, no remote
+            end
+        end
+    end
+
+    local branches = {}
+    for _, short in ipairs(order) do
+        branches[#branches + 1] = by_name[short]
+    end
+    return { head = head, branches = branches, tags = tags }
+end
+
 --- Parse one `git log` line. Fields are `%x1f`-separated:
 --- hash, parent hashes, author, epoch (%at), iso date (%ai), subject. Refs are
 --- NOT here — they come from `fetch_refs` (§3.2); a fresh commit starts with an
@@ -1296,28 +1346,38 @@ end
 local function display_item(opts, item, selection_state)
     local palette = opts.palette
 
-    -- Refs by kind: HEAD marker, local (name), remote (remote/name, dimmed),
-    -- tag [name]. Each ref points directly at its commit (§4).
-    local REF_HL = { head = palette.head, ["local"] = palette.branch, remote = palette.remote, tag = palette.tags }
-    local REF_FMT = {
-        head = function(_) return "HEAD" end,
-        ["local"] = function(r) return "(" .. r.name .. ")" end,
-        remote = function(r) return "(" .. r.name .. ")" end,
-        tag = function(r) return "[" .. r.name .. "]" end,
-    }
+    -- Refs (§6): a HEAD marker, then branch groups, then tags. Branch refs
+    -- sharing a short name collapse to "(name ↑remote1,remote2)" — the name once
+    -- (highlighted if a local exists, dimmed if remote-only) plus the remotes
+    -- that also point here. Grouping is done by the pure group_refs.
     local get_refs = function(commit)
+        local g = group_refs(commit.refs)
         local parts = {}
-        for _, kind in ipairs({ "head", "local", "remote", "tag" }) do
-            for _, ref in ipairs(commit.refs or {}) do
-                if ref.kind == kind then
-                    parts[#parts + 1] = highlight_text(REF_FMT[kind](ref), REF_HL[kind])
-                end
+        if g.head then
+            parts[#parts + 1] = highlight_text("HEAD", palette.head)
+        end
+        for _, b in ipairs(g.branches) do
+            local name_hl = b.has_local and palette.branch or palette.remote
+            local segs = { highlight_text("(" .. b.name, name_hl) }
+            if #b.remotes > 0 then
+                segs[#segs + 1] = highlight_text(" ↑" .. table.concat(b.remotes, ","), palette.remote)
             end
+            segs[#segs + 1] = highlight_text(")", name_hl)
+            parts[#parts + 1] = compose(segs)
         end
-        if #parts > 0 then
-            parts[#parts + 1] = highlight_text(" ")
+        for _, t in ipairs(g.tags) do
+            parts[#parts + 1] = highlight_text("[" .. t .. "]", palette.tags)
         end
-        return compose(parts)
+
+        -- Space-separate the decorations, with a trailing space before the
+        -- message when any are present.
+        local spaced = {}
+        for i, p in ipairs(parts) do
+            if i > 1 then spaced[#spaced + 1] = highlight_text(" ") end
+            spaced[#spaced + 1] = p
+        end
+        if #spaced > 0 then spaced[#spaced + 1] = highlight_text(" ") end
+        return compose(spaced)
     end
 
     local get_tracks = function(tracks)
@@ -1691,6 +1751,7 @@ end
 -- Internal functions exposed for testing only. Not part of the public API.
 M._internal = {
     classify_ref = classify_ref,
+    group_refs = group_refs,
     parse_commit_line = parse_commit_line,
     parse_timestamp = parse_timestamp,
     format_absolute = format_absolute,
