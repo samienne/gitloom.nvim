@@ -208,6 +208,30 @@ local function check_commits(rows, items)
     return errors
 end
 
+-- Exactly one commit per commit row (the row carries that commit's message),
+-- and none on the split/merge virtual sub-lines.
+local function check_one_commit_per_line(rows)
+    local errors = {}
+    for i, row in ipairs(rows) do
+        local n = 0
+        for _, t in ipairs(row.tracks) do
+            if t.has_commit then n = n + 1 end
+        end
+        if n ~= 1 then
+            errors[#errors + 1] = ("row %d has %d commits on its line, expected 1"):format(i, n)
+        end
+        for _, sub in ipairs({ row.split, row.merge }) do
+            for _, t in ipairs(sub or {}) do
+                if t.has_commit then
+                    errors[#errors + 1] = ("row %d sub-line carries a commit"):format(i)
+                    break
+                end
+            end
+        end
+    end
+    return errors
+end
+
 -- "Wires must connect" check on the rendered glyph grid.
 -- With `skip_color`, the color-continuity checks (steps 6–7) are omitted —
 -- used for styles where lane color is intentionally allowed to change (e.g.
@@ -362,6 +386,7 @@ function M.check(opts, items, skip_color)
 
     local errors = {}
     for _, e in ipairs(check_commits(rows, items)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_one_commit_per_line(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_grid(grid, opts, skip_color)) do errors[#errors + 1] = e end
     return errors, rows, grid
 end
