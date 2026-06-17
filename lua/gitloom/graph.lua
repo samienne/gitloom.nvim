@@ -1,5 +1,17 @@
 local M = {}
 
+-- merge_style presets the viewer cycles through with `m` (see M.open). Each
+-- toggles whether merges/splits get their own virtual line, or are folded
+-- onto the commit line (inline), plus the experimental allow_merge_on_split.
+local MERGE_STYLES = {
+    { name = "split on its own line",   style = { allow_merge_on_split = false, merge_on_separate_line = false, split_on_separate_line = true } },
+    { name = "merge on its own line",   style = { allow_merge_on_split = false, merge_on_separate_line = true,  split_on_separate_line = false } },
+    { name = "merge + split lines",     style = { allow_merge_on_split = false, merge_on_separate_line = true,  split_on_separate_line = true } },
+    { name = "inline",                  style = { allow_merge_on_split = false, merge_on_separate_line = false, split_on_separate_line = false } },
+    { name = "inline (merge on split)", style = { allow_merge_on_split = true,  merge_on_separate_line = false, split_on_separate_line = false } },
+}
+local merge_style_index = 1
+
 local function make_future()
     local state = {
         callback = nil,
@@ -1094,7 +1106,15 @@ function M.open(folder, opts)
             width = 0.80,
             height = 0.80,
             title = "GraphView",
-            footer = "Press 'q' to quit",
+            footer = "q: quit   m: cycle merge/split style",
+            keys = {
+                m = function(self)
+                    merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
+                    self:close()
+                    M.open()
+                    vim.notify("gitloom: " .. MERGE_STYLES[merge_style_index].name .. " style")
+                end,
+            },
         },
         palette = {
             date = "Title",
@@ -1116,11 +1136,7 @@ function M.open(folder, opts)
             },
         },
         --merge_style = "merge"
-        merge_style = {
-            allow_merge_on_split = false,
-            merge_on_separate_line = false,
-            split_on_separate_line = true,
-        },
+        merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style),
         icons = {
             --merge = "M",
         },
