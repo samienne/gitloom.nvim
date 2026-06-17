@@ -1300,8 +1300,8 @@ end
 
 ---@class GraphWinOptions
 ---@field border string
----@field width number
----@field height number
+---@field width number|fun():number   fraction (0–1), absolute (>1), or a function
+---@field height number|fun():number
 ---@field title string
 ---@field footer string
 
@@ -1337,8 +1337,11 @@ function M.open(folder, opts)
     local defaults = {
         win = {
             border = "rounded",
-            width = 0.80,
-            height = 0.80,
+            -- Nearly full screen: a ~2-char margin on each edge (snacks treats
+            -- a returned size >= 1 as absolute and centers it). Re-evaluated on
+            -- resize.
+            width = function() return math.max(vim.o.columns - 4, 1) end,
+            height = function() return math.max(vim.o.lines - 4, 1) end,
             title = "GraphView",
             footer = footer_text(),
         },

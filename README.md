@@ -100,10 +100,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 {
     win = {
         border = "rounded",
-        width = 0.80,
-        height = 0.80,
+        -- Default: nearly full screen (~2-char margin each edge). A fraction
+        -- (0–1) gives a proportional size; a number > 1 is absolute columns/rows.
+        width = function() return math.max(vim.o.columns - 4, 1) end,
+        height = function() return math.max(vim.o.lines - 4, 1) end,
         title = "GraphView",
-        footer = "Press 'q' to quit",
+        footer = "(status + key hints)",
     },
     palette = {
         date = "Title",
