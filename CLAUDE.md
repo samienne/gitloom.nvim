@@ -149,6 +149,14 @@ maintenance treadmill. Two layers, both in `graph_helpers.lua`:
   the horizontal wire through a vertical bar, and lane color stays continuous
   (including across crossings).
 
+Color/id-continuity is the **id-continuity** invariant: a lane's id must not
+silently change along a straight `│` run (a "lane handoff"). Tests use
+`big_opts` (a 64-entry palette) so color is a 1:1 proxy for lane id — with the
+default wrapping palette, two ids can share a color and mask a handoff. The
+four stable styles pass this exactly across fuzzing; only `allow_merge_on_split`
+fails it (column reuse at a merge — see known gaps), which is why that style
+asserts structural-only invariants plus the characterization snapshot.
+
 Invariants must be **sound** (never flag correct output) before being strict.
 Glyph-level color/continuity is subtle because junction glyphs (`├ ┤ ┬ ┴`,
 turns) are lane *boundaries* where color legitimately changes — only enforce

@@ -107,21 +107,22 @@ for _, style in ipairs(STYLES) do
     describe("graph layout [" .. style.name .. "]", function()
         for _, fx in ipairs(FIXTURES) do
             it("lays out " .. fx.name, function()
-                -- Hand fixtures are clean enough to satisfy color-continuity
-                -- even for the experimental style, so assert it everywhere.
-                assert_ok(h.opts(style.ms), h.dag(fx.rows), style.name .. "/" .. fx.name)
+                -- big_opts => color is a 1:1 proxy for lane id, so the
+                -- color/id-continuity checks are exact (no palette-collision
+                -- masking). The experimental style skips color (lane handoff).
+                assert_ok(h.big_opts(style.ms), h.dag(fx.rows), style.name .. "/" .. fx.name, style.experimental)
             end)
         end
 
         if style.experimental then
             it("produces structurally well-formed graphs for random DAGs", function()
-                -- Color-continuity is intentionally not asserted here (lane
+                -- Color/id-continuity is intentionally not asserted here (lane
                 -- handoff at merges); structural well-formedness still must hold.
-                fuzz(h.opts(style.ms), true)
+                fuzz(h.big_opts(style.ms), true)
             end)
         else
-            it("produces well-formed graphs for random DAGs", function()
-                fuzz(h.opts(style.ms), false)
+            it("produces well-formed graphs (incl. exact id-continuity) for random DAGs", function()
+                fuzz(h.big_opts(style.ms), false)
             end)
         end
     end)

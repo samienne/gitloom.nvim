@@ -84,6 +84,20 @@ function M.opts(merge_style)
     return o
 end
 
+--- Like opts(), but with a large palette so a lane's color is a 1:1 proxy for
+--- its id (no `id % #tracks` wraparound collisions). Use this for the
+--- id-continuity invariant so a silent id change can't be masked by two ids
+--- mapping to the same color.
+---@param merge_style table?
+---@return table
+function M.big_opts(merge_style)
+    local o = M.opts(merge_style)
+    local p = {}
+    for i = 0, 63 do p[i + 1] = "C" .. i end
+    o.palette.tracks = p
+    return o
+end
+
 ----------------------------------------------------------------------
 -- Rendering to a glyph grid
 ----------------------------------------------------------------------
