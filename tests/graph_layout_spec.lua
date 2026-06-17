@@ -154,6 +154,30 @@ describe("graph layout [inline+mergesplit] characterization", function()
     end)
 end)
 
+describe("lane model decomposition", function()
+    -- Cells decompose into two-sided wires (validated broadly by check_lanes
+    -- inside h.check); here we also confirm a junction yields >1 lane.
+    it("splits junction cells into multiple lanes", function()
+        local errors, rows = h.check(h.default_opts(), h.dag({
+            { "c1", { "c2", "c3" } },
+            { "c2", { "c4" } },
+            { "c3", { "c4" } },
+            { "c4", {} },
+        }))
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+
+        local max_lanes = 0
+        for _, row in ipairs(rows) do
+            for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
+                for _, t in ipairs(lst) do
+                    max_lanes = math.max(max_lanes, #(t.lanes or {}))
+                end
+            end
+        end
+        assert.is_true(max_lanes >= 2) -- the diamond has a tee/crossing
+    end)
+end)
+
 describe("invariant checker self-test", function()
     -- Guards against the checker silently becoming vacuous: it must flag
     -- the very defects it exists to catch.
@@ -193,5 +217,23 @@ describe("invariant checker self-test", function()
     it("flags an unknown glyph", function()
         local errors = h.check_grid(grid({ { "x" } }), opts)
         assert(has(errors, "unknown glyph"), table.concat(errors, "\n"))
+    end)
+
+    it("lane continuity flags a conflated vertical (up id != above down id)", function()
+        -- A column whose lane id changes between two connected cells without
+        -- being modeled as two lanes — exactly what the handoff split prevents.
+        local rows = {
+            { tracks = { { connectivity = { down = true }, lanes = { { id = 1, connectivity = { down = true } } } } } },
+            { tracks = { { connectivity = { up = true }, lanes = { { id = 2, connectivity = { up = true } } } } } },
+        }
+        assert(has(h.check_lane_continuity(rows), "up-lane id"))
+    end)
+
+    it("lane continuity accepts a matching column", function()
+        local rows = {
+            { tracks = { { connectivity = { down = true }, lanes = { { id = 7, connectivity = { down = true } } } } } },
+            { tracks = { { connectivity = { up = true }, lanes = { { id = 7, connectivity = { up = true } } } } } },
+        }
+        assert.equals(0, #h.check_lane_continuity(rows))
     end)
 end)

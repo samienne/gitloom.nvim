@@ -699,6 +699,105 @@ end
 ---@field merge? Track[]       lane state on the merge (below) line, if any
 ---@field carry Track[]        lane state handed to the next item
 
+--- The id of the horizontal wire passing through cell `i` — the next track to
+--- the right that is neither a crossing nor a horizontal jump (mirrors the
+--- lookahead get_track_chars uses to color a horizontal run).
+---@param tracks Track[]
+---@param i integer
+---@return integer|nil
+local function horizontal_id(tracks, i)
+    for j = i + 1, #tracks do
+        local c = tracks[j].connectivity
+        local is_cross = c.down and c.up and c.left and c.right
+        local is_jump = not c.down and not c.up and c.right and c.left
+        if not (is_cross or is_jump) then
+            return tracks[j].id
+        end
+    end
+    return nil
+end
+
+--- Attach the lane-model view (specification.md §5) to each track in a row.
+--- Decomposes a cell's connectivity into two-sided wires: a crossing becomes a
+--- vertical lane + a horizontal lane; a tee becomes a through lane + a branch;
+--- a turn is one bent lane; straights and endpoints are one lane. Rendering
+--- still reads the flat fields, so this stays output-neutral. Lane ids are
+--- best-effort here (vertical = track id, horizontal = lookahead); precise
+--- ids and the child edge come with native threading in a later phase.
+---@param tracks Track[]?
+---@param prev_line Track[]?  the line directly above (column-aligned by index)
+local function attach_lanes(tracks, prev_line)
+    for i, t in ipairs(tracks or {}) do
+        local c = t.connectivity
+        local u, d, l, r = c.up or false, c.down or false, c.left or false, c.right or false
+        local h_id = horizontal_id(tracks, i)
+        local down_id = t.id
+
+        -- The id of the lane entering from above (the cell directly above in
+        -- the same column). When it differs from this cell's own (down) id,
+        -- the up segment and down segment are *different* lanes sharing the
+        -- column — a handoff (e.g. a child's split-in lane reaching the commit
+        -- while a parent's merge-out lane leaves it). They are modeled as two
+        -- lanes, even though they render as one (best-effort) glyph.
+        local up_id = down_id
+        if u and prev_line and prev_line[i] and prev_line[i].connectivity.down then
+            up_id = prev_line[i].id
+        end
+        local handoff = u and d and up_id ~= down_id
+
+        local lanes = {}
+        local function add(id, sides)
+            lanes[#lanes + 1] = { id = id, parent = t.parent, connectivity = sides }
+        end
+
+        local vpair, hpair = u and d, l and r
+        if hpair then
+            -- horizontal through-lane is always its own lane
+            add(h_id, { left = true, right = true })
+            if handoff then
+                add(up_id, { up = true })
+                add(down_id, { down = true })
+            elseif vpair then
+                add(down_id, { up = true, down = true })
+            elseif u then
+                add(down_id, { up = true })
+            elseif d then
+                add(down_id, { down = true })
+            end
+        elseif l or r then
+            local h = l and "left" or "right"
+            if handoff then
+                -- incoming child-lane and outgoing parent-lane share the
+                -- horizontal stub toward the commit; modeled separately.
+                local up_sides = { up = true }; up_sides[h] = true
+                local down_sides = { down = true }; down_sides[h] = true
+                add(up_id, up_sides)
+                add(down_id, down_sides)
+            elseif vpair then
+                -- tee: vertical through-lane + horizontal branch
+                add(down_id, { up = true, down = true })
+                add(h_id, { [h] = true })
+            elseif u or d then
+                -- turn: one bent lane
+                add(down_id, { up = u or nil, down = d or nil, [h] = true })
+            else
+                add(h_id, { [h] = true })
+            end
+        else
+            -- no horizontal
+            if handoff then
+                add(up_id, { up = true })
+                add(down_id, { down = true })
+            else
+                add(down_id, { up = u or nil, down = d or nil })
+            end
+        end
+
+        ---@type Lane[]
+        t.lanes = lanes
+    end
+end
+
 --- Lay out a single item against the previous item's carry-over lanes.
 --- Pure: it neither mutates `item` nor touches the list view. Callers decide
 --- what to do with the result (assign onto the OrderItem, collect into rows,
@@ -726,6 +825,20 @@ local function layout_item(opts, prev_tracks, item)
     end
 
     result.carry = tracks
+
+    -- Attach lanes per rendered line, each against the line above it, so the
+    -- handoff (up != down) split can see the incoming lane.
+    local prev = prev_tracks
+    if result.split then
+        attach_lanes(result.split, prev)
+        prev = result.split
+    end
+    attach_lanes(result.tracks, prev)
+    prev = result.tracks
+    if result.merge then
+        attach_lanes(result.merge, prev)
+    end
+
     return result
 end
 
@@ -796,9 +909,11 @@ end
 ---@field commit? Commit
 ---@field parent? Commit
 ---@field override? string
---- NOTE: migrating to a `lanes: Lane[]` cell model (specification.md §5):
---- glyph = union of lanes' connectivity, color = a "top" lane's id. The
---- single-id fields above are the current representation.
+---@field lanes? Lane[]
+--- MIGRATION (specification.md §5): a cell is moving to a `lanes: Lane[]`
+--- model where glyph = union of lanes' connectivity and color = a "top"
+--- lane's id. `lanes` is currently an additive view (one lane per track,
+--- mirroring the flat fields); rendering still reads the flat fields.
 
 ---@class MergeState
 ---@field remaining integer
@@ -867,6 +982,25 @@ end
 
 ---@param opts GraphOptions
 ---@param tracks Track[]
+--- The "top" lane whose id colors a cell: prefer the lane heading *down*
+--- (so a column reads continuously into the lane below), then the up lane,
+--- then any. This is the configurable color strategy (specification.md §5);
+--- the chosen id is always one of the cell's lanes'. At a handoff the up and
+--- down segments are different lanes — only one color can show, so the visual
+--- is best-effort while the model keeps both lanes.
+---@param lanes Lane[]?
+---@return integer|nil
+local function top_lane_id(lanes)
+    if not lanes then return nil end
+    for _, lane in ipairs(lanes) do
+        if lane.connectivity.down then return lane.id end
+    end
+    for _, lane in ipairs(lanes) do
+        if lane.connectivity.up then return lane.id end
+    end
+    return lanes[1] and lanes[1].id or nil
+end
+
 local function get_track_chars(opts, tracks)
     local result = {}
 
@@ -884,7 +1018,10 @@ local function get_track_chars(opts, tracks)
         }
 
         local char = " "
-        local track_id = track.id
+        -- Color from the lane model's "top" lane (specification.md §5). For a
+        -- horizontal "─" cell this resolves to the horizontal lane's id, which
+        -- attach_lanes derives via the same lookahead this used to do inline.
+        local track_id = top_lane_id(track.lanes)
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
@@ -895,17 +1032,6 @@ local function get_track_chars(opts, tracks)
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
             char = "─"
-            for j = i + 1, #tracks do
-                local t = tracks[j]
-                local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and
-                    t.connectivity.right
-                local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
-                    t.connectivity.left
-                if not is_cross and not is_jump then
-                    track_id = t.id
-                    break
-                end
-            end
             -- ═
         elseif c.left and c.up and not c.right and c.down then
             char = "┤"

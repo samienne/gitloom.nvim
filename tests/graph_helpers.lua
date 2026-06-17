@@ -232,6 +232,101 @@ local function check_one_commit_per_line(rows)
     return errors
 end
 
+local SIDES = { "up", "down", "left", "right" }
+
+local function count_sides(conn)
+    local n = 0
+    for _, k in ipairs(SIDES) do
+        if conn[k] then n = n + 1 end
+    end
+    return n
+end
+
+-- Lane-model invariants (specification.md §5) on the decomposed `track.lanes`:
+--   * connectivity consistency — the union of a cell's lanes' sides equals the
+--     cell's connectivity.
+--   * two-sided lanes — each lane is a wire with exactly two sides; one side
+--     only at an endpoint (a commit, or a branch within a junction cell).
+local function check_lanes(rows)
+    local errors = {}
+    local function err(m) errors[#errors + 1] = m end
+    for ri, row in ipairs(rows) do
+        for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
+            for ti, t in ipairs(lst) do
+                local lanes = t.lanes or {}
+
+                local union = {}
+                for _, lane in ipairs(lanes) do
+                    for _, k in ipairs(SIDES) do
+                        if lane.connectivity[k] then union[k] = true end
+                    end
+                end
+                for _, k in ipairs(SIDES) do
+                    if (t.connectivity[k] and true or false) ~= (union[k] and true or false) then
+                        err(("row %d track %d: lane union mismatches connectivity at %s"):format(ri, ti, k))
+                    end
+                end
+
+                for li, lane in ipairs(lanes) do
+                    local n = count_sides(lane.connectivity)
+                    if n > 2 then
+                        err(("row %d track %d lane %d: %d sides (>2)"):format(ri, ti, li, n))
+                    elseif n < 2 and not (t.has_commit or #lanes > 1) then
+                        err(("row %d track %d lane %d: %d-sided but not an endpoint"):format(ri, ti, li, n))
+                    end
+                    -- leads somewhere: a lane heading down must have a parent
+                    if lane.connectivity.down and not lane.parent then
+                        err(("row %d track %d lane %d: down lane has no parent"):format(ri, ti, li))
+                    end
+                end
+            end
+        end
+    end
+    return errors
+end
+
+local function down_lane_id(t)
+    for _, lane in ipairs(t.lanes or {}) do
+        if lane.connectivity.down then return lane.id end
+    end
+end
+
+local function up_lane_id(t)
+    for _, lane in ipairs(t.lanes or {}) do
+        if lane.connectivity.up then return lane.id end
+    end
+end
+
+-- Per-lane vertical continuity on the lane *model* (not the rendered color).
+-- Where a cell connects up, its up-lane's id must equal the id of the
+-- down-lane in the cell directly above (same column). This is what the
+-- handoff split buys: a conflated single vertical lane (up id != down id)
+-- would fail here, whereas modeling the up and down segments as separate
+-- lanes makes every lane continuous regardless of how it's colored.
+local function check_lane_continuity(rows)
+    local lines = {}
+    for _, row in ipairs(rows) do
+        if row.split then lines[#lines + 1] = row.split end
+        lines[#lines + 1] = row.tracks
+        if row.merge then lines[#lines + 1] = row.merge end
+    end
+
+    local errors = {}
+    for li = 1, #lines - 1 do
+        local upper, lower = lines[li], lines[li + 1]
+        for i, t in ipairs(lower) do
+            if t.connectivity.up and upper[i] and upper[i].connectivity.down then
+                local a, b = up_lane_id(t), down_lane_id(upper[i])
+                if a ~= b then
+                    errors[#errors + 1] = ("line %d col %d: up-lane id %s != above down-lane id %s")
+                        :format(li + 1, i, tostring(a), tostring(b))
+                end
+            end
+        end
+    end
+    return errors
+end
+
 -- "Wires must connect" check on the rendered glyph grid.
 -- With `skip_color`, the color-continuity checks (steps 6–7) are omitted —
 -- used for styles where lane color is intentionally allowed to change (e.g.
@@ -372,6 +467,7 @@ end
 
 -- Exposed so a self-test can prove the checker catches broken grids.
 M.check_grid = check_grid
+M.check_lane_continuity = check_lane_continuity
 
 --- Build the layout for `items` and run every invariant.
 --- Returns a flat list of error strings (empty = all good).
@@ -387,6 +483,8 @@ function M.check(opts, items, skip_color)
     local errors = {}
     for _, e in ipairs(check_commits(rows, items)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_one_commit_per_line(rows)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_lanes(rows)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_lane_continuity(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_grid(grid, opts, skip_color)) do errors[#errors + 1] = e end
     return errors, rows, grid
 end
