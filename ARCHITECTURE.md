@@ -340,6 +340,12 @@ pushed onto the jumplist and the built-in `<C-o>` / `<C-i>` move between the
 diffstat and the diff. The map is keyed by buffer line, so it is robust to the
 diffstat's variable height.
 
+`<C-o>` is itself remapped in the view: it inspects `getjumplist()` and, when the
+entry it would visit (`list[curidx]`, or none) is not in the view's buffer,
+closes the float instead of jumping into the graph buffer — otherwise it replays
+a real `<C-o>`. So `<C-o>` walks back through the view's own jumps and then backs
+out of the view entirely (§11.4).
+
 ### Vendored helpers
 
 - `make_future()` — a minimal promise used to chain the two git jobs.

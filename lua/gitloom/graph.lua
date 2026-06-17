@@ -1876,6 +1876,23 @@ local function open_commit_view(opts, commit)
         end
     end, { buffer = buf, nowait = true, silent = true })
 
+    -- <C-o> walks the jumplist back through the view's own jumps (diffstat <->
+    -- diff). Once the next jump-back would leave the commit view — its target is
+    -- another buffer (the graph), or there is none — close the view instead of
+    -- jumping out of it (§11.4). getjumplist's curidx is the 1-based index of
+    -- the entry <C-o> would visit (0 = nothing to go back to).
+    vim.keymap.set("n", "<C-o>", function()
+        local jl = vim.fn.getjumplist()
+        local list, curidx = jl[1], jl[2]
+        local target = (curidx >= 1) and list[curidx] or nil
+        if target and target.bufnr == buf then
+            vim.api.nvim_feedkeys(
+                vim.api.nvim_replace_termcodes("<C-o>", true, false, true), "n", false)
+        else
+            w:close()
+        end
+    end, { buffer = buf, nowait = true, silent = true })
+
     set_lines({ "Loading…" })
 
     -- Render the metadata (format_commit_detail), then the diffstat

@@ -105,8 +105,8 @@ that commit's full details (hash, refs, author, committer when it differs,
 parents, the full message, a diffstat, and the diff), fetched on demand. The
 diff is colored line-by-line (added / removed / hunk / file headers). The
 diffstat lists the changed files; pressing `<CR>` on a file line jumps to that
-file's section in the diff below (`<C-o>` / `<C-i>` jump back and forth). `q`
-closes it.
+file's section in the diff below (`<C-o>` / `<C-i>` jump back and forth, and
+`<C-o>` closes the view once it would step back out). `q` closes it.
 
 Navigation is line-by-line, with `cursorline` marking the current row. The
 cursor parks at the commit message; `l` moves the selection right onto the refs

@@ -457,4 +457,7 @@ Pressing `<CR>` on a changed-file line **jumps** the cursor to that file's
 section in the diff below (scrolling it to the top of the view). This makes the
 diffstat a table of contents for the diff. The jump is recorded in the
 jumplist, so `<C-o>` / `<C-i>` move back to the diffstat and forward to the diff
-section as usual. `<CR>` elsewhere in the view does nothing.
+section as usual. When `<C-o>` would step back *out* of the commit view (its
+next jump target is another buffer, or there is none left), it **closes the
+commit view** instead of leaving its buffer — so `<C-o>` backs all the way out.
+`<CR>` elsewhere in the view does nothing.
