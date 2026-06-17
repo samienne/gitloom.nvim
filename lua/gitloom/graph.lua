@@ -922,6 +922,21 @@ end
 
 ---@param opts GraphOptions
 ---@param tracks Track[]
+--- The "top" lane whose id colors a cell: prefer the vertical (through) lane,
+--- else the horizontal one. This is the configurable color strategy
+--- (specification.md §5); the chosen id is always one of the cell's lanes'.
+---@param lanes Lane[]?
+---@return integer|nil
+local function top_lane_id(lanes)
+    if not lanes then return nil end
+    for _, lane in ipairs(lanes) do
+        if lane.connectivity.up or lane.connectivity.down then
+            return lane.id
+        end
+    end
+    return lanes[1] and lanes[1].id or nil
+end
+
 local function get_track_chars(opts, tracks)
     local result = {}
 
@@ -939,7 +954,10 @@ local function get_track_chars(opts, tracks)
         }
 
         local char = " "
-        local track_id = track.id
+        -- Color from the lane model's "top" lane (specification.md §5). For a
+        -- horizontal "─" cell this resolves to the horizontal lane's id, which
+        -- attach_lanes derives via the same lookahead this used to do inline.
+        local track_id = top_lane_id(track.lanes)
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
@@ -950,17 +968,6 @@ local function get_track_chars(opts, tracks)
             --"o"
         elseif c.left and c.right and not c.up and not c.down then
             char = "─"
-            for j = i + 1, #tracks do
-                local t = tracks[j]
-                local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and
-                    t.connectivity.right
-                local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
-                    t.connectivity.left
-                if not is_cross and not is_jump then
-                    track_id = t.id
-                    break
-                end
-            end
             -- ═
         elseif c.left and c.up and not c.right and c.down then
             char = "┤"
