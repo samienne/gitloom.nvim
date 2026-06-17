@@ -218,4 +218,22 @@ describe("invariant checker self-test", function()
         local errors = h.check_grid(grid({ { "x" } }), opts)
         assert(has(errors, "unknown glyph"), table.concat(errors, "\n"))
     end)
+
+    it("lane continuity flags a conflated vertical (up id != above down id)", function()
+        -- A column whose lane id changes between two connected cells without
+        -- being modeled as two lanes — exactly what the handoff split prevents.
+        local rows = {
+            { tracks = { { connectivity = { down = true }, lanes = { { id = 1, connectivity = { down = true } } } } } },
+            { tracks = { { connectivity = { up = true }, lanes = { { id = 2, connectivity = { up = true } } } } } },
+        }
+        assert(has(h.check_lane_continuity(rows), "up-lane id"))
+    end)
+
+    it("lane continuity accepts a matching column", function()
+        local rows = {
+            { tracks = { { connectivity = { down = true }, lanes = { { id = 7, connectivity = { down = true } } } } } },
+            { tracks = { { connectivity = { up = true }, lanes = { { id = 7, connectivity = { up = true } } } } } },
+        }
+        assert.equals(0, #h.check_lane_continuity(rows))
+    end)
 end)

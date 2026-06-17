@@ -285,6 +285,48 @@ local function check_lanes(rows)
     return errors
 end
 
+local function down_lane_id(t)
+    for _, lane in ipairs(t.lanes or {}) do
+        if lane.connectivity.down then return lane.id end
+    end
+end
+
+local function up_lane_id(t)
+    for _, lane in ipairs(t.lanes or {}) do
+        if lane.connectivity.up then return lane.id end
+    end
+end
+
+-- Per-lane vertical continuity on the lane *model* (not the rendered color).
+-- Where a cell connects up, its up-lane's id must equal the id of the
+-- down-lane in the cell directly above (same column). This is what the
+-- handoff split buys: a conflated single vertical lane (up id != down id)
+-- would fail here, whereas modeling the up and down segments as separate
+-- lanes makes every lane continuous regardless of how it's colored.
+local function check_lane_continuity(rows)
+    local lines = {}
+    for _, row in ipairs(rows) do
+        if row.split then lines[#lines + 1] = row.split end
+        lines[#lines + 1] = row.tracks
+        if row.merge then lines[#lines + 1] = row.merge end
+    end
+
+    local errors = {}
+    for li = 1, #lines - 1 do
+        local upper, lower = lines[li], lines[li + 1]
+        for i, t in ipairs(lower) do
+            if t.connectivity.up and upper[i] and upper[i].connectivity.down then
+                local a, b = up_lane_id(t), down_lane_id(upper[i])
+                if a ~= b then
+                    errors[#errors + 1] = ("line %d col %d: up-lane id %s != above down-lane id %s")
+                        :format(li + 1, i, tostring(a), tostring(b))
+                end
+            end
+        end
+    end
+    return errors
+end
+
 -- "Wires must connect" check on the rendered glyph grid.
 -- With `skip_color`, the color-continuity checks (steps 6–7) are omitted —
 -- used for styles where lane color is intentionally allowed to change (e.g.
@@ -425,6 +467,7 @@ end
 
 -- Exposed so a self-test can prove the checker catches broken grids.
 M.check_grid = check_grid
+M.check_lane_continuity = check_lane_continuity
 
 --- Build the layout for `items` and run every invariant.
 --- Returns a flat list of error strings (empty = all good).
@@ -441,6 +484,7 @@ function M.check(opts, items, skip_color)
     for _, e in ipairs(check_commits(rows, items)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_one_commit_per_line(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_lanes(rows)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_lane_continuity(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_grid(grid, opts, skip_color)) do errors[#errors + 1] = e end
     return errors, rows, grid
 end

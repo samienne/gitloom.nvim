@@ -725,33 +725,72 @@ end
 --- best-effort here (vertical = track id, horizontal = lookahead); precise
 --- ids and the child edge come with native threading in a later phase.
 ---@param tracks Track[]?
-local function attach_lanes(tracks)
+---@param prev_line Track[]?  the line directly above (column-aligned by index)
+local function attach_lanes(tracks, prev_line)
     for i, t in ipairs(tracks or {}) do
         local c = t.connectivity
         local u, d, l, r = c.up or false, c.down or false, c.left or false, c.right or false
         local h_id = horizontal_id(tracks, i)
+        local down_id = t.id
+
+        -- The id of the lane entering from above (the cell directly above in
+        -- the same column). When it differs from this cell's own (down) id,
+        -- the up segment and down segment are *different* lanes sharing the
+        -- column — a handoff (e.g. a child's split-in lane reaching the commit
+        -- while a parent's merge-out lane leaves it). They are modeled as two
+        -- lanes, even though they render as one (best-effort) glyph.
+        local up_id = down_id
+        if u and prev_line and prev_line[i] and prev_line[i].connectivity.down then
+            up_id = prev_line[i].id
+        end
+        local handoff = u and d and up_id ~= down_id
+
         local lanes = {}
         local function add(id, sides)
             lanes[#lanes + 1] = { id = id, parent = t.parent, connectivity = sides }
         end
 
         local vpair, hpair = u and d, l and r
-        if vpair and hpair then
-            -- crossing: independent vertical + horizontal lanes
-            add(t.id, { up = true, down = true })
+        if hpair then
+            -- horizontal through-lane is always its own lane
             add(h_id, { left = true, right = true })
-        elseif vpair and (l or r) then
-            -- tee on a vertical through-lane: branch off to the side
-            add(t.id, { up = true, down = true })
-            add(h_id, { left = l or nil, right = r or nil })
-        elseif hpair and (u or d) then
-            -- tee on a horizontal through-lane: branch up/down
-            add(h_id, { left = true, right = true })
-            add(t.id, { up = u or nil, down = d or nil })
+            if handoff then
+                add(up_id, { up = true })
+                add(down_id, { down = true })
+            elseif vpair then
+                add(down_id, { up = true, down = true })
+            elseif u then
+                add(down_id, { up = true })
+            elseif d then
+                add(down_id, { down = true })
+            end
+        elseif l or r then
+            local h = l and "left" or "right"
+            if handoff then
+                -- incoming child-lane and outgoing parent-lane share the
+                -- horizontal stub toward the commit; modeled separately.
+                local up_sides = { up = true }; up_sides[h] = true
+                local down_sides = { down = true }; down_sides[h] = true
+                add(up_id, up_sides)
+                add(down_id, down_sides)
+            elseif vpair then
+                -- tee: vertical through-lane + horizontal branch
+                add(down_id, { up = true, down = true })
+                add(h_id, { [h] = true })
+            elseif u or d then
+                -- turn: one bent lane
+                add(down_id, { up = u or nil, down = d or nil, [h] = true })
+            else
+                add(h_id, { [h] = true })
+            end
         else
-            -- turn, straight, single-sided endpoint, or empty: one lane
-            local id = (hpair and not (u or d)) and h_id or t.id
-            add(id, { up = u or nil, down = d or nil, left = l or nil, right = r or nil })
+            -- no horizontal
+            if handoff then
+                add(up_id, { up = true })
+                add(down_id, { down = true })
+            else
+                add(down_id, { up = u or nil, down = d or nil })
+            end
         end
 
         ---@type Lane[]
@@ -787,9 +826,18 @@ local function layout_item(opts, prev_tracks, item)
 
     result.carry = tracks
 
-    attach_lanes(result.tracks)
-    attach_lanes(result.split)
-    attach_lanes(result.merge)
+    -- Attach lanes per rendered line, each against the line above it, so the
+    -- handoff (up != down) split can see the incoming lane.
+    local prev = prev_tracks
+    if result.split then
+        attach_lanes(result.split, prev)
+        prev = result.split
+    end
+    attach_lanes(result.tracks, prev)
+    prev = result.tracks
+    if result.merge then
+        attach_lanes(result.merge, prev)
+    end
 
     return result
 end
@@ -934,17 +982,21 @@ end
 
 ---@param opts GraphOptions
 ---@param tracks Track[]
---- The "top" lane whose id colors a cell: prefer the vertical (through) lane,
---- else the horizontal one. This is the configurable color strategy
---- (specification.md §5); the chosen id is always one of the cell's lanes'.
+--- The "top" lane whose id colors a cell: prefer the lane heading *down*
+--- (so a column reads continuously into the lane below), then the up lane,
+--- then any. This is the configurable color strategy (specification.md §5);
+--- the chosen id is always one of the cell's lanes'. At a handoff the up and
+--- down segments are different lanes — only one color can show, so the visual
+--- is best-effort while the model keeps both lanes.
 ---@param lanes Lane[]?
 ---@return integer|nil
 local function top_lane_id(lanes)
     if not lanes then return nil end
     for _, lane in ipairs(lanes) do
-        if lane.connectivity.up or lane.connectivity.down then
-            return lane.id
-        end
+        if lane.connectivity.down then return lane.id end
+    end
+    for _, lane in ipairs(lanes) do
+        if lane.connectivity.up then return lane.id end
     end
     return lanes[1] and lanes[1].id or nil
 end

@@ -148,12 +148,13 @@ several bundled vertical lanes is reserved for future collapse/reflow work;
 - `merge_on_separate_line` — when set and a commit has >1 parent, the fan-out
   is drawn on a virtual line **below** the commit row.
 - `allow_merge_on_split` — permits placing a merge onto a split lane when
-  merges are folded onto the commit line. **Experimental.** In this mode a
-  merge commit's incoming lane terminates while a new parent lane reuses the
-  same column, so a vertical lane's color may change mid-column at a merge
-  (a "lane handoff"). The intended rendering for this case is not yet settled;
-  the behavior is pinned by a characterization test rather than treated as a
-  fixed contract.
+  merges are folded onto the commit line. In this mode an incoming child-lane
+  and an outgoing parent-lane can share a column (a "lane handoff"): the cell's
+  `up` segment and `down` segment belong to *different* lanes. The **model**
+  represents these faithfully as two separate lanes (so per-lane continuity
+  holds); the **rendered** glyph is a single cell that can only show one
+  color, so its color is best-effort and may read as continuous across the
+  handoff. The model is the contract here, not the coloring.
 
 When a separate line is not used, the merge/split is folded onto the commit
 row itself.
