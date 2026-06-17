@@ -1281,14 +1281,6 @@ function M.open(folder, opts)
             height = 0.80,
             title = "GraphView",
             footer = "q: quit   m: cycle style   K: lane info   i: toggle ids",
-            keys = {
-                m = function(self)
-                    merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
-                    self:close()
-                    M.open()
-                    vim.notify("gitloom: " .. MERGE_STYLES[merge_style_index].name .. " style")
-                end,
-            },
         },
         palette = {
             date = "Title",
@@ -1447,6 +1439,20 @@ function M.open(folder, opts)
     ---@type table
     local lv
     opts.win.keys = opts.win.keys or {}
+    -- m: cycle the merge/split style and reflow in place (no re-fetch). This
+    -- is the reflow path the interactive views (collapse/pin/toggle) will use:
+    -- relayout repo.order, then re-render. One buffer line per commit doesn't
+    -- change, so no insert/remove churn — only tracks and virtual lines update.
+    opts.win.keys.m = function()
+        merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
+        opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
+        reset_ids()
+        refresh_tracks(opts, repo.order, 1)
+        if lv and lv.controller then
+            lv.controller.refresh()
+        end
+        vim.notify("gitloom: " .. MERGE_STYLES[merge_style_index].name .. " style")
+    end
     -- K: float with the full lane breakdown for the commit under the cursor.
     opts.win.keys.K = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win)[1]

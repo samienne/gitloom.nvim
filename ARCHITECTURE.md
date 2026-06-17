@@ -232,8 +232,18 @@ now (see "Self-contained by design").
 A reusable virtualized list widget over `snacks.win`.
 
 - `M.open(opts)` — creates the float, a `model` (`items`, `columns`,
-  `display`), and a `controller` (`insert`, `remove`, `move`). Installs a
-  decoration provider that calls `on_redraw` for the visible range.
+  `display`), and a `controller` (`insert`, `remove`, `move`, `refresh`).
+  Installs a decoration provider that calls `on_redraw` for the visible range.
+  Returns `{ win, controller }`.
+- **In-place view updates** — `controller.refresh()` drops cached columns and
+  re-renders the visible range. Two reflow patterns sit on top of it: a
+  *display-only* change (e.g. the `i` lane-id toggle) just calls `refresh()`;
+  a *layout* change (e.g. the `m` style cycle) first re-lays-out `repo.order`
+  via `refresh_tracks` (mutating each item's tracks in place) then calls
+  `refresh()`. Because there is one buffer line per commit (split/merge are
+  virtual lines), neither adds or removes buffer lines — this is the
+  reflow-without-reopen path the §10 interactive views (collapse / pin /
+  toggle) will build on.
 - **Lazy column computation** — `refresh_columns` computes an item's display
   columns (via `model.display`) only when first needed, and recomputes the
   shared per-column max widths used to align `above`/`line`/`below` fields.
