@@ -124,7 +124,8 @@ Tests use plenary.busted.
 Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`
-- `tests/commit_spec.lua` — `parse_commit_line`
+- `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
+  date formatters (`format_absolute`, `format_relative`)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
@@ -135,7 +136,8 @@ Coverage:
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `parse_commit_line`,
-`build_graph`, `get_track_chars`, `reset_ids`.
+`parse_timestamp`, `format_absolute`, `format_relative`, `build_graph`,
+`get_track_chars`, `reset_ids`.
 
 ### Layout testing approach
 
