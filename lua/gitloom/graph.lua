@@ -16,6 +16,11 @@ local merge_style_index = 1
 -- Hidden by default; toggled with `i` in the graph window (see M.open).
 local show_lane_ids = false
 
+-- Index of the flex (message) column in a row's `line` field: date, author,
+-- graph, message. The message fills the remaining width and refs are pinned to
+-- the right edge of the row (specification.md §6; see listview's build_line).
+local FLEX_COL = 4
+
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
 local KEYBINDS = {
@@ -361,34 +366,35 @@ local function decoration_texts(commit)
     return out
 end
 
---- Move within a row's cursor positions: 1..count-1 are ref decorations and
---- `count` is the commit message — the rightmost position and the default.
---- Clamps (no wrap); nil starts at the message. `count` is #decorations + 1, so
---- count == 1 means message-only. The message sits to the right of the refs, so
---- `l` moves toward it and `h` toward the first decoration (spec §2).
+--- Move the ref selection. `nil` is the message (the default; the message is to
+--- the left, refs are pinned to the right edge); 1..count are the ref
+--- decorations, left to right. `l` (dir +1) moves right onto the refs starting
+--- at the first; `h` (dir -1) moves back left, returning to the message past the
+--- first. Clamps at the last decoration; no wrap (spec §2). `count` is the
+--- number of decorations.
 ---@param pos integer|nil
 ---@param count integer
 ---@param dir integer
----@return integer
+---@return integer|nil
 local function move_selection(pos, count, dir)
-    if pos == nil then pos = count end
-    return math.max(1, math.min(count, pos + dir))
+    if dir > 0 then
+        if pos == nil then return count >= 1 and 1 or nil end
+        return math.min(count, pos + 1)
+    else
+        if pos == nil or pos <= 1 then return nil end
+        return pos - 1
+    end
 end
 
---- Byte column (0-based) to park the cursor on a rendered row: on `deco` (its
---- first occurrence in the line) when given, otherwise at the message — the
---- line's tail before any trailing padding.
+--- Byte column (0-based) of `deco`'s first occurrence in a rendered row, or nil
+--- if absent. Used to park the cursor on the selected ref (which the listview
+--- pins to the right edge); message parking uses the listview column offset.
 ---@param line_text string
----@param message string?
----@param deco string?
----@return integer
-local function cursor_column(line_text, message, deco)
-    if deco then
-        local s = line_text:find(deco, 1, true)
-        if s then return s - 1 end
-    end
-    local trimmed = line_text:gsub("%s+$", "")
-    return math.max(0, #trimmed - #(message or ""))
+---@param deco string
+---@return integer|nil
+local function ref_byte_col(line_text, deco)
+    local s = line_text:find(deco, 1, true)
+    return s and (s - 1) or nil
 end
 
 --- Parse one `git log` line. Fields are `%x1f`-separated:
@@ -1409,54 +1415,44 @@ local function display_item(opts, item, selection_state)
         selected = selection_state.index
     end
 
-    -- Refs (§6): a HEAD marker, then branch groups, then tags. Branch refs
-    -- sharing a short name collapse to "(name ↑remote1,remote2)" — the name once
-    -- (highlighted if a local exists, dimmed if remote-only) plus the remotes
-    -- that also point here. Grouping is done by the pure group_refs. The
-    -- `selected`-th decoration (branches then tags, matching selectable_count)
-    -- is drawn with palette.selected (§2).
-    local get_refs = function(commit)
+    -- Refs (§6) as a list of right-pinned items: a HEAD marker, then branch
+    -- groups, then tags. Branch refs sharing a short name collapse to
+    -- "(name ↑remote1,remote2)" — the name once (highlighted if a local exists,
+    -- dimmed if remote-only) plus the remotes that also point here (group_refs).
+    -- The `selected`-th decoration (branches then tags) is drawn with
+    -- palette.selected (§2). The listview packs these against the right edge
+    -- with a width budget and a "+N" overflow marker.
+    local get_ref_items = function(commit)
         local g = group_refs(commit.refs)
         local texts = decoration_texts(commit) -- same order; shared with the cursor target
-        local head_part = g.head and highlight_text("HEAD", palette.head) or nil
-
-        -- Selectable decorations, in selection order: branches then tags. Each
-        -- carries its plain `text` (from decoration_texts, used for the selected
-        -- highlight and cursor search) and its normal colored `segs`.
-        local decos = {}
+        local items = {}
+        if g.head then
+            items[#items + 1] = highlight_text("HEAD", palette.head)
+        end
+        local di = 0
         for _, b in ipairs(g.branches) do
-            local name_hl = b.has_local and palette.branch or palette.remote
-            local segs = { highlight_text("(" .. b.name, name_hl) }
-            if #b.remotes > 0 then
-                segs[#segs + 1] = highlight_text(" ↑" .. table.concat(b.remotes, ","), palette.remote)
+            di = di + 1
+            if di == selected then
+                items[#items + 1] = highlight_text(texts[di], palette.selected)
+            else
+                local name_hl = b.has_local and palette.branch or palette.remote
+                local segs = { highlight_text("(" .. b.name, name_hl) }
+                if #b.remotes > 0 then
+                    segs[#segs + 1] = highlight_text(" ↑" .. table.concat(b.remotes, ","), palette.remote)
+                end
+                segs[#segs + 1] = highlight_text(")", name_hl)
+                items[#items + 1] = compose(segs)
             end
-            segs[#segs + 1] = highlight_text(")", name_hl)
-            decos[#decos + 1] = { text = texts[#decos + 1], segs = segs }
         end
         for _, t in ipairs(g.tags) do
-            local text = "[" .. t .. "]"
-            decos[#decos + 1] = { text = texts[#decos + 1], segs = { highlight_text(text, palette.tags) } }
-        end
-
-        local parts = {}
-        if head_part then parts[#parts + 1] = head_part end
-        for i, d in ipairs(decos) do
-            if i == selected then
-                parts[#parts + 1] = highlight_text(d.text, palette.selected)
+            di = di + 1
+            if di == selected then
+                items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                parts[#parts + 1] = compose(d.segs)
+                items[#items + 1] = highlight_text("[" .. t .. "]", palette.tags)
             end
         end
-
-        -- Space-separate the decorations, with a trailing space before the
-        -- message when any are present.
-        local spaced = {}
-        for i, p in ipairs(parts) do
-            if i > 1 then spaced[#spaced + 1] = highlight_text(" ") end
-            spaced[#spaced + 1] = p
-        end
-        if #spaced > 0 then spaced[#spaced + 1] = highlight_text(" ") end
-        return compose(spaced)
+        return items
     end
 
     local get_tracks = function(tracks)
@@ -1481,12 +1477,14 @@ local function display_item(opts, item, selection_state)
                 highlight_text(format_date(item.commit.date, opts) .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
                 get_track_chars(opts, item.tracks),
+                -- The flex (message) column: optional lane-id debug prefix, then
+                -- the subject. Refs go in line_right, pinned to the right edge.
                 compose({
                     get_tracks(item.tracks),
-                    get_refs(item.commit),
                     highlight_text(item.commit.message, palette.message) or "",
                 }),
-            }
+            },
+            line_right = get_ref_items(item.commit),
         }
         if item.split then
             element.above = { "", "", get_track_chars(opts, item.split), get_tracks(item.split) }
@@ -1579,6 +1577,7 @@ end
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
+---@field message_min? integer  min width kept for the message; refs use the rest; §6
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -1625,6 +1624,9 @@ function M.open(folder, opts)
         -- Toggle live with d.
         date_format = "%Y-%m-%d %H:%M",
         date_mode = "absolute",
+        -- Refs are pinned to the right edge and use the free width; the message
+        -- keeps at least message_min, and ref overflow becomes a "+N" marker.
+        message_min = 24,
         icons = {
             --merge = "M",
         },
@@ -1671,6 +1673,11 @@ function M.open(folder, opts)
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
+        -- The message (FLEX_COL) fills the row; refs (line_right) pin to the
+        -- right edge, using the free width down to message_min (§6).
+        flex = FLEX_COL,
+        message_min = opts.message_min,
+        overflow_hl = opts.palette.remote,
         display = function(item)
             return display_item(opts, item, selection_state)
         end,
@@ -1846,11 +1853,11 @@ function M.open(folder, opts)
             if not commit then
                 return
             end
-            local count = #decoration_texts(commit) + 1 -- +1 for the message slot
+            local count = #decoration_texts(commit)
             local pos = (selection_state.commit == commit) and selection_state.index or nil
             selection_state.commit = commit
             selection_state.index = move_selection(pos, count, dir)
-            selection_visible = selection_state.index < count
+            selection_visible = selection_state.index ~= nil
             if lv and lv.controller then
                 lv.controller.refresh()
             end
@@ -1873,16 +1880,21 @@ function M.open(folder, opts)
             local line = vim.api.nvim_win_get_cursor(win)[1]
             local item = repo.order[line]
             if not item or not item.commit then return end
-            local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-            local deco = nil
+            local col = nil
+            -- A selected ref: jump onto it (the listview pins refs to the right
+            -- edge, so find the decoration text in the rendered line).
             if selection_state.commit == item.commit and selection_state.index then
                 local texts = decoration_texts(item.commit)
                 if selection_state.index <= #texts then
-                    deco = texts[selection_state.index]
+                    local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
+                    col = ref_byte_col(text, texts[selection_state.index])
                 end
             end
-            local col = cursor_column(text, item.commit.message, deco)
-            pcall(vim.api.nvim_win_set_cursor, win, { line, col })
+            -- Otherwise park at the start of the message column (FLEX_COL).
+            if not col and lv and lv.controller and lv.controller.col_offset then
+                col = lv.controller.col_offset(line, "line", FLEX_COL)
+            end
+            pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
         end
 
         -- On moving to a different row, reset the selection to the message and
@@ -1919,7 +1931,7 @@ M._internal = {
     group_refs = group_refs,
     decoration_texts = decoration_texts,
     move_selection = move_selection,
-    cursor_column = cursor_column,
+    ref_byte_col = ref_byte_col,
     parse_commit_line = parse_commit_line,
     parse_timestamp = parse_timestamp,
     format_absolute = format_absolute,

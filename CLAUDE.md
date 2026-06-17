@@ -125,7 +125,8 @@ Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display)
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
-  `cursor_column` (h/l ref selection + cursor parking)
+  `ref_byte_col` (h/l ref selection + cursor parking), and `pack_right`
+  (the right-pinned ref width budget)
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
   date formatters (`format_absolute`, `format_relative`)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -138,9 +139,10 @@ Coverage:
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
-`move_selection`, `cursor_column`, `parse_commit_line`, `parse_timestamp`,
+`move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
 `format_absolute`, `format_relative`, `build_graph`, `get_track_chars`,
-`reset_ids`.
+`reset_ids`. `listview._internal` exposes `pack_right` (the right-pin budget
+packer).
 
 ### Layout testing approach
 
@@ -172,7 +174,9 @@ continuity where it unambiguously holds (straight `│↔│` runs, and across
 crossings). A `checker self-test` block feeds deliberately broken grids to
 prove the checker still has teeth; keep it passing.
 
-Still uncovered: the listview widget (needs snacks in the test runtime).
+Still uncovered: the listview widget's rendering (needs snacks in the test
+runtime). Its pure helpers are testable — `snacks.win` loads lazily (only
+`create_win` errors without it), so `listview._internal.pack_right` is covered.
 
 ## Key concepts (quick reference)
 

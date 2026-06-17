@@ -252,9 +252,10 @@ leads-somewhere, per-lane continuity) are tested against this view.
   tags the column `align = "right"` so the listview right-aligns it (padding on
   the left) — keeping vertical wires column-aligned across rows of differing
   lane counts. Render-only; the model rows are untouched (specification.md §5.4).
-- `display_item(opts, item)` — assembles a `DisplayElement`: the commit line
-  (date, author, graph glyphs, refs, message) plus optional `above`/`below`
-  virtual lines for separate split/merge rows.
+- `display_item(opts, item)` — assembles a `DisplayElement`: the commit `line`
+  (date, author, graph glyphs, then the message as the flex column `FLEX_COL`)
+  plus `line_right` — the ref decorations the listview pins to the right edge —
+  and optional `above`/`below` virtual lines for separate split/merge rows.
 
 ### Selection and navigation
 
@@ -264,21 +265,24 @@ cursor** at the commit message — or on the selected ref — rather than hiding
 (`guicursor` blend) is unreliable.
 
 A `SelectionState { commit, index }` (held by commit *identity*, so it survives
-reflow) tracks the selection. The cursor positions on a row are `1..N` ref
-decorations plus a final **message** slot (`index == N+1`, the default); the
-message is the rightmost, so `l` moves toward it and `h` toward the first
-decoration. `move_selection(pos, count, dir)` is the pure clamp-step.
+reflow) tracks the selection. `index` is `nil` for the **message** (the default)
+or `1..N` for a ref decoration. Refs are pinned to the right edge, so `l`
+(dir +1) moves right onto the refs starting at the first and `h` (dir -1) moves
+left back to the message; `move_selection(pos, count, dir)` is the pure
+clamp-step (no wrap).
 
 `decoration_texts(commit)` is the single source for the decoration strings
 (branch groups then tags), so `display_item` (rendering + the `palette.selected`
-highlight) and the cursor target use byte-identical text. `place_cursor` reads
-the rendered buffer line and `cursor_column(line, message, deco)` returns the
-byte column — the decoration's first occurrence, or the line's tail (the
-message) — which sidesteps cross-column byte math (multibyte glyphs, mirror
-padding). A `CursorMoved` autocmd resets the selection to the message and
-re-parks on row change; the `m`/`M`/`d`/`i` toggles re-park after their refresh
-since column widths shift. This is the selection substrate for the §10
-per-branch actions; nothing acts on it yet.
+highlight) and the cursor target use byte-identical text. `place_cursor` parks
+the cursor: for a selected ref it finds the decoration in the rendered line via
+`ref_byte_col` (refs are pinned to the right edge, so their column is not
+fixed); otherwise it parks at the message via `controller.col_offset(line,
+"line", FLEX_COL)`. A `CursorMoved` autocmd resets the selection to the message
+and re-parks on row change; the `m`/`M`/`d`/`i` toggles re-park after their
+refresh since column widths shift. Selection counts all decorations, so one
+hidden in the `+N` overflow can be selected but parks at the message until
+visible. This is the selection substrate for the §10 per-branch actions;
+nothing acts on it yet.
 
 ### Vendored helpers
 
@@ -308,16 +312,32 @@ A reusable virtualized list widget over `snacks.win`.
   toggle) will build on.
 - **Lazy column computation** — `refresh_columns` computes an item's display
   columns (via `model.display`) only when first needed, and recomputes the
-  shared per-column max widths used to align `above`/`line`/`below` fields.
-- **Rendering** — `display` writes real buffer lines for the `line` field and
-  attaches `above`/`below` as virtual lines (extmarks). Highlights are applied
-  as extmarks. The buffer is briefly made modifiable around writes.
+  shared per-column max widths used to align `above`/`line`/`below` fields. The
+  `flex` column is excluded from that max (it sizes per row, not by alignment).
+- **Flex column + right-pinned items** — `build_line` lays out the `line` field:
+  columns before `model.flex` are fixed (aligned); the flex column fills the
+  remaining window width (truncated with `…`); and the row's `line_right` items
+  (e.g. refs) are packed against the **right edge** by `pack_right`. The refs
+  may use the free width, reserving only what the flex column needs — its
+  natural width, capped at `message_min` — so refs fill empty space yet a long
+  message keeps its floor; the leftover collapses into a `+N` marker. This is
+  per-row, not an aligned column, so navigation stays line-by-line (spec §6).
+- **Rendering** — `display(win, …)` writes real buffer lines for the `line`
+  field and attaches `above`/`below` as virtual lines (extmarks). It takes the
+  window (not just the buffer) because the flex/right layout needs its width.
 - **Width fitting** — `fix_width` pads/truncates a `DisplayItem` to a target
-  display width (UTF-8 and display-width aware), clamping highlight ranges. A
-  `DisplayItem` with `align = "right"` is padded on the left instead (highlight
-  ranges shifted by the pad), used for the mirrored graph column.
+  display width (UTF-8 and display-width aware), clamping highlight ranges; with
+  `ellipsis` it appends `…` when truncating. A `DisplayItem` with
+  `align = "right"` is padded on the left instead (highlight ranges shifted by
+  the pad), used for the mirrored graph column.
+- **Cursor offset** — `controller.col_offset(row, field, j)` returns the byte
+  offset where column `j` starts (summing the fixed columns before it), used by
+  graph to park the cursor at the message.
 - **virt_text chunks** — `build_virt_text_chunks` converts a `DisplayItem`
   into extmark `virt_text` chunks.
+- **Lazy snacks** — `snacks.win` is required lazily; only `create_win` errors if
+  it is missing, so the pure helpers (e.g. `pack_right`) load under test without
+  it. `pack_right` is exposed via `listview._internal` for testing.
 
 The buffer holds one (blank, then filled) line per item; all graph content
 for `line` rows lives in the real buffer text, while split/merge rows are

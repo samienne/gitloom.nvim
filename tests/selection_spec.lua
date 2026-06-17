@@ -7,29 +7,29 @@
 local internal = require("gitloom.graph")._internal
 local move_selection = internal.move_selection
 local decoration_texts = internal.decoration_texts
-local cursor_column = internal.cursor_column
+local ref_byte_col = internal.ref_byte_col
+local pack_right = require("gitloom.listview")._internal.pack_right
 
 describe("move_selection", function()
-    -- count = 4: positions 1..3 are decorations, 4 is the message (default).
-    it("starts from the message (nil): h -> last decoration, l stays", function()
-        assert.equals(3, move_selection(nil, 4, -1))
-        assert.equals(4, move_selection(nil, 4, 1))
+    -- nil = message (default, leftmost); 1..count = decorations, left to right.
+    it("from the message (nil): l selects the first ref, h stays", function()
+        assert.equals(1, move_selection(nil, 3, 1))
+        assert.is_nil(move_selection(nil, 3, -1))
     end)
 
-    it("steps within range", function()
-        assert.equals(2, move_selection(3, 4, -1))
-        assert.equals(3, move_selection(2, 4, 1))
+    it("l steps right through the refs, clamping at the last", function()
+        assert.equals(2, move_selection(1, 3, 1))
+        assert.equals(3, move_selection(3, 3, 1)) -- clamp
     end)
 
-    it("clamps at both ends (no wrap)", function()
-        assert.equals(1, move_selection(1, 4, -1)) -- first decoration
-        assert.equals(4, move_selection(4, 4, 1))  -- message
+    it("h steps left, returning to the message past the first", function()
+        assert.equals(1, move_selection(2, 3, -1))
+        assert.is_nil(move_selection(1, 3, -1)) -- back to the message
     end)
 
-    it("is a no-op when only the message exists (count 1)", function()
-        assert.equals(1, move_selection(nil, 1, -1))
-        assert.equals(1, move_selection(1, 1, -1))
-        assert.equals(1, move_selection(1, 1, 1))
+    it("is a no-op when there are no refs (count 0)", function()
+        assert.is_nil(move_selection(nil, 0, 1))
+        assert.is_nil(move_selection(nil, 0, -1))
     end)
 end)
 
@@ -56,17 +56,36 @@ describe("decoration_texts", function()
     end)
 end)
 
-describe("cursor_column", function()
-    it("lands on a decoration's first occurrence (0-based byte col)", function()
-        assert.equals(2, cursor_column("ab(main) fix bug", "fix bug", "(main)"))
+describe("ref_byte_col", function()
+    it("returns the 0-based byte column of a decoration's first occurrence", function()
+        assert.equals(2, ref_byte_col("ab(main) fix bug", "(main)"))
     end)
 
-    it("falls back to the message tail when no decoration is given", function()
-        -- "xx (main) hello" then trailing padding; message is the line's tail.
-        assert.equals(10, cursor_column("xx (main) hello    ", "hello", nil))
+    it("returns nil when the decoration is absent", function()
+        assert.is_nil(ref_byte_col("xx hello world", "(nope)"))
+    end)
+end)
+
+describe("pack_right", function()
+    -- Items of given display widths packed into a budget; whole items only, in
+    -- order, reserving room for a "+N" marker when some overflow.
+    it("shows all items when they fit", function()
+        local shown, overflow, used = pack_right({ 6, 8 }, 40)
+        assert.equals(2, shown)
+        assert.equals(0, overflow)
+        assert.equals(6 + 1 + 8, used) -- one-cell gap between
     end)
 
-    it("falls back to the message tail when the decoration is absent", function()
-        assert.equals(10, cursor_column("xx (main) hello", "hello", "(nope)"))
+    it("overflows the rest into a +N marker when the budget is tight", function()
+        -- 6 fits; "+2" marker (width 2) plus a gap also fits within 10.
+        local shown, overflow = pack_right({ 6, 8, 9 }, 10)
+        assert.equals(1, shown)
+        assert.equals(2, overflow)
+    end)
+
+    it("can show nothing but the marker when nothing fits", function()
+        local shown, overflow = pack_right({ 30, 30 }, 3)
+        assert.equals(0, shown)
+        assert.equals(2, overflow)
     end)
 end)

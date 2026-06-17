@@ -1,10 +1,9 @@
 local M = {}
 
 
+-- snacks is required only to open a window; load it lazily so the pure helpers
+-- (and their tests) don't need it in the runtime. create_win errors if missing.
 local snacks_ok, snacks = pcall(require, "snacks.win")
-if not snacks_ok then
-    error("snacks.win not found. Install snacks.nvim")
-end
 
 -- 1-based indexing, inclusive range
 local function get_visible_range(win)
@@ -16,6 +15,9 @@ local function get_visible_range(win)
 end
 
 local function create_win(opts)
+    if not snacks_ok then
+        error("snacks.win not found. Install snacks.nvim")
+    end
     opts = opts or {}
     local win_opts = vim.tbl_deep_extend("force", {
         border = "rounded",
@@ -122,10 +124,14 @@ local function refresh_columns(win, model, first, last)
             for _, field in ipairs({ "above", "line", "text" }) do
                 if item and item.columns[field] then
                     for j, column in ipairs(item.columns[field]) do
-                        if #new_columns < j then
-                            table.insert(new_columns, vim.fn.strdisplaywidth(column.text))
-                        else
-                            new_columns[j] = math.max(vim.fn.strdisplaywidth(column.text), new_columns[j])
+                        -- The flex column (e.g. the message) fills the remaining
+                        -- width per row, so it must not drive the aligned widths.
+                        if not (field == "line" and model.flex and j == model.flex) then
+                            if #new_columns < j then
+                                new_columns[j] = vim.fn.strdisplaywidth(column.text)
+                            else
+                                new_columns[j] = math.max(vim.fn.strdisplaywidth(column.text), new_columns[j])
+                            end
                         end
                     end
                 end
@@ -152,12 +158,15 @@ end
 ---@field above? (DisplayItem|string)[]
 ---@field line (DisplayItem|string)[]
 ---@field below? (DisplayItem|string)[]
+---@field line_right? DisplayItem[]  right-pinned items for the line (e.g. refs)
 
---- Requested width in utf code points.
+--- Requested width in display cells. With `ellipsis`, truncation appends "…"
+--- (reserving one cell) instead of a hard cut.
 ---@param item DisplayItem
 ---@param requested_utf_len integer
+---@param ellipsis boolean?
 ---@return DisplayItem
-local function fix_width(item, requested_utf_len)
+local function fix_width(item, requested_utf_len, ellipsis)
     local text = item.text or ""
     local utf_len = vim.fn.strdisplaywidth(text)
 
@@ -186,7 +195,14 @@ local function fix_width(item, requested_utf_len)
             highlight = item.highlight,
         }
     else
-        local requested_len = vim.str_byteindex(item.text, "utf-8", requested_utf_len, false)
+        -- Truncate. With an ellipsis, reserve one cell for "…".
+        local target = requested_utf_len
+        local suffix = ""
+        if ellipsis and requested_utf_len >= 1 then
+            target = requested_utf_len - 1
+            suffix = "…"
+        end
+        local requested_len = vim.str_byteindex(item.text, "utf-8", target, false)
 
         ---@type HighlightInfo[]
         local highlight = {}
@@ -210,10 +226,41 @@ local function fix_width(item, requested_utf_len)
         end
 
         return {
-            text = string.sub(text, 1, requested_len),
+            text = string.sub(text, 1, requested_len) .. suffix,
             highlight = highlight
         }
     end
+end
+
+--- Pack right-pinned items into `budget` display cells, whole items only and in
+--- order (a `sep`-cell gap between them), reserving room for a "+N" overflow
+--- marker when some don't fit. Returns the number shown (a prefix), the
+--- overflow count, and the display width used. Pure; exposed for testing.
+---@param widths integer[]   -- display width of each item, in order
+---@param budget integer
+---@param sep integer?       -- gap between items (default 1)
+---@return integer shown, integer overflow, integer used
+local function pack_right(widths, budget, sep)
+    sep = sep or 1
+    local n = #widths
+    local function width_for(k)
+        local w = 0
+        for i = 1, k do
+            w = w + widths[i] + (i > 1 and sep or 0)
+        end
+        local overflow = n - k
+        if overflow > 0 then
+            local marker = 1 + #tostring(overflow) -- "+N"
+            w = w + (k > 0 and sep or 0) + marker
+        end
+        return w
+    end
+
+    local best = 0
+    for k = 0, n do
+        if width_for(k) <= budget then best = k end
+    end
+    return best, n - best, width_for(best)
 end
 
 ---@param item DisplayItem
@@ -285,12 +332,86 @@ end
 
 local namespace = vim.api.nvim_create_namespace("gitloom.listview")
 
+--- Build the `line` string for one row plus its absolute highlight ranges.
+--- When `model.flex` is set, columns before it are fixed-width (aligned), the
+--- flex column fills the remaining window width (truncated with "…"), and the
+--- row's `line_right` items are packed against the right edge. The refs may use
+--- all the free width except what the flex column needs — its natural width, but
+--- never reserving more than `model.message_min` (so refs fill empty space, yet
+--- a long message keeps its floor). Overflow collapses into a "+N" marker.
+---@return string line, table[] highlights
+local function build_line(win, model, columns, right)
+    local line, highlights = "", {}
+    local function append(fixed)
+        local offset = string.len(line)
+        line = line .. fixed.text
+        for _, hl in ipairs(fixed.highlight or {}) do
+            highlights[#highlights + 1] = {
+                start_pos = offset + hl.start_pos,
+                end_pos = offset + hl.end_pos,
+                hl = hl.hl,
+            }
+        end
+    end
+
+    local flex = model.flex
+    if not flex then
+        for j, column in ipairs(columns) do
+            append(fix_width(column, model.columns[j] or 0))
+        end
+        return line, highlights
+    end
+
+    -- Fixed columns before the flex one.
+    local used = 0
+    for j = 1, flex - 1 do
+        local w = model.columns[j] or 0
+        append(fix_width(columns[j] or { text = "" }, w))
+        used = used + w
+    end
+
+    local available = math.max(0, vim.api.nvim_win_get_width(win) - used)
+
+    -- Pack the right-pinned items into the available width, reserving only what
+    -- the flex column actually needs (its natural width, capped at message_min).
+    -- So refs use free space, while a long message keeps at least message_min.
+    right = right or {}
+    local widths = {}
+    for k, it in ipairs(right) do widths[k] = vim.fn.strdisplaywidth(it.text or "") end
+    local flex_item = columns[flex] or { text = "" }
+    local flex_w = vim.fn.strdisplaywidth(flex_item.text or "")
+    local reserve = math.min(flex_w, model.message_min or 24)
+    local budget = math.max(0, available - reserve)
+    local shown, overflow, right_w = pack_right(widths, budget)
+
+    -- Compose the right text: shown items, space-separated, then "+N".
+    local parts = {}
+    for k = 1, shown do
+        if k > 1 then parts[#parts + 1] = " " end
+        parts[#parts + 1] = right[k]
+    end
+    if overflow > 0 then
+        if shown > 0 then parts[#parts + 1] = " " end
+        local m = "+" .. overflow
+        parts[#parts + 1] = { text = m, highlight = model.overflow_hl
+            and { { start_pos = 0, end_pos = #m, hl = model.overflow_hl } } or {} }
+    end
+    local right_item = compose(parts)
+
+    -- The flex (message) column fills what's left of the packed refs.
+    local flex_target = math.max(0, available - right_w)
+    append(fix_width(flex_item, flex_target, true))
+    append(right_item)
+    return line, highlights
+end
+
 --- 1-based indexing, inclusive last
+---@param win integer
 ---@param buf integer
 ---@param model ListViewModel
 ---@param first integer
 ---@param last integer
-local function display(buf, model, first, last)
+local function display(win, buf, model, first, last)
     first = first or 1
     last = last or #model.items
 
@@ -305,18 +426,15 @@ local function display(buf, model, first, last)
         local above = {}
         local below = {}
         if item then
-            for j, column in ipairs(item.columns.line) do
-                local fixed = fix_width(column, model.columns[j])
-                local offset = string.len(line)
-                line = line .. fixed.text
-                for _, hl in ipairs(fixed.highlight or {}) do
-                    table.insert(highlight, {
-                        line = i - 1,
-                        start_pos = offset + hl.start_pos,
-                        end_pos = offset + hl.end_pos,
-                        hl = hl.hl,
-                    })
-                end
+            local built, hls = build_line(win, model, item.columns.line, item.columns.line_right)
+            line = built
+            for _, hl in ipairs(hls) do
+                highlight[#highlight + 1] = {
+                    line = i - 1,
+                    start_pos = hl.start_pos,
+                    end_pos = hl.end_pos,
+                    hl = hl.hl,
+                }
             end
 
             for j, column in ipairs(item.columns.above or {}) do
@@ -437,6 +555,7 @@ end
 ---@field insert fun(items: OrderItem[], pos: integer)
 ---@field remove fun(pos: integer)
 ---@field refresh fun()
+---@field col_offset fun(row: integer, field: string, j: integer): integer
 
 ---@alias DisplayFunction fun(item): DisplayElement
 
@@ -452,12 +571,18 @@ end
 ---@field items ListItem[]
 ---@field columns integer[]
 ---@field display DisplayFunction
+---@field flex? integer        index of the flex column in `line` (fills width)
+---@field message_min? integer min width kept for the flex column
+---@field overflow_hl? string  highlight for the "+N" overflow marker
 
 ---@class ListViewOptions
 ---@field namespace? integer
 ---@field display DisplayFunction
 ---@field on_redraw? OnRedrawFunction
 ---@field on_controller OnControllerFunction
+---@field flex? integer
+---@field message_min? integer
+---@field overflow_hl? string
 
 ---@param opts ListViewOptions
 function M.open(opts)
@@ -466,13 +591,16 @@ function M.open(opts)
         items = {},
         columns = {},
         display = opts.display,
+        flex = opts.flex,
+        message_min = opts.message_min,
+        overflow_hl = opts.overflow_hl,
     }
 
     opts = opts or {}
     opts.namespace = namespace
     opts.on_redraw = function(winid, bufnr, top, bottom)
         local changed = refresh_columns(winid, model, top, bottom)
-        display(bufnr, model, top, bottom)
+        display(winid, bufnr, model, top, bottom)
     end
 
     local win = create_win(opts or {})
@@ -501,7 +629,23 @@ function M.open(opts)
             end
             local first, last = get_visible_range(win.win)
             refresh_columns(win.win, model, first, last)
-            display(win.buf, model, first, last)
+            display(win.win, win.buf, model, first, last)
+        end,
+        -- Byte offset where column `j` of `field` starts on the rendered row,
+        -- summing the fixed columns before it (used to park the cursor).
+        col_offset = function(row, field, j)
+            local item = model.items[row]
+            if not item or not item.columns or not item.columns[field] then
+                return 0
+            end
+            local off = 0
+            for k = 1, (j or 1) - 1 do
+                local col = item.columns[field][k]
+                if col then
+                    off = off + #(fix_width(col, model.columns[k] or 0).text)
+                end
+            end
+            return off
         end,
     }
 
@@ -515,5 +659,10 @@ function M.open(opts)
 
     return { win = win, controller = controller }
 end
+
+-- Exposed for testing only. Not part of the public API.
+M._internal = {
+    pack_right = pack_right,
+}
 
 return M
