@@ -42,6 +42,16 @@ debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6).
   `?` opens a float listing all keybindings. The footer shows live status
   (the active mode, and `(mirrored)` when mirroring is on).
+- **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
+  rows), with `cursorline` marking the current row (§7). The cursor is parked at
+  the **commit message** rather than left at column 0. `h`/`l` move a selection
+  across the current row's ref decorations — the branch groups then tags (§6);
+  the selected decoration is highlighted (`palette.selected`) **and the cursor
+  moves onto it**. The message is the rightmost selection position (the
+  default); `l` moves toward it, `h` toward the first decoration; selection
+  clamps at the ends and resets to the message when the cursor moves to another
+  row. This selection is the substrate for the planned per-branch actions
+  (collapse / hide / pin, §10); it has no effect yet.
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
 
@@ -254,6 +264,9 @@ Columns are width-aligned across visible rows. Each field is colored by its
   laid out and drawn. Scrolling triggers layout of newly visible rows.
 - The view updates incrementally as commits stream in.
 - The buffer is non-modifiable to the user (`nofile`, read-only).
+- The window uses `cursorline` as the current-row indicator and keeps the
+  cursor parked at the commit message (or, when a ref is selected, on that ref);
+  see §2.
 
 ## 8. Configuration
 
@@ -267,6 +280,8 @@ MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate
 
 - `win` — floating-window geometry (snacks.win).
 - `palette` — highlight group per field, plus a `tracks` list cycled by lane id.
+  Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
+  (§2; default `Visual`).
 - `branches` — ref argument(s) for `git log` (default `--all`).
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the

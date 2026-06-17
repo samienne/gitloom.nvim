@@ -88,12 +88,18 @@ Opens the graph for the repository at Neovim's current working directory.
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
+| `h` / `l` | Select the previous / next ref decoration on the current row |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
 
 The footer shows the active mode and whether the graph is mirrored
 (e.g. `Mode: inline  (mirrored)`).
+
+Navigation is line-by-line, with `cursorline` marking the current row. The
+cursor is parked at the commit message; `h`/`l` move a selection across the
+current row's ref decorations and the cursor onto the selected one (the
+substrate for planned per-branch actions; it does nothing on its own yet).
 
 ## Configuration
 
@@ -118,6 +124,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         head = "Special",        -- HEAD marker on the current branch
         message = nil,
         tags = "Comment",
+        selected = "Visual",     -- the h/l-selected ref decoration
+
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },
     },
     merge_style = {
