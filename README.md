@@ -87,7 +87,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `q` | Close the graph |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
-| `i` | Toggle the per-lane id column shown before the message (debug) |
+| `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
 
 The footer shows the active mode (e.g. `Mode: inline`).

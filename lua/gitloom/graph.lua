@@ -13,8 +13,8 @@ local MERGE_STYLES = {
 local merge_style_index = 1
 
 -- Whether the per-lane id column (a debug aid) is shown before the message.
--- Toggled with `i` in the graph window (see M.open).
-local show_lane_ids = true
+-- Hidden by default; toggled with `i` in the graph window (see M.open).
+local show_lane_ids = false
 
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.

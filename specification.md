@@ -36,7 +36,8 @@ exists primarily to exercise and validate the graph algorithm.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance. Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
-  the cursor, and `i` toggles the per-lane id column shown before the message.
+  the cursor, and `i` toggles the per-lane id column before the message (a
+debug aid, hidden by default).
   `?` opens a float listing all keybindings. The footer shows live status
   (currently the active mode).
 - The view opens immediately and is populated asynchronously as git output
