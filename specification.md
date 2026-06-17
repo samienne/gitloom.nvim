@@ -99,7 +99,7 @@ Each ref is classified by its refname and resolved to its target commit:
 | `refs/heads/<name>`              | `local`  | `<name>`              |
 | `refs/remotes/<remote>/<name>`   | `remote` | `<remote>/<name>`     |
 | `refs/tags/<name>`               | `tag`    | `<name>` (annotated tags resolved to their commit via the dereferenced hash) |
-| HEAD (symbolic)                  | `head`   | the branch HEAD points at (or the commit, if detached) |
+| HEAD (symbolic)                  | `head`   | marks the current branch's commit; a detached HEAD is not marked (current limitation) |
 
 `refs/remotes/<remote>/HEAD` (the remote's default-branch symref) is skipped.
 The target hash is looked up in the commit table; a missing target yields a

@@ -2,7 +2,8 @@
 
 local parse_commit_line = require("gitloom.graph")._internal.parse_commit_line
 
--- The pretty-format uses %x1f (unit separator) as the field delimiter.
+-- The pretty-format uses %x1f (unit separator) as the field delimiter:
+-- hash, parents, author, date, subject (refs are resolved separately).
 local US = "\31"
 
 local function line(fields)
@@ -12,7 +13,7 @@ end
 describe("parse_commit_line", function()
     it("parses a commit with a single parent", function()
         local c = parse_commit_line(line({
-            "abc123", "def456", "Alice", "2024-01-01 12:00:00 +0000", "Initial commit", "",
+            "abc123", "def456", "Alice", "2024-01-01 12:00:00 +0000", "Initial commit",
         }))
         assert.equals("abc123", c.hash)
         assert.same({ "def456" }, c.parents)
@@ -23,17 +24,17 @@ describe("parse_commit_line", function()
     end)
 
     it("parses multiple parents", function()
-        local c = parse_commit_line(line({ "h", "p1 p2", "A", "d", "merge", "" }))
+        local c = parse_commit_line(line({ "h", "p1 p2", "A", "d", "merge" }))
         assert.same({ "p1", "p2" }, c.parents)
     end)
 
     it("handles a root commit with no parents", function()
-        local c = parse_commit_line(line({ "h", "", "A", "d", "root", "" }))
+        local c = parse_commit_line(line({ "h", "", "A", "d", "root" }))
         assert.same({}, c.parents)
     end)
 
-    it("parses refs from the decorate field", function()
-        local c = parse_commit_line(line({ "h", "", "A", "d", "subj", "refs/heads/main" }))
-        assert.equals("main", c.refs.branches[1].name)
+    it("starts with an empty refs list (refs are resolved separately)", function()
+        local c = parse_commit_line(line({ "h", "", "A", "d", "subj" }))
+        assert.same({}, c.refs)
     end)
 end)

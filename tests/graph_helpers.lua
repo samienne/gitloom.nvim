@@ -35,7 +35,7 @@ function M.dag(rows)
                 hash = h,
                 parents = {},
                 children = {},
-                refs = { branches = {}, tags = {}, symbols = {}, raw = {} },
+                refs = {},
                 author = "author",
                 date = "date",
                 message = h,

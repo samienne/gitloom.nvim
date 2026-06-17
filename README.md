@@ -108,7 +108,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     palette = {
         date = "Title",
         author = "Comment",
-        branch = "WarningMsg",
+        branch = "WarningMsg",   -- local branches (name)
+        remote = "Comment",      -- remote branches (remote/name)
+        head = "Special",        -- HEAD marker on the current branch
         message = nil,
         tags = "Comment",
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },
