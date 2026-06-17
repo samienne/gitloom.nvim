@@ -767,6 +767,16 @@ end
 ---@field left boolean
 ---@field right boolean
 
+--- Target lane model (specification.md §5). A lane is one wire through a
+--- cell: the edge child -> parent, with its own connectivity (exactly two
+--- sides; one only at a commit endpoint). Migration in progress — see the
+--- note on Track.
+---@class Lane
+---@field id integer|nil
+---@field child? Commit       the placed commit (above) the lane emanates from
+---@field parent? Commit      the commit (below) the lane terminates at
+---@field connectivity Connectivity
+
 ---@class Track
 ---@field id integer|nil
 ---@field connectivity Connectivity
@@ -774,6 +784,9 @@ end
 ---@field commit? Commit
 ---@field parent? Commit
 ---@field override? string
+--- NOTE: migrating to a `lanes: Lane[]` cell model (specification.md §5):
+--- glyph = union of lanes' connectivity, color = a "top" lane's id. The
+--- single-id fields above are the current representation.
 
 ---@class MergeState
 ---@field remaining integer

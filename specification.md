@@ -88,24 +88,55 @@ An empty decorate string yields all-empty ref lists.
 
 ## 5. Graph layout
 
-Each commit occupies one **row**. A row is a sequence of **lanes** (tracks).
-A lane is a vertical line of history with:
+Each commit occupies one **row** — it carries that commit's message, so there
+is exactly one commit per row. A row is a sequence of **cells**, one per
+column. A cell holds zero or more **lanes**, where a lane is one wire passing
+through the cell:
 
-- an **id** (stable identity, used to pick its color),
-- **connectivity** (`up`, `down`, `left`, `right`),
-- an optional **commit** marker when the commit sits on that lane.
+```
+Lane = { id, child: Commit, parent: Commit, connectivity: {up,down,left,right} }
+```
+
+- **id** — stable visual identity (drives color).
+- **child** — the already-placed commit (above) the lane emanates from; its
+  owner / attribution anchor.
+- **parent** — the commit (below) the lane leads to and terminates at.
+- **connectivity** — which of the cell's four sides this wire touches.
+
+A lane represents the edge **child → parent**. The graph is walked top to
+bottom (newest heads on top, roots at the bottom), so the child is always
+already placed and the parent is the downward target; reaching a commit
+matches it against its children's active lanes.
+
+The cell's rendered **glyph** is the function of the **union** of its lanes'
+connectivity. The cell's **color** is the id of one of its lanes, chosen by a
+configurable "top" strategy.
 
 ### 5.1 Invariants
 
-- The commit for a row sits on exactly one lane in that row.
-- A lane that continues from the previous row preserves its id (and thus its
-  color).
-- Merges (a commit with >1 parent) fan out additional lanes; splits (a commit
-  with >1 child) fan lanes in.
-- Lane connectivity is internally consistent: a lane segment that claims a
-  `down` connection is matched by an `up` on the lane below in the same
-  column, and horizontal connectors join adjacent lanes that claim `left`/
-  `right` toward each other.
+- **One commit per row.** Exactly one commit is placed per commit row; the
+  virtual split/merge sub-lines carry none.
+- **Two-sided lanes.** Each lane touches exactly two of the cell's sides (a
+  wire enters and exits) — one side only where it is an endpoint (born at or
+  terminating at a commit). This forces crossings (`─│─`) and tees to be
+  modeled as *separate* lanes, not one over-connected wire.
+- **Leads somewhere.** Every lane has a `parent`; its run terminates exactly
+  at the row where that parent is placed (or the fetched-range boundary). No
+  lane fizzles out into nothing.
+- **No accidental crossing.** A lane keeps its `(id, child, parent)` along its
+  run; two lanes that share a column or cross stay distinct because their
+  edges differ.
+- **Per-lane continuity.** A lane with `down` at one row meets a lane with the
+  same id and `up` in the same column on the next row.
+- **Color is active.** The color a cell shows is the id of one of its lanes.
+- **Connectivity consistency.** The glyph's wired sides equal the union of the
+  cell's lanes' connectivity (every wired side has a lane providing it).
+- Merges (commit with >1 parent) fan out additional lanes; splits (>1 child)
+  fan lanes in.
+
+Current limitation: a cell's vertical lanes number at most one. A "bus" of
+several bundled vertical lanes is reserved for future collapse/reflow work;
+`Lane` arrays are kept symmetric (vertical and horizontal alike) to admit it.
 
 ### 5.2 Merge style
 
