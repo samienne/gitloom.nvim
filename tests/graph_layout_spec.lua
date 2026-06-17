@@ -154,30 +154,27 @@ describe("graph layout [inline+mergesplit] characterization", function()
     end)
 end)
 
-describe("lane model (phase 1)", function()
-    -- Phase 1 attaches an additive one-lane-per-track view; later phases
-    -- decompose crossings/tees and thread the child/parent edge.
-    it("attaches a one-lane view mirroring each track", function()
-        local _, rows = h.check(h.default_opts(), h.dag({
+describe("lane model decomposition", function()
+    -- Cells decompose into two-sided wires (validated broadly by check_lanes
+    -- inside h.check); here we also confirm a junction yields >1 lane.
+    it("splits junction cells into multiple lanes", function()
+        local errors, rows = h.check(h.default_opts(), h.dag({
             { "c1", { "c2", "c3" } },
             { "c2", { "c4" } },
             { "c3", { "c4" } },
             { "c4", {} },
         }))
-        local seen = false
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+
+        local max_lanes = 0
         for _, row in ipairs(rows) do
             for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
                 for _, t in ipairs(lst) do
-                    assert.is_table(t.lanes)
-                    assert.equals(1, #t.lanes)
-                    assert.equals(t.id, t.lanes[1].id)
-                    assert.equals(t.parent, t.lanes[1].parent)
-                    assert.equals(t.connectivity, t.lanes[1].connectivity)
-                    seen = true
+                    max_lanes = math.max(max_lanes, #(t.lanes or {}))
                 end
             end
         end
-        assert.is_true(seen)
+        assert.is_true(max_lanes >= 2) -- the diamond has a tee/crossing
     end)
 end)
 

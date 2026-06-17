@@ -687,16 +687,63 @@ end
 ---@field merge? Track[]       lane state on the merge (below) line, if any
 ---@field carry Track[]        lane state handed to the next item
 
+--- The id of the horizontal wire passing through cell `i` — the next track to
+--- the right that is neither a crossing nor a horizontal jump (mirrors the
+--- lookahead get_track_chars uses to color a horizontal run).
+---@param tracks Track[]
+---@param i integer
+---@return integer|nil
+local function horizontal_id(tracks, i)
+    for j = i + 1, #tracks do
+        local c = tracks[j].connectivity
+        local is_cross = c.down and c.up and c.left and c.right
+        local is_jump = not c.down and not c.up and c.right and c.left
+        if not (is_cross or is_jump) then
+            return tracks[j].id
+        end
+    end
+    return nil
+end
+
 --- Attach the lane-model view (specification.md §5) to each track in a row.
---- Phase 1: one lane per track, mirroring the current flat fields. Rendering
---- still reads the flat fields, so this is additive and output-neutral;
---- later phases decompose crossings/tees into multiple lanes and thread the
---- child/parent edge so the lane invariants can be checked.
+--- Decomposes a cell's connectivity into two-sided wires: a crossing becomes a
+--- vertical lane + a horizontal lane; a tee becomes a through lane + a branch;
+--- a turn is one bent lane; straights and endpoints are one lane. Rendering
+--- still reads the flat fields, so this stays output-neutral. Lane ids are
+--- best-effort here (vertical = track id, horizontal = lookahead); precise
+--- ids and the child edge come with native threading in a later phase.
 ---@param tracks Track[]?
 local function attach_lanes(tracks)
-    for _, t in ipairs(tracks or {}) do
+    for i, t in ipairs(tracks or {}) do
+        local c = t.connectivity
+        local u, d, l, r = c.up or false, c.down or false, c.left or false, c.right or false
+        local h_id = horizontal_id(tracks, i)
+        local lanes = {}
+        local function add(id, sides)
+            lanes[#lanes + 1] = { id = id, parent = t.parent, connectivity = sides }
+        end
+
+        local vpair, hpair = u and d, l and r
+        if vpair and hpair then
+            -- crossing: independent vertical + horizontal lanes
+            add(t.id, { up = true, down = true })
+            add(h_id, { left = true, right = true })
+        elseif vpair and (l or r) then
+            -- tee on a vertical through-lane: branch off to the side
+            add(t.id, { up = true, down = true })
+            add(h_id, { left = l or nil, right = r or nil })
+        elseif hpair and (u or d) then
+            -- tee on a horizontal through-lane: branch up/down
+            add(h_id, { left = true, right = true })
+            add(t.id, { up = u or nil, down = d or nil })
+        else
+            -- turn, straight, single-sided endpoint, or empty: one lane
+            local id = (hpair and not (u or d)) and h_id or t.id
+            add(id, { up = u or nil, down = d or nil, left = l or nil, right = r or nil })
+        end
+
         ---@type Lane[]
-        t.lanes = { { id = t.id, parent = t.parent, connectivity = t.connectivity } }
+        t.lanes = lanes
     end
 end
 

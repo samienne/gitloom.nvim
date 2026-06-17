@@ -232,6 +232,55 @@ local function check_one_commit_per_line(rows)
     return errors
 end
 
+local SIDES = { "up", "down", "left", "right" }
+
+local function count_sides(conn)
+    local n = 0
+    for _, k in ipairs(SIDES) do
+        if conn[k] then n = n + 1 end
+    end
+    return n
+end
+
+-- Lane-model invariants (specification.md §5) on the decomposed `track.lanes`:
+--   * connectivity consistency — the union of a cell's lanes' sides equals the
+--     cell's connectivity.
+--   * two-sided lanes — each lane is a wire with exactly two sides; one side
+--     only at an endpoint (a commit, or a branch within a junction cell).
+local function check_lanes(rows)
+    local errors = {}
+    local function err(m) errors[#errors + 1] = m end
+    for ri, row in ipairs(rows) do
+        for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
+            for ti, t in ipairs(lst) do
+                local lanes = t.lanes or {}
+
+                local union = {}
+                for _, lane in ipairs(lanes) do
+                    for _, k in ipairs(SIDES) do
+                        if lane.connectivity[k] then union[k] = true end
+                    end
+                end
+                for _, k in ipairs(SIDES) do
+                    if (t.connectivity[k] and true or false) ~= (union[k] and true or false) then
+                        err(("row %d track %d: lane union mismatches connectivity at %s"):format(ri, ti, k))
+                    end
+                end
+
+                for li, lane in ipairs(lanes) do
+                    local n = count_sides(lane.connectivity)
+                    if n > 2 then
+                        err(("row %d track %d lane %d: %d sides (>2)"):format(ri, ti, li, n))
+                    elseif n < 2 and not (t.has_commit or #lanes > 1) then
+                        err(("row %d track %d lane %d: %d-sided but not an endpoint"):format(ri, ti, li, n))
+                    end
+                end
+            end
+        end
+    end
+    return errors
+end
+
 -- "Wires must connect" check on the rendered glyph grid.
 -- With `skip_color`, the color-continuity checks (steps 6–7) are omitted —
 -- used for styles where lane color is intentionally allowed to change (e.g.
@@ -387,6 +436,7 @@ function M.check(opts, items, skip_color)
     local errors = {}
     for _, e in ipairs(check_commits(rows, items)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_one_commit_per_line(rows)) do errors[#errors + 1] = e end
+    for _, e in ipairs(check_lanes(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_grid(grid, opts, skip_color)) do errors[#errors + 1] = e end
     return errors, rows, grid
 end
