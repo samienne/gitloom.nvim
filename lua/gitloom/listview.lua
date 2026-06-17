@@ -146,6 +146,7 @@ end
 ---@class DisplayItem
 ---@field text string
 ---@field highlight HighlightInfo
+---@field align? "left"|"right"  column padding side (default left)
 
 ---@class DisplayElement
 ---@field above? (DisplayItem|string)[]
@@ -163,8 +164,25 @@ local function fix_width(item, requested_utf_len)
     if utf_len == requested_utf_len then
         return item
     elseif utf_len < requested_utf_len then
+        local pad = requested_utf_len - utf_len
+        if item.align == "right" then
+            -- Right-align: prepend padding and shift each highlight range by the
+            -- pad's byte length (a space is one byte).
+            local highlight = {}
+            for _, hl in ipairs(item.highlight or {}) do
+                table.insert(highlight, {
+                    start_pos = hl.start_pos + pad,
+                    end_pos = hl.end_pos + pad,
+                    hl = hl.hl,
+                })
+            end
+            return {
+                text = string.rep(" ", pad) .. text,
+                highlight = highlight,
+            }
+        end
         return {
-            text = text .. string.rep(" ", requested_utf_len - utf_len),
+            text = text .. string.rep(" ", pad),
             highlight = item.highlight,
         }
     else

@@ -229,6 +229,14 @@ leads-somewhere, per-lane continuity) are tested against this view.
 - `get_track_chars(opts, tracks)` — maps each track's connectivity to a
   box-drawing glyph (`│ ├ ┤ ┬ ┴ ╭ ╮ ╯ ╰ ─ ○ ◉ ◎` …) plus inter-lane
   horizontal connectors, coloring each by lane id against `palette.tracks`.
+- `mirror_tracks(tracks)` — when `opts.mirror` is set, `get_track_chars` runs
+  the cells through this first: it reverses the column order and swaps each
+  cell's `left`/`right` connectivity. Because the glyph is a pure function of
+  connectivity, the mirrored glyphs (`╭`↔`╮`, `┤`↔`├`, `╴`↔`╶`) and connectors
+  fall out with no glyph-swap table, and color (lane id) is unchanged. It also
+  tags the column `align = "right"` so the listview right-aligns it (padding on
+  the left) — keeping vertical wires column-aligned across rows of differing
+  lane counts. Render-only; the model rows are untouched (specification.md §5.4).
 - `display_item(opts, item)` — assembles a `DisplayElement`: the commit line
   (date, author, graph glyphs, refs, message) plus optional `above`/`below`
   virtual lines for separate split/merge rows.
@@ -266,7 +274,9 @@ A reusable virtualized list widget over `snacks.win`.
   attaches `above`/`below` as virtual lines (extmarks). Highlights are applied
   as extmarks. The buffer is briefly made modifiable around writes.
 - **Width fitting** — `fix_width` pads/truncates a `DisplayItem` to a target
-  display width (UTF-8 and display-width aware), clamping highlight ranges.
+  display width (UTF-8 and display-width aware), clamping highlight ranges. A
+  `DisplayItem` with `align = "right"` is padded on the left instead (highlight
+  ranges shifted by the pad), used for the mirrored graph column.
 - **virt_text chunks** — `build_virt_text_chunks` converts a `DisplayItem`
   into extmark `virt_text` chunks.
 

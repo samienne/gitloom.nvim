@@ -21,15 +21,19 @@ local show_lane_ids = false
 local KEYBINDS = {
     { "q", "Close the graph" },
     { "m", "Cycle the merge/split rendering style" },
+    { "M", "Toggle mirroring (lane 1 on the right)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },
 }
 
--- The graph window footer: live status (the current mode for now; more later)
--- plus a hint to the help float.
-local function footer_text()
-    return ("Mode: %s    ?: help"):format(MERGE_STYLES[merge_style_index].name)
+-- The graph window footer: live status (the current mode, and whether the graph
+-- is mirrored) plus a hint to the help float.
+---@param mirror boolean?
+local function footer_text(mirror)
+    local status = ("Mode: %s"):format(MERGE_STYLES[merge_style_index].name)
+    if mirror then status = status .. "  (mirrored)" end
+    return status .. "    ?: help"
 end
 
 -- Lines for the `?` help float.
@@ -1071,7 +1075,35 @@ local function top_lane_id(lanes)
     return lanes[1] and lanes[1].id or nil
 end
 
+--- Mirror a row's cells for right-aligned rendering (specification.md §5.4).
+--- Reverses the column order (so lane 1 becomes the rightmost column, nearest
+--- the message) and swaps each cell's left/right connectivity. Because the
+--- glyph is a pure function of connectivity (get_track_chars), the mirrored
+--- glyphs (╭↔╮, ┤↔├, ╴↔╶) and the inter-lane connectors fall out automatically
+--- — no glyph-swap table. Color is unaffected (it comes from each lane's
+--- up/down). Returns a fresh array; the model rows are left untouched.
+---@param tracks Track[]
+---@return Track[]
+local function mirror_tracks(tracks)
+    local out = {}
+    for i = #tracks, 1, -1 do
+        local t = tracks[i]
+        local c = t.connectivity
+        local m = {}
+        for k, v in pairs(t) do m[k] = v end
+        m.connectivity = { up = c.up, down = c.down, left = c.right, right = c.left }
+        out[#out + 1] = m
+    end
+    return out
+end
+
 local function get_track_chars(opts, tracks)
+    -- Right-aligned mirror: flip the cells before deriving glyphs. The graph
+    -- column is then right-aligned by the listview (fix_width align = "right").
+    if opts.mirror then
+        tracks = mirror_tracks(tracks)
+    end
+
     local result = {}
 
     for i = 1, #tracks do
@@ -1175,6 +1207,12 @@ local function get_track_chars(opts, tracks)
         else
             result = compose({ result, " " })
         end
+    end
+
+    -- Mirrored graphs right-align the column so lane 1 hugs the message edge and
+    -- vertical wires stay column-aligned across rows (see fix_width).
+    if opts.mirror then
+        result.align = "right"
     end
 
     return result
@@ -1330,6 +1368,7 @@ end
 ---@field merge_style MergeStyle
 ---@field branches? string|string[]
 ---@field icons Icons
+---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -1368,12 +1407,21 @@ function M.open(folder, opts)
         },
         --merge_style = "merge"
         merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style),
+        -- Render the graph mirrored (lane 1 at the right, nearest the message)
+        -- by default. Toggle live with M.
+        mirror = true,
         icons = {
             --merge = "M",
         },
     }
+    -- The default footer is computed before opts.mirror is resolved; unless the
+    -- caller set its own footer, recompute it so the initial mirror state shows.
+    local user_footer = opts and opts.win and opts.win.footer
     ---@type GraphOptions
     opts = vim.tbl_deep_extend("force", defaults, opts or {})
+    if not user_footer then
+        opts.win.footer = footer_text(opts.mirror)
+    end
 
     local listview = require("gitloom.listview")
 
@@ -1506,7 +1554,22 @@ function M.open(folder, opts)
         end
         -- Reflect the new mode live in the footer (no transient notify).
         if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text()
+            lv.win.opts.footer = footer_text(opts.mirror)
+            pcall(vim.api.nvim_win_set_config, lv.win.win, {
+                footer = lv.win.opts.footer,
+                footer_pos = "center",
+            })
+        end
+    end
+    -- M: toggle graph mirroring (lane 1 on the right). A render-only change, so
+    -- just refresh the display (no relayout/re-fetch) — like the `i` toggle.
+    opts.win.keys.M = function()
+        opts.mirror = not opts.mirror
+        if lv and lv.controller then
+            lv.controller.refresh()
+        end
+        if lv and lv.win and lv.win.win then
+            lv.win.opts.footer = footer_text(opts.mirror)
             pcall(vim.api.nvim_win_set_config, lv.win.win, {
                 footer = lv.win.opts.footer,
                 footer_pos = "center",

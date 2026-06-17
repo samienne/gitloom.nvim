@@ -34,12 +34,13 @@ exists primarily to exercise and validate the graph algorithm.
 - `:GitloomGraph` opens the graph for the repository at Neovim's current
   working directory.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
-  rendering style (§5.2) so the styles can be compared at a glance. Two debug
+  rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
+  graph mirroring (§5.4). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default).
   `?` opens a float listing all keybindings. The footer shows live status
-  (currently the active mode).
+  (the active mode, and `(mirrored)` when mirroring is on).
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
 
@@ -197,6 +198,24 @@ Lanes render as box-drawing characters derived from connectivity
 | `○`    | ordinary commit |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
 
+### 5.4 Mirroring
+
+By default the graph is **mirrored**: the cell sequence of each row is reversed
+and each cell's `left`/`right` connectivity is swapped before glyphs are
+derived, so the graph reads right-to-left with lane 1 at the **right** edge of
+the graph column, nearest the commit message. The graph column is right-aligned
+(padded on the left) so vertical wires stay column-aligned across rows of
+differing lane counts. Setting `mirror = false` (§8) renders it the
+conventional way, left-to-right with lane 1 at the left.
+
+Mirroring is purely a rendering transform: the commit ordering, the lane
+layout, and the lane model (ids, `child`/`parent`, per-lane continuity) are
+unchanged — only the projection to glyphs is flipped. Because the glyph is a
+pure function of connectivity (§5), the mirrored glyphs (`╭`↔`╮`, `┤`↔`├`,
+`╴`↔`╶`) and the inter-lane connectors fall out of the model with no separate
+glyph-swap table, and color (lane id) is preserved. All §5.1 invariants hold on
+the mirrored output.
+
 ## 6. Row content
 
 A commit row displays, left to right:
@@ -225,13 +244,17 @@ Columns are width-aligned across visible rows. Each field is colored by its
 `GraphOptions` (see [README.md](README.md) for the full default table):
 
 ```
-GraphOptions = { win, palette, merge_style, icons, branches }
+GraphOptions = { win, palette, merge_style, icons, branches, mirror }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 ```
 
 - `win` — floating-window geometry (snacks.win).
 - `palette` — highlight group per field, plus a `tracks` list cycled by lane id.
 - `branches` — ref argument(s) for `git log` (default `--all`).
+- `mirror` — render the graph mirrored with lane 1 at the right edge of the
+  graph column, nearest the message (§5.4). **Default true.** Set false for the
+  conventional left-to-right layout. Purely a rendering transform; ordering and
+  lane layout are unchanged. Toggle live with `M`.
 
 ### Known gap: setup() wiring
 
