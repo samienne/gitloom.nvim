@@ -87,6 +87,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `q` | Close the graph |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
+| `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
@@ -129,6 +130,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
+    date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
+    date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
 }
 ```
 
@@ -143,6 +146,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   graph column (nearest the message). On by default; set `false` for the
   conventional left-to-right layout. A render-only transform; toggle live with
   `M`. See [specification.md](specification.md) §5.4.
+- **`date_format`** / **`date_mode`** — the author date is parsed into a
+  structured timestamp and rendered either as an absolute author-local time
+  (`date_format`, an `os.date` string) or a relative age (`date_mode =
+  "relative"`). Toggle live with `d`.
 
 > **Note:** `require("gitloom").setup(opts)` currently stores config but does
 > not yet forward it to `:GitloomGraph` — the command uses the defaults above.

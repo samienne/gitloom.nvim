@@ -22,6 +22,7 @@ local KEYBINDS = {
     { "q", "Close the graph" },
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
+    { "d", "Toggle absolute / relative dates" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },
@@ -223,17 +224,83 @@ local function fetch_head(repo)
     return future
 end
 
+--- Parse git's author date into a structured Timestamp (specification.md §4).
+--- `epoch_str` is `%at` (Unix time, UTC); `iso` is `%ai` (carries the tz
+--- offset, e.g. "2026-06-17 14:23:05 +0300"). The author's local wall-clock is
+--- `epoch + offset`.
+---@class Timestamp
+---@field epoch integer   author date as Unix time (UTC)
+---@field offset integer  author tz offset in seconds (e.g. +03:00 -> 10800)
+---@field raw string?     original "%ai" text (debug / fallback)
+---@param epoch_str string?
+---@param iso string?
+---@return Timestamp
+local function parse_timestamp(epoch_str, iso)
+    local epoch = tonumber(epoch_str) or 0
+    local offset = 0
+    local sign, hh, mm = (iso or ""):match("([%+%-])(%d%d)(%d%d)%s*$")
+    if sign then
+        offset = (tonumber(hh) * 3600 + tonumber(mm) * 60) * (sign == "-" and -1 or 1)
+    end
+    return { epoch = epoch, offset = offset, raw = iso }
+end
+
+--- Absolute author-local time. Uses os.date in UTC mode ("!") over the
+--- offset-shifted epoch so the result is the author's wall-clock, independent
+--- of the viewer's timezone.
+---@param ts Timestamp
+---@param fmt string?
+---@return string
+local function format_absolute(ts, fmt)
+    return os.date("!" .. (fmt or "%Y-%m-%d %H:%M"), ts.epoch + ts.offset)
+end
+
+local REL_UNITS = {
+    { 31536000, "year" }, { 2592000, "month" }, { 604800, "week" },
+    { 86400, "day" }, { 3600, "hour" }, { 60, "minute" }, { 1, "second" },
+}
+
+--- Relative age, e.g. "3 days ago". `now` is the reference Unix time (passed in
+--- so it is testable).
+---@param ts Timestamp
+---@param now integer
+---@return string
+local function format_relative(ts, now)
+    local diff = now - ts.epoch
+    if diff < 1 then return "just now" end
+    for _, u in ipairs(REL_UNITS) do
+        if diff >= u[1] then
+            local n = math.floor(diff / u[1])
+            return ("%d %s%s ago"):format(n, u[2], n > 1 and "s" or "")
+        end
+    end
+    return "just now"
+end
+
+--- Render a commit's date for display per opts.date_mode (§6).
+---@param ts Timestamp?
+---@param opts GraphOptions
+---@return string
+local function format_date(ts, opts)
+    if type(ts) ~= "table" then return ts and tostring(ts) or "" end
+    if opts.date_mode == "relative" then
+        return format_relative(ts, os.time())
+    end
+    return format_absolute(ts, opts.date_format)
+end
+
 --- Parse one `git log` line. Fields are `%x1f`-separated:
---- hash, parent hashes, author, date, subject. Refs are NOT here — they come
---- from `fetch_refs` (§3.2); a fresh commit starts with an empty refs list.
+--- hash, parent hashes, author, epoch (%at), iso date (%ai), subject. Refs are
+--- NOT here — they come from `fetch_refs` (§3.2); a fresh commit starts with an
+--- empty refs list.
 local function parse_commit_line(line)
     local fields = vim.split(line, "\x1f")
 
     local hash = fields[1]
     local parents = vim.split(fields[2] or "", " ")
     local author = fields[3]
-    local date = fields[4]
-    local subject = fields[5]
+    local date = parse_timestamp(fields[4], fields[5])
+    local subject = fields[6]
 
     if not hash then
         return
@@ -266,9 +333,10 @@ local function fetch_commits(opts)
         opts.branch = { opts.branch }
     end
 
-    -- Refs come from fetch_refs (§3.2), so no --decorate here.
+    -- Refs come from fetch_refs (§3.2), so no --decorate here. %at (epoch) +
+    -- %ai (carries the tz offset) feed the structured Timestamp (§4).
     local command = { "git", "log", "--topo-order", "--parents", unpack(opts.branch),
-        "--pretty=format:%H%x1f%P%x1f%an%x1f%ai%x1f%s" }
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%s" }
     if opts.count then
         table.insert(command, "-n")
         table.insert(command, tostring(opts.count))
@@ -1271,7 +1339,7 @@ local function display_item(opts, item, selection_state)
         ---@type DisplayElement
         local element = {
             line = {
-                highlight_text(item.commit.date .. " ", palette.date),
+                highlight_text(format_date(item.commit.date, opts) .. " ", palette.date),
                 highlight_text(item.commit.author .. " ", palette.author),
                 get_track_chars(opts, item.tracks),
                 compose({
@@ -1369,6 +1437,8 @@ end
 ---@field branches? string|string[]
 ---@field icons Icons
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
+---@field date_format? string  os.date format for absolute dates; §6
+---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -1410,6 +1480,10 @@ function M.open(folder, opts)
         -- Render the graph mirrored (lane 1 at the right, nearest the message)
         -- by default. Toggle live with M.
         mirror = true,
+        -- Date column: absolute (os.date format) or relative ("3 days ago").
+        -- Toggle live with d.
+        date_format = "%Y-%m-%d %H:%M",
+        date_mode = "absolute",
         icons = {
             --merge = "M",
         },
@@ -1588,6 +1662,13 @@ function M.open(folder, opts)
             focusable = true,
         })
     end
+    -- d: toggle the date column between absolute and relative. Render-only.
+    opts.win.keys.d = function()
+        opts.date_mode = (opts.date_mode == "relative") and "absolute" or "relative"
+        if lv and lv.controller then
+            lv.controller.refresh()
+        end
+    end
     -- i: toggle the per-lane id column before the message.
     opts.win.keys.i = function()
         show_lane_ids = not show_lane_ids
@@ -1611,6 +1692,9 @@ end
 M._internal = {
     classify_ref = classify_ref,
     parse_commit_line = parse_commit_line,
+    parse_timestamp = parse_timestamp,
+    format_absolute = format_absolute,
+    format_relative = format_relative,
     build_graph = build_graph,
     get_track_chars = get_track_chars,
     reset_ids = reset_ids,

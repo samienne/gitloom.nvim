@@ -143,8 +143,14 @@ on_redraw(top, bottom)
 - `fetch_head(repo)` — `git symbolic-ref --short --quiet HEAD` for the current
   branch.
 - `fetch_commits(opts)` — `git log --topo-order --parents` with a
-  `%x1f`-delimited pretty-format (`%H %P %an %ai %s`). No `--decorate`; refs
-  are a separate query (specification.md §3).
+  `%x1f`-delimited pretty-format (`%H %P %an %at %ai %s`). `%at` (epoch) + `%ai`
+  (offset) feed the parsed timestamp. No `--decorate`; refs are a separate query
+  (specification.md §3).
+
+`git log` is porcelain, but an explicit `--pretty=format:` is a stable,
+documented placeholder contract — the de-facto way to script this. The
+plumbing-pure alternative (`git rev-list --no-commit-header`, same format) is a
+one-line swap with no real gain today; revisit only if §10 takes over ordering.
 
 All run via `vim.fn.jobstart` (no explicit `cwd`, so they observe Neovim's
 working directory) and resolve a `Future` on `on_exit`. The controller chains
@@ -153,15 +159,20 @@ them refs → head → commits.
 ### Parsing / ref resolution
 
 - `parse_commit_line(line)` — splits the `%x1f` fields into a `Commit`
-  (hash, parent hashes, author, date, message; an empty `refs` list).
+  (hash, parent hashes, author, date, message; an empty `refs` list), with the
+  date built by `parse_timestamp`.
+- `parse_timestamp(epoch, iso)` — `%at` + `%ai` → `Timestamp { epoch, offset,
+  raw }`. `format_absolute(ts, fmt)` renders author-local wall-clock (os.date in
+  UTC mode over `epoch + offset`); `format_relative(ts, now)` renders an age.
+  `format_date(ts, opts)` dispatches on `opts.date_mode`.
 - `classify_ref(refname)` — maps a full refname to a `(kind, name)`:
   `refs/heads/*` → `local`, `refs/remotes/*` → `remote` (skipping the remote's
   `HEAD` symref), `refs/tags/*` → `tag`; nil for anything else.
 - `add_ref` / `get_or_create_commit` — resolve a ref's target hash to a
   `Commit` (placeholder if unseen) and link them by reference.
 
-`parse_commit_line` and `classify_ref` are pure and exposed via
-`graph._internal` for testing.
+`parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
+and `classify_ref` are pure and exposed via `graph._internal` for testing.
 
 ### DAG construction
 

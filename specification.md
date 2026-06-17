@@ -38,7 +38,8 @@ exists primarily to exercise and validate the graph algorithm.
   graph mirroring (§5.4). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
-debug aid, hidden by default).
+debug aid, hidden by default). `d` toggles the date column between absolute and
+relative (§6).
   `?` opens a float listing all keybindings. The footer shows live status
   (the active mode, and `(mirrored)` when mirroring is on).
 - The view opens immediately and is populated asynchronously as git output
@@ -56,8 +57,10 @@ Commits are read via `git log` with:
 - `--parents` — full parent hash list per commit.
 - a refspec, default `--all`.
 
-Each commit carries: hash, parent hashes, author, author date, subject. Refs
-are **not** taken from `--decorate`; they come from §3.2.
+Each commit carries: hash, parent hashes, author, author date, subject. The
+author date is read as a Unix epoch (`%at`) plus its tz offset (from `%ai`) and
+parsed into a structured `Timestamp` (§4), not kept as text. Refs are **not**
+taken from `--decorate`; they come from §3.2.
 
 ### 3.2 Refs
 
@@ -74,11 +77,16 @@ first-class (the decorate field conflated them and dropped remotes).
 ## 4. Data model
 
 ```
-Commit = { hash, parents: Commit[], children: Commit[], refs: Ref[],
-           author, date, message }
-Ref    = { name, kind, commit: Commit }
+Commit    = { hash, parents: Commit[], children: Commit[], refs: Ref[],
+              author, date: Timestamp, message }
+Ref       = { name, kind, commit: Commit }
+Timestamp = { epoch, offset, raw }
 ```
 
+- `Commit.date` is a parsed `Timestamp`, not a string: `epoch` is the author
+  date as Unix time (UTC), `offset` is the author's tz offset in seconds (so
+  the author's local wall-clock is `epoch + offset`), and `raw` keeps the
+  original `%ai` text. Formatting happens at render time (§6).
 - `Ref.kind` is one of `local`, `remote`, `tag`, `head`.
 - `Ref.commit` is the `Commit` the ref points at — a **direct reference, not a
   hash**. `Commit.refs` lists the refs pointing at it (the inverse). A
@@ -220,7 +228,10 @@ the mirrored output.
 
 A commit row displays, left to right:
 
-1. author date
+1. author date — formatted from the `Timestamp` (§4) either as an **absolute**
+   author-local time (via the configurable `date_format`, default
+   `%Y-%m-%d %H:%M`) or as a **relative** age (e.g. `3 days ago`). The
+   `date_mode` selects which; `d` toggles it live.
 2. author name
 3. graph lanes (glyphs)
 4. ref decorations, by kind — local branches as `(name)`, remote branches as
@@ -244,7 +255,8 @@ Columns are width-aligned across visible rows. Each field is colored by its
 `GraphOptions` (see [README.md](README.md) for the full default table):
 
 ```
-GraphOptions = { win, palette, merge_style, icons, branches, mirror }
+GraphOptions = { win, palette, merge_style, icons, branches, mirror,
+                 date_format, date_mode }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 ```
 
@@ -255,6 +267,10 @@ MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate
   graph column, nearest the message (§5.4). **Default true.** Set false for the
   conventional left-to-right layout. Purely a rendering transform; ordering and
   lane layout are unchanged. Toggle live with `M`.
+- `date_format` — `os.date` format string for absolute dates (default
+  `%Y-%m-%d %H:%M`), rendered in the author's local time.
+- `date_mode` — `absolute` (default) or `relative`; selects the initial date
+  rendering (§6). Toggle live with `d`.
 
 ### Known gap: setup() wiring
 
