@@ -274,6 +274,10 @@ local function check_lanes(rows)
                     elseif n < 2 and not (t.has_commit or #lanes > 1) then
                         err(("row %d track %d lane %d: %d-sided but not an endpoint"):format(ri, ti, li, n))
                     end
+                    -- leads somewhere: a lane heading down must have a parent
+                    if lane.connectivity.down and not lane.parent then
+                        err(("row %d track %d lane %d: down lane has no parent"):format(ri, ti, li))
+                    end
                 end
             end
         end
