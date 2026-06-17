@@ -9,6 +9,7 @@ local format_commit_detail = internal.format_commit_detail
 local format_diff = internal.format_diff
 local diffstat_files = internal.diffstat_files
 local format_diffstat = internal.format_diffstat
+local commit_range = internal.commit_range
 
 -- Build a `git show -s` output line for the documented format:
 -- %H %an %ae %ad %cn %ce %cd %P %B, separated by \x1f, body last.
@@ -260,5 +261,30 @@ describe("format_diffstat", function()
         for _, hl in ipairs(rows[2].highlight or {}) do groups[hl.hl] = true end
         assert.is_true(groups["DiffAdd"])
         assert.is_true(groups["DiffDelete"])
+    end)
+end)
+
+describe("commit_range", function()
+    it("uses <hash>^! for a commit with parents, from = first parent", function()
+        local p1, p2 = { hash = "p1" }, { hash = "p2" }
+        local c = { hash = "abc1234", parents = { p1, p2 } }
+        local r = commit_range(c)
+        assert.equals("abc1234^!", r.rev)
+        assert.equals(p1, r.from)
+        assert.equals(c, r.to)
+    end)
+
+    it("uses the empty-tree range for a root commit (no parents)", function()
+        local c = { hash = "root123", parents = {} }
+        local r = commit_range(c)
+        assert.equals("4b825dc642cb6eb9a060e54bf8d69288fbee4904..root123", r.rev)
+        assert.is_nil(r.from)
+        assert.equals(c, r.to)
+    end)
+
+    it("treats a missing parents field as a root", function()
+        local r = commit_range({ hash = "x" })
+        assert.equals("4b825dc642cb6eb9a060e54bf8d69288fbee4904..x", r.rev)
+        assert.is_nil(r.from)
     end)
 end)

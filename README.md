@@ -54,6 +54,9 @@ even though it ships as part of the same suite. See
 - Neovim >= 0.10 (uses the 4-argument `vim.str_byteindex` and the
   decoration-provider API)
 - [snacks.nvim](https://github.com/folke/snacks.nvim) (window management)
+- *Optional:* [diffview.nvim](https://github.com/sindrets/diffview.nvim) (or any
+  diff plugin) for the external diff (`D` / the commit view's action label); the
+  provider is configurable, so diffview is not required
 
 ## Installation
 
@@ -88,6 +91,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `<CR>` | Open the commit view for the commit on the current row |
+| `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
@@ -107,6 +111,12 @@ diff is colored line-by-line (added / removed / hunk / file headers). The
 diffstat lists the changed files; pressing `<CR>` on a file line jumps to that
 file's section in the diff below (`<C-o>` / `<C-i>` jump back and forth, and
 `<C-o>` closes the view once it would step back out). `q` closes it.
+
+The first line of the commit view is an **action label** (`▶ Open diff
+(diffview)`) and the cursor parks on it when the view opens, so `<CR>` then
+`<CR>` opens the diff. The same diff opens from the graph with `D`. The diff
+viewer is a configurable provider (`diff.open`/`diff.label`) operating on a
+git range, defaulting to diffview — see Configuration.
 
 Navigation is line-by-line, with `cursorline` marking the current row. The
 cursor parks at the commit message; `l` moves the selection right onto the refs
@@ -138,6 +148,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         message = nil,
         tags = "Comment",
         selected = "Visual",     -- the h/l-selected ref decoration
+        action = "Special",      -- the commit-view diff action label (§11.5)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
 
@@ -156,6 +167,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
+    diff = {
+        -- External diff provider, operating on a git range (§11.5). Default opens
+        -- diffview; override to use another plugin, or set open = nil to disable.
+        -- open = function(range) vim.cmd("DiffviewOpen " .. range.rev) end,
+        label = "▶ Open diff (diffview)",  -- commit-view action label text
+    },
 }
 ```
 
@@ -177,6 +194,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`message_min`** — ref labels are pinned to the right edge of the row and use
   the free width; the message keeps at least `message_min` columns (truncated
   with `…`), and refs that don't fit collapse into a `+N` marker.
+- **`diff`** — the external diff provider (`D` and the commit view's action
+  label). `open` is called with a `DiffRange` (`{ rev, from, to }` — `rev` is a
+  git rev-range like `<hash>^!`) and defaults to opening diffview; `label` is the
+  action-label text. Override `open` to use a different diff plugin, or set it to
+  `nil` to disable the integration. See [specification.md](specification.md)
+  §11.5.
 
 > **Note:** `require("gitloom").setup(opts)` currently stores config but does
 > not yet forward it to `:GitloomGraph` — the command uses the defaults above.
