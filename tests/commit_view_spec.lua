@@ -7,6 +7,8 @@ local internal = require("gitloom.graph")._internal
 local parse_show = internal.parse_show
 local format_commit_detail = internal.format_commit_detail
 local format_diff = internal.format_diff
+local diffstat_files = internal.diffstat_files
+local format_diffstat = internal.format_diffstat
 
 -- Build a `git show -s` output line for the documented format:
 -- %H %an %ae %ad %cn %ce %cd %P %B, separated by \x1f, body last.
@@ -175,5 +177,88 @@ describe("format_diff", function()
         assert.equals("none", role_hl(rows[1]))
         assert.equals("none", role_hl(rows[2]))
         assert.equals("+added", rows[1].text)
+    end)
+end)
+
+describe("diffstat_files", function()
+    local patch = table.concat({
+        "diff --git a/foo.lua b/foo.lua", -- 1
+        "index 1111111..2222222 100644",  -- 2
+        "--- a/foo.lua",                  -- 3 (not counted)
+        "+++ b/foo.lua",                  -- 4 (not counted)
+        "@@ -1,3 +1,4 @@",                -- 5
+        " context",                       -- 6
+        "-old line",                      -- 7 (removed)
+        "+new line one",                  -- 8 (added)
+        "+new line two",                  -- 9 (added)
+        "diff --git a/bar.txt b/bar.txt", -- 10
+        "new file mode 100644",           -- 11
+        "index 0000000..3333333",         -- 12
+        "--- /dev/null",                  -- 13
+        "+++ b/bar.txt",                  -- 14
+        "@@ -0,0 +1 @@",                  -- 15
+        "+hello",                         -- 16 (added)
+        "diff --git a/old.md b/new.md",   -- 17 (rename)
+        "similarity index 100%",          -- 18
+        "rename from old.md",             -- 19
+        "rename to new.md",               -- 20
+        "diff --git a/img.png b/img.png", -- 21 (binary)
+        "index aaaaaaa..bbbbbbb",         -- 22
+        "Binary files a/img.png and b/img.png differ", -- 23
+    }, "\n")
+
+    it("parses per-file counts and start offsets", function()
+        local files = diffstat_files(patch)
+        assert.equals(4, #files)
+        assert.same({ path = "foo.lua", added = 2, removed = 1, binary = false, start = 1 }, files[1])
+        assert.same({ path = "bar.txt", added = 1, removed = 0, binary = false, start = 10 }, files[2])
+    end)
+
+    it("shows renames as old => new and keeps the start offset", function()
+        local files = diffstat_files(patch)
+        assert.equals("old.md => new.md", files[3].path)
+        assert.equals(17, files[3].start)
+    end)
+
+    it("flags binary files", function()
+        local files = diffstat_files(patch)
+        assert.is_true(files[4].binary)
+        assert.equals("img.png", files[4].path)
+        assert.equals(21, files[4].start)
+    end)
+
+    it("is empty for an empty patch", function()
+        assert.same({}, diffstat_files(""))
+    end)
+end)
+
+describe("format_diffstat", function()
+    local PALETTE = { diff = { add = "DiffAdd", delete = "DiffDelete" }, author = "Comment" }
+    local files = {
+        { path = "foo.lua", added = 2, removed = 1, binary = false },
+        { path = "bar.txt", added = 1, removed = 0, binary = false },
+        { path = "img.png", added = 0, removed = 0, binary = true },
+    }
+    local function has(s, sub) return s:find(sub, 1, true) ~= nil end
+
+    it("renders a git-style summary first", function()
+        local rows = format_diffstat(files, PALETTE)
+        assert.equals("3 files changed, 3 insertions(+), 1 deletion(-)", rows[1].text)
+    end)
+
+    it("renders one row per file in order, with counts and a bar", function()
+        local rows = format_diffstat(files, PALETTE)
+        assert.equals(4, #rows) -- summary + 3 files
+        assert.is_true(has(rows[2].text, "foo.lua"))
+        assert.is_true(has(rows[2].text, "3 ++-")) -- total 3, then ++ and -
+        assert.is_true(has(rows[4].text, "Bin"))   -- binary file
+    end)
+
+    it("colors the + and - bar segments", function()
+        local rows = format_diffstat(files, PALETTE)
+        local groups = {}
+        for _, hl in ipairs(rows[2].highlight or {}) do groups[hl.hl] = true end
+        assert.is_true(groups["DiffAdd"])
+        assert.is_true(groups["DiffDelete"])
     end)
 end)

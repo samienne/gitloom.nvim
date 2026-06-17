@@ -1683,6 +1683,91 @@ local function format_diff(patch, palette)
     return rows
 end
 
+--- Parse a patch into a per-file diffstat (specification.md §11.4). Each entry
+--- carries the display path, insertion/deletion counts, a binary flag, and
+--- `start` — the 1-based index (into the patch's split lines) of that file's
+--- `diff --git` line, used as the jump target. Renames (a/ != b/) show as
+--- "old => new". Pure; exposed for testing.
+---@param patch string?
+---@return { path: string, added: integer, removed: integer, binary: boolean, start: integer }[]
+local function diffstat_files(patch)
+    local files = {}
+    local cur = nil
+    for i, line in ipairs(vim.split(patch or "", "\n")) do
+        local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
+        if a then
+            cur = { a = a, b = b, added = 0, removed = 0, binary = false, start = i }
+            files[#files + 1] = cur
+        elseif cur then
+            if line:sub(1, 13) == "Binary files " then
+                cur.binary = true
+            elseif line:sub(1, 3) ~= "+++" and line:sub(1, 1) == "+" then
+                cur.added = cur.added + 1
+            elseif line:sub(1, 3) ~= "---" and line:sub(1, 1) == "-" then
+                cur.removed = cur.removed + 1
+            end
+        end
+    end
+    for _, f in ipairs(files) do
+        f.path = (f.a ~= f.b) and (f.a .. " => " .. f.b) or f.b
+        f.a, f.b = nil, nil
+    end
+    return files
+end
+
+-- Max width of the +/- bar in a diffstat row; long files scale down to fit.
+local DIFFSTAT_BAR_MAX = 40
+
+--- Render a diffstat (specification.md §11.4) into compose-style rows: a summary
+--- row ("N files changed, …") then one row per file (path, count, colored +/-
+--- bar) in `files` order — so the caller can map each file row back to its
+--- `diffstat_files` entry by position. The bar uses palette.diff.add/.delete.
+--- Pure; exposed for testing.
+---@param files { path: string, added: integer, removed: integer, binary: boolean }[]
+---@param palette GraphPalette?
+---@return table[]
+local function format_diffstat(files, palette)
+    palette = palette or {}
+    local diff = palette.diff or {}
+    local rows = {}
+
+    local total_add, total_del, max_path, max_total = 0, 0, 0, 1
+    for _, f in ipairs(files) do
+        total_add = total_add + f.added
+        total_del = total_del + f.removed
+        max_path = math.max(max_path, vim.fn.strdisplaywidth(f.path))
+        max_total = math.max(max_total, f.added + f.removed)
+    end
+
+    local function plural(c, word)
+        return ("%d %s%s"):format(c, word, c == 1 and "" or "s")
+    end
+    local summary = plural(#files, "file") .. " changed"
+    if total_add > 0 then summary = summary .. ", " .. plural(total_add, "insertion") .. "(+)" end
+    if total_del > 0 then summary = summary .. ", " .. plural(total_del, "deletion") .. "(-)" end
+    rows[#rows + 1] = highlight_text(summary, palette.author)
+
+    local scale = math.min(1, DIFFSTAT_BAR_MAX / max_total)
+    for _, f in ipairs(files) do
+        local count = f.binary and "Bin" or tostring(f.added + f.removed)
+        local pad = string.rep(" ", max_path - vim.fn.strdisplaywidth(f.path))
+        local segs = {
+            highlight_text("  " .. f.path, palette.message),
+            highlight_text(pad .. " | ", palette.author),
+            highlight_text(("%3s "):format(count), palette.author),
+        }
+        if not f.binary then
+            local add_bar = (f.added > 0) and math.max(1, math.floor(f.added * scale + 0.5)) or 0
+            local del_bar = (f.removed > 0) and math.max(1, math.floor(f.removed * scale + 0.5)) or 0
+            if add_bar > 0 then segs[#segs + 1] = highlight_text(string.rep("+", add_bar), diff.add) end
+            if del_bar > 0 then segs[#segs + 1] = highlight_text(string.rep("-", del_bar), diff.delete) end
+        end
+        rows[#rows + 1] = compose(segs)
+    end
+
+    return rows
+end
+
 --- Fetch one commit's full detail via `git show -s` (specification.md §11.1).
 --- Buffered; resolves the raw `%x1f`-delimited output as a single string (the
 --- body `%B` is last so its newlines survive). On-demand only — not part of the
@@ -1738,9 +1823,11 @@ end
 local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 
 --- Open the commit view (specification.md §11) for `commit`: a read-only snacks
---- float that fetches the commit's detail on demand and renders it. `q` closes
---- it (snacks default). The pure pieces (parse_show / format_commit_detail) do
---- the work; this is just window + IO glue.
+--- float that fetches the commit's detail + diff on demand and renders the
+--- metadata, the diffstat, and the diff. `q` closes it (snacks default); `<CR>`
+--- on a diffstat file line jumps to that file's diff section (§11.4). The pure
+--- pieces (parse_show / format_commit_detail / format_diff / diffstat_files /
+--- format_diffstat) do the work; this is just window + IO glue.
 ---@param opts GraphOptions
 ---@param commit Commit
 local function open_commit_view(opts, commit)
@@ -1761,6 +1848,10 @@ local function open_commit_view(opts, commit)
     })
     local buf = w.buf
 
+    -- Maps a diffstat file row's buffer line -> the buffer line where that
+    -- file's diff section begins. Rebuilt on each render; <CR> jumps by it.
+    local file_jumps = {}
+
     local function set_lines(lines)
         if not vim.api.nvim_buf_is_valid(buf) then return end
         vim.bo[buf].modifiable = true
@@ -1770,24 +1861,55 @@ local function open_commit_view(opts, commit)
         vim.bo[buf].readonly = true
     end
 
+    -- <CR> on a diffstat file line jumps to that file's diff section (§11.4),
+    -- scrolling it to the top of the view; elsewhere it does nothing. The jump
+    -- uses the `G` motion (a jump command) so the diffstat position lands in the
+    -- jumplist — `<C-o>` / `<C-i>` then move back and forth between the diffstat
+    -- and the file's diff.
+    vim.keymap.set("n", "<CR>", function()
+        if not vim.api.nvim_win_is_valid(w.win) then return end
+        local target = file_jumps[vim.api.nvim_win_get_cursor(w.win)[1]]
+        if target then
+            vim.api.nvim_win_call(w.win, function()
+                vim.cmd("normal! " .. target .. "Gzt")
+            end)
+        end
+    end, { buffer = buf, nowait = true, silent = true })
+
     set_lines({ "Loading…" })
 
-    -- Render the metadata (format_commit_detail) then the diff (format_diff)
-    -- into one buffer: real lines + namespaced extmarks (the diff is highlighted
-    -- this way, not via filetype=diff, so the metadata header stays clean §11.3).
+    -- Render the metadata (format_commit_detail), then the diffstat
+    -- (format_diffstat), then the diff (format_diff) into one buffer: real lines
+    -- + namespaced extmarks (the diff is highlighted this way, not via
+    -- filetype=diff, so the metadata header stays clean §11.3). While laying out
+    -- the rows, record each diffstat file row -> its diff section line (§11.4).
     local function render(meta_output, diff_output)
         if not vim.api.nvim_buf_is_valid(buf) then return end
+        file_jumps = {}
         local detail = parse_show(meta_output)
         local rows = format_commit_detail(detail, {
             decorations = decoration_texts(commit),
             palette = opts.palette,
         })
+
         -- `git show --format=` prints a leading blank line; drop it.
         local patch = (diff_output or ""):gsub("^%s+", "")
         if patch ~= "" then
+            local files = diffstat_files(patch)
             rows[#rows + 1] = highlight_text("")
+            local stat_start = #rows + 1 -- buffer line of the diffstat summary row
+            for _, r in ipairs(format_diffstat(files, opts.palette)) do
+                rows[#rows + 1] = r
+            end
+            rows[#rows + 1] = highlight_text("")
+            local diff_start = #rows + 1 -- buffer line of the first patch line
             for _, r in ipairs(format_diff(patch, opts.palette)) do
                 rows[#rows + 1] = r
+            end
+            -- Summary sits at stat_start; file j at stat_start + j. Its diff
+            -- section starts at diff_start + (start - 1).
+            for j, f in ipairs(files) do
+                file_jumps[stat_start + j] = diff_start + f.start - 1
             end
         end
 
@@ -2234,6 +2356,8 @@ M._internal = {
     parse_show = parse_show,
     format_commit_detail = format_commit_detail,
     format_diff = format_diff,
+    diffstat_files = diffstat_files,
+    format_diffstat = format_diffstat,
     build_graph = build_graph,
     get_track_chars = get_track_chars,
     reset_ids = reset_ids,

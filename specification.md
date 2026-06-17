@@ -420,7 +420,9 @@ The view shows, in order:
    noise);
 5. the parent commits (abbreviated hashes), when any;
 6. the full commit message — subject and body — indented;
-7. the commit's diff (the patch), shown below the message.
+7. the **diffstat** — the list of changed files with per-file insertion /
+   deletion counts (§11.4) — shown between the message and the diff;
+8. the commit's diff (the patch), shown below the diffstat.
 
 The author and committer dates are shown as `git show` renders them
 (`--date=iso`); the structured `Timestamp` formatting of §6 applies to the graph
@@ -428,7 +430,7 @@ date column, not here.
 
 ### 11.3 Diff
 
-The commit view shows the commit's diff below the message. Highlighting is
+The commit view shows the commit's diff below the diffstat (§11.4). Highlighting is
 **line-level** (matching git's default and lazygit/tig): each patch line is
 colored by its role — added, removed, hunk header (`@@ … @@`), and file header
 (`diff --git`, `index`, `---`/`+++`, mode/rename/new-file lines); context lines
@@ -437,3 +439,22 @@ always-defined UI groups by default, applied as extmarks — the view does **not
 switch the buffer to `filetype=diff`, so the custom metadata header above stays
 unaffected. Language-aware (intra-line) syntax highlighting of the diff content
 is a possible future enhancement.
+
+### 11.4 Changed-files list (diffstat)
+
+Between the message and the diff, the commit view shows a **diffstat**: a
+summary line (`N files changed, X insertions(+), Y deletions(-)`) followed by one
+line per changed file — the path, its insertion/deletion counts, and a colored
+`+`/`-` bar (the `+` segment in `palette.diff.add`, the `-` in
+`palette.diff.delete`; §8). Renames are shown as `old => new`; a binary file
+shows `Bin` instead of counts.
+
+The diffstat is **derived from the same patch** that §11.3 renders — not a
+separate query — so the file list, the counts, and each file's location in the
+diff all come from one source.
+
+Pressing `<CR>` on a changed-file line **jumps** the cursor to that file's
+section in the diff below (scrolling it to the top of the view). This makes the
+diffstat a table of contents for the diff. The jump is recorded in the
+jumplist, so `<C-o>` / `<C-i>` move back to the diffstat and forward to the diff
+section as usual. `<CR>` elsewhere in the view does nothing.

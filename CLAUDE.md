@@ -132,7 +132,9 @@ Coverage:
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
   `parse_show` (git-show field splitting, multi-line body, empty parents),
   `format_commit_detail` (committer-differs branch, refs line, body indent),
-  and `format_diff` (add/delete vs `+++`/`---`, hunk + file headers, context)
+  `format_diff` (add/delete vs `+++`/`---`, hunk + file headers, context),
+  `diffstat_files` (per-file counts, `start` offsets, rename, binary), and
+  `format_diffstat` (summary totals, per-file rows)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
@@ -145,8 +147,9 @@ Coverage:
 only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
-`format_diff`, `build_graph`, `get_track_chars`, `reset_ids`.
-`listview._internal` exposes `pack_right` (the right-pin budget packer).
+`format_diff`, `diffstat_files`, `format_diffstat`, `build_graph`,
+`get_track_chars`, `reset_ids`. `listview._internal` exposes `pack_right` (the
+right-pin budget packer).
 
 ### Layout testing approach
 
