@@ -16,10 +16,29 @@ local merge_style_index = 1
 -- Toggled with `i` in the graph window (see M.open).
 local show_lane_ids = true
 
--- The graph window footer: the current merge/split mode plus the key hints.
+-- Graph window keybindings — the single source of truth for the `?` help
+-- float. Handlers are registered in M.open.
+local KEYBINDS = {
+    { "q", "Close the graph" },
+    { "m", "Cycle the merge/split rendering style" },
+    { "K", "Lane breakdown for the commit under the cursor" },
+    { "i", "Toggle the per-lane id column" },
+    { "?", "Show this help" },
+}
+
+-- The graph window footer: live status (the current mode for now; more later)
+-- plus a hint to the help float.
 local function footer_text()
-    return ("Mode: %s    q: quit   m: cycle   K: lane info   i: toggle ids")
-        :format(MERGE_STYLES[merge_style_index].name)
+    return ("Mode: %s    ?: help"):format(MERGE_STYLES[merge_style_index].name)
+end
+
+-- Lines for the `?` help float.
+local function help_lines()
+    local lines = { "gitloom keys", "" }
+    for _, kb in ipairs(KEYBINDS) do
+        lines[#lines + 1] = ("  %-2s  %s"):format(kb[1], kb[2])
+    end
+    return lines
 end
 
 local function make_future()
@@ -1484,6 +1503,13 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.refresh()
         end
+    end
+    -- ?: float listing all keybindings.
+    opts.win.keys["?"] = function()
+        vim.lsp.util.open_floating_preview(help_lines(), "", {
+            border = "rounded",
+            focusable = true,
+        })
     end
 
     lv = listview.open(listview_options)
