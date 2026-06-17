@@ -44,52 +44,66 @@ exists primarily to exercise and validate the graph algorithm.
 
 ## 3. Data source
 
-### 3.1 Branches
+Two independent queries, joined by commit hash.
 
-Branch heads are read via `git for-each-ref` over `refs/heads`, producing a
-`name → object-hash` mapping. This populates the repository's branch list
-ahead of the commit stream.
-
-### 3.2 Commits
+### 3.1 Commits
 
 Commits are read via `git log` with:
 
 - `--topo-order` — topological ordering (children before parents).
 - `--parents` — full parent hash list per commit.
-- `--decorate=full` — ref decorations (branches, tags, HEAD).
-- a `branches` refspec, default `--all`.
+- a refspec, default `--all`.
 
-Each commit carries: hash, parent hashes, author, author date, subject,
-and parsed ref decorations.
+Each commit carries: hash, parent hashes, author, author date, subject. Refs
+are **not** taken from `--decorate`; they come from §3.2.
+
+### 3.2 Refs
+
+Refs are read via `git for-each-ref` over `refs/heads`, `refs/remotes`, and
+`refs/tags`, yielding for each ref its refname, target hash, and — for
+annotated tags — the dereferenced commit hash. The current branch is read via
+`git symbolic-ref` (HEAD). Each ref is resolved to the `Commit` it points at
+by hash (§4.1).
+
+Using a dedicated, structured query rather than parsing `git log --decorate`
+makes ref discovery robust and makes remote branches and annotated tags
+first-class (the decorate field conflated them and dropped remotes).
 
 ## 4. Data model
 
 ```
-Commit  = { hash, parents: Commit[], children: Commit[], refs: Refs,
-            author, date, message }
-Refs    = { branches: Ref[], tags: Ref[], symbols: {from,to}[], raw: string[] }
-Ref     = { name }
+Commit = { hash, parents: Commit[], children: Commit[], refs: Ref[],
+           author, date, message }
+Ref    = { name, kind, commit: Commit }
 ```
 
-- Commits are identity-stable: a commit referenced as a parent before it is
-  seen in the log is the *same* object once its own log line arrives.
-- Every parent hash resolves to a `Commit`. A parent not present in the
-  fetched range still exists as a (sparse) `Commit` so the graph stays
-  connected.
+- `Ref.kind` is one of `local`, `remote`, `tag`, `head`.
+- `Ref.commit` is the `Commit` the ref points at — a **direct reference, not a
+  hash**. `Commit.refs` lists the refs pointing at it (the inverse). A
+  name → `Ref` registry is kept on the repository.
+- Commits are identity-stable: a commit referenced as a parent (or by a ref)
+  before it is seen in the log is the *same* object once its own log line
+  arrives.
+- Every hash reference resolves to a `Commit`: parent hashes and ref targets
+  become `Commit` references once resolved. A target not in the fetched range
+  still exists as a (sparse) `Commit` placeholder so the graph and refs stay
+  connected, filled in when (if) its log line arrives.
 - Child links are the inverse of parent links.
 
-### 4.1 Ref parsing (`%D` decorate field)
+### 4.1 Ref resolution
 
-Given the comma-separated decorate string, each entry is classified:
+Each ref is classified by its refname and resolved to its target commit:
 
-| Entry form                  | Classified as | Notes |
-|-----------------------------|---------------|-------|
-| `HEAD -> <ref>`             | `symbols` + `branches` | `from`/`to`; target also recorded as a branch |
-| `tag: <ref>`                | `tags`        | name is the text after `tag: ` |
-| `refs/heads/<name>`         | `branches`    | name is `<name>` |
-| anything else               | `raw`         | kept verbatim (e.g. remotes) |
+| refname                          | kind     | name shown            |
+|----------------------------------|----------|-----------------------|
+| `refs/heads/<name>`              | `local`  | `<name>`              |
+| `refs/remotes/<remote>/<name>`   | `remote` | `<remote>/<name>`     |
+| `refs/tags/<name>`               | `tag`    | `<name>` (annotated tags resolved to their commit via the dereferenced hash) |
+| HEAD (symbolic)                  | `head`   | the branch HEAD points at (or the commit, if detached) |
 
-An empty decorate string yields all-empty ref lists.
+`refs/remotes/<remote>/HEAD` (the remote's default-branch symref) is skipped.
+The target hash is looked up in the commit table; a missing target yields a
+sparse `Commit` placeholder (as above).
 
 ## 5. Graph layout
 
@@ -189,7 +203,9 @@ A commit row displays, left to right:
 1. author date
 2. author name
 3. graph lanes (glyphs)
-4. ref decorations — branches as `(name)`, tags as `[name]`
+4. ref decorations, by kind — local branches as `(name)`, remote branches as
+   `(remote/name)` (dimmed), tags as `[name]`, and a `HEAD` marker on the
+   current branch
 5. commit subject
 
 Columns are width-aligned across visible rows. Each field is colored by its
