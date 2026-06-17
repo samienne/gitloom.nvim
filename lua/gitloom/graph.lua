@@ -16,6 +16,12 @@ local merge_style_index = 1
 -- Toggled with `i` in the graph window (see M.open).
 local show_lane_ids = true
 
+-- The graph window footer: the current merge/split mode plus the key hints.
+local function footer_text()
+    return ("Mode: %s    q: quit   m: cycle   K: lane info   i: toggle ids")
+        :format(MERGE_STYLES[merge_style_index].name)
+end
+
 local function make_future()
     local state = {
         callback = nil,
@@ -1280,7 +1286,7 @@ function M.open(folder, opts)
             width = 0.80,
             height = 0.80,
             title = "GraphView",
-            footer = "q: quit   m: cycle style   K: lane info   i: toggle ids",
+            footer = footer_text(),
         },
         palette = {
             date = "Title",
@@ -1451,7 +1457,14 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.refresh()
         end
-        vim.notify("gitloom: " .. MERGE_STYLES[merge_style_index].name .. " style")
+        -- Reflect the new mode live in the footer (no transient notify).
+        if lv and lv.win and lv.win.win then
+            lv.win.opts.footer = footer_text()
+            pcall(vim.api.nvim_win_set_config, lv.win.win, {
+                footer = lv.win.opts.footer,
+                footer_pos = "center",
+            })
+        end
     end
     -- K: float with the full lane breakdown for the commit under the cursor.
     opts.win.keys.K = function(self)
