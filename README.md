@@ -87,7 +87,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `q` | Close the graph |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
-| `i` | Toggle the per-lane id column shown before the message (debug) |
+| `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
 
 The footer shows the active mode (e.g. `Mode: inline`).
@@ -100,15 +100,19 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 {
     win = {
         border = "rounded",
-        width = 0.80,
-        height = 0.80,
+        -- Default: nearly full screen (~2-char margin each edge). A fraction
+        -- (0–1) gives a proportional size; a number > 1 is absolute columns/rows.
+        width = function() return math.max(vim.o.columns - 4, 1) end,
+        height = function() return math.max(vim.o.lines - 4, 1) end,
         title = "GraphView",
-        footer = "Press 'q' to quit",
+        footer = "(status + key hints)",
     },
     palette = {
         date = "Title",
         author = "Comment",
-        branch = "WarningMsg",
+        branch = "WarningMsg",   -- local branches (name)
+        remote = "Comment",      -- remote branches (remote/name)
+        head = "Special",        -- HEAD marker on the current branch
         message = nil,
         tags = "Comment",
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },

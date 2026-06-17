@@ -101,14 +101,18 @@ listview.open(listview_options)
    ▼
 on_controller(controller)
    │
-   ├─ fetch_branches()           git for-each-ref refs/heads  → repo.branches/heads
+   ├─ fetch_refs()               git for-each-ref heads/remotes/tags
+   │      │  per ref: classify_ref → kind/name; resolve target hash to a
+   │      │  Commit (placeholder if unseen); link Ref ↔ Commit; register
+   │      ▼
+   ├─ fetch_head()               git symbolic-ref → mark current branch (head Ref)
    │      │ (Future)
    │      ▼
-   └─ fetch_commits()            git log --all --topo-order --parents --decorate=full
+   └─ fetch_commits()            git log --all --topo-order --parents
           │  per commit line:
           │    parse_commit_line → Commit
-          │    merge into repo.commits (identity-preserving)
-          │    resolve parent hashes → Commit refs (+ child links, dummy parents)
+          │    merge into repo.commits (fills ref placeholders, keeps their refs)
+          │    resolve parent hashes → Commit refs (+ child links, placeholders)
           │    append OrderItem to repo.order
           │    refresh_tracks(order, #order)   ← incremental lane layout
           │    controller.insert(order_item)   ← inserts a blank buffer line
@@ -133,30 +137,41 @@ on_redraw(top, bottom)
 
 ### Git I/O
 
-- `fetch_branches(opts)` — `git for-each-ref --format="%(refname:short) %(objectname)" refs/heads`.
-- `fetch_commits(opts)` — `git log --remotes --topo-order --decorate=full --parents`
-  with a `%x1f`-delimited pretty-format (`%H %P %an %ai %s %D`).
+- `fetch_refs(repo)` — `git for-each-ref --format="%(objectname) %(refname)
+  %(*objectname)" refs/heads refs/remotes refs/tags` (the deref hash resolves
+  annotated tags).
+- `fetch_head(repo)` — `git symbolic-ref --short --quiet HEAD` for the current
+  branch.
+- `fetch_commits(opts)` — `git log --topo-order --parents` with a
+  `%x1f`-delimited pretty-format (`%H %P %an %ai %s`). No `--decorate`; refs
+  are a separate query (specification.md §3).
 
-Both run via `vim.fn.jobstart` (no explicit `cwd`, so they observe Neovim's
-working directory) and resolve a `Future` on `on_exit`. Output is parsed
-line-by-line in `on_stdout`.
+All run via `vim.fn.jobstart` (no explicit `cwd`, so they observe Neovim's
+working directory) and resolve a `Future` on `on_exit`. The controller chains
+them refs → head → commits.
 
-### Parsing
+### Parsing / ref resolution
 
 - `parse_commit_line(line)` — splits the `%x1f` fields into a `Commit`
-  (hash, parent hashes, author, date, message, parsed refs).
-- `parse_refs(str)` — parses the `%D` decorate field into `branches`, `tags`,
-  `symbols` (`HEAD -> ...`), and `raw` (unrecognized).
+  (hash, parent hashes, author, date, message; an empty `refs` list).
+- `classify_ref(refname)` — maps a full refname to a `(kind, name)`:
+  `refs/heads/*` → `local`, `refs/remotes/*` → `remote` (skipping the remote's
+  `HEAD` symref), `refs/tags/*` → `tag`; nil for anything else.
+- `add_ref` / `get_or_create_commit` — resolve a ref's target hash to a
+  `Commit` (placeholder if unseen) and link them by reference.
 
-Both are pure and exposed via `graph._internal` for testing.
+`parse_commit_line` and `classify_ref` are pure and exposed via
+`graph._internal` for testing.
 
 ### DAG construction
 
-In the `fetch_commits` `on_item` callback, commits are merged into
-`repo.commits` keyed by hash (so a commit seen first as a parent placeholder
-is later filled in — identity is preserved). Parent hash strings are resolved
-to `Commit` references; unseen parents get a dummy `Commit` so the graph is
-always connected. Child links are populated on the parent side.
+Commits are merged into `repo.commits` keyed by hash via
+`get_or_create_commit`, so a commit first seen as a parent or ref target is a
+placeholder later filled in by its log line (identity preserved; its refs are
+kept). Parent hash strings resolve to `Commit` references; unseen parents get
+a placeholder so the graph stays connected. Child links are populated on the
+parent side. Refs are resolved the same way (a `Ref` holds a direct `Commit`
+reference, and `Commit.refs` is the inverse).
 
 ### Lane layout (the core algorithm)
 

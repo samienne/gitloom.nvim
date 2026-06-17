@@ -13,8 +13,8 @@ local MERGE_STYLES = {
 local merge_style_index = 1
 
 -- Whether the per-lane id column (a debug aid) is shown before the message.
--- Toggled with `i` in the graph window (see M.open).
-local show_lane_ids = true
+-- Hidden by default; toggled with `i` in the graph window (see M.open).
+local show_lane_ids = false
 
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
@@ -106,24 +106,80 @@ local function highlight_text(text, hl)
 end
 
 
-local function fetch_branches(opts)
-    opts = opts or {}
+--- Classify a full refname into a ref kind and the name to show.
+--- Returns nil to skip the ref (e.g. a remote's HEAD symref).
+---@param refname string
+---@return string|nil kind  "local"|"remote"|"tag"
+---@return string|nil name
+local function classify_ref(refname)
+    local name = refname:match("^refs/heads/(.+)$")
+    if name then
+        return "local", name
+    end
+    name = refname:match("^refs/remotes/(.+)$")
+    if name then
+        if name:match("/HEAD$") then
+            return nil -- skip the remote's default-branch symref
+        end
+        return "remote", name
+    end
+    name = refname:match("^refs/tags/(.+)$")
+    if name then
+        return "tag", name
+    end
+    return nil
+end
 
+--- The Commit for `hash`, created as a sparse placeholder if not seen yet.
+--- The placeholder is filled in when its `git log` line arrives (identity
+--- preserved), so refs and parents can be resolved in any order.
+---@param repo Repo
+---@param hash string
+---@return Commit
+local function get_or_create_commit(repo, hash)
+    local commit = repo.commits[hash]
+    if not commit then
+        commit = { hash = hash, parents = {}, children = {}, refs = {} }
+        repo.commits[hash] = commit
+    end
+    return commit
+end
+
+--- Resolve a ref to its target Commit and link them (direct references).
+---@param repo Repo
+---@param name string
+---@param kind string
+---@param hash string
+local function add_ref(repo, name, kind, hash)
+    local commit = get_or_create_commit(repo, hash)
+    ---@type Ref
+    local ref = { name = name, kind = kind, commit = commit }
+    commit.refs = commit.refs or {}
+    table.insert(commit.refs, ref)
+    repo.refs[ref.kind == "head" and "HEAD" or name] = ref
+end
+
+--- Read all refs via `git for-each-ref` and resolve each to its commit.
+--- Output line: "<objectname> <refname> [<*objectname>]" — the dereferenced
+--- hash is present (and used) for annotated tags.
+---@param repo Repo
+local function fetch_refs(repo)
     local future, promise = make_future()
 
     vim.fn.jobstart(
-        { "git", "for-each-ref", "--format=%(refname:short) %(objectname)", "refs/heads" },
+        { "git", "for-each-ref", "--format=%(objectname) %(refname) %(*objectname)",
+            "refs/heads", "refs/remotes", "refs/tags" },
         {
             stdout_buffered = true,
             on_stdout = function(_, lines)
                 for _, line in ipairs(lines) do
                     if line ~= "" then
-                        local name, hash = line:match("^(%S+)%s+(%x+)$")
-
-                        if name and hash then
-                            if opts.on_item then
-                                opts.on_item(name, hash)
-                            end
+                        local parts = vim.split(line, " ")
+                        local hash, refname, deref = parts[1], parts[2], parts[3]
+                        local kind, name = classify_ref(refname or "")
+                        if kind and hash then
+                            local target = (deref and deref ~= "") and deref or hash
+                            add_ref(repo, name, kind, target)
                         end
                     end
                 end
@@ -136,58 +192,44 @@ local function fetch_branches(opts)
     return future
 end
 
-local function parse_refs(str)
-    ---@type Refs
-    local result = {
-        branches = {},
-        tags = {},
-        symbols = {},
-        raw = {}
-    }
+--- Mark the current branch's commit with a `head` ref (skipped when detached).
+---@param repo Repo
+local function fetch_head(repo)
+    local future, promise = make_future()
 
-    if str == "" then
-        return result
-    end
+    vim.fn.jobstart(
+        { "git", "symbolic-ref", "--short", "--quiet", "HEAD" },
+        {
+            stdout_buffered = true,
+            on_stdout = function(_, lines)
+                local name = lines[1]
+                if name and name ~= "" then
+                    repo.head = name
+                    local localref = repo.refs[name]
+                    if localref then
+                        add_ref(repo, "HEAD", "head", localref.commit.hash)
+                    end
+                end
+            end,
+            on_exit = function()
+                promise.resolve()
+            end,
+        })
 
-    for entry in string.gmatch(str, "([^,]+)") do
-        entry = vim.trim(entry)
-
-        local left, right = entry:match("^(.-)%s*%-%>%s(.+)$")
-        if left and right then
-            table.insert(result.symbols, { from = left, to = right })
-            table.insert(result.branches, { name = right })
-            goto continue
-        end
-
-        local tag = entry:match("^tag:%s*(.+)$")
-        if tag then
-            table.insert(result.tags, { name = tag })
-            goto continue
-        end
-
-        local head = entry:match("^refs/heads/(.+)$")
-        if head then
-            table.insert(result.branches, { name = head })
-            goto continue
-        end
-
-        table.insert(result.raw, entry)
-
-        ::continue::
-    end
-
-    return result
+    return future
 end
 
+--- Parse one `git log` line. Fields are `%x1f`-separated:
+--- hash, parent hashes, author, date, subject. Refs are NOT here — they come
+--- from `fetch_refs` (§3.2); a fresh commit starts with an empty refs list.
 local function parse_commit_line(line)
     local fields = vim.split(line, "\x1f")
 
     local hash = fields[1]
-    local parents = vim.split(fields[2], " ")
+    local parents = vim.split(fields[2] or "", " ")
     local author = fields[3]
     local date = fields[4]
     local subject = fields[5]
-    local refs = parse_refs(fields[6])
 
     if not hash then
         return
@@ -207,7 +249,7 @@ local function parse_commit_line(line)
         date = date,
         message = subject,
         loaded = true,
-        refs = refs
+        refs = {},
     }
 end
 
@@ -220,8 +262,9 @@ local function fetch_commits(opts)
         opts.branch = { opts.branch }
     end
 
-    local command = { "git", "log", "--remotes", "--topo-order", "--decorate=full", "--parents", unpack(opts.branch),
-        "--pretty=format:%H%x1f%P%x1f%an%x1f%ai%x1f%s%x1f%D" }
+    -- Refs come from fetch_refs (§3.2), so no --decorate here.
+    local command = { "git", "log", "--topo-order", "--parents", unpack(opts.branch),
+        "--pretty=format:%H%x1f%P%x1f%an%x1f%ai%x1f%s" }
     if opts.count then
         table.insert(command, "-n")
         table.insert(command, tostring(opts.count))
@@ -901,16 +944,14 @@ end
 
 ---@class Ref
 ---@field name string
-
----@class Refs
----@field branches Ref[]
----@field tags Ref[]
+---@field kind "local"|"remote"|"tag"|"head"
+---@field commit Commit   the commit this ref points at (a direct reference)
 
 ---@class Commit
 ---@field hash string
 ---@field parents Commit[]|string[]
 ---@field children Commit[]|string[]
----@field refs Refs
+---@field refs Ref[]
 ---@field author string
 ---@field date string
 ---@field message string
@@ -1149,33 +1190,29 @@ end
 local function display_item(opts, item, selection_state)
     local palette = opts.palette
 
-    local branches = ""
-    for _, branch in ipairs(item.commit.refs.branches or {}) do
-        branches = branches .. "(" .. branch.name .. ")"
-    end
-    if branches ~= "" then
-        branches = branches .. " "
-    end
-
-    local tags = ""
-    for _, tag in ipairs(item.commit.refs.tags or {}) do
-        tags = tags .. "[" .. tag.name .. "]"
-    end
-    if tags ~= "" then
-        tags = tags .. " "
-    end
-
-    --[[
-            local symbols = ""
-            for _, symbol in ipairs(item.commit.refs.symbols or {}) do
-                symbols = symbols .. "{" .. symbol.name .. "}"
+    -- Refs by kind: HEAD marker, local (name), remote (remote/name, dimmed),
+    -- tag [name]. Each ref points directly at its commit (§4).
+    local REF_HL = { head = palette.head, ["local"] = palette.branch, remote = palette.remote, tag = palette.tags }
+    local REF_FMT = {
+        head = function(_) return "HEAD" end,
+        ["local"] = function(r) return "(" .. r.name .. ")" end,
+        remote = function(r) return "(" .. r.name .. ")" end,
+        tag = function(r) return "[" .. r.name .. "]" end,
+    }
+    local get_refs = function(commit)
+        local parts = {}
+        for _, kind in ipairs({ "head", "local", "remote", "tag" }) do
+            for _, ref in ipairs(commit.refs or {}) do
+                if ref.kind == kind then
+                    parts[#parts + 1] = highlight_text(REF_FMT[kind](ref), REF_HL[kind])
+                end
             end
-            if symbols ~= "" then
-                symbols = symbols .. " "
-            end
-            --]]
-
-    --tracks = ""
+        end
+        if #parts > 0 then
+            parts[#parts + 1] = highlight_text(" ")
+        end
+        return compose(parts)
+    end
 
     local get_tracks = function(tracks)
         if not show_lane_ids then
@@ -1201,11 +1238,7 @@ local function display_item(opts, item, selection_state)
                 get_track_chars(opts, item.tracks),
                 compose({
                     get_tracks(item.tracks),
-                    highlight_text(branches, palette.branch),
-                    highlight_text(tags, palette.tags),
-                    --highlight_text(vim.inspect(item.commit.refs.symbols, { newline=" " }), palette.tags),
-                    --highlight_text(vim.inspect(item.commit.refs.raw, { newline=" " }), palette.tags),
-
+                    get_refs(item.commit),
                     highlight_text(item.commit.message, palette.message) or "",
                 }),
             }
@@ -1267,8 +1300,8 @@ end
 
 ---@class GraphWinOptions
 ---@field border string
----@field width number
----@field height number
+---@field width number|fun():number   fraction (0–1), absolute (>1), or a function
+---@field height number|fun():number
 ---@field title string
 ---@field footer string
 
@@ -1276,6 +1309,8 @@ end
 ---@field date? string
 ---@field author? string
 ---@field branch? string
+---@field remote? string
+---@field head? string
 ---@field message? string
 ---@field tags? string
 ---@field tracks? string[]
@@ -1302,8 +1337,11 @@ function M.open(folder, opts)
     local defaults = {
         win = {
             border = "rounded",
-            width = 0.80,
-            height = 0.80,
+            -- Nearly full screen: a ~2-char margin on each edge (snacks treats
+            -- a returned size >= 1 as absolute and centers it). Re-evaluated on
+            -- resize.
+            width = function() return math.max(vim.o.columns - 4, 1) end,
+            height = function() return math.max(vim.o.lines - 4, 1) end,
             title = "GraphView",
             footer = footer_text(),
         },
@@ -1311,6 +1349,8 @@ function M.open(folder, opts)
             date = "Title",
             author = "Comment",
             branch = "WarningMsg",
+            remote = "Comment",
+            head = "Special",
             message = nil,
             tags = "Comment",
             tracks = {
@@ -1341,19 +1381,16 @@ function M.open(folder, opts)
     reset_ids()
 
     ---@class Repo
-    ---@field commits table<string, Commit>
-    ---@field order Commit[]
-    ---@field branches string[]
-    ---@field heads string[]
-    ---@field refresh_scheduled boolean
+    ---@field commits table<string, Commit>  hash → Commit (the resolution table)
+    ---@field order OrderItem[]
+    ---@field refs table<string, Ref>        name → Ref ("HEAD" for the head)
+    ---@field head? string                   current branch name
 
     ---@type Repo
     local repo = {
         commits = {},
         order = {},
-        branches = {},
-        heads = {},
-        refresh_scheduled = false,
+        refs = {},
     }
 
     local palette = opts.palette
@@ -1370,27 +1407,24 @@ function M.open(folder, opts)
             return display_item(opts, item, selection_state)
         end,
         on_controller = function(controller)
-            fetch_branches({
-                on_item = function(name, hash)
-                    repo.branches[name] = hash
-                    table.insert(repo.heads, { name = name, hash = hash })
-                end,
-            }).next(function()
+            -- Refs first: they create sparse Commit placeholders with refs
+            -- attached, which the commit stream then fills in (identity
+            -- preserved), so rows render with their refs already present.
+            fetch_refs(repo).next(function()
+                return fetch_head(repo)
+            end).next(function()
                 return fetch_commits({
                     branch = opts.branches or { "--all" },
                     ---@param item Commit
                     on_item = function(item)
-                        --if not repo.commits[item.hash] then
-                        -- New commit
-
                         local existing = repo.commits[item.hash]
                         if existing then
-                            existing.hash = item.hash
+                            -- Fill the placeholder; keep its already-resolved refs.
                             existing.author = item.author
                             existing.date = item.date
-                            existing.refs = item.refs
                             existing.parents = item.parents
                             existing.message = item.message
+                            existing.loaded = true
 
                             item = existing
                         else
@@ -1401,13 +1435,7 @@ function M.open(folder, opts)
                         -- Convert parent hashes to references
                         local newParents = {}
                         for _, p in ipairs(item.parents) do
-                            local parent = repo.commits[p]
-                            if not parent then
-                                -- Add a dummy parent if not seen yet
-                                parent = { hash = p, parents = {}, children = {}, refs = {} }
-                                repo.commits[p] = parent
-                            end
-
+                            local parent = get_or_create_commit(repo, p)
                             table.insert(parent.children, item)
                             table.insert(newParents, parent)
                         end
@@ -1518,7 +1546,7 @@ end
 
 -- Internal functions exposed for testing only. Not part of the public API.
 M._internal = {
-    parse_refs = parse_refs,
+    classify_ref = classify_ref,
     parse_commit_line = parse_commit_line,
     build_graph = build_graph,
     get_track_chars = get_track_chars,

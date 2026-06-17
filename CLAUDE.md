@@ -123,7 +123,7 @@ Tests use plenary.busted.
 
 Coverage:
 
-- `tests/refs_spec.lua` — `parse_refs`
+- `tests/refs_spec.lua` — `classify_ref`
 - `tests/commit_spec.lua` — `parse_commit_line`
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
@@ -131,8 +131,8 @@ Coverage:
   tests survive visualization changes; see below).
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
-only** (not the public API): `parse_refs`, `parse_commit_line`, `build_graph`,
-`get_track_chars`, `reset_ids`.
+only** (not the public API): `classify_ref`, `parse_commit_line`,
+`build_graph`, `get_track_chars`, `reset_ids`.
 
 ### Layout testing approach
 
