@@ -129,6 +129,10 @@ Coverage:
   (the right-pinned ref width budget)
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
   date formatters (`format_absolute`, `format_relative`)
+- `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
+  `parse_show` (git-show field splitting, multi-line body, empty parents),
+  `format_commit_detail` (committer-differs branch, refs line, body indent),
+  and `format_diff` (add/delete vs `+++`/`---`, hunk + file headers, context)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
@@ -140,9 +144,9 @@ Coverage:
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
-`format_absolute`, `format_relative`, `build_graph`, `get_track_chars`,
-`reset_ids`. `listview._internal` exposes `pack_right` (the right-pin budget
-packer).
+`format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
+`format_diff`, `build_graph`, `get_track_chars`, `reset_ids`.
+`listview._internal` exposes `pack_right` (the right-pin budget packer).
 
 ### Layout testing approach
 
