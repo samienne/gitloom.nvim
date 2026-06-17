@@ -234,9 +234,14 @@ A commit row displays, left to right:
    `date_mode` selects which; `d` toggles it live.
 2. author name
 3. graph lanes (glyphs)
-4. ref decorations, by kind — local branches as `(name)`, remote branches as
-   `(remote/name)` (dimmed), tags as `[name]`, and a `HEAD` marker on the
-   current branch
+4. ref decorations — a `HEAD` marker on the current branch, then branch
+   groups, then tags as `[name]`. Branch refs (local + remote) that share a
+   **short name** collapse into one group: the name is shown once, followed by
+   the remotes that also point at this commit, as `(name ↑remote1,remote2)`.
+   The name is highlighted when a local branch exists and dimmed when the group
+   is remote-only. A local branch with no matching remotes is just `(name)`.
+   This keeps the common case (a branch plus its remote-tracking copies all at
+   one commit) from repeating the name per remote.
 5. commit subject
 
 Columns are width-aligned across visible rows. Each field is colored by its

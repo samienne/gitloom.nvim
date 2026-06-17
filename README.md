@@ -113,8 +113,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     palette = {
         date = "Title",
         author = "Comment",
-        branch = "WarningMsg",   -- local branches (name)
-        remote = "Comment",      -- remote branches (remote/name)
+        branch = "WarningMsg",   -- local branch name in (name ↑remotes)
+        remote = "Comment",      -- the ↑remotes suffix (and remote-only names)
         head = "Special",        -- HEAD marker on the current branch
         message = nil,
         tags = "Comment",
