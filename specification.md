@@ -139,6 +139,13 @@ Current limitation: a cell's vertical lanes number at most one. A "bus" of
 several bundled vertical lanes is reserved for future collapse/reflow work;
 `Lane` arrays are kept symmetric (vertical and horizontal alike) to admit it.
 
+Implementation status: lane `id`, `connectivity`, and the handoff split are
+implemented and tested. Per-lane **`child`** and a *precise* per-lane
+**`parent`** are not yet threaded — every lane currently carries its track's
+parent, sufficient for `leads-somewhere`. Full edge attribution (the
+`(id, child, parent)` identity behind `no accidental crossing`) is the next
+step toward §10.
+
 ### 5.2 Merge style
 
 `merge_style` selects where merges and splits are drawn:

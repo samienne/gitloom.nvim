@@ -185,6 +185,30 @@ These share a `TrackState` (`space_available`, `merge`/`split` bookkeeping,
 and drives lane color; `reset_ids()` restarts the sequence so each
 `build_graph` (and each opened graph window) is deterministic.
 
+### Lane model (specification.md §5)
+
+On top of the flat `Track` (one cell = one id + connectivity), `attach_lanes`
+derives a `lanes: Lane[]` view per cell — the faithful model where each lane
+is one wire (the edge child → parent) with its own connectivity. It runs per
+rendered line against the line above it (column-aligned by track index):
+
+- A cell's connectivity is decomposed into two-sided wires: a crossing →
+  vertical + horizontal lanes; a tee → through lane + branch; a turn → one
+  bent lane; straights/endpoints → one lane.
+- **Handoff split:** if a cell's incoming (`up`) lane id — taken from the cell
+  directly above — differs from its own (`down`) id, the up and down segments
+  are *different* lanes (a child's split-in lane and a parent's merge-out lane
+  sharing a column). They are modeled as two lanes rather than one conflated
+  vertical, so per-lane continuity holds.
+
+This is additive and behavior-neutral: the flat fields still drive the glyph
+(its connectivity is the union of the cell's lanes' connectivity). Only the
+*color* is sourced from the lanes, via `top_lane_id` (prefers the `down` lane
+so a column reads continuously into the lane below) — a single cell shows one
+color, so at a handoff the visual is best-effort while the model keeps both
+lanes. The lane invariants (two-sided, connectivity-consistency,
+leads-somewhere, per-lane continuity) are tested against this view.
+
 ### Rendering to glyphs
 
 - `get_track_chars(opts, tracks)` — maps each track's connectivity to a
