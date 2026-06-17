@@ -12,6 +12,10 @@ local MERGE_STYLES = {
 }
 local merge_style_index = 1
 
+-- Whether the per-lane id column (a debug aid) is shown before the message.
+-- Toggled with `i` in the graph window (see M.open).
+local show_lane_ids = true
+
 local function make_future()
     local state = {
         callback = nil,
@@ -1149,6 +1153,9 @@ local function display_item(opts, item, selection_state)
     --tracks = ""
 
     local get_tracks = function(tracks)
+        if not show_lane_ids then
+            return highlight_text("")
+        end
         local result = "("
         for i, t in ipairs(tracks) do
             result = result .. (i > 1 and ", " or "") .. (t.id or "-")
@@ -1192,6 +1199,47 @@ local function display_item(opts, item, selection_state)
     end
 end
 
+--- Human-readable dump of a row's lanes, for the `K` debug float.
+---@param item OrderItem
+---@return string[]
+local function format_lane_info(item)
+    local function short(c)
+        return (c and c.hash) and c.hash:sub(1, 7) or "-"
+    end
+    local function sides(conn)
+        local s = {}
+        for _, k in ipairs({ "up", "down", "left", "right" }) do
+            if conn[k] then s[#s + 1] = k:sub(1, 1) end
+        end
+        return table.concat(s, "")
+    end
+
+    local lines = {}
+    lines[#lines + 1] = ("commit %s  %s"):format(short(item.commit), item.commit.message or "")
+
+    local function dump(label, tracks)
+        if not tracks then return end
+        lines[#lines + 1] = label .. ":"
+        for i, t in ipairs(tracks) do
+            local head = ("  #%d %s"):format(i, t.has_commit and "●" or "·")
+            local lanes = t.lanes or {}
+            if #lanes == 0 then
+                lines[#lines + 1] = head .. " (no lanes)"
+            end
+            for j, lane in ipairs(lanes) do
+                lines[#lines + 1] = ("%s id=%s [%s] parent=%s"):format(
+                    j == 1 and head or string.rep(" ", #head),
+                    tostring(lane.id), sides(lane.connectivity), short(lane.parent))
+            end
+        end
+    end
+
+    dump("split (above)", item.split)
+    dump("commit line", item.tracks)
+    dump("merge (below)", item.merge)
+    return lines
+end
+
 ---@class GraphWinOptions
 ---@field border string
 ---@field width number
@@ -1232,7 +1280,7 @@ function M.open(folder, opts)
             width = 0.80,
             height = 0.80,
             title = "GraphView",
-            footer = "q: quit   m: cycle merge/split style",
+            footer = "q: quit   m: cycle style   K: lane info   i: toggle ids",
             keys = {
                 m = function(self)
                     merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
@@ -1396,7 +1444,31 @@ function M.open(folder, opts)
         end,
     }
 
-    return listview.open(listview_options)
+    ---@type table
+    local lv
+    opts.win.keys = opts.win.keys or {}
+    -- K: float with the full lane breakdown for the commit under the cursor.
+    opts.win.keys.K = function(self)
+        local line = vim.api.nvim_win_get_cursor(self.win)[1]
+        local item = repo.order[line]
+        if not item or not item.commit then
+            return
+        end
+        vim.lsp.util.open_floating_preview(format_lane_info(item), "", {
+            border = "rounded",
+            focusable = true,
+        })
+    end
+    -- i: toggle the per-lane id column before the message.
+    opts.win.keys.i = function()
+        show_lane_ids = not show_lane_ids
+        if lv and lv.controller then
+            lv.controller.refresh()
+        end
+    end
+
+    lv = listview.open(listview_options)
+    return lv
 end
 
 -- Internal functions exposed for testing only. Not part of the public API.

@@ -34,7 +34,9 @@ exists primarily to exercise and validate the graph algorithm.
 - `:GitloomGraph` opens the graph for the repository at Neovim's current
   working directory.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
-  rendering style (§5.2) so the styles can be compared at a glance.
+  rendering style (§5.2) so the styles can be compared at a glance. Two debug
+  aids: `K` opens a float with the full lane breakdown for the commit under
+  the cursor, and `i` toggles the per-lane id column shown before the message.
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
 

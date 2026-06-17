@@ -418,6 +418,7 @@ end
 ---@class ListViewController
 ---@field insert fun(items: OrderItem[], pos: integer)
 ---@field remove fun(pos: integer)
+---@field refresh fun()
 
 ---@alias DisplayFunction fun(item): DisplayElement
 
@@ -474,6 +475,16 @@ function M.open(opts)
         end,
         move = function()
         end,
+        -- Re-render the visible range from scratch (drops cached columns), for
+        -- when the display function's output changes (e.g. a display toggle).
+        refresh = function()
+            for _, item in ipairs(model.items) do
+                item.columns = nil
+            end
+            local first, last = get_visible_range(win.win)
+            refresh_columns(win.win, model, first, last)
+            display(win.buf, model, first, last)
+        end,
     }
 
     if opts.on_controller then
@@ -483,6 +494,8 @@ function M.open(opts)
     vim.bo[win.buf].buftype = "nofile"
     vim.bo[win.buf].modifiable = false
     vim.bo[win.buf].readonly = true
+
+    return { win = win, controller = controller }
 end
 
 return M
