@@ -124,6 +124,8 @@ Tests use plenary.busted.
 Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display)
+- `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
+  `cursor_column` (h/l ref selection + cursor parking)
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
   date formatters (`format_absolute`, `format_relative`)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -135,9 +137,10 @@ Coverage:
   must equal the horizontal flip of the normal grid (reverse + glyph swap).
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
-only** (not the public API): `classify_ref`, `group_refs`, `parse_commit_line`,
-`parse_timestamp`, `format_absolute`, `format_relative`, `build_graph`,
-`get_track_chars`, `reset_ids`.
+only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
+`move_selection`, `cursor_column`, `parse_commit_line`, `parse_timestamp`,
+`format_absolute`, `format_relative`, `build_graph`, `get_track_chars`,
+`reset_ids`.
 
 ### Layout testing approach
 

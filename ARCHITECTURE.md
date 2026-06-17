@@ -256,6 +256,30 @@ leads-somewhere, per-lane continuity) are tested against this view.
   (date, author, graph glyphs, refs, message) plus optional `above`/`below`
   virtual lines for separate split/merge rows.
 
+### Selection and navigation
+
+The graph window uses `cursorline` as the current-row indicator and **parks the
+cursor** at the commit message — or on the selected ref — rather than hiding it
+(specification.md §2/§7). Parking is robust across terminals where cursor-hiding
+(`guicursor` blend) is unreliable.
+
+A `SelectionState { commit, index }` (held by commit *identity*, so it survives
+reflow) tracks the selection. The cursor positions on a row are `1..N` ref
+decorations plus a final **message** slot (`index == N+1`, the default); the
+message is the rightmost, so `l` moves toward it and `h` toward the first
+decoration. `move_selection(pos, count, dir)` is the pure clamp-step.
+
+`decoration_texts(commit)` is the single source for the decoration strings
+(branch groups then tags), so `display_item` (rendering + the `palette.selected`
+highlight) and the cursor target use byte-identical text. `place_cursor` reads
+the rendered buffer line and `cursor_column(line, message, deco)` returns the
+byte column — the decoration's first occurrence, or the line's tail (the
+message) — which sidesteps cross-column byte math (multibyte glyphs, mirror
+padding). A `CursorMoved` autocmd resets the selection to the message and
+re-parks on row change; the `m`/`M`/`d`/`i` toggles re-park after their refresh
+since column widths shift. This is the selection substrate for the §10
+per-branch actions; nothing acts on it yet.
+
 ### Vendored helpers
 
 - `make_future()` — a minimal promise used to chain the two git jobs.
