@@ -133,8 +133,9 @@ Coverage:
   `parse_show` (git-show field splitting, multi-line body, empty parents),
   `format_commit_detail` (committer-differs branch, refs line, body indent),
   `format_diff` (add/delete vs `+++`/`---`, hunk + file headers, context),
-  `diffstat_files` (per-file counts, `start` offsets, rename, binary), and
-  `format_diffstat` (summary totals, per-file rows)
+  `diffstat_files` (per-file counts, `start` offsets, rename, binary),
+  `format_diffstat` (summary totals, per-file rows), and `commit_range`
+  (single-commit `DiffRange`: `^!`, empty-tree for roots, `from` = first parent)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
@@ -147,9 +148,9 @@ Coverage:
 only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
-`format_diff`, `diffstat_files`, `format_diffstat`, `build_graph`,
-`get_track_chars`, `reset_ids`. `listview._internal` exposes `pack_right` (the
-right-pin budget packer).
+`format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
+`build_graph`, `get_track_chars`, `reset_ids`. `listview._internal` exposes
+`pack_right` (the right-pin budget packer).
 
 ### Layout testing approach
 
@@ -230,5 +231,12 @@ Details not covered by the spec or architecture:
   cleaning up and prefer removing dead scaffolding over leaving it.
 - **git runs in Neovim's cwd** — `jobstart` is called without an explicit
   `cwd`, so the graph reflects the current working directory's repo.
+- **External diff is a pluggable provider** (specification.md §11.5): the
+  `diff.open` callback takes a **`DiffRange`** (`{ rev, from, to }`), not a
+  commit, so future graph range-selection reuses it. `commit_range(commit)` is
+  the only constructor today (single commit → `<hash>^!`, empty-tree for roots).
+  The default `open` runs diffview guarded; diffview is the only optional
+  dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
+  `commit_range` is.
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.

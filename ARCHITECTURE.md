@@ -203,11 +203,16 @@ them refs → head → commits.
   (`N files changed, …`) then one row per file (path, counts, colored `+`/`-`
   bar). Returns compose-style rows, summary first, files in `files` order, so
   the caller can map each file row back to its `diffstat_files` entry. Pure.
+- `commit_range(commit)` — builds the `DiffRange` for a single commit's own
+  changes: `{ rev = "<hash>^!"` (or `<empty-tree>..<hash>` for a root, no
+  parents)`, from = parents[1], to = commit }`. The first range constructor for
+  the external-diff provider (specification.md §11.5); graph range-selection will
+  add more. Pure.
 
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
 `classify_ref`, `group_refs`, `parse_show`, `format_commit_detail`,
-`format_diff`, `diffstat_files`, and `format_diffstat` are pure and exposed via
-`graph._internal` for testing.
+`format_diff`, `diffstat_files`, `format_diffstat`, and `commit_range` are pure
+and exposed via `graph._internal` for testing.
 
 ### DAG construction
 
@@ -321,9 +326,11 @@ nothing acts on it yet.
 current row. `open_commit_view(opts, commit)` is the runtime glue: it opens a
 `snacks.win` float (same geometry as the graph window), chains
 `fetch_commit_detail(commit.hash)` then `fetch_commit_diff(commit.hash)`, and on
-resolution renders the metadata (`format_commit_detail`), then the diffstat
+resolution renders the diff **action label** (when a provider is configured;
+§11.5), then the metadata (`format_commit_detail`), then the diffstat
 (`format_diffstat`), then the diff (`format_diff`) into the buffer (real lines +
-namespaced extmark highlights, then made read-only). `q` closes it. The pure
+namespaced extmark highlights, then made read-only). The cursor is parked on the
+action label after render. `q` closes it. The pure
 pieces — `parse_show`, `format_commit_detail`, `format_diff`, `diffstat_files`,
 and `format_diffstat` — are unit-tested; only the window/IO glue is not. The
 refs in the view come from the row's commit (`decoration_texts`), not a
@@ -345,6 +352,25 @@ entry it would visit (`list[curidx]`, or none) is not in the view's buffer,
 closes the float instead of jumping into the graph buffer — otherwise it replays
 a real `<C-o>`. So `<C-o>` walks back through the view's own jumps and then backs
 out of the view entirely (§11.4).
+
+The action label's buffer line maps (like the diffstat file rows) to an action;
+`<CR>` on it calls the diff provider. So the commit view's `<CR>` dispatches by
+cursor line: action label → open diff, diffstat file row → jump, else nothing.
+
+### External diff
+
+gitloom delegates rich diffs to an external plugin via a pluggable provider
+(specification.md §11.5), so it carries no diff renderer of its own.
+`open_diff(opts, commit)` builds a `DiffRange` with the pure `commit_range`
+constructor and calls `opts.diff.open(range)`. The default `open`
+`require`s diffview first (so a lazy-loaded diffview registers its command),
+then runs `:DiffviewOpen <range.rev>` guarded by `vim.fn.exists(":DiffviewOpen")`
+(it notifies when diffview is absent rather than erroring), so diffview is optional;
+overriding `diff.open`/`diff.label` swaps in another plugin. Two call sites use
+it: the graph's `D` key (commit under the cursor) and the commit view's action
+label. Because the provider takes a *range*, future graph-side multi-commit
+selection adds new range constructors (e.g. `range_between(a, b)`) without
+touching the provider or the call sites.
 
 ### Vendored helpers
 

@@ -28,6 +28,7 @@ local KEYBINDS = {
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "<CR>", "Open the commit view for the row" },
+    { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref on the row" },
     { "K", "Lane breakdown for the commit under the cursor" },
@@ -1768,6 +1769,56 @@ local function format_diffstat(files, palette)
     return rows
 end
 
+-- git's well-known empty-tree hash, used as the base for a root commit's diff.
+local EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+--- The DiffRange for a single commit's own changes (specification.md §11.5).
+--- `rev` is `<hash>^!` (the commit vs its first parent), or an empty-tree range
+--- for a root commit (no parents) so it still diffs. `from`/`to` are the
+--- structured endpoints. The first range constructor for the diff provider;
+--- graph range-selection will add more. Pure; exposed for testing.
+---@class DiffRange
+---@field rev string       git rev-range the diff tool understands
+---@field from? Commit     base endpoint (nil for a root commit)
+---@field to Commit        head endpoint
+---@param commit Commit
+---@return DiffRange
+local function commit_range(commit)
+    local parents = commit.parents or {}
+    if #parents == 0 then
+        return { rev = EMPTY_TREE .. ".." .. commit.hash, from = nil, to = commit }
+    end
+    return { rev = commit.hash .. "^!", from = parents[1], to = commit }
+end
+
+--- Default diff provider: open diffview for the range (specification.md §11.5).
+--- Guarded — reports rather than errors when diffview is not installed. Override
+--- opts.diff.open to use another plugin.
+---@param range DiffRange
+local function open_diffview(range)
+    -- diffview is usually lazy-loaded, so `:DiffviewOpen` does not exist until
+    -- the plugin is loaded; require it first (a no-op if already loaded) to
+    -- trigger the load, then run the command.
+    pcall(require, "diffview")
+    if vim.fn.exists(":DiffviewOpen") == 0 then
+        vim.notify("diffview.nvim not found; set diff.open to use another diff plugin",
+            vim.log.levels.ERROR)
+        return
+    end
+    vim.cmd("DiffviewOpen " .. range.rev)
+end
+
+--- Open the configured external diff (§11.5) for a commit: build its DiffRange
+--- and hand it to the provider. No-op when no provider is configured.
+---@param opts GraphOptions
+---@param commit Commit
+local function open_diff(opts, commit)
+    local open = opts.diff and opts.diff.open
+    if open then
+        open(commit_range(commit))
+    end
+end
+
 --- Fetch one commit's full detail via `git show -s` (specification.md §11.1).
 --- Buffered; resolves the raw `%x1f`-delimited output as a single string (the
 --- body `%B` is last so its newlines survive). On-demand only — not part of the
@@ -1851,6 +1902,9 @@ local function open_commit_view(opts, commit)
     -- Maps a diffstat file row's buffer line -> the buffer line where that
     -- file's diff section begins. Rebuilt on each render; <CR> jumps by it.
     local file_jumps = {}
+    -- Buffer line of the diff action label (§11.5), or nil. <CR> there opens the
+    -- external diff; the cursor parks here when the view opens.
+    local action_line = nil
 
     local function set_lines(lines)
         if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -1861,14 +1915,20 @@ local function open_commit_view(opts, commit)
         vim.bo[buf].readonly = true
     end
 
-    -- <CR> on a diffstat file line jumps to that file's diff section (§11.4),
-    -- scrolling it to the top of the view; elsewhere it does nothing. The jump
-    -- uses the `G` motion (a jump command) so the diffstat position lands in the
+    -- <CR> dispatches by cursor line: on the action label it opens the external
+    -- diff (§11.5); on a diffstat file line it jumps to that file's diff section
+    -- (§11.4), scrolling it to the top; elsewhere it does nothing. The jump uses
+    -- the `G` motion (a jump command) so the diffstat position lands in the
     -- jumplist — `<C-o>` / `<C-i>` then move back and forth between the diffstat
     -- and the file's diff.
     vim.keymap.set("n", "<CR>", function()
         if not vim.api.nvim_win_is_valid(w.win) then return end
-        local target = file_jumps[vim.api.nvim_win_get_cursor(w.win)[1]]
+        local line = vim.api.nvim_win_get_cursor(w.win)[1]
+        if action_line and line == action_line then
+            open_diff(opts, commit)
+            return
+        end
+        local target = file_jumps[line]
         if target then
             vim.api.nvim_win_call(w.win, function()
                 vim.cmd("normal! " .. target .. "Gzt")
@@ -1903,11 +1963,22 @@ local function open_commit_view(opts, commit)
     local function render(meta_output, diff_output)
         if not vim.api.nvim_buf_is_valid(buf) then return end
         file_jumps = {}
+        action_line = nil
         local detail = parse_show(meta_output)
-        local rows = format_commit_detail(detail, {
+
+        local rows = {}
+        -- Diff action label as the first line (§11.5), when a provider is set.
+        if opts.diff and opts.diff.open then
+            rows[#rows + 1] = highlight_text(opts.diff.label or "▶ Open diff", opts.palette.action)
+            action_line = #rows
+            rows[#rows + 1] = highlight_text("")
+        end
+        for _, r in ipairs(format_commit_detail(detail, {
             decorations = decoration_texts(commit),
             palette = opts.palette,
-        })
+        })) do
+            rows[#rows + 1] = r
+        end
 
         -- `git show --format=` prints a leading blank line; drop it.
         local patch = (diff_output or ""):gsub("^%s+", "")
@@ -1946,6 +2017,11 @@ local function open_commit_view(opts, commit)
                 end
             end
         end
+
+        -- Park the cursor on the action label so <CR><CR> opens the diff (§11.2).
+        if action_line and vim.api.nvim_win_is_valid(w.win) then
+            pcall(vim.api.nvim_win_set_cursor, w.win, { action_line, 0 })
+        end
     end
 
     -- Fetch metadata, then the diff; render once both arrive (§11.1).
@@ -1974,6 +2050,7 @@ end
 ---@field message? string
 ---@field tags? string
 ---@field selected? string  the h/l-selected ref decoration (§2)
+---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field tracks? string[]
 
@@ -1996,6 +2073,7 @@ end
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
+---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -2020,6 +2098,7 @@ function M.open(folder, opts)
             message = nil,
             tags = "Comment",
             selected = "Visual", -- the h/l-selected ref decoration (§2)
+            action = "Special",  -- the commit-view diff action label (§11.5)
             -- Commit-view diff colors (§11.3): per-role highlight groups.
             diff = {
                 add = "DiffAdd",
@@ -2052,6 +2131,13 @@ function M.open(folder, opts)
         -- Refs are pinned to the right edge and use the free width; the message
         -- keeps at least message_min, and ref overflow becomes a "+N" marker.
         message_min = 24,
+        -- External diff provider (§11.5): open is called with a DiffRange; the
+        -- default opens diffview. Override open/label to use another diff plugin,
+        -- or set open = nil to disable (no action label, D is a no-op).
+        diff = {
+            open = open_diffview,
+            label = "▶ Open diff (diffview)",
+        },
         icons = {
             --merge = "M",
         },
@@ -2239,6 +2325,15 @@ function M.open(folder, opts)
         end
         open_commit_view(opts, item.commit)
     end
+    -- D: open the commit's diff in the external diff viewer (§11.5).
+    opts.win.keys.D = function(self)
+        local line = vim.api.nvim_win_get_cursor(self.win)[1]
+        local item = repo.order[line]
+        if not item or not item.commit then
+            return
+        end
+        open_diff(opts, item.commit)
+    end
     -- K: float with the full lane breakdown for the commit under the cursor.
     opts.win.keys.K = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win)[1]
@@ -2375,6 +2470,7 @@ M._internal = {
     format_diff = format_diff,
     diffstat_files = diffstat_files,
     format_diffstat = format_diffstat,
+    commit_range = commit_range,
     build_graph = build_graph,
     get_track_chars = get_track_chars,
     reset_ids = reset_ids,

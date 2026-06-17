@@ -36,7 +36,8 @@ exists primarily to exercise and validate the graph algorithm.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `<CR>` opens the **commit view** for the commit on
-  the current row (§11). Two debug
+  the current row (§11); `D` opens that commit's diff in an external diff viewer
+  via the configured provider (§11.5). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
@@ -293,16 +294,19 @@ actions).
 
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, mirror,
-                 date_format, date_mode, message_min }
+                 date_format, date_mode, message_min, diff }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
+Diff         = { open: fun(range: DiffRange), label: string }
+DiffRange    = { rev: string, from: Commit?, to: Commit }
 ```
 
 - `win` — floating-window geometry (snacks.win).
 - `palette` — highlight group per field, plus a `tracks` list cycled by lane id.
   Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
-  (§2; default `Visual`), and `diff`, a sub-table of highlight groups for the
+  (§2; default `Visual`); `diff`, a sub-table of highlight groups for the
   commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,
-  `DiffDelete`, `Title`, `Comment`; §11.3).
+  `DiffDelete`, `Title`, `Comment`; §11.3); and `action`, the highlight for the
+  commit view's diff action label (default `Special`; §11.5).
 - `branches` — ref argument(s) for `git log` (default `--all`).
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
@@ -315,6 +319,11 @@ MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate
 - `message_min` — the minimum width always kept for the message (default `24`);
   the right-pinned refs use the rest of the free width, with overflow becoming
   `+N` (§6).
+- `diff` — the external diff provider (§11.5): `open` is a function called with a
+  `DiffRange` to open the diff (default opens diffview), and `label` is the
+  commit view's action-label text (default `▶ Open diff (diffview)`). Override
+  `open`/`label` to use a different diff plugin; set `open` to `nil`/`false` to
+  disable the integration (no action label, `D` is a no-op).
 
 ### Known gap: setup() wiring
 
@@ -332,10 +341,11 @@ commit, rebase, reset). gitloom is a viewer.
 
 Acting on the commit under the cursor is reasonable where it arises naturally
 from the graph, and the **commit view** (§11) is the first realization of it: a
-read-only detail view of the selected commit. Showing the commit's diff in that
-view is planned. Integration with external plugins (e.g. opening a diff via
-diffview) remains reasonable later. These are secondary to the graph itself and
-must not compromise the model-ownership principle (§1.1).
+read-only detail view of the selected commit, including its diff. Integration
+with external diff plugins is realized through a pluggable provider (§11.5,
+default diffview) rather than gitloom rendering its own rich diff. These are
+secondary to the graph itself and must not compromise the model-ownership
+principle (§1.1).
 
 ## 10. Planned: view model and transformations
 
@@ -410,7 +420,10 @@ arrive.
 
 ### 11.2 Content
 
-The view shows, in order:
+The first line is the **diff action label** (§11.5) — when a diff provider is
+configured — and the cursor is parked on it when the view opens, so `<CR>`
+(open the commit view) then `<CR>` (on the focused label) opens the diff. Below
+it the view shows, in order:
 
 1. the full commit hash;
 2. the ref decorations on the commit (the same compact groups as §6), when any;
@@ -461,3 +474,35 @@ section as usual. When `<C-o>` would step back *out* of the commit view (its
 next jump target is another buffer, or there is none left), it **closes the
 commit view** instead of leaving its buffer — so `<C-o>` backs all the way out.
 `<CR>` elsewhere in the view does nothing.
+
+### 11.5 External diff
+
+gitloom does not render a rich (side-by-side, syntax-highlighted) diff itself;
+it **delegates** to an external diff plugin through a pluggable provider
+(§8 `diff`). The provider operates on a **range**, not a single commit, so
+richer commit selections on the graph can reuse it later (commit-vs-commit,
+commit-vs-working-tree, a tag range, …); a single commit is just one way to
+construct a range.
+
+A `DiffRange` is `{ rev, from?, to }`: `rev` is a git rev-range the diff tool
+understands (e.g. `<hash>^!` for a commit's own changes, `<a>..<b>` for a span,
+or an empty-tree range for a root commit), and `from`/`to` are the structured
+endpoint commits (`from` is `nil` for a root). The provider's `open(range)` is
+called to display it; the default opener runs diffview on `range.rev` and, when
+diffview is not installed, reports that instead of erroring. Overriding `open`
+(and `label`) switches to another diff plugin — diffview is therefore an
+**optional dependency**, not required.
+
+Two entry points construct a single-commit range (`<hash>^!`, or an empty-tree
+range for a root) and call the provider:
+
+- the graph's `D` key, on the commit under the cursor (§2);
+- the commit view's **action label** — the first line, where the cursor parks on
+  open (§11.2) — activated with `<CR>`.
+
+The action label text is `diff.label` (default `▶ Open diff (diffview)`),
+highlighted with `palette.action`. When no provider is configured (`diff.open`
+is unset) the label is omitted and `D` is a no-op.
+
+Planned: graph-side range selection (building on the §2 selection substrate and
+§10 view work) to pick two commits and feed the same provider.
