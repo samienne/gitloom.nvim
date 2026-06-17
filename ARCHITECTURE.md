@@ -146,6 +146,14 @@ on_redraw(top, bottom)
   `%x1f`-delimited pretty-format (`%H %P %an %at %ai %s`). `%at` (epoch) + `%ai`
   (offset) feed the parsed timestamp. No `--decorate`; refs are a separate query
   (specification.md §3).
+- `fetch_commit_detail(hash)` — `git show -s --date=iso` with a `%x1f`-delimited
+  format (`%H %an %ae %ad %cn %ce %cd %P %B`), buffered and resolved as one raw
+  string. The on-demand source for the **commit view** (specification.md §11);
+  it does not feed the graph model. The body `%B` is last so its embedded
+  newlines stay in the final field.
+- `fetch_commit_diff(hash)` — `git show --format= -p <hash>`, buffered and
+  resolved as the raw patch string. The commit view's diff source (§11.3),
+  fetched on demand and chained after `fetch_commit_detail`.
 
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
 documented placeholder contract — the de-facto way to script this. The
@@ -173,10 +181,33 @@ them refs → head → commits.
 - `group_refs(refs)` — for display: collapses branch refs (local + remote) that
   share a short name into one `RefGroup { name, has_local, remotes }`, keeping
   HEAD and tags separate. Drives the compact `(name ↑remotes)` rendering (§6).
+- `parse_show(output)` — splits the `fetch_commit_detail` output (`%x1f` fields,
+  body last) into a `CommitDetail { hash, author_name, author_email,
+  author_date, committer_name, committer_email, committer_date, parents[], body
+  }` for the commit view (specification.md §11).
+- `format_commit_detail(detail, opts)` — renders a `CommitDetail` into the
+  commit view's display lines (compose-style `{text, highlight}` rows). The
+  committer block is emitted only when it differs from the author; `opts`
+  carries the row's `decorations` (refs, reused from the model) and the
+  `palette`. Pure; the window glue (`open_commit_view`) just writes its output.
+- `format_diff(patch, palette)` — classifies each patch line by role (added,
+  removed, hunk header `@@`, file header `diff --git`/`index`/`---`/`+++`/mode/
+  rename/new-file; context uncolored) and returns one compose-style row per
+  line, the whole line carrying the role's `palette.diff` group (§11.3). Pure.
+- `diffstat_files(patch)` — parses the patch into a per-file list
+  `{ path, added, removed, binary, start }` where `start` is the 1-based index
+  (into the patch's split lines) of that file's `diff --git` line — the jump
+  target. Counts `+`/`-` lines (skipping `+++`/`---`), shows renames as
+  `old => new`, flags binary files (§11.4). Pure.
+- `format_diffstat(files, palette)` — renders the diffstat: a summary row
+  (`N files changed, …`) then one row per file (path, counts, colored `+`/`-`
+  bar). Returns compose-style rows, summary first, files in `files` order, so
+  the caller can map each file row back to its `diffstat_files` entry. Pure.
 
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
-`classify_ref`, and `group_refs` are pure and exposed via `graph._internal` for
-testing.
+`classify_ref`, `group_refs`, `parse_show`, `format_commit_detail`,
+`format_diff`, `diffstat_files`, and `format_diffstat` are pure and exposed via
+`graph._internal` for testing.
 
 ### DAG construction
 
@@ -283,6 +314,37 @@ refresh since column widths shift. Selection counts all decorations, so one
 hidden in the `+N` overflow can be selected but parks at the message until
 visible. This is the selection substrate for the §10 per-branch actions;
 nothing acts on it yet.
+
+### Commit view
+
+`<CR>` opens the commit view (specification.md §11) for the commit on the
+current row. `open_commit_view(opts, commit)` is the runtime glue: it opens a
+`snacks.win` float (same geometry as the graph window), chains
+`fetch_commit_detail(commit.hash)` then `fetch_commit_diff(commit.hash)`, and on
+resolution renders the metadata (`format_commit_detail`), then the diffstat
+(`format_diffstat`), then the diff (`format_diff`) into the buffer (real lines +
+namespaced extmark highlights, then made read-only). `q` closes it. The pure
+pieces — `parse_show`, `format_commit_detail`, `format_diff`, `diffstat_files`,
+and `format_diffstat` — are unit-tested; only the window/IO glue is not. The
+refs in the view come from the row's commit (`decoration_texts`), not a
+re-query. The diff highlights are applied as extmarks rather than
+`filetype=diff`, so the metadata header stays unaffected (§11.3).
+
+While assembling the rows it records, for each changed file, the buffer line of
+its diffstat row and the buffer line where its diff section begins
+(`diff_start + start - 1`, from `diffstat_files`). A buffer-local `<CR>` mapping
+looks up the cursor's line in that map and jumps to the file's diff section,
+scrolling it to the top (§11.4). The jump is performed with the `G` motion (a
+jump command) rather than `nvim_win_set_cursor`, so the diffstat position is
+pushed onto the jumplist and the built-in `<C-o>` / `<C-i>` move between the
+diffstat and the diff. The map is keyed by buffer line, so it is robust to the
+diffstat's variable height.
+
+`<C-o>` is itself remapped in the view: it inspects `getjumplist()` and, when the
+entry it would visit (`list[curidx]`, or none) is not in the view's buffer,
+closes the float instead of jumping into the graph buffer — otherwise it replays
+a real `<C-o>`. So `<C-o>` walks back through the view's own jumps and then backs
+out of the view entirely (§11.4).
 
 ### Vendored helpers
 

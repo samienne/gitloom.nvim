@@ -87,6 +87,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `q` | Close the graph |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
+| `<CR>` | Open the commit view for the commit on the current row |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
@@ -98,6 +99,14 @@ The footer shows the active mode and whether the graph is mirrored
 
 Ref labels are pinned to the right edge of each row, with the message filling
 the gap (truncated with `…`); a `+N` marker stands in for labels that don't fit.
+
+Pressing `<CR>` on a commit opens the **commit view** — a read-only float with
+that commit's full details (hash, refs, author, committer when it differs,
+parents, the full message, a diffstat, and the diff), fetched on demand. The
+diff is colored line-by-line (added / removed / hunk / file headers). The
+diffstat lists the changed files; pressing `<CR>` on a file line jumps to that
+file's section in the diff below (`<C-o>` / `<C-i>` jump back and forth, and
+`<C-o>` closes the view once it would step back out). `q` closes it.
 
 Navigation is line-by-line, with `cursorline` marking the current row. The
 cursor parks at the commit message; `l` moves the selection right onto the refs
@@ -129,6 +138,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         message = nil,
         tags = "Comment",
         selected = "Visual",     -- the h/l-selected ref decoration
+        -- commit-view diff colors (§11.3)
+        diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
 
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },
     },

@@ -35,7 +35,8 @@ exists primarily to exercise and validate the graph algorithm.
   working directory.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
-  graph mirroring (§5.4). Two debug
+  graph mirroring (§5.4); `<CR>` opens the **commit view** for the commit on
+  the current row (§11). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
@@ -299,7 +300,9 @@ MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate
 - `win` — floating-window geometry (snacks.win).
 - `palette` — highlight group per field, plus a `tracks` list cycled by lane id.
   Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
-  (§2; default `Visual`).
+  (§2; default `Visual`), and `diff`, a sub-table of highlight groups for the
+  commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,
+  `DiffDelete`, `Title`, `Comment`; §11.3).
 - `branches` — ref argument(s) for `git log` (default `--all`).
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
@@ -327,11 +330,12 @@ open function.)
 **Permanently** out of scope: repository mutation of any kind (no checkout,
 commit, rebase, reset). gitloom is a viewer.
 
-Out of scope **for now**, but reasonable later where they arise naturally
-from the graph: acting on the commit/ref under the cursor, and integration
-with external plugins (e.g. opening a diff via diffview). These are secondary
-to the graph itself and must not compromise the model-ownership principle
-(§1.1).
+Acting on the commit under the cursor is reasonable where it arises naturally
+from the graph, and the **commit view** (§11) is the first realization of it: a
+read-only detail view of the selected commit. Showing the commit's diff in that
+view is planned. Integration with external plugins (e.g. opening a diff via
+diffview) remains reasonable later. These are secondary to the graph itself and
+must not compromise the model-ownership principle (§1.1).
 
 ## 10. Planned: view model and transformations
 
@@ -383,3 +387,77 @@ These must be specified before implementation:
 - **Scale.** Reading all commits is unbounded in large repositories; the
   loading strategy (limits, lazy/streamed loading, on-demand reachability)
   must keep reflow responsive.
+
+## 11. Commit view
+
+Pressing `<CR>` on a commit row opens the **commit view**: a separate read-only
+floating window showing the full details of that one commit. `q` closes it. Like
+the graph, it is a viewer — it never mutates the repository (§9).
+
+### 11.1 Data source
+
+The commit view's data is fetched **on demand** when it is opened — a single
+`git show -s` for the selected commit's hash — *not* taken from the streaming
+graph model. The graph model (§3, §4) deliberately carries only what the graph
+needs (author, author date, subject); the richer per-commit detail (email,
+committer, full message body) is read only when a commit is actually opened, so
+the streaming path stays lean. The refs shown are the row's existing decorations
+(§6), reused from the model rather than re-queried.
+
+The diff is fetched the same way, on demand, by a second `git show --format= -p`
+for the commit, chained after the metadata fetch; the view renders once both
+arrive.
+
+### 11.2 Content
+
+The view shows, in order:
+
+1. the full commit hash;
+2. the ref decorations on the commit (the same compact groups as §6), when any;
+3. the **author** — name, email, and date;
+4. the **committer** — name, email, and date — shown **only when it differs**
+   from the author (the common case where they match is omitted to reduce
+   noise);
+5. the parent commits (abbreviated hashes), when any;
+6. the full commit message — subject and body — indented;
+7. the **diffstat** — the list of changed files with per-file insertion /
+   deletion counts (§11.4) — shown between the message and the diff;
+8. the commit's diff (the patch), shown below the diffstat.
+
+The author and committer dates are shown as `git show` renders them
+(`--date=iso`); the structured `Timestamp` formatting of §6 applies to the graph
+date column, not here.
+
+### 11.3 Diff
+
+The commit view shows the commit's diff below the diffstat (§11.4). Highlighting is
+**line-level** (matching git's default and lazygit/tig): each patch line is
+colored by its role — added, removed, hunk header (`@@ … @@`), and file header
+(`diff --git`, `index`, `---`/`+++`, mode/rename/new-file lines); context lines
+are uncolored. The highlight groups come from `palette.diff` (§8), using
+always-defined UI groups by default, applied as extmarks — the view does **not**
+switch the buffer to `filetype=diff`, so the custom metadata header above stays
+unaffected. Language-aware (intra-line) syntax highlighting of the diff content
+is a possible future enhancement.
+
+### 11.4 Changed-files list (diffstat)
+
+Between the message and the diff, the commit view shows a **diffstat**: a
+summary line (`N files changed, X insertions(+), Y deletions(-)`) followed by one
+line per changed file — the path, its insertion/deletion counts, and a colored
+`+`/`-` bar (the `+` segment in `palette.diff.add`, the `-` in
+`palette.diff.delete`; §8). Renames are shown as `old => new`; a binary file
+shows `Bin` instead of counts.
+
+The diffstat is **derived from the same patch** that §11.3 renders — not a
+separate query — so the file list, the counts, and each file's location in the
+diff all come from one source.
+
+Pressing `<CR>` on a changed-file line **jumps** the cursor to that file's
+section in the diff below (scrolling it to the top of the view). This makes the
+diffstat a table of contents for the diff. The jump is recorded in the
+jumplist, so `<C-o>` / `<C-i>` move back to the diffstat and forward to the diff
+section as usual. When `<C-o>` would step back *out* of the commit view (its
+next jump target is another buffer, or there is none left), it **closes the
+commit view** instead of leaving its buffer — so `<C-o>` backs all the way out.
+`<CR>` elsewhere in the view does nothing.

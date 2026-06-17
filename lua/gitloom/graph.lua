@@ -27,6 +27,7 @@ local KEYBINDS = {
     { "q", "Close the graph" },
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
+    { "<CR>", "Open the commit view for the row" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref on the row" },
     { "K", "Lane breakdown for the commit under the cursor" },
@@ -1541,6 +1542,422 @@ local function format_lane_info(item)
     return lines
 end
 
+--- Full per-commit detail for the commit view (specification.md §11). Fetched
+--- on demand via `git show -s`, independent of the streaming graph model.
+---@class CommitDetail
+---@field hash string
+---@field author_name string
+---@field author_email string
+---@field author_date string
+---@field committer_name string
+---@field committer_email string
+---@field committer_date string
+---@field parents string[]   parent hashes
+---@field body string        full message (subject + body), trailing space trimmed
+
+--- Parse the `fetch_commit_detail` output into a CommitDetail. Fields are
+--- `%x1f`-separated; the body (`%B`) is last so its embedded newlines stay in
+--- the final field. Pure; exposed for testing.
+---@param output string?
+---@return CommitDetail
+local function parse_show(output)
+    local fields = vim.split(output or "", "\x1f")
+    local parents = {}
+    for _, p in ipairs(vim.split(fields[8] or "", " ")) do
+        if p ~= "" then
+            parents[#parents + 1] = p
+        end
+    end
+    return {
+        hash = fields[1] or "",
+        author_name = fields[2] or "",
+        author_email = fields[3] or "",
+        author_date = fields[4] or "",
+        committer_name = fields[5] or "",
+        committer_email = fields[6] or "",
+        committer_date = fields[7] or "",
+        parents = parents,
+        body = (fields[9] or ""):gsub("%s+$", ""),
+    }
+end
+
+--- Render a CommitDetail into the commit view's display lines (one compose-style
+--- `{ text, highlight }` per buffer line). The committer block is shown only
+--- when it differs from the author (the common case is omitted). `opts` carries
+--- the row's `decorations` (refs, reused from the model; §6) and the `palette`
+--- for highlights. Pure; exposed for testing.
+---@param detail CommitDetail
+---@param opts? { decorations?: string[], palette?: GraphPalette }
+---@return table[]
+local function format_commit_detail(detail, opts)
+    opts = opts or {}
+    local palette = opts.palette or {}
+    local decorations = opts.decorations or {}
+    local lines = {}
+
+    local function add(segs)
+        lines[#lines + 1] = compose(segs)
+    end
+    -- A "Label:" field: label padded to 12 cells (dimmed) then the value.
+    local function field(label, value, value_hl)
+        add({ highlight_text(("%-12s"):format(label), palette.author),
+            highlight_text(value or "", value_hl) })
+    end
+
+    add({ highlight_text("commit ", palette.author), highlight_text(detail.hash, palette.date) })
+    if #decorations > 0 then
+        field("Refs:", table.concat(decorations, " "), palette.branch)
+    end
+    field("Author:", detail.author_name .. " <" .. detail.author_email .. ">", palette.message)
+    field("AuthorDate:", detail.author_date, palette.date)
+
+    local differs = detail.committer_name ~= detail.author_name
+        or detail.committer_email ~= detail.author_email
+        or detail.committer_date ~= detail.author_date
+    if differs then
+        field("Commit:", detail.committer_name .. " <" .. detail.committer_email .. ">", palette.message)
+        field("CommitDate:", detail.committer_date, palette.date)
+    end
+
+    if #detail.parents > 0 then
+        local shorts = {}
+        for _, p in ipairs(detail.parents) do
+            shorts[#shorts + 1] = p:sub(1, 7)
+        end
+        field("Parents:", table.concat(shorts, " "), palette.message)
+    end
+
+    add({ highlight_text("") })
+    for _, l in ipairs(vim.split(detail.body or "", "\n")) do
+        add({ highlight_text("    " .. l, palette.message) })
+    end
+
+    return lines
+end
+
+-- Line prefixes that mark a diff's file-header lines (checked before +/- so the
+-- "+++"/"---" file markers don't read as added/removed content).
+local DIFF_HEADER_PREFIXES = {
+    "diff --git", "index ", "--- ", "+++ ", "old mode", "new mode",
+    "deleted file", "new file", "similarity index", "dissimilarity index",
+    "rename ", "copy ", "Binary files",
+}
+
+--- Classify one patch line by role: "header", "hunk", "add", "delete", or nil
+--- (a context line). Pure.
+---@param line string
+---@return string|nil
+local function diff_line_role(line)
+    for _, p in ipairs(DIFF_HEADER_PREFIXES) do
+        if line:sub(1, #p) == p then
+            return "header"
+        end
+    end
+    if line:sub(1, 2) == "@@" then
+        return "hunk"
+    end
+    local c = line:sub(1, 1)
+    if c == "+" then
+        return "add"
+    elseif c == "-" then
+        return "delete"
+    end
+    return nil
+end
+
+--- Render a patch into the commit view's diff lines (one compose-style
+--- `{ text, highlight }` per line), each line colored by its role via
+--- `palette.diff` (add/delete/hunk/header; context uncolored). Line-level
+--- highlighting only (specification.md §11.3). Pure; exposed for testing.
+---@param patch string?
+---@param palette GraphPalette?
+---@return table[]
+local function format_diff(patch, palette)
+    local diff = (palette or {}).diff or {}
+    local groups = { add = diff.add, delete = diff.delete, hunk = diff.hunk, header = diff.header }
+    local rows = {}
+    for _, line in ipairs(vim.split(patch or "", "\n")) do
+        local role = diff_line_role(line)
+        rows[#rows + 1] = highlight_text(line, role and groups[role] or nil)
+    end
+    return rows
+end
+
+--- Parse a patch into a per-file diffstat (specification.md §11.4). Each entry
+--- carries the display path, insertion/deletion counts, a binary flag, and
+--- `start` — the 1-based index (into the patch's split lines) of that file's
+--- `diff --git` line, used as the jump target. Renames (a/ != b/) show as
+--- "old => new". Pure; exposed for testing.
+---@param patch string?
+---@return { path: string, added: integer, removed: integer, binary: boolean, start: integer }[]
+local function diffstat_files(patch)
+    local files = {}
+    local cur = nil
+    for i, line in ipairs(vim.split(patch or "", "\n")) do
+        local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
+        if a then
+            cur = { a = a, b = b, added = 0, removed = 0, binary = false, start = i }
+            files[#files + 1] = cur
+        elseif cur then
+            if line:sub(1, 13) == "Binary files " then
+                cur.binary = true
+            elseif line:sub(1, 3) ~= "+++" and line:sub(1, 1) == "+" then
+                cur.added = cur.added + 1
+            elseif line:sub(1, 3) ~= "---" and line:sub(1, 1) == "-" then
+                cur.removed = cur.removed + 1
+            end
+        end
+    end
+    for _, f in ipairs(files) do
+        f.path = (f.a ~= f.b) and (f.a .. " => " .. f.b) or f.b
+        f.a, f.b = nil, nil
+    end
+    return files
+end
+
+-- Max width of the +/- bar in a diffstat row; long files scale down to fit.
+local DIFFSTAT_BAR_MAX = 40
+
+--- Render a diffstat (specification.md §11.4) into compose-style rows: a summary
+--- row ("N files changed, …") then one row per file (path, count, colored +/-
+--- bar) in `files` order — so the caller can map each file row back to its
+--- `diffstat_files` entry by position. The bar uses palette.diff.add/.delete.
+--- Pure; exposed for testing.
+---@param files { path: string, added: integer, removed: integer, binary: boolean }[]
+---@param palette GraphPalette?
+---@return table[]
+local function format_diffstat(files, palette)
+    palette = palette or {}
+    local diff = palette.diff or {}
+    local rows = {}
+
+    local total_add, total_del, max_path, max_total = 0, 0, 0, 1
+    for _, f in ipairs(files) do
+        total_add = total_add + f.added
+        total_del = total_del + f.removed
+        max_path = math.max(max_path, vim.fn.strdisplaywidth(f.path))
+        max_total = math.max(max_total, f.added + f.removed)
+    end
+
+    local function plural(c, word)
+        return ("%d %s%s"):format(c, word, c == 1 and "" or "s")
+    end
+    local summary = plural(#files, "file") .. " changed"
+    if total_add > 0 then summary = summary .. ", " .. plural(total_add, "insertion") .. "(+)" end
+    if total_del > 0 then summary = summary .. ", " .. plural(total_del, "deletion") .. "(-)" end
+    rows[#rows + 1] = highlight_text(summary, palette.author)
+
+    local scale = math.min(1, DIFFSTAT_BAR_MAX / max_total)
+    for _, f in ipairs(files) do
+        local count = f.binary and "Bin" or tostring(f.added + f.removed)
+        local pad = string.rep(" ", max_path - vim.fn.strdisplaywidth(f.path))
+        local segs = {
+            highlight_text("  " .. f.path, palette.message),
+            highlight_text(pad .. " | ", palette.author),
+            highlight_text(("%3s "):format(count), palette.author),
+        }
+        if not f.binary then
+            local add_bar = (f.added > 0) and math.max(1, math.floor(f.added * scale + 0.5)) or 0
+            local del_bar = (f.removed > 0) and math.max(1, math.floor(f.removed * scale + 0.5)) or 0
+            if add_bar > 0 then segs[#segs + 1] = highlight_text(string.rep("+", add_bar), diff.add) end
+            if del_bar > 0 then segs[#segs + 1] = highlight_text(string.rep("-", del_bar), diff.delete) end
+        end
+        rows[#rows + 1] = compose(segs)
+    end
+
+    return rows
+end
+
+--- Fetch one commit's full detail via `git show -s` (specification.md §11.1).
+--- Buffered; resolves the raw `%x1f`-delimited output as a single string (the
+--- body `%B` is last so its newlines survive). On-demand only — not part of the
+--- graph stream.
+---@param hash string
+local function fetch_commit_detail(hash)
+    local future, promise = make_future()
+    local out = {}
+
+    vim.fn.jobstart(
+        { "git", "show", "-s", "--date=iso",
+            "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%cn%x1f%ce%x1f%cd%x1f%P%x1f%B", hash },
+        {
+            stdout_buffered = true,
+            on_stdout = function(_, lines)
+                for _, l in ipairs(lines) do
+                    out[#out + 1] = l
+                end
+            end,
+            on_exit = function()
+                promise.resolve(table.concat(out, "\n"))
+            end,
+        })
+
+    return future
+end
+
+--- Fetch a commit's diff via `git show --format= -p` (specification.md §11.3).
+--- Buffered; resolves the raw patch string. On-demand only, chained after
+--- fetch_commit_detail by the commit view.
+---@param hash string
+local function fetch_commit_diff(hash)
+    local future, promise = make_future()
+    local out = {}
+
+    vim.fn.jobstart(
+        { "git", "show", "--format=", "-p", hash },
+        {
+            stdout_buffered = true,
+            on_stdout = function(_, lines)
+                for _, l in ipairs(lines) do
+                    out[#out + 1] = l
+                end
+            end,
+            on_exit = function()
+                promise.resolve(table.concat(out, "\n"))
+            end,
+        })
+
+    return future
+end
+
+local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
+
+--- Open the commit view (specification.md §11) for `commit`: a read-only snacks
+--- float that fetches the commit's detail + diff on demand and renders the
+--- metadata, the diffstat, and the diff. `q` closes it (snacks default); `<CR>`
+--- on a diffstat file line jumps to that file's diff section (§11.4). The pure
+--- pieces (parse_show / format_commit_detail / format_diff / diffstat_files /
+--- format_diffstat) do the work; this is just window + IO glue.
+---@param opts GraphOptions
+---@param commit Commit
+local function open_commit_view(opts, commit)
+    local ok, snacks = pcall(require, "snacks.win")
+    if not ok then
+        vim.notify("snacks.win not found. Install snacks.nvim", vim.log.levels.ERROR)
+        return
+    end
+
+    -- Match the graph window's geometry so the commit view is the same size.
+    local w = snacks.new({
+        border = opts.win.border or "rounded",
+        width = opts.win.width,
+        height = opts.win.height,
+        title = "Commit " .. commit.hash:sub(1, 7),
+        footer = "q: close",
+        keys = { q = "close" },
+    })
+    local buf = w.buf
+
+    -- Maps a diffstat file row's buffer line -> the buffer line where that
+    -- file's diff section begins. Rebuilt on each render; <CR> jumps by it.
+    local file_jumps = {}
+
+    local function set_lines(lines)
+        if not vim.api.nvim_buf_is_valid(buf) then return end
+        vim.bo[buf].modifiable = true
+        vim.bo[buf].readonly = false
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+        vim.bo[buf].modifiable = false
+        vim.bo[buf].readonly = true
+    end
+
+    -- <CR> on a diffstat file line jumps to that file's diff section (§11.4),
+    -- scrolling it to the top of the view; elsewhere it does nothing. The jump
+    -- uses the `G` motion (a jump command) so the diffstat position lands in the
+    -- jumplist — `<C-o>` / `<C-i>` then move back and forth between the diffstat
+    -- and the file's diff.
+    vim.keymap.set("n", "<CR>", function()
+        if not vim.api.nvim_win_is_valid(w.win) then return end
+        local target = file_jumps[vim.api.nvim_win_get_cursor(w.win)[1]]
+        if target then
+            vim.api.nvim_win_call(w.win, function()
+                vim.cmd("normal! " .. target .. "Gzt")
+            end)
+        end
+    end, { buffer = buf, nowait = true, silent = true })
+
+    -- <C-o> walks the jumplist back through the view's own jumps (diffstat <->
+    -- diff). Once the next jump-back would leave the commit view — its target is
+    -- another buffer (the graph), or there is none — close the view instead of
+    -- jumping out of it (§11.4). getjumplist's curidx is the 1-based index of
+    -- the entry <C-o> would visit (0 = nothing to go back to).
+    vim.keymap.set("n", "<C-o>", function()
+        local jl = vim.fn.getjumplist()
+        local list, curidx = jl[1], jl[2]
+        local target = (curidx >= 1) and list[curidx] or nil
+        if target and target.bufnr == buf then
+            vim.api.nvim_feedkeys(
+                vim.api.nvim_replace_termcodes("<C-o>", true, false, true), "n", false)
+        else
+            w:close()
+        end
+    end, { buffer = buf, nowait = true, silent = true })
+
+    set_lines({ "Loading…" })
+
+    -- Render the metadata (format_commit_detail), then the diffstat
+    -- (format_diffstat), then the diff (format_diff) into one buffer: real lines
+    -- + namespaced extmarks (the diff is highlighted this way, not via
+    -- filetype=diff, so the metadata header stays clean §11.3). While laying out
+    -- the rows, record each diffstat file row -> its diff section line (§11.4).
+    local function render(meta_output, diff_output)
+        if not vim.api.nvim_buf_is_valid(buf) then return end
+        file_jumps = {}
+        local detail = parse_show(meta_output)
+        local rows = format_commit_detail(detail, {
+            decorations = decoration_texts(commit),
+            palette = opts.palette,
+        })
+
+        -- `git show --format=` prints a leading blank line; drop it.
+        local patch = (diff_output or ""):gsub("^%s+", "")
+        if patch ~= "" then
+            local files = diffstat_files(patch)
+            rows[#rows + 1] = highlight_text("")
+            local stat_start = #rows + 1 -- buffer line of the diffstat summary row
+            for _, r in ipairs(format_diffstat(files, opts.palette)) do
+                rows[#rows + 1] = r
+            end
+            rows[#rows + 1] = highlight_text("")
+            local diff_start = #rows + 1 -- buffer line of the first patch line
+            for _, r in ipairs(format_diff(patch, opts.palette)) do
+                rows[#rows + 1] = r
+            end
+            -- Summary sits at stat_start; file j at stat_start + j. Its diff
+            -- section starts at diff_start + (start - 1).
+            for j, f in ipairs(files) do
+                file_jumps[stat_start + j] = diff_start + f.start - 1
+            end
+        end
+
+        local lines = {}
+        for _, r in ipairs(rows) do
+            lines[#lines + 1] = r.text
+        end
+        set_lines(lines)
+        vim.api.nvim_buf_clear_namespace(buf, commit_view_ns, 0, -1)
+        for i, r in ipairs(rows) do
+            for _, hl in ipairs(r.highlight or {}) do
+                if hl.hl then
+                    vim.api.nvim_buf_set_extmark(buf, commit_view_ns, i - 1, hl.start_pos, {
+                        end_col = hl.end_pos,
+                        hl_group = hl.hl,
+                    })
+                end
+            end
+        end
+    end
+
+    -- Fetch metadata, then the diff; render once both arrive (§11.1).
+    fetch_commit_detail(commit.hash).next(function(meta_output)
+        return fetch_commit_diff(commit.hash).next(function(diff_output)
+            return { meta = meta_output, diff = diff_output }
+        end)
+    end).next(function(res)
+        render(res.meta, res.diff)
+    end)
+end
+
 ---@class GraphWinOptions
 ---@field border string
 ---@field width number|fun():number   fraction (0–1), absolute (>1), or a function
@@ -1557,6 +1974,7 @@ end
 ---@field message? string
 ---@field tags? string
 ---@field selected? string  the h/l-selected ref decoration (§2)
+---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field tracks? string[]
 
 ---@class MergeStyle
@@ -1602,6 +2020,13 @@ function M.open(folder, opts)
             message = nil,
             tags = "Comment",
             selected = "Visual", -- the h/l-selected ref decoration (§2)
+            -- Commit-view diff colors (§11.3): per-role highlight groups.
+            diff = {
+                add = "DiffAdd",
+                delete = "DiffDelete",
+                hunk = "Title",
+                header = "Comment",
+            },
             tracks = {
                 --"DiagnosticWarn",
                 "Constant",
@@ -1805,6 +2230,15 @@ function M.open(folder, opts)
         end
         place_cursor()
     end
+    -- <CR>: open the commit view for the commit on the current row (§11).
+    opts.win.keys["<CR>"] = function(self)
+        local line = vim.api.nvim_win_get_cursor(self.win)[1]
+        local item = repo.order[line]
+        if not item or not item.commit then
+            return
+        end
+        open_commit_view(opts, item.commit)
+    end
     -- K: float with the full lane breakdown for the commit under the cursor.
     opts.win.keys.K = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win)[1]
@@ -1936,6 +2370,11 @@ M._internal = {
     parse_timestamp = parse_timestamp,
     format_absolute = format_absolute,
     format_relative = format_relative,
+    parse_show = parse_show,
+    format_commit_detail = format_commit_detail,
+    format_diff = format_diff,
+    diffstat_files = diffstat_files,
+    format_diffstat = format_diffstat,
     build_graph = build_graph,
     get_track_chars = get_track_chars,
     reset_ids = reset_ids,
