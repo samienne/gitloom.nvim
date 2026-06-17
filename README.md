@@ -86,11 +86,13 @@ Opens the graph for the repository at Neovim's current working directory.
 |-----|--------|
 | `q` | Close the graph |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
+| `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
 
-The footer shows the active mode (e.g. `Mode: inline`).
+The footer shows the active mode and whether the graph is mirrored
+(e.g. `Mode: inline  (mirrored)`).
 
 ## Configuration
 
@@ -126,6 +128,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- merge = "M",
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
+    mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
 }
 ```
 
@@ -136,6 +139,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`merge_style`** — controls whether merges/splits get their own virtual
   line above/below the commit, or are folded onto the commit line.
 - **`branches`** — the ref arguments passed to `git log` (default `--all`).
+- **`mirror`** — render the graph mirrored, with lane 1 at the right edge of the
+  graph column (nearest the message). On by default; set `false` for the
+  conventional left-to-right layout. A render-only transform; toggle live with
+  `M`. See [specification.md](specification.md) §5.4.
 
 > **Note:** `require("gitloom").setup(opts)` currently stores config but does
 > not yet forward it to `:GitloomGraph` — the command uses the defaults above.

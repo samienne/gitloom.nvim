@@ -143,7 +143,14 @@ function M.render_grid(opts, rows)
     local w = 0
     for _, l in ipairs(lines) do w = math.max(w, #l) end
     for _, l in ipairs(lines) do
-        for i = #l + 1, w do l[i] = { ch = " ", hl = nil } end
+        if opts.mirror then
+            -- Mirrored graphs are right-aligned (the listview pads the graph
+            -- column on the left, see fix_width), so pad on the left here too;
+            -- otherwise vertical wires would misalign across rows.
+            for _ = #l + 1, w do table.insert(l, 1, { ch = " ", hl = nil }) end
+        else
+            for i = #l + 1, w do l[i] = { ch = " ", hl = nil } end
+        end
     end
     return lines
 end

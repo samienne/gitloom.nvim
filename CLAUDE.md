@@ -129,6 +129,9 @@ Coverage:
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below).
+- `tests/graph_mirror_spec.lua` — the `mirror` render transform (spec §5.4):
+  the same invariant suite must pass on mirrored output, and the mirrored grid
+  must equal the horizontal flip of the normal grid (reverse + glyph swap).
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `parse_commit_line`,
