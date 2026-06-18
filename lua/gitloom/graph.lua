@@ -1207,16 +1207,19 @@ local function build_lanes(rows, top, bottom)
         return lane
     end
 
-    -- DAG edges (authoritative) -> OrderItem incident lanes.
+    -- DAG edges (authoritative) -> OrderItem incident lanes. A visible commit
+    -- gets *every* incident edge, even to a parent/child that is off-window: the
+    -- Lane is attached to whichever endpoint is on screen so its visible stub can
+    -- still light (the walk just won't recurse off-window). Each Lane object is
+    -- shared, so an edge with both ends visible is one object in both lists.
     for i = top, bottom do
         local c = rows[i] and rows[i].commit
         if c and item_of[c] then
             for _, p in ipairs(c.parents or {}) do
-                if item_of[p] and not (registry[c] and registry[c][p]) then
-                    local lane = get_lane(c, p)
-                    table.insert(item_of[c].parent_lanes, lane)
-                    table.insert(item_of[p].child_lanes, lane)
-                end
+                table.insert(item_of[c].parent_lanes, get_lane(c, p))
+            end
+            for _, ch in ipairs(c.children or {}) do
+                table.insert(item_of[c].child_lanes, get_lane(ch, c))
             end
         end
     end
@@ -1817,30 +1820,30 @@ local function mark_reachable(order, pivot_index, top, bottom)
     if not pivot or not visible[pivot] then return cone end
     cone[pivot] = true
 
-    local stack = { pivot } -- ancestors: follow parent_lanes
+    -- Every parent edge of an ancestor leads to a deeper ancestor, so all of a
+    -- reached commit's parent_lanes are cone edges — highlight them even when the
+    -- parent is off-window (its visible stub still lights); only recurse into
+    -- on-window parents. Symmetric for descendants via child_lanes.
+    local stack = { pivot } -- ancestors
     while #stack > 0 do
         local it = item_of[table.remove(stack)]
         for _, lane in ipairs(it and it.parent_lanes or {}) do
-            if visible[lane.parent] then
-                lane.highlighted = true
-                if not cone[lane.parent] then
-                    cone[lane.parent] = true
-                    stack[#stack + 1] = lane.parent
-                end
+            lane.highlighted = true
+            if visible[lane.parent] and not cone[lane.parent] then
+                cone[lane.parent] = true
+                stack[#stack + 1] = lane.parent
             end
         end
     end
 
-    stack = { pivot } -- descendants: follow child_lanes
+    stack = { pivot } -- descendants
     while #stack > 0 do
         local it = item_of[table.remove(stack)]
         for _, lane in ipairs(it and it.child_lanes or {}) do
-            if visible[lane.begin] then
-                lane.highlighted = true
-                if not cone[lane.begin] then
-                    cone[lane.begin] = true
-                    stack[#stack + 1] = lane.begin
-                end
+            lane.highlighted = true
+            if visible[lane.begin] and not cone[lane.begin] then
+                cone[lane.begin] = true
+                stack[#stack + 1] = lane.begin
             end
         end
     end

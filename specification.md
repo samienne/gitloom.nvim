@@ -550,8 +550,9 @@ the commits causally related to the pivot — not the whole connected component.
 The walk stays within the **currently visible rows**. Because rows are in
 topological order (a parent is always at a later row than its child), restricting
 to the contiguous viewport loses nothing about relationships *between* on-screen
-commits — it only clips the cone at the viewport edges. A Lane whose far endpoint
-is off-screen is not followed past the edge.
+commits — it only clips the *recursion* at the viewport edges. A cone Lane whose
+far endpoint is off-screen is still highlighted (its on-screen stub lights); the
+walk simply does not recurse past it.
 
 ### 12.2 Dimming
 

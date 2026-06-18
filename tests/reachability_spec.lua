@@ -12,6 +12,7 @@
 local internal = require("gitloom.graph")._internal
 local reachable_cone = internal.reachable_cone
 local mark_reachable = internal.mark_reachable
+local build_lanes = internal.build_lanes
 local build_graph = internal.build_graph
 local helpers = require("tests.graph_helpers")
 
@@ -344,6 +345,18 @@ describe("mark_reachable", function()
         for _, l in ipairs(all_lanes(rows)) do
             assert.is_true(l.highlighted)
         end
+    end)
+
+    it("highlights an edge to an off-window parent", function()
+        -- LINEAR c1->c2->c3->c4 with only rows 1..3 visible (c4 off-window).
+        -- Pivot c2: the edge c3->c4 leaves the bottom of the view but is still a
+        -- cone ancestor edge, so its visible stub must light (the window bound
+        -- clips the walk, not the highlight of on-screen wires).
+        local rows = build_graph(helpers.big_opts(), make_order(LINEAR))
+        build_lanes(rows, 1, 3)             -- window excludes c4
+        mark_reachable(rows, 2, 1, 3)       -- pivot c2
+        assert.is_true(lane_hl(rows, "c2", "c3")) -- in-window
+        assert.is_true(lane_hl(rows, "c3", "c4")) -- to the off-window parent
     end)
 
     it("leaves a sibling's marker and edges dim", function()
