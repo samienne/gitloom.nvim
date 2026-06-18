@@ -150,3 +150,46 @@ for _, style in ipairs(STYLES) do
         end
     end)
 end
+
+--------------------------------------------------------------------------------
+-- (3) Mirroring preserves color: a flip never recolors a cell or connector.
+--------------------------------------------------------------------------------
+
+-- Every highlight group used, with counts, over the whole grid. With big_opts
+-- (64-color palette) a color is a 1:1 proxy for a lane id, so the multiset must
+-- be identical mirrored vs normal — a flip moves cells, it never recolors them.
+local function color_multiset(grid)
+    local set = {}
+    for _, row in ipairs(grid) do
+        for _, cell in ipairs(row) do
+            if cell.hl then set[cell.hl] = (set[cell.hl] or 0) + 1 end
+        end
+    end
+    return set
+end
+
+for _, style in ipairs(STYLES) do
+    if not style.experimental then -- allow_merge_on_split color is best-effort
+        describe("mirror preserves color [" .. style.name .. "]", function()
+            local function check(items, label)
+                local rows = graph._internal.build_graph(h.big_opts(style.ms), items)
+                local normal = color_multiset(h.render_grid(h.big_opts(style.ms), rows))
+                local mirrored = color_multiset(h.render_grid(mirror_opts(style.ms), rows))
+                assert.same(normal, mirrored, label)
+            end
+
+            for _, fx in ipairs(FIXTURES) do
+                it("for " .. fx.name, function()
+                    check(h.dag(fx.rows), style.name .. "/" .. fx.name)
+                end)
+            end
+
+            it("for random DAGs", function()
+                for seed = 1, 40 do
+                    local n = 3 + (seed % 10)
+                    check(h.dag(h.random_dag(n, seed)), "seed=" .. seed)
+                end
+            end)
+        end)
+    end
+end

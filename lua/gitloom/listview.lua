@@ -95,22 +95,20 @@ local function refresh_columns(win, model, first, last)
         if not changed then
             for i = first, last do
                 local item = model.items[i]
-                if item.columns[field] then
-                    if item then
-                        if #item.columns[field] ~= #model.columns then
+                if item and item.columns[field] then
+                    if #item.columns[field] ~= #model.columns then
+                        changed = true
+                    end
+
+                    for j = 1, #item.columns[field] do
+                        if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[field][j].text) ~= model.columns[j] then
                             changed = true
-                        end
-
-                        for j = 1, #item.columns[field] do
-                            if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[field][j].text) ~= model.columns[j] then
-                                changed = true
-                                break
-                            end
-                        end
-
-                        if changed then
                             break
                         end
+                    end
+
+                    if changed then
+                        break
                     end
                 end
             end

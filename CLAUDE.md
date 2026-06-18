@@ -136,21 +136,30 @@ Coverage:
   `diffstat_files` (per-file counts, `start` offsets, rename, binary),
   `format_diffstat` (summary totals, per-file rows), and `commit_range`
   (single-commit `DiffRange`: `^!`, empty-tree for roots, `from` = first parent)
+- `tests/reachability_spec.lua` — `reachable_cone` (spec §12.1: pivot/ancestors/
+  descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
+  attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and
+  `mark_reachable` (the Lane walk): cone markers light, an edge is highlighted iff
+  it's in the cone, and a sibling sharing a fan stays fully dim (exact, no bus
+  over-lighting)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below).
 - `tests/graph_mirror_spec.lua` — the `mirror` render transform (spec §5.4):
-  the same invariant suite must pass on mirrored output, and the mirrored grid
-  must equal the horizontal flip of the normal grid (reverse + glyph swap).
+  the same invariant suite must pass on mirrored output, the mirrored grid must
+  equal the horizontal flip of the normal grid (reverse + glyph swap), and the
+  per-cell color multiset must be preserved (connectors included — guards the
+  connector-color scan that flips direction under mirror).
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
-`build_graph`, `get_track_chars`, `reset_ids`. `listview._internal` exposes
-`pack_right` (the right-pin budget packer).
+`reachable_cone`, `build_lanes`, `mark_reachable`, `build_graph`,
+`get_track_chars`, `reset_ids`.
+`listview._internal` exposes `pack_right` (the right-pin budget packer).
 
 ### Layout testing approach
 
@@ -238,5 +247,21 @@ Details not covered by the spec or architecture:
   The default `open` runs diffview guarded; diffview is the only optional
   dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
   `commit_range` is.
+- **Reachability dimming = Lane model + walk** (specification.md §5, §12):
+  `build_lanes` makes one **Lane** (edge `{id, begin, parent, highlighted}`) per
+  visible parent/child edge, wires `OrderItem.parent_lanes`/`child_lanes`, and
+  binds each **Segment** to the Lane(s) it draws — a fan **bus** Segment carries
+  the *set* of edges routing through it (span between each tap and the commit's
+  hub column). `mark_reachable` walks the Lanes from the pivot (parent_lanes =
+  ancestors, child_lanes = descendants), setting `highlighted`. This is **exact**
+  — a sibling sharing a fan is a distinct Lane, so it stays fully dim (the old
+  flood's best-effort over-lighting is gone). `get_track_chars(opts, tracks,
+  emphasis)` dims a glyph by whether its top Segment draws a highlighted edge
+  (colour unchanged unless a highlighted edge overrides it) and a connector by
+  its horizontal Segment's edge set; `dim_hl` is the cached, `ColorScheme`-rebuilt
+  hue-preserving blend (flat `NonText` without truecolor). Recomputed on row
+  change / `m` reflow / stream completion; `emphasis` is false (all lit) on `H`
+  off or no pivot. `reachable_cone` stays a pure, tested helper; production uses
+  `mark_reachable`. Deferred: `Track`→`Column` rename; a `Route` (run of Lanes).
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.

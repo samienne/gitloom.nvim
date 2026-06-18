@@ -209,10 +209,18 @@ them refs → head → commits.
   the external-diff provider (specification.md §11.5); graph range-selection will
   add more. Pure.
 
+- `reachable_cone(order, pivot_index, top, bottom)` — the pivot's causal cone
+  (specification.md §12.1): two monotonic sweeps from `order[pivot_index].commit`
+  — one following `parents` (ancestors), one following `children` (descendants) —
+  bounded to commits in the visible rows `top..bottom`. Returns a
+  `table<Commit, true>` set (pivot included). Pure (no view/IO); the window
+  bound and the parent-always-below-child topological order make it exact for
+  relationships between on-screen commits.
+
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
 `classify_ref`, `group_refs`, `parse_show`, `format_commit_detail`,
-`format_diff`, `diffstat_files`, `format_diffstat`, and `commit_range` are pure
-and exposed via `graph._internal` for testing.
+`format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`, and
+`reachable_cone` are pure and exposed via `graph._internal` for testing.
 
 ### DAG construction
 
@@ -251,29 +259,35 @@ These share a `TrackState` (`space_available`, `merge`/`split` bookkeeping,
 and drives lane color; `reset_ids()` restarts the sequence so each
 `build_graph` (and each opened graph window) is deterministic.
 
-### Lane model (specification.md §5)
+### Lane / Segment model (specification.md §5)
 
-On top of the flat `Track` (one cell = one id + connectivity), `attach_lanes`
-derives a `lanes: Lane[]` view per cell — the faithful model where each lane
-is one wire (the edge child → parent) with its own connectivity. It runs per
-rendered line against the line above it (column-aligned by track index):
+The layout produces, per cell (`Track`), a `lanes: Segment[]` decomposition
+(`attach_lanes`), and a post-pass (`build_lanes`) binds those Segments to
+first-class **Lane** objects (edges).
 
-- A cell's connectivity is decomposed into two-sided wires: a crossing →
-  vertical + horizontal lanes; a tee → through lane + branch; a turn → one
-  bent lane; straights/endpoints → one lane.
-- **Handoff split:** if a cell's incoming (`up`) lane id — taken from the cell
-  directly above — differs from its own (`down`) id, the up and down segments
-  are *different* lanes (a child's split-in lane and a parent's merge-out lane
-  sharing a column). They are modeled as two lanes rather than one conflated
-  vertical, so per-lane continuity holds.
+- `attach_lanes(tracks, prev_line)` splits each cell's connectivity into
+  two-sided **Segments**: a crossing → vertical + horizontal; a tee → through +
+  branch; a turn → one bent wire; straights/endpoints → one. Each Segment records
+  the edge it draws — `begin`/`parent` — taken from this cell's track, the
+  cell above for the up half of a **handoff** (incoming child-lane id ≠ outgoing
+  parent-lane id), or the horizontal lookahead for a bus wire.
+- `build_lanes(rows, top, bottom)` creates one `Lane = { id, begin, parent,
+  highlighted }` per visible parent/child edge (from the DAG, authoritative),
+  attaches `parent_lanes`/`child_lanes` to each `OrderItem`, and points each
+  Segment at the Lane(s) it draws (shared objects). A **fan** (split or merge)
+  draws several edges over one horizontal run, so its bus Segments get the *set*
+  of edges routing through them: each edge spans the columns between its tap and
+  the commit's hub column, and a bus cell carries every edge whose span covers
+  it. This is what makes the §12 emphasis exact across shared fans — a sibling's
+  exclusive bus cell carries only the sibling's (dim) edge.
 
-This is additive and behavior-neutral: the flat fields still drive the glyph
-(its connectivity is the union of the cell's lanes' connectivity). Only the
-*color* is sourced from the lanes, via `top_lane_id` (prefers the `down` lane
-so a column reads continuously into the lane below) — a single cell shows one
-color, so at a handoff the visual is best-effort while the model keeps both
-lanes. The lane invariants (two-sided, connectivity-consistency,
-leads-somewhere, per-lane continuity) are tested against this view.
+`get_track_chars` colours a glyph by its top Segment's edge (`seg_color_id`,
+preferring a highlighted edge so the cone colour wins, else the segment's own
+layout id) and a connector by the lane its run terminates at (a direction-aware
+lookahead, for colour continuity under mirror). At a handoff a single cell shows
+one colour while the model keeps both Lanes. Invariants (two-sided,
+connectivity-consistency, every-lane-an-edge, per-lane continuity) are tested
+against this model.
 
 ### Rendering to glyphs
 
@@ -284,7 +298,12 @@ leads-somewhere, per-lane continuity) are tested against this view.
   the cells through this first: it reverses the column order and swaps each
   cell's `left`/`right` connectivity. Because the glyph is a pure function of
   connectivity, the mirrored glyphs (`╭`↔`╮`, `┤`↔`├`, `╴`↔`╶`) and connectors
-  fall out with no glyph-swap table, and color (lane id) is unchanged. It also
+  fall out with no glyph-swap table, and color (lane id) is unchanged. A
+  horizontal connector is colored by the lane its run terminates at (found by
+  scanning past pass-through crossings/jumps); that destination is to the right
+  normally but to the **left** once the cells are reversed, so `get_track_chars`
+  flips the scan direction under mirror (`i → 1` inclusive, mirroring the normal
+  `i+1 ..` range under the flip) — otherwise the connector is miscolored. It also
   tags the column `align = "right"` so the listview right-aligns it (padding on
   the left) — keeping vertical wires column-aligned across rows of differing
   lane counts. Render-only; the model rows are untouched (specification.md §5.4).
@@ -371,6 +390,42 @@ it: the graph's `D` key (commit under the cursor) and the commit view's action
 label. Because the provider takes a *range*, future graph-side multi-commit
 selection adds new range constructors (e.g. `range_between(a, b)`) without
 touching the provider or the call sites.
+
+### Reachability emphasis
+
+The pivot's cone (specification.md §12) drives a dimming pass over the visible
+rows, walking the **Lane graph** (no flood, no id heuristics):
+
+- `mark_reachable(order, pivot_index, top, bottom)` walks the Lanes from the
+  pivot: follow `parent_lanes` (ancestors), then `child_lanes` (descendants),
+  setting `highlighted` on each Lane reached and `active` on each cone commit's
+  marker (others dim). It returns the cone commit set, which also drives the
+  **row-field** dimming (date/author/message/refs) in `display_item`. Each Lane
+  is one edge, so the walk is **exact**: a sibling sharing a fan is a distinct
+  Lane and never lights. Bounded to the visible rows. Assumes `build_lanes` ran.
+- `get_track_chars(opts, tracks, emphasis)` dims a glyph by whether its top
+  Segment draws a highlighted edge (`seg_hl`) — the commit marker by the track's
+  own `active` — and a connector by whether its horizontal Segment's edge set
+  contains a highlighted edge. `emphasis` is false when the toggle is off or
+  there is no pivot, so everything renders lit. Colour is unchanged from the
+  un-emphasised layout unless a highlighted edge overrides it.
+- `reachable_cone` (above) remains a pure helper (commit-set only) with its own
+  property tests; the production path uses `mark_reachable` (which subsumes it).
+  `update_cone` calls `build_lanes(order, top, bottom)` then `mark_reachable`.
+- `dim_hl(opts, group)` returns a dimmed derivative of a highlight group:
+  it resolves the group's `fg`, blends it toward `Normal`'s `bg` by
+  `palette.dim` (default `0.6`), and defines a cached `GitloomDim_<group>`
+  group with that colour. Cached per `(group, factor)`; a `ColorScheme` autocmd
+  clears the cache (the derived groups are wiped by `hi clear`) and refreshes.
+  Without `termguicolors` it returns a flat `NonText` fallback.
+
+`display_item` dims the row's non-lane fields (date, author, message, refs)
+through `dim_hl` when the row's commit is outside the cone, and passes
+`emphasis` to `get_track_chars` for the lanes. With no pivot (or the toggle off)
+`emphasis` is false, so streaming and the pre-pivot state render lit. The cone
+is recomputed (Lanes rebuilt over the window and re-walked) on row change via
+the `CursorMoved` autocmd, on the `m` reflow, and once the commit stream
+completes; the listview then refreshes the visible range.
 
 ### Vendored helpers
 

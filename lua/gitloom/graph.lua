@@ -31,6 +31,7 @@ local KEYBINDS = {
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref on the row" },
+    { "H", "Toggle reachability highlighting (dimming)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },
@@ -116,6 +117,61 @@ local function highlight_text(text, hl)
             },
         } or nil,
     }
+end
+
+-- Reachability dimming (specification.md §12). A dimmed derivative of a
+-- highlight group: resolve its fg, blend it toward Normal's bg by the palette's
+-- dim factor, and cache a `GitloomDim_*` group with that color. Without
+-- truecolor we cannot blend rgb, so fall back to a single flat group.
+local DIM_FALLBACK = "NonText"
+local dim_cache = {}
+
+---@param fg integer
+---@param bg integer
+---@param alpha number  fraction blended toward bg (0 = fg, 1 = bg)
+---@return integer
+local function blend_color(fg, bg, alpha)
+    local function chan(f, b)
+        return math.floor(f * (1 - alpha) + b * alpha + 0.5)
+    end
+    local fr, fg2, fb = math.floor(fg / 65536) % 256, math.floor(fg / 256) % 256, fg % 256
+    local br, bg2, bb = math.floor(bg / 65536) % 256, math.floor(bg / 256) % 256, bg % 256
+    return chan(fr, br) * 65536 + chan(fg2, bg2) * 256 + chan(fb, bb)
+end
+
+--- A dimmed version of `group`, blended toward the Normal background by the
+--- palette's dim factor (specification.md §12.2). Cached per (group, factor);
+--- the cache is cleared on ColorScheme (the derived groups are wiped by
+--- `hi clear`). Returns a flat fallback group when truecolor is off.
+---@param opts GraphOptions
+---@param group string|nil
+---@return string|nil
+local function dim_hl(opts, group)
+    if not group then return nil end
+    if not vim.o.termguicolors then return DIM_FALLBACK end
+    local factor = (opts.palette and type(opts.palette.dim) == "number") and opts.palette.dim or 0.6
+    local key = group .. "\x1f" .. tostring(factor)
+    if dim_cache[key] then return dim_cache[key] end
+
+    local ok_src, src = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+    local ok_norm, normal = pcall(vim.api.nvim_get_hl, 0, { name = "Normal", link = false })
+    normal = (ok_norm and normal) or {}
+    local fg = (ok_src and src and src.fg) or normal.fg
+    if not fg then return DIM_FALLBACK end
+    -- A transparent colorscheme leaves Normal without a bg; blend toward the
+    -- editor's background tone so dimming still preserves hue (not a flat grey).
+    local bg = normal.bg or ((vim.o.background == "light") and 0xffffff or 0x000000)
+
+    local name = "GitloomDim_" .. group:gsub("%W", "_") .. "_" .. tostring(math.floor(factor * 100))
+    pcall(vim.api.nvim_set_hl, 0, name, { fg = blend_color(fg, bg, factor) })
+    dim_cache[key] = name
+    return name
+end
+
+--- Clear the dim-group cache (the derived groups are wiped by `hi clear` on a
+--- ColorScheme change); they are recreated lazily on the next render.
+local function reset_dim_cache()
+    for k in pairs(dim_cache) do dim_cache[k] = nil end
 end
 
 
@@ -600,13 +656,9 @@ local function handle_commit(opts, state, track, item)
         ---@type Track
         local new_track = {
             id = track_id,
-            --override = track == nil and "*" or nil,
-            --override = "*",
-            --override = opts.merge_on_separate_line and "*" or nil,
-            --override = state.merge and tostring(#state.merge.new_parents) or nil,
-            --override = state.split and tostring(state.split.remaining) or nil,
-            --override = tostring(state.space_available),
-            --override = track and track.parent == item.commit and "*" or nil,
+            -- This commit fans its outgoing edges, so each new track's lane
+            -- begins (child end) at this commit (specification.md §5).
+            begin = item.commit,
             connectivity = {
                 down = parent ~= nil,
                 right = not opts.merge_on_separate_line and state.merge and #state.merge.new_parents > 0 or
@@ -645,8 +697,7 @@ local function handle_merge(state, track, item)
         ---@type Track
         local new_track = {
             id = track_id,
-            --override = "*",
-            --override = parent ~= nil and "*" or nil,
+            begin = item.commit, -- merge fan-out: lanes begin at this commit
             has_commit = false,
             connectivity = {
                 down = parent ~= nil,
@@ -684,11 +735,8 @@ local function handle_split(state, track, item)
         ---@type Track
         local new_track = {
             id = track and track.id,
+            begin = track and track.begin, -- split fan-in: carry the child's lane
             has_commit = false,
-            --override = state.split and tostring(state.split.remaining) or nil,
-            --override = tostring(#item.commit.children),
-            --override = parent and "*" or nil,
-            --override = "*",
             connectivity = {
                 down = parent ~= nil and i == 1 and state.split.remaining == #item.commit.children,
                 up = i == state.space_available,
@@ -719,10 +767,7 @@ local function handle_line(state, track)
         local new_track = {
             --id = state.merge_id or track.id,
             id = track.id,
-            --override = "*",
-            --override = state.split and tostring(state.split.remaining) or nil,
-            --override = splitting_or_merging and "*" or nil,
-            --override = tostring(state.space_available),
+            begin = track.begin, -- pass-through: same lane continues
             connectivity = {
                 up = i == state.space_available,
                 down = splitting_or_merging and i == state.space_available or not splitting_or_merging and i == 1,
@@ -818,7 +863,7 @@ local function handle_merge_line(opts, tracks, item)
             ---@type Track
             local new_track = {
                 id = get_next_id(),
-                --override = "*",
+                begin = item.commit, -- merge-line fan-out
                 connectivity = {
                     up = false,
                     left = true,
@@ -890,7 +935,7 @@ local function handle_commit_line(opts, tracks, item)
                 ---@type Track
                 local new_track = {
                     id = get_next_id(),
-                    --override = "*",
+                    begin = item.commit, -- inline merge fan-out
                     connectivity = {
                         up = false,
                         left = true,
@@ -929,7 +974,7 @@ local function handle_commit_line(opts, tracks, item)
             ---@type Track
             local new_track = {
                 id = get_next_id(),
-                --override = "*",
+                begin = item.commit, -- merge-line fan-out
                 connectivity = {
                     up = false,
                     left = true,
@@ -958,14 +1003,14 @@ end
 --- lookahead get_track_chars uses to color a horizontal run).
 ---@param tracks Track[]
 ---@param i integer
----@return integer|nil
-local function horizontal_id(tracks, i)
+---@return Track|nil
+local function horizontal_track(tracks, i)
     for j = i + 1, #tracks do
         local c = tracks[j].connectivity
         local is_cross = c.down and c.up and c.left and c.right
         local is_jump = not c.down and not c.up and c.right and c.left
         if not (is_cross or is_jump) then
-            return tracks[j].id
+            return tracks[j]
         end
     end
     return nil
@@ -984,71 +1029,69 @@ local function attach_lanes(tracks, prev_line)
     for i, t in ipairs(tracks or {}) do
         local c = t.connectivity
         local u, d, l, r = c.up or false, c.down or false, c.left or false, c.right or false
-        local h_id = horizontal_id(tracks, i)
+        local h_track = horizontal_track(tracks, i)
+        local h_id = h_track and h_track.id
         local down_id = t.id
 
-        -- The id of the lane entering from above (the cell directly above in
-        -- the same column). When it differs from this cell's own (down) id,
-        -- the up segment and down segment are *different* lanes sharing the
-        -- column — a handoff (e.g. a child's split-in lane reaching the commit
-        -- while a parent's merge-out lane leaves it). They are modeled as two
-        -- lanes, even though they render as one (best-effort) glyph.
-        local up_id = down_id
-        if u and prev_line and prev_line[i] and prev_line[i].connectivity.down then
-            up_id = prev_line[i].id
-        end
+        -- The lane entering from above (the cell directly above in the same
+        -- column). When its id differs from this cell's own (down) id, the up
+        -- and down segments are *different* edges sharing the column — a handoff.
+        local up_track = (u and prev_line and prev_line[i] and prev_line[i].connectivity.down)
+            and prev_line[i] or nil
+        local up_id = up_track and up_track.id or down_id
         local handoff = u and d and up_id ~= down_id
 
-        local lanes = {}
-        local function add(id, sides)
-            lanes[#lanes + 1] = { id = id, parent = t.parent, connectivity = sides }
+        local segments = {}
+        -- Each Segment records the edge (begin -> parent) it draws, so build_lanes
+        -- can bind it to a Lane object (§5). Down/vertical/turn use this cell's
+        -- edge; the up half of a handoff uses the incoming cell's edge; a
+        -- horizontal wire uses the lane it reaches (best-effort lookahead).
+        local function add(id, begin_c, parent_c, sides)
+            segments[#segments + 1] = { id = id, begin = begin_c, parent = parent_c, connectivity = sides }
         end
+        local function v(sides) add(down_id, t.begin, t.parent, sides) end
+        local function vup(sides) add(up_id, up_track and up_track.begin, up_track and up_track.parent, sides) end
+        local function h(sides) add(h_id, h_track and h_track.begin, h_track and h_track.parent, sides) end
 
         local vpair, hpair = u and d, l and r
         if hpair then
-            -- horizontal through-lane is always its own lane
-            add(h_id, { left = true, right = true })
+            h({ left = true, right = true })
             if handoff then
-                add(up_id, { up = true })
-                add(down_id, { down = true })
+                vup({ up = true })
+                v({ down = true })
             elseif vpair then
-                add(down_id, { up = true, down = true })
+                v({ up = true, down = true })
             elseif u then
-                add(down_id, { up = true })
+                v({ up = true })
             elseif d then
-                add(down_id, { down = true })
+                v({ down = true })
             end
         elseif l or r then
-            local h = l and "left" or "right"
+            local hs = l and "left" or "right"
             if handoff then
-                -- incoming child-lane and outgoing parent-lane share the
-                -- horizontal stub toward the commit; modeled separately.
-                local up_sides = { up = true }; up_sides[h] = true
-                local down_sides = { down = true }; down_sides[h] = true
-                add(up_id, up_sides)
-                add(down_id, down_sides)
+                local up_sides = { up = true }; up_sides[hs] = true
+                local down_sides = { down = true }; down_sides[hs] = true
+                vup(up_sides)
+                v(down_sides)
             elseif vpair then
-                -- tee: vertical through-lane + horizontal branch
-                add(down_id, { up = true, down = true })
-                add(h_id, { [h] = true })
+                v({ up = true, down = true })
+                h({ [hs] = true })
             elseif u or d then
-                -- turn: one bent lane
-                add(down_id, { up = u or nil, down = d or nil, [h] = true })
+                v({ up = u or nil, down = d or nil, [hs] = true })
             else
-                add(h_id, { [h] = true })
+                h({ [hs] = true })
             end
         else
-            -- no horizontal
             if handoff then
-                add(up_id, { up = true })
-                add(down_id, { down = true })
+                vup({ up = true })
+                v({ down = true })
             else
-                add(down_id, { up = u or nil, down = d or nil })
+                v({ up = u or nil, down = d or nil })
             end
         end
 
-        ---@type Lane[]
-        t.lanes = lanes
+        ---@type Segment[]
+        t.lanes = segments
     end
 end
 
@@ -1096,6 +1139,180 @@ local function layout_item(opts, prev_tracks, item)
     return result
 end
 
+--- Build first-class Lane (edge) objects over the laid-out rows and attach them
+--- to OrderItems (specification.md §5). One Lane per visible parent/child edge,
+--- taken from the DAG (authoritative) so it is independent of layout quirks;
+--- `parent_lanes` are a commit's edges out to its parents, `child_lanes` its
+--- edges in from its children. The colour `id` is read from a Track that draws
+--- the edge, so a Lane's colour matches its rendered wire.
+--- The rendered lines of an OrderItem in display order (split / commit / merge),
+--- skipping absent ones. A plain `{item.split, item.tracks, item.merge}` can't be
+--- `ipairs`-ed because a nil `split` truncates the list.
+---@param item OrderItem|nil
+---@return Track[][]
+local function item_lines(item)
+    local out = {}
+    if not item then return out end
+    if item.split then out[#out + 1] = item.split end
+    if item.tracks then out[#out + 1] = item.tracks end
+    if item.merge then out[#out + 1] = item.merge end
+    return out
+end
+
+---@param rows OrderItem[]
+---@param top? integer  first row to consider (default 1)
+---@param bottom? integer  last row to consider (default #rows)
+---@return table<Commit, OrderItem>  commit -> its OrderItem (for the lane walk)
+local function build_lanes(rows, top, bottom)
+    top = top or 1
+    bottom = bottom or #rows
+
+    local item_of = {} -- Commit -> its commit-row OrderItem
+    for i = top, bottom do
+        local row = rows[i]
+        if row and row.commit and row.type ~= "split" and row.type ~= "merge" then
+            item_of[row.commit] = row
+            row.parent_lanes = {}
+            row.child_lanes = {}
+        end
+    end
+
+    -- colour id per edge (begin -> parent -> id), from the tracks that draw it.
+    local edge_id = {}
+    for i = top, bottom do
+        for _, line in ipairs(item_lines(rows[i])) do
+            for _, t in ipairs(line) do
+                if t.begin and t.parent and t.id then
+                    edge_id[t.begin] = edge_id[t.begin] or {}
+                    if edge_id[t.begin][t.parent] == nil then
+                        edge_id[t.begin][t.parent] = t.id
+                    end
+                end
+            end
+        end
+    end
+
+    local registry = {} -- begin -> parent -> Lane
+    local function get_lane(b, p, id)
+        if not b or not p then return nil end
+        registry[b] = registry[b] or {}
+        local lane = registry[b][p]
+        if not lane then
+            ---@type Lane
+            lane = { id = id or (edge_id[b] and edge_id[b][p]) or nil, begin = b, parent = p, highlighted = false }
+            registry[b][p] = lane
+        elseif lane.id == nil and id then
+            lane.id = id
+        end
+        return lane
+    end
+
+    -- DAG edges (authoritative) -> OrderItem incident lanes.
+    for i = top, bottom do
+        local c = rows[i] and rows[i].commit
+        if c and item_of[c] then
+            for _, p in ipairs(c.parents or {}) do
+                if item_of[p] and not (registry[c] and registry[c][p]) then
+                    local lane = get_lane(c, p)
+                    table.insert(item_of[c].parent_lanes, lane)
+                    table.insert(item_of[p].child_lanes, lane)
+                end
+            end
+        end
+    end
+
+    -- Bind each Segment to the Lane(s) it draws (the same shared objects, so a
+    -- highlighted edge shows on every Segment that draws it). Verticals/turns
+    -- resolve to a single edge; the fan pass below overrides bus horizontals.
+    for i = top, bottom do
+        for _, line in ipairs(item_lines(rows[i])) do
+            for _, t in ipairs(line) do
+                for _, seg in ipairs(t.lanes or {}) do
+                    local lane = get_lane(seg.begin, seg.parent, seg.id)
+                    seg.edges = lane and { lane } or {}
+                end
+            end
+        end
+    end
+
+    -- Fan buses: a split/merge draws several edges over one shared horizontal
+    -- run. Bind each horizontal Segment to the *set* of edges routing through it
+    -- (a bus cell lights when any of its edges is in the cone), and each tap's
+    -- vertical to its own edge. An edge fanning between a tap column and the hub
+    -- (the commit's column) occupies every cell strictly between them.
+    local function bind_fan(line, hub_col, taps)
+        if not hub_col then return end
+        -- tap verticals -> their own edge
+        for _, tp in ipairs(taps) do
+            for _, seg in ipairs(line[tp.col].lanes or {}) do
+                if seg.connectivity.up or seg.connectivity.down then seg.edges = { tp.lane } end
+            end
+        end
+        -- horizontal Segments -> the set of edges whose span covers the column
+        for j, cell in ipairs(line) do
+            local set, seen = {}, {}
+            for _, tp in ipairs(taps) do
+                local lo, hi = math.min(tp.col, hub_col), math.max(tp.col, hub_col)
+                if lo ~= hi and j >= lo and j <= hi and not seen[tp.lane] then
+                    set[#set + 1] = tp.lane
+                    seen[tp.lane] = true
+                end
+            end
+            if #set > 0 then
+                for _, seg in ipairs(cell.lanes or {}) do
+                    if seg.connectivity.left or seg.connectivity.right then seg.edges = set end
+                end
+            end
+        end
+    end
+    for i = top, bottom do
+        local row = rows[i]
+        local C = row and row.commit
+        if C and item_of[C] then
+            -- Split line: C's children fan in. The hub is the cell descending to
+            -- C (`parent == C`) — NOT just any `down` cell, since unrelated
+            -- pass-through lanes also descend and would stretch the spans. Taps
+            -- are the up cells whose lane is a real child edge of C.
+            if row.split then
+                local children = {}
+                for _, ch in ipairs(C.children or {}) do children[ch] = true end
+                local hub, taps = nil, {}
+                for j, cell in ipairs(row.split) do
+                    if cell.connectivity.down and cell.parent == C then hub = j end
+                    if cell.connectivity.up and cell.begin and children[cell.begin] then
+                        local lane = get_lane(cell.begin, C)
+                        if lane then taps[#taps + 1] = { lane = lane, col = j } end
+                    end
+                end
+                bind_fan(row.split, hub, taps)
+            end
+            -- Commit/merge line: C fans out to its parents; hub = C's column. Only
+            -- C's own outgoing edges (begin == C) are taps, so unrelated lanes
+            -- crossing the line are left alone.
+            for _, line in ipairs({ row.tracks, row.merge }) do
+                local hub, taps = nil, {}
+                for j, cell in ipairs(line) do
+                    if cell.has_commit and cell.commit == C then hub = j end
+                    if cell.connectivity.down and cell.parent and cell.begin == C then
+                        local lane = get_lane(C, cell.parent)
+                        if lane then taps[#taps + 1] = { lane = lane, col = j } end
+                    end
+                end
+                -- A separate merge line has no commit cell; the hub is C's
+                -- continuation (the up wire it carries).
+                if not hub then
+                    for j, cell in ipairs(line) do
+                        if cell.connectivity.up and cell.begin == C then hub = j break end
+                    end
+                end
+                bind_fan(line, hub, taps)
+            end
+        end
+    end
+
+    return item_of
+end
+
 --- Build the full graph layout from an ordered list of items, from scratch.
 --- Pure and deterministic (fresh lane-id sequence each call). Returns new row
 --- tables (does not mutate the inputs). This is the reflow primitive and the
@@ -1121,6 +1338,7 @@ local function build_graph(opts, items)
         carry = result.carry
     end
 
+    build_lanes(rows)
     return rows
 end
 
@@ -1144,28 +1362,35 @@ end
 ---@field left boolean
 ---@field right boolean
 
---- Target lane model (specification.md §5). A lane is one wire through a
---- cell: the edge child -> parent, with its own connectivity (exactly two
---- sides; one only at a commit endpoint). Migration in progress — see the
---- note on Track.
+--- A **Lane** is one drawn edge, child -> parent (specification.md §5). `begin`
+--- is the child (above), `parent` the parent/end (below); `id` drives colour;
+--- `highlighted` marks it for the reachability emphasis (§12). One Lane per
+--- parent/child edge, shared by every Segment that draws it.
 ---@class Lane
 ---@field id integer|nil
----@field child? Commit       the placed commit (above) the lane emanates from
----@field parent? Commit      the commit (below) the lane terminates at
+---@field begin Commit
+---@field parent Commit
+---@field highlighted boolean
+
+--- A **Segment** is one wire within a Column (today's `Track`): its
+--- connectivity plus the Lane(s) it draws (a list — usually one, but a shared
+--- fan bus carries the set of edges routing through it).
+---@class Segment
+---@field id integer|nil
 ---@field connectivity Connectivity
+---@field begin? Commit
+---@field parent? Commit
+---@field edges? Lane[]   the edge(s) this wire draws (§5)
 
 ---@class Track
 ---@field id integer|nil
 ---@field connectivity Connectivity
 ---@field has_commit boolean
 ---@field commit? Commit
----@field parent? Commit
+---@field begin? Commit   the child end of this wire's edge (lane begin); §5
+---@field parent? Commit  the parent end of this wire's edge (lane end); §5
 ---@field override? string
----@field lanes? Lane[]
---- MIGRATION (specification.md §5): a cell is moving to a `lanes: Lane[]`
---- model where glyph = union of lanes' connectivity and color = a "top"
---- lane's id. `lanes` is currently an additive view (one lane per track,
---- mirroring the flat fields); rendering still reads the flat fields.
+---@field lanes? Segment[]  per-wire decomposition of the cell (Segments; §5)
 
 ---@class MergeState
 ---@field remaining integer
@@ -1188,6 +1413,8 @@ end
 ---@field tracks Track[]
 ---@field split? Track[]
 ---@field merge? Track[]
+---@field parent_lanes? Lane[]  edges out to this commit's parents (§5)
+---@field child_lanes? Lane[]   edges in from this commit's children (§5)
 
 ---@param opts GraphOptions
 ---@param order OrderItem[]
@@ -1234,23 +1461,79 @@ end
 
 ---@param opts GraphOptions
 ---@param tracks Track[]
---- The "top" lane whose id colors a cell: prefer the lane heading *down*
---- (so a column reads continuously into the lane below), then the up lane,
---- then any. This is the configurable color strategy (specification.md §5);
---- the chosen id is always one of the cell's lanes'. At a handoff the up and
---- down segments are different lanes — only one color can show, so the visual
---- is best-effort while the model keeps both lanes.
+--- The "top" lane that colors (and sets the dim state of) a cell: prefer the
+--- lane heading *down* (so a column reads continuously into the lane below),
+--- then the up lane, then any. This is the configurable color strategy
+--- (specification.md §5); the chosen lane is always one of the cell's. At a
+--- handoff the up and down segments are different lanes — only one color can
+--- show, so the visual is best-effort while the model keeps both lanes.
 ---@param lanes Lane[]?
+---@return Lane|nil
+--- Whether a Segment draws any highlighted edge (specification.md §12).
+---@param seg Segment
+---@return boolean
+local function seg_hl(seg)
+    for _, e in ipairs(seg.edges or {}) do
+        if e.highlighted then return true end
+    end
+    return false
+end
+
+--- The colour id a Segment renders in: with `emphasis`, a highlighted edge's id
+--- wins (so the cone colour shows); otherwise (and as the fallback) the
+--- segment's own layout id — so colour is pivot-independent when emphasis is off.
+---@param seg Segment|nil
+---@param emphasis boolean|nil
 ---@return integer|nil
-local function top_lane_id(lanes)
-    if not lanes then return nil end
-    for _, lane in ipairs(lanes) do
-        if lane.connectivity.down then return lane.id end
+local function seg_color_id(seg, emphasis)
+    if not seg then return nil end
+    if emphasis then
+        for _, e in ipairs(seg.edges or {}) do
+            if e.highlighted and e.id then return e.id end
+        end
     end
-    for _, lane in ipairs(lanes) do
-        if lane.connectivity.up then return lane.id end
+    return seg.id
+end
+
+--- The "top" Segment a Column's glyph takes its colour/dim from. With
+--- `emphasis`, prefers a highlighted Segment so the cone colour wins a shared
+--- cell (§12.2): a highlighted vertical (down then up), then a single-sided
+--- fan/branch stub, then a both-sided bus when the cell has no through-vertical
+--- (a ┴/┬ fan, never a │ crossing). Without emphasis (or as fallback) it is the
+--- plain §5 down-before-up order, so the picture is pivot-independent.
+---@param segs Segment[]|nil
+---@param emphasis boolean|nil
+---@return Segment|nil
+local function top_lane(segs, emphasis)
+    if not segs then return nil end
+    if emphasis then
+        for _, s in ipairs(segs) do
+            if seg_hl(s) and s.connectivity.down then return s end
+        end
+        for _, s in ipairs(segs) do
+            if seg_hl(s) and s.connectivity.up then return s end
+        end
+        for _, s in ipairs(segs) do
+            local l, r = s.connectivity.left, s.connectivity.right
+            if seg_hl(s) and (l or r) and not (l and r) then return s end
+        end
+        local has_through = false
+        for _, s in ipairs(segs) do
+            if s.connectivity.up and s.connectivity.down then has_through = true break end
+        end
+        if not has_through then
+            for _, s in ipairs(segs) do
+                if seg_hl(s) and s.connectivity.left and s.connectivity.right then return s end
+            end
+        end
     end
-    return lanes[1] and lanes[1].id or nil
+    for _, s in ipairs(segs) do
+        if s.connectivity.down then return s end
+    end
+    for _, s in ipairs(segs) do
+        if s.connectivity.up then return s end
+    end
+    return segs[1]
 end
 
 --- Mirror a row's cells for right-aligned rendering (specification.md §5.4).
@@ -1275,7 +1558,7 @@ local function mirror_tracks(tracks)
     return out
 end
 
-local function get_track_chars(opts, tracks)
+local function get_track_chars(opts, tracks, emphasis)
     -- Right-aligned mirror: flip the cells before deriving glyphs. The graph
     -- column is then right-aligned by the listview (fix_width align = "right").
     if opts.mirror then
@@ -1298,10 +1581,11 @@ local function get_track_chars(opts, tracks)
         }
 
         local char = " "
-        -- Color from the lane model's "top" lane (specification.md §5). For a
-        -- horizontal "─" cell this resolves to the horizontal lane's id, which
-        -- attach_lanes derives via the same lookahead this used to do inline.
-        local track_id = top_lane_id(track.lanes)
+        -- Colour (and dim state) from the Column's "top" Segment (§5): the
+        -- Segment whose edge colours the glyph (a highlighted edge wins, but
+        -- only with emphasis — so the picture is unchanged when it is off).
+        local color_seg = top_lane(track.lanes, emphasis)
+        local track_id = seg_color_id(color_seg, emphasis)
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
@@ -1357,26 +1641,69 @@ local function get_track_chars(opts, tracks)
             return id and opts.palette.tracks[(id % #opts.palette.tracks) + 1] or nil
         end
 
-        -- "┌"  "┘" or "─",
-        -- ┴─┴─ ┤
-        result = compose({ result, highlight_text(char, get_highlight(track_id))
-        })
+        -- Reachability dimming (§12): a cell outside the cone renders its colour
+        -- blended toward the background. The commit marker follows its commit
+        -- (track.active, set by mark_reachable); other glyphs follow whether
+        -- their colour Segment draws a highlighted edge. `emphasis` is false when
+        -- the feature is off / no pivot, so everything renders lit.
+        local cell_active
+        if not emphasis then
+            cell_active = true
+        elseif track.has_commit then
+            cell_active = track.active ~= false
+        else
+            cell_active = not color_seg or seg_hl(color_seg)
+        end
+        local cell_hl = get_highlight(track_id)
+        if not cell_active then cell_hl = dim_hl(opts, cell_hl) end
+        result = compose({ result, highlight_text(char, cell_hl) })
 
-        local next_track_id = nil
-        for j = i + 1, #tracks do
+        -- Connector colour: the lane its horizontal run terminates at, found by
+        -- scanning past pass-through crossings/jumps — to the right normally, to
+        -- the left once mirrored (cells reversed), so the scan flips direction
+        -- (§5.4). Keeping this lookahead preserves colour continuity along a run.
+        local function real_id(j)
             local t = tracks[j]
-            local is_cross = t.connectivity.down and t.connectivity.up and t.connectivity.left and t.connectivity.right
-            local is_jump = not t.connectivity.down and not t.connectivity.up and t.connectivity.right and
-                t.connectivity.left
-            --if not t.connectivity.down or not t.connectivity.up or not t.connectivity.left or not t.connectivity.right then
-            if not is_cross and not is_jump then
-                next_track_id = t.id
-                break
+            if not t then return nil end
+            local cc = t.connectivity
+            local is_cross = cc.down and cc.up and cc.left and cc.right
+            local is_jump = not cc.down and not cc.up and cc.right and cc.left
+            if is_cross or is_jump then return false end
+            return t.id
+        end
+        local next_track_id
+        local from, to, step = i + 1, #tracks, 1
+        if opts.mirror then from, to, step = i, 1, -1 end
+        for j = from, to, step do
+            local id = real_id(j)
+            if id ~= false then next_track_id = id; break end
+        end
+
+        -- Connector dim: this Column's horizontal Segment carries the bus edge
+        -- set (§12.2), so the connector lights iff one of those edges is in the
+        -- cone — independent of the colour lane above.
+        local hseg
+        for _, s in ipairs(track.lanes or {}) do
+            if s.connectivity.left and s.connectivity.right then hseg = s; break end
+        end
+        if not hseg then
+            for _, s in ipairs(track.lanes or {}) do
+                if s.connectivity.left or s.connectivity.right then hseg = s; break end
             end
         end
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
-            local hl = get_highlight(next_track_id)
+            -- Colour: normally the run's terminating lane (continuity); but when
+            -- the bus is lit, take the highlighted edge's colour so the connector
+            -- matches the cone glyphs rather than a passing child's lane.
+            local conn_id = next_track_id
+            if emphasis and hseg then
+                for _, e in ipairs(hseg.edges or {}) do
+                    if e.highlighted and e.id then conn_id = e.id; break end
+                end
+            end
+            local hl = get_highlight(conn_id)
+            if emphasis and hseg and not seg_hl(hseg) then hl = dim_hl(opts, hl) end
             result = compose({ result, highlight_text("─", hl) })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
             result = compose({ result, "╴" })
@@ -1396,6 +1723,140 @@ local function get_track_chars(opts, tracks)
     return result
 end
 
+--- The pivot's causal cone (specification.md §12.1): the commit at
+--- order[pivot_index] plus its ancestors (a parent-only sweep) and descendants
+--- (a child-only sweep), each monotonic, restricted to commits in the visible
+--- rows top..bottom (the window bound). Returns a set keyed by Commit, pivot
+--- included. Pure (no view/IO).
+---@param order OrderItem[]
+---@param pivot_index integer
+---@param top integer
+---@param bottom integer
+---@return table<Commit, boolean>
+local function reachable_cone(order, pivot_index, top, bottom)
+    local cone = {}
+    local pivot_item = order[pivot_index]
+    local pivot = pivot_item and pivot_item.commit
+    if not pivot then return cone end
+
+    -- Only on-screen commits are eligible (§12.1: compute over visible rows).
+    local visible = {}
+    for i = top, bottom do
+        local it = order[i]
+        if it and it.commit then visible[it.commit] = true end
+    end
+    if not visible[pivot] then return cone end
+
+    cone[pivot] = true
+
+    -- Ancestors: a single sweep following parent links only.
+    local stack = { pivot }
+    while #stack > 0 do
+        local c = table.remove(stack)
+        for _, p in ipairs(c.parents or {}) do
+            if visible[p] and not cone[p] then
+                cone[p] = true
+                stack[#stack + 1] = p
+            end
+        end
+    end
+
+    -- Descendants: a single sweep following child links only.
+    stack = { pivot }
+    while #stack > 0 do
+        local c = table.remove(stack)
+        for _, ch in ipairs(c.children or {}) do
+            if visible[ch] and not cone[ch] then
+                cone[ch] = true
+                stack[#stack + 1] = ch
+            end
+        end
+    end
+
+    return cone
+end
+
+--- Mark the reachability emphasis from the pivot (specification.md §12) by
+--- walking the **Lane graph**: from the pivot commit, follow `parent_lanes`
+--- (ancestors) then `child_lanes` (descendants), setting `highlighted` on each
+--- Lane reached and `active` on each cone commit's marker. Bounded to the
+--- visible rows top..bottom. Returns the cone commit set (drives the row-field
+--- dimming, §12.2). Exact: each Lane is one edge, so a sibling sharing a fan is
+--- a distinct Lane and never lights. Assumes `build_lanes` has run.
+---@param order OrderItem[]
+---@param pivot_index integer
+---@param top integer
+---@param bottom integer
+---@return table<Commit, boolean>
+local function mark_reachable(order, pivot_index, top, bottom)
+    local item_of, visible = {}, {}
+    for i = top, bottom do
+        local it = order[i]
+        if it and it.commit then
+            item_of[it.commit] = it
+            visible[it.commit] = true
+        end
+    end
+
+    -- Reset: clear every visible Lane's highlight; dim every commit marker.
+    for i = top, bottom do
+        local it = order[i]
+        if it then
+            for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
+            for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
+            for _, line in ipairs(item_lines(it)) do
+                for _, t in ipairs(line) do
+                    if t.has_commit then t.active = false end
+                end
+            end
+        end
+    end
+
+    local cone = {}
+    local pivot = order[pivot_index] and order[pivot_index].commit
+    if not pivot or not visible[pivot] then return cone end
+    cone[pivot] = true
+
+    local stack = { pivot } -- ancestors: follow parent_lanes
+    while #stack > 0 do
+        local it = item_of[table.remove(stack)]
+        for _, lane in ipairs(it and it.parent_lanes or {}) do
+            if visible[lane.parent] then
+                lane.highlighted = true
+                if not cone[lane.parent] then
+                    cone[lane.parent] = true
+                    stack[#stack + 1] = lane.parent
+                end
+            end
+        end
+    end
+
+    stack = { pivot } -- descendants: follow child_lanes
+    while #stack > 0 do
+        local it = item_of[table.remove(stack)]
+        for _, lane in ipairs(it and it.child_lanes or {}) do
+            if visible[lane.begin] then
+                lane.highlighted = true
+                if not cone[lane.begin] then
+                    cone[lane.begin] = true
+                    stack[#stack + 1] = lane.begin
+                end
+            end
+        end
+    end
+
+    for c in pairs(cone) do -- light the cone commits' markers
+        for _, line in ipairs(item_lines(item_of[c])) do
+            for _, t in ipairs(line) do
+                if t.has_commit and t.commit == c then t.active = true end
+            end
+        end
+    end
+
+    return cone
+end
+
+
 --- Tracks the current ref selection (specification.md §2). Held by commit
 --- identity so it survives reflow; `index` is 1-based into the row's selectable
 --- decorations (branch groups then tags), or nil for no selection.
@@ -1406,8 +1867,9 @@ end
 ---@param opts GraphOptions
 ---@param item OrderItem
 ---@param selection_state SelectionState
+---@param cone table<Commit, boolean>|nil  the pivot's reachability cone (§12), or nil
 ---@return DisplayElement
-local function display_item(opts, item, selection_state)
+local function display_item(opts, item, selection_state, cone)
     local palette = opts.palette
 
     -- The 1-based decoration index selected on this row, or nil. Selection is
@@ -1415,6 +1877,20 @@ local function display_item(opts, item, selection_state)
     local selected = nil
     if selection_state and item.commit and selection_state.commit == item.commit then
         selected = selection_state.index
+    end
+
+    -- Reachability dimming (§12): when a cone is active and this commit is
+    -- outside it, the row's non-lane fields render dimmed (the lanes dim
+    -- per-cell via track.active in get_track_chars). `cone == nil` means no
+    -- pivot yet, so nothing dims. `rh` is "row highlight": the field's group,
+    -- or its dimmed derivative on an out-of-cone row.
+    -- Emphasis is active only with a pivot (cone) and the toggle on; otherwise
+    -- everything renders lit. Lane dimming reads `emphasis`; row fields read
+    -- `row_active` (this commit in the cone).
+    local emphasis = (opts.highlight ~= false) and (cone ~= nil)
+    local row_active = (not emphasis) or (item.commit ~= nil and cone[item.commit] == true)
+    local function rh(text, group)
+        return highlight_text(text, row_active and group or dim_hl(opts, group))
     end
 
     -- Refs (§6) as a list of right-pinned items: a HEAD marker, then branch
@@ -1429,7 +1905,7 @@ local function display_item(opts, item, selection_state)
         local texts = decoration_texts(commit) -- same order; shared with the cursor target
         local items = {}
         if g.head then
-            items[#items + 1] = highlight_text("HEAD", palette.head)
+            items[#items + 1] = rh("HEAD", palette.head)
         end
         local di = 0
         for _, b in ipairs(g.branches) do
@@ -1438,11 +1914,11 @@ local function display_item(opts, item, selection_state)
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
                 local name_hl = b.has_local and palette.branch or palette.remote
-                local segs = { highlight_text("(" .. b.name, name_hl) }
+                local segs = { rh("(" .. b.name, name_hl) }
                 if #b.remotes > 0 then
-                    segs[#segs + 1] = highlight_text(" ↑" .. table.concat(b.remotes, ","), palette.remote)
+                    segs[#segs + 1] = rh(" ↑" .. table.concat(b.remotes, ","), palette.remote)
                 end
-                segs[#segs + 1] = highlight_text(")", name_hl)
+                segs[#segs + 1] = rh(")", name_hl)
                 items[#items + 1] = compose(segs)
             end
         end
@@ -1451,7 +1927,7 @@ local function display_item(opts, item, selection_state)
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                items[#items + 1] = highlight_text("[" .. t .. "]", palette.tags)
+                items[#items + 1] = rh("[" .. t .. "]", palette.tags)
             end
         end
         return items
@@ -1476,24 +1952,24 @@ local function display_item(opts, item, selection_state)
         ---@type DisplayElement
         local element = {
             line = {
-                highlight_text(format_date(item.commit.date, opts) .. " ", palette.date),
-                highlight_text(item.commit.author .. " ", palette.author),
-                get_track_chars(opts, item.tracks),
+                rh(format_date(item.commit.date, opts) .. " ", palette.date),
+                rh(item.commit.author .. " ", palette.author),
+                get_track_chars(opts, item.tracks, emphasis),
                 -- The flex (message) column: optional lane-id debug prefix, then
                 -- the subject. Refs go in line_right, pinned to the right edge.
                 compose({
                     get_tracks(item.tracks),
-                    highlight_text(item.commit.message, palette.message) or "",
+                    rh(item.commit.message, palette.message) or "",
                 }),
             },
             line_right = get_ref_items(item.commit),
         }
         if item.split then
-            element.above = { "", "", get_track_chars(opts, item.split), get_tracks(item.split) }
+            element.above = { "", "", get_track_chars(opts, item.split, emphasis), get_tracks(item.split) }
         end
 
         if item.merge then
-            element.below = { "", "", get_track_chars(opts, item.merge), get_tracks(item.merge) }
+            element.below = { "", "", get_track_chars(opts, item.merge, emphasis), get_tracks(item.merge) }
         end
 
         return element
@@ -2052,6 +2528,7 @@ end
 ---@field selected? string  the h/l-selected ref decoration (§2)
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
+---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
 ---@field tracks? string[]
 
 ---@class MergeStyle
@@ -2070,6 +2547,7 @@ end
 ---@field branches? string|string[]
 ---@field icons Icons
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
+---@field highlight? boolean  reachability dimming on/off (default true); §12
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
@@ -2099,6 +2577,9 @@ function M.open(folder, opts)
             tags = "Comment",
             selected = "Visual", -- the h/l-selected ref decoration (§2)
             action = "Special",  -- the commit-view diff action label (§11.5)
+            -- Reachability dimming (§12): blend factor toward the bg for the
+            -- out-of-cone rows/lanes. Higher = more muted.
+            dim = 0.6,
             -- Commit-view diff colors (§11.3): per-role highlight groups.
             diff = {
                 add = "DiffAdd",
@@ -2124,6 +2605,8 @@ function M.open(folder, opts)
         -- Render the graph mirrored (lane 1 at the right, nearest the message)
         -- by default. Toggle live with M.
         mirror = true,
+        -- Reachability highlighting (§12) on by default; toggle live with H.
+        highlight = true,
         -- Date column: absolute (os.date format) or relative ("3 days ago").
         -- Toggle live with d.
         date_format = "%Y-%m-%d %H:%M",
@@ -2177,9 +2660,15 @@ function M.open(folder, opts)
         index = nil,
     }
 
+    -- Reachability cone for the dimming pass (§12); nil until a pivot exists.
+    local view_state = { cone = nil }
+
     -- Parks the cursor at the message (or the selected ref). Assigned after the
     -- listview opens; forward-declared so the key handlers can call it.
     local place_cursor = function() end
+    -- Recomputes the pivot's cone + re-marks track activeness (§12). Assigned
+    -- after the listview opens; forward-declared for the key handlers.
+    local update_cone = function() end
 
     ---@type ListViewOptions
     local listview_options = {
@@ -2190,7 +2679,7 @@ function M.open(folder, opts)
         message_min = opts.message_min,
         overflow_hl = opts.palette.remote,
         display = function(item)
-            return display_item(opts, item, selection_state)
+            return display_item(opts, item, selection_state, view_state.cone)
         end,
         on_controller = function(controller)
             -- Refs first: they create sparse Commit placeholders with refs
@@ -2270,7 +2759,13 @@ function M.open(folder, opts)
                     end,
                 })
             end).next(function()
-                --vim.notify(vim.inspect(repo))
+                -- Initial dimming once the graph is populated (§12): compute the
+                -- cone for the parked pivot, then refresh and re-park.
+                update_cone()
+                if lv and lv.controller then
+                    lv.controller.refresh()
+                end
+                place_cursor()
             end)
         end,
     }
@@ -2287,6 +2782,7 @@ function M.open(folder, opts)
         opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
         reset_ids()
         refresh_tracks(opts, repo.order, 1)
+        update_cone() -- tracks regenerated → re-mark active for the cone (§12)
         if lv and lv.controller then
             lv.controller.refresh()
         end
@@ -2349,6 +2845,15 @@ function M.open(folder, opts)
     -- d: toggle the date column between absolute and relative. Render-only.
     opts.win.keys.d = function()
         opts.date_mode = (opts.date_mode == "relative") and "absolute" or "relative"
+        if lv and lv.controller then
+            lv.controller.refresh()
+        end
+        place_cursor()
+    end
+    -- H: toggle reachability highlighting (dimming) on/off (§12). Render-only.
+    opts.win.keys.H = function()
+        opts.highlight = opts.highlight == false
+        update_cone() -- recompute for the current pivot so the toggle takes effect
         if lv and lv.controller then
             lv.controller.refresh()
         end
@@ -2426,9 +2931,37 @@ function M.open(folder, opts)
             pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
         end
 
-        -- On moving to a different row, reset the selection to the message and
-        -- re-park the cursor. Only refresh when a decoration was highlighted on
-        -- the row we left (otherwise nothing to redraw).
+        -- Recompute the pivot's cone over the visible rows and re-mark track
+        -- activeness (§12). Cheap (O(visible)); the caller then refreshes.
+        update_cone = function()
+            local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            local bottom = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+            local cur = vim.api.nvim_win_get_cursor(win)[1]
+            -- (Re)build Lanes over the visible window (layout may have changed or
+            -- streamed), then walk them from the pivot to mark highlights (§12).
+            build_lanes(repo.order, top, bottom)
+            local item = repo.order[cur]
+            if not (item and item.commit) then
+                view_state.cone = nil
+                return
+            end
+            view_state.cone = mark_reachable(repo.order, cur, top, bottom)
+        end
+
+        -- Rebuild the dimmed highlight groups after a colorscheme change (the
+        -- derived groups are wiped by `hi clear`) and redraw (§12).
+        vim.api.nvim_create_autocmd("ColorScheme", {
+            group = vim.api.nvim_create_augroup("GitloomDim_" .. buf, { clear = true }),
+            callback = function()
+                reset_dim_cache()
+                if lv and lv.controller then
+                    lv.controller.refresh()
+                end
+            end,
+        })
+
+        -- On moving to a different row, reset the selection to the message,
+        -- recompute the cone for the new pivot, redraw the dimming, and re-park.
         local last_line = nil
         vim.api.nvim_create_autocmd("CursorMoved", {
             group = vim.api.nvim_create_augroup("Gitloom_" .. buf, { clear = true }),
@@ -2440,14 +2973,17 @@ function M.open(folder, opts)
                 local item = repo.order[line]
                 selection_state.commit = item and item.commit or nil
                 selection_state.index = nil
-                if selection_visible and lv.controller then
+                selection_visible = false
+                update_cone()
+                if lv.controller then
                     lv.controller.refresh()
                 end
-                selection_visible = false
                 place_cursor()
             end,
         })
 
+        -- No initial cone/refresh here: the fetch is async, so no commits are
+        -- loaded yet. Initial dimming happens once the stream completes (above).
         place_cursor()
     end
 
@@ -2471,6 +3007,9 @@ M._internal = {
     diffstat_files = diffstat_files,
     format_diffstat = format_diffstat,
     commit_range = commit_range,
+    reachable_cone = reachable_cone,
+    build_lanes = build_lanes,
+    mark_reachable = mark_reachable,
     build_graph = build_graph,
     get_track_chars = get_track_chars,
     reset_ids = reset_ids,
