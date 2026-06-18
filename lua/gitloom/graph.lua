@@ -1049,7 +1049,18 @@ local function attach_lanes(tracks, prev_line)
         local function add(id, begin_c, parent_c, sides)
             segments[#segments + 1] = { id = id, begin = begin_c, parent = parent_c, connectivity = sides }
         end
-        local function v(sides) add(down_id, t.begin, t.parent, sides) end
+        -- An up-without-down segment is an incoming edge ending here, so its edge
+        -- (begin -> parent) is the lane from the cell above (up_track) — e.g. an
+        -- inline split's fan-in tap, whose cell's own begin is the merge commit,
+        -- not the child. Keep this cell's id so the un-emphasised colour is
+        -- unchanged; only the edge attribution (for highlighting) differs.
+        local function v(sides)
+            if sides.up and not sides.down and up_track then
+                add(down_id, up_track.begin, up_track.parent, sides)
+            else
+                add(down_id, t.begin, t.parent, sides)
+            end
+        end
         local function vup(sides) add(up_id, up_track and up_track.begin, up_track and up_track.parent, sides) end
         local function h(sides) add(h_id, h_track and h_track.begin, h_track and h_track.parent, sides) end
 
@@ -1238,32 +1249,74 @@ local function build_lanes(rows, top, bottom)
         end
     end
 
-    -- Fan buses: a split/merge draws several edges over one shared horizontal
-    -- run. Bind each horizontal Segment to the *set* of edges routing through it
-    -- (a bus cell lights when any of its edges is in the cone), and each tap's
-    -- vertical to its own edge. An edge fanning between a tap column and the hub
-    -- (the commit's column) occupies every cell strictly between them.
-    local function bind_fan(line, hub_col, taps)
+    -- Fan decomposition: a split/merge draws several edges over one shared
+    -- horizontal run. Rebuild every cell of the run with *one Segment per drawn
+    -- edge* (specification.md §5), each carrying its own connectivity — a passing
+    -- edge is `left+right`, an edge tapping out of the run turns (`left/right` +
+    -- `up/down`). With per-edge Segments the renderer can simply union the
+    -- highlighted ones to gap a junction's off-cone arms, no extra bus state.
+    -- Unrelated wires crossing the fan row (a vertical that is not a fan edge)
+    -- are preserved; only the bus and the fan's own end-verticals are replaced.
+    -- `taps` are the fan arms ({lane, col, vert} — `vert` is the arm's vertical
+    -- direction); `hub_vert` is C's vertical at the hub (nil when C is a marker).
+    local function build_fan(line, hub_col, taps, hub_vert)
         if not hub_col then return end
-        -- tap verticals -> their own edge
+        -- Arms spread horizontally from the hub. A tap at the hub column is the
+        -- trunk (drawn straight by attach_lanes — the incoming wire and the
+        -- first-parent continuation) and is left alone.
+        local fan_edge = {} -- begin -> parent -> true (the fan's own edges)
+        local arms, cols = {}, {}
         for _, tp in ipairs(taps) do
-            for _, seg in ipairs(line[tp.col].lanes or {}) do
-                if seg.connectivity.up or seg.connectivity.down then seg.edges = { tp.lane } end
+            fan_edge[tp.lane.begin] = fan_edge[tp.lane.begin] or {}
+            fan_edge[tp.lane.begin][tp.lane.parent] = true
+            if tp.col ~= hub_col then
+                arms[#arms + 1] = tp
+                for j = math.min(tp.col, hub_col), math.max(tp.col, hub_col) do cols[j] = true end
             end
         end
-        -- horizontal Segments -> the set of edges whose span covers the column
-        for j, cell in ipairs(line) do
-            local set, seen = {}, {}
-            for _, tp in ipairs(taps) do
-                local lo, hi = math.min(tp.col, hub_col), math.max(tp.col, hub_col)
-                if lo ~= hi and j >= lo and j <= hi and not seen[tp.lane] then
-                    set[#set + 1] = tp.lane
-                    seen[tp.lane] = true
+        -- 1. Across the arm span keep only the hub trunk and unrelated pass-through
+        --    verticals; the bus and the arms' own end-verticals are redrawn below.
+        -- At the hub the trunk vertical (incoming wire + first-parent descent) may
+        -- be fused with the bus in one Segment, so keep its vertical *component*.
+        for j in pairs(cols) do
+            local kept = {}
+            for _, seg in ipairs(line[j].lanes or {}) do
+                local sc = seg.connectivity
+                local has_vert = sc.up or sc.down
+                local vertical_only = has_vert and not (sc.left or sc.right)
+                local is_fan = seg.begin and fan_edge[seg.begin] and fan_edge[seg.begin][seg.parent]
+                if j == hub_col and has_vert then
+                    kept[#kept + 1] = vertical_only and seg or {
+                        id = seg.id, begin = seg.begin, parent = seg.parent, edges = seg.edges,
+                        connectivity = { up = sc.up, down = sc.down },
+                    }
+                elseif j ~= hub_col and vertical_only and not is_fan then
+                    kept[#kept + 1] = seg
                 end
             end
-            if #set > 0 then
-                for _, seg in ipairs(cell.lanes or {}) do
-                    if seg.connectivity.left or seg.connectivity.right then seg.edges = set end
+            line[j].lanes = kept
+        end
+        -- 2. Redraw each arm as one Segment per cell: a turn at its tap (its own
+        --    vertical) and at the hub (toward C), straight bus between. Per-edge,
+        --    so the renderer can union just the cone arms to gap the dim ones.
+        -- Each direction is clamped to the cell's actual layout connectivity, so
+        -- where the layout jumps the bus over a crossing (a `┤╶╮` break) the arm
+        -- follows that routing instead of inventing a wire that is not drawn.
+        for _, tp in ipairs(arms) do
+            local lo, hi = math.min(tp.col, hub_col), math.max(tp.col, hub_col)
+            for j = lo, hi do
+                local tc = line[j].connectivity
+                local conn = {
+                    left = (j > lo and tc.left) or nil,
+                    right = (j < hi and tc.right) or nil,
+                }
+                if j == tp.col and tp.vert and tc[tp.vert] then conn[tp.vert] = true end
+                if j == hub_col and hub_vert and tc[hub_vert] then conn[hub_vert] = true end
+                if conn.left or conn.right or conn.up or conn.down then
+                    line[j].lanes[#line[j].lanes + 1] = {
+                        id = tp.lane.id, begin = tp.lane.begin, parent = tp.lane.parent,
+                        connectivity = conn, edges = { tp.lane },
+                    }
                 end
             end
         end
@@ -1272,33 +1325,52 @@ local function build_lanes(rows, top, bottom)
         local row = rows[i]
         local C = row and row.commit
         if C and item_of[C] then
-            -- Split line: C's children fan in. The hub is the cell descending to
-            -- C (`parent == C`) — NOT just any `down` cell, since unrelated
-            -- pass-through lanes also descend and would stretch the spans. Taps
-            -- are the up cells whose lane is a real child edge of C.
+            local children = {}
+            for _, ch in ipairs(C.children or {}) do children[ch] = true end
+            -- Separate split line: C's children fan in from above (vert "up"); the
+            -- hub is the cell descending to C (`parent == C`) — NOT just any `down`
+            -- cell, since unrelated pass-throughs also descend.
             if row.split then
-                local children = {}
-                for _, ch in ipairs(C.children or {}) do children[ch] = true end
                 local hub, taps = nil, {}
                 for j, cell in ipairs(row.split) do
-                    if cell.connectivity.down and cell.parent == C then hub = j end
-                    if cell.connectivity.up and cell.begin and children[cell.begin] then
+                    local cc = cell.connectivity
+                    if cc.down and cell.parent == C then hub = j end
+                    -- A real arm *turns* toward the hub (up + a horizontal); a cell
+                    -- that merely hosts a child of C passing straight through to a
+                    -- different parent (up+down, no horizontal) is not a tap.
+                    if cc.up and (cc.left or cc.right) and cell.begin and children[cell.begin] then
                         local lane = get_lane(cell.begin, C)
-                        if lane then taps[#taps + 1] = { lane = lane, col = j } end
+                        if lane then taps[#taps + 1] = { lane = lane, col = j, vert = "up" } end
                     end
                 end
-                bind_fan(row.split, hub, taps)
+                build_fan(row.split, hub, taps, "down")
             end
-            -- Commit/merge line: C fans out to its parents; hub = C's column. Only
-            -- C's own outgoing edges (begin == C) are taps, so unrelated lanes
-            -- crossing the line are left alone.
+            -- Commit/merge line: C fans out to its parents below (vert "down"). When
+            -- the split is inline (no separate split line) its children also fan in
+            -- from above (vert "up"). Hub = C's column; on a separate merge line C
+            -- is the up wire (hub_vert "up"), on the commit line C is the marker
+            -- (no hub vertical). Only C's own edges and real child edges are taps,
+            -- so unrelated crossing lanes are left alone.
             for _, line in ipairs({ row.tracks, row.merge }) do
+                local is_commit_line = line == row.tracks
                 local hub, taps = nil, {}
                 for j, cell in ipairs(line) do
                     if cell.has_commit and cell.commit == C then hub = j end
                     if cell.connectivity.down and cell.parent and cell.begin == C then
                         local lane = get_lane(C, cell.parent)
-                        if lane then taps[#taps + 1] = { lane = lane, col = j } end
+                        if lane then taps[#taps + 1] = { lane = lane, col = j, vert = "down" } end
+                    end
+                    -- An inline fan-in tap: a cell with an incoming up segment from
+                    -- a child of C (the cell's own begin is C; the child rides the
+                    -- up segment, attributed by attach_lanes).
+                    if is_commit_line and not row.split and not cell.has_commit then
+                        for _, seg in ipairs(cell.lanes or {}) do
+                            if seg.connectivity.up and not seg.connectivity.down
+                                and seg.begin and children[seg.begin] and seg.parent == C then
+                                taps[#taps + 1] = { lane = get_lane(seg.begin, C), col = j, vert = "up" }
+                                break
+                            end
+                        end
                     end
                 end
                 -- A separate merge line has no commit cell; the hub is C's
@@ -1308,7 +1380,11 @@ local function build_lanes(rows, top, bottom)
                         if cell.connectivity.up and cell.begin == C then hub = j break end
                     end
                 end
-                bind_fan(line, hub, taps)
+                -- C is the marker on the commit line (no hub vertical); on a
+                -- separate merge line C is the up wire the hub carries.
+                local hub_vert
+                if not is_commit_line then hub_vert = "up" end
+                build_fan(line, hub, taps, hub_vert)
             end
         end
     end
@@ -1574,14 +1650,44 @@ local function get_track_chars(opts, tracks, emphasis)
         local track = tracks[i]
         local next = tracks[i + 1]
 
+        -- A *crossing* is an independent through-vertical + through-horizontal in
+        -- one cell (a `│` a wire passes across). It is left whole so a passing
+        -- cone wire never truncates it; only real junctions drop their dim arms.
+        local cross_v, cross_h
+        for _, s in ipairs(track.lanes or {}) do
+            if s.connectivity.up and s.connectivity.down then cross_v = s end
+            if s.connectivity.left and s.connectivity.right then cross_h = true end
+        end
+        local is_crossing = cross_v ~= nil and cross_h
+
+        -- The glyph's connectivity: the full cell by default, but under emphasis a
+        -- real junction keeps only the arms its *highlighted* Segments draw (each
+        -- Segment is one edge; build_fan), so off-cone arms gap out. A uniformly
+        -- dim cell and a crossing keep their full glyph.
         ---@type Connectivity
         local c = {
             left = track.connectivity.left,
-            --right = track.connectivity.right or next and next.connectivity.left,
             right = track.connectivity.right,
             up = track.connectivity.up,
             down = track.connectivity.down,
         }
+        if emphasis and not track.has_commit and not is_crossing then
+            local hc, any = { up = false, down = false, left = false, right = false }, false
+            for _, s in ipairs(track.lanes or {}) do
+                if seg_hl(s) then
+                    any = true
+                    local sc = s.connectivity
+                    if sc.up then hc.up = true end
+                    if sc.down then hc.down = true end
+                    if sc.left then hc.left = true end
+                    if sc.right then hc.right = true end
+                end
+            end
+            if any then
+                if opts.mirror then hc.left, hc.right = hc.right, hc.left end
+                c = hc
+            end
+        end
 
         local char = " "
         -- Colour (and dim state) from the Column's "top" Segment (§5): the
@@ -1682,31 +1788,27 @@ local function get_track_chars(opts, tracks, emphasis)
             if id ~= false then next_track_id = id; break end
         end
 
-        -- Connector dim: this Column's horizontal Segment carries the bus edge
-        -- set (§12.2), so the connector lights iff one of those edges is in the
-        -- cone — independent of the colour lane above.
-        local hseg
-        for _, s in ipairs(track.lanes or {}) do
-            if s.connectivity.left and s.connectivity.right then hseg = s; break end
-        end
-        if not hseg then
+        -- Connector dim/colour: it lights iff a *highlighted* Segment leaves this
+        -- cell toward the next (visual right — which is the unmirrored "left" once
+        -- mirrored reverses the cells). Its colour is that cone edge's, else the
+        -- run's terminating lane (continuity).
+        local conn_dir = opts.mirror and "left" or "right"
+        local conn_lit, conn_id = false, next_track_id
+        if emphasis then
             for _, s in ipairs(track.lanes or {}) do
-                if s.connectivity.left or s.connectivity.right then hseg = s; break end
+                if s.connectivity[conn_dir] and seg_hl(s) then
+                    conn_lit = true
+                    for _, e in ipairs(s.edges or {}) do
+                        if e.highlighted and e.id then conn_id = e.id; break end
+                    end
+                    break
+                end
             end
         end
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
-            -- Colour: normally the run's terminating lane (continuity); but when
-            -- the bus is lit, take the highlighted edge's colour so the connector
-            -- matches the cone glyphs rather than a passing child's lane.
-            local conn_id = next_track_id
-            if emphasis and hseg then
-                for _, e in ipairs(hseg.edges or {}) do
-                    if e.highlighted and e.id then conn_id = e.id; break end
-                end
-            end
             local hl = get_highlight(conn_id)
-            if emphasis and hseg and not seg_hl(hseg) then hl = dim_hl(opts, hl) end
+            if emphasis and not conn_lit then hl = dim_hl(opts, hl) end
             result = compose({ result, highlight_text("─", hl) })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
             result = compose({ result, "╴" })
