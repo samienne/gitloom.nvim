@@ -2963,11 +2963,13 @@ function M.open(folder, opts)
             end,
         })
 
+        local group = vim.api.nvim_create_augroup("Gitloom_" .. buf, { clear = true })
+
         -- On moving to a different row, reset the selection to the message,
         -- recompute the cone for the new pivot, redraw the dimming, and re-park.
         local last_line = nil
         vim.api.nvim_create_autocmd("CursorMoved", {
-            group = vim.api.nvim_create_augroup("Gitloom_" .. buf, { clear = true }),
+            group = group,
             buffer = buf,
             callback = function()
                 local line = vim.api.nvim_win_get_cursor(win)[1]
@@ -2982,6 +2984,24 @@ function M.open(folder, opts)
                     lv.controller.refresh()
                 end
                 place_cursor()
+            end,
+        })
+
+        -- Scrolling (no row change) shifts the visible window, so the
+        -- window-bounded cone must be recomputed for the newly visible rows too.
+        -- Scoped to this window; a guard prevents re-entry from the refresh.
+        local in_scroll = false
+        vim.api.nvim_create_autocmd("WinScrolled", {
+            group = group,
+            pattern = tostring(win),
+            callback = function()
+                if in_scroll or not vim.api.nvim_win_is_valid(win) then return end
+                in_scroll = true
+                update_cone()
+                if lv.controller then
+                    lv.controller.refresh()
+                end
+                in_scroll = false
             end,
         })
 

@@ -423,9 +423,10 @@ rows, walking the **Lane graph** (no flood, no id heuristics):
 through `dim_hl` when the row's commit is outside the cone, and passes
 `emphasis` to `get_track_chars` for the lanes. With no pivot (or the toggle off)
 `emphasis` is false, so streaming and the pre-pivot state render lit. The cone
-is recomputed (Lanes rebuilt over the window and re-walked) on row change via
-the `CursorMoved` autocmd, on the `m` reflow, and once the commit stream
-completes; the listview then refreshes the visible range.
+is recomputed (Lanes rebuilt over the window and re-walked) on row change
+(`CursorMoved`), on scroll (`WinScrolled`, so the window-bounded cone tracks the
+visible rows), on the `m` reflow, and once the commit stream completes; the
+listview then refreshes the visible range.
 
 ### Vendored helpers
 

@@ -260,8 +260,8 @@ Details not covered by the spec or architecture:
   (colour unchanged unless a highlighted edge overrides it) and a connector by
   its horizontal Segment's edge set; `dim_hl` is the cached, `ColorScheme`-rebuilt
   hue-preserving blend (flat `NonText` without truecolor). Recomputed on row
-  change / `m` reflow / stream completion; `emphasis` is false (all lit) on `H`
-  off or no pivot. `reachable_cone` stays a pure, tested helper; production uses
+  change / scroll (`WinScrolled`) / `m` reflow / stream completion; `emphasis` is
+  false (all lit) on `H` off or no pivot. `reachable_cone` stays a pure, tested helper; production uses
   `mark_reachable`. Deferred: `Track`→`Column` rename; a `Route` (run of Lanes).
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.

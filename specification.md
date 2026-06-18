@@ -578,7 +578,8 @@ recognisable. On terminals without true colour, dimming falls back to a single
 flat highlight group (`NonText`).
 
 The emphasis is **on by default** and follows the cursor; it is recomputed when
-the cursor moves to a new row. `H` toggles it off and on live (and `highlight`
+the cursor moves to a new row and when the view scrolls (the window-bounded cone
+tracks the visible rows). `H` toggles it off and on live (and `highlight`
 configures the initial state, §8) — when off, the whole graph renders at full
 colour, **identical regardless of the cursor row** (highlight state never affects
 colour while it is off).
