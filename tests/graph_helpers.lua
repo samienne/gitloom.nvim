@@ -132,11 +132,11 @@ end
 ---@param rows table[]  -- build_graph output
 ---@return table[][]
 function M.render_grid(opts, rows)
-    local gtc = graph._internal.get_track_chars
+    local gtc = graph._internal.get_column_chars
     local lines = {}
     for _, row in ipairs(rows) do
         if row.split then lines[#lines + 1] = line_cells(gtc(opts, row.split)) end
-        lines[#lines + 1] = line_cells(gtc(opts, row.tracks))
+        lines[#lines + 1] = line_cells(gtc(opts, row.columns))
         if row.merge then lines[#lines + 1] = line_cells(gtc(opts, row.merge)) end
     end
 
@@ -198,7 +198,7 @@ local NODES = { ["○"] = true, ["◉"] = true, ["◎"] = true }
 local function check_commits(rows, items)
     local errors, seen = {}, {}
     for _, row in ipairs(rows) do
-        for _, t in ipairs(row.tracks) do
+        for _, t in ipairs(row.columns) do
             if t.has_commit and t.commit then
                 if seen[t.commit.hash] then
                     errors[#errors + 1] = "commit appears twice: " .. t.commit.hash
@@ -221,7 +221,7 @@ local function check_one_commit_per_line(rows)
     local errors = {}
     for i, row in ipairs(rows) do
         local n = 0
-        for _, t in ipairs(row.tracks) do
+        for _, t in ipairs(row.columns) do
             if t.has_commit then n = n + 1 end
         end
         if n ~= 1 then
@@ -258,7 +258,7 @@ local function check_lanes(rows)
     local errors = {}
     local function err(m) errors[#errors + 1] = m end
     for ri, row in ipairs(rows) do
-        for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
+        for _, lst in ipairs({ row.columns, row.split or {}, row.merge or {} }) do
             for ti, t in ipairs(lst) do
                 local lanes = t.lanes or {}
 
@@ -314,7 +314,7 @@ local function check_lane_continuity(rows)
     local lines = {}
     for _, row in ipairs(rows) do
         if row.split then lines[#lines + 1] = row.split end
-        lines[#lines + 1] = row.tracks
+        lines[#lines + 1] = row.columns
         if row.merge then lines[#lines + 1] = row.merge end
     end
 

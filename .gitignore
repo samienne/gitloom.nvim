@@ -1,2 +1,3 @@
 *.swp
 *.lua.luarc.json
+.luals-log/

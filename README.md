@@ -39,6 +39,9 @@ even though it ships as part of the same suite. See
   so large histories stay responsive
 - **Configurable merge style** — render merges/splits inline or on their
   own virtual lines
+- **Reachability emphasis** — the row under the cursor dims everything not in
+  its history (ancestors) or downstream of it (descendants), keeping each
+  lane's colour (just muted) so the relevant graph stands out
 
 ### Planned
 
@@ -94,6 +97,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row |
+| `H` | Toggle reachability highlighting (dimming) off / on |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
@@ -124,6 +128,13 @@ and `h` moves it back left to the message, with the cursor following the
 selected ref (the substrate for planned per-branch actions; it does nothing on
 its own yet).
 
+The row under the cursor is the **pivot**: gitloom dims everything outside its
+reachability cone — its ancestors (following parents) and descendants
+(following children) — so the relevant slice of history stands out. Dimming
+keeps each lane's colour, only muted (`palette.dim`), so dimmed lanes stay
+recognisable. It is on by default and follows the cursor; press `H` to toggle it
+off and on. See [specification.md](specification.md) §12.
+
 ## Configuration
 
 The graph view accepts an options table (`GraphOptions`). Defaults:
@@ -149,6 +160,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         tags = "Comment",
         selected = "Visual",     -- the h/l-selected ref decoration
         action = "Special",      -- the commit-view diff action label (§11.5)
+        dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
 
@@ -164,6 +176,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
+    highlight = true,        -- reachability dimming (§12) on; toggle with H
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
@@ -179,7 +192,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`win`** — floating window geometry (forwarded to snacks.win). Fractional
   `width`/`height` are a share of the editor.
 - **`palette`** — highlight groups per field. `tracks` is a list cycled by
-  lane id to color each lane.
+  lane id to color each lane. `dim` is a blend factor (`0`–`1`) toward the
+  window background applied to everything outside the cursor row's reachability
+  cone (§12); each field keeps its own colour, just muted (a higher factor is
+  more muted). Falls back to a flat `NonText` on non-truecolor terminals.
 - **`merge_style`** — controls whether merges/splits get their own virtual
   line above/below the commit, or are folded onto the commit line.
 - **`branches`** — the ref arguments passed to `git log` (default `--all`).
@@ -187,6 +203,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   graph column (nearest the message). On by default; set `false` for the
   conventional left-to-right layout. A render-only transform; toggle live with
   `M`. See [specification.md](specification.md) §5.4.
+- **`highlight`** — whether reachability dimming (§12) starts enabled (default
+  `true`). Toggle live with `H`.
 - **`date_format`** / **`date_mode`** — the author date is parsed into a
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =

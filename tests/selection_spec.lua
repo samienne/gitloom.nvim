@@ -9,6 +9,7 @@ local move_selection = internal.move_selection
 local decoration_texts = internal.decoration_texts
 local ref_byte_col = internal.ref_byte_col
 local pack_right = require("gitloom.listview")._internal.pack_right
+local refresh_columns = require("gitloom.listview")._internal.refresh_columns
 
 describe("move_selection", function()
     -- nil = message (default, leftmost); 1..count = decorations, left to right.
@@ -87,5 +88,33 @@ describe("pack_right", function()
         local shown, overflow = pack_right({ 30, 30 }, 3)
         assert.equals(0, shown)
         assert.equals(2, overflow)
+    end)
+end)
+
+describe("refresh_columns", function()
+    -- Regression: aligned column widths must be driven by `below` (merge) lines
+    -- too, not just `above`/`line`/`text`. A `below` line wider than every other
+    -- line previously left model.columns[j] = nil, which fix_width then compared
+    -- against (listview.lua "attempt to compare number with nil").
+    it("sizes columns from below (merge) lines", function()
+        local model = {
+            flex = nil,
+            columns = {},
+            items = { { data = 1 }, { data = 2 } },
+            display = function(data)
+                if data == 1 then
+                    return { line = { { text = "A" } } }
+                end
+                -- a merge line below, wider than any commit line
+                return {
+                    line = { { text = "B" } },
+                    below = { { text = "X" }, { text = "Y" }, { text = "Z" } },
+                }
+            end,
+        }
+        refresh_columns(nil, model, 1, 2)
+        assert.equals(3, #model.columns)
+        assert.is_not_nil(model.columns[3]) -- was nil before the fix
+        assert.equals(1, model.columns[3])
     end)
 end)

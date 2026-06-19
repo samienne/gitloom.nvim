@@ -41,7 +41,7 @@ exists primarily to exercise and validate the graph algorithm.
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
-relative (§6).
+relative (§6). `H` toggles reachability highlighting (§12) off and on.
   `?` opens a float listing all keybindings. The footer shows live status
   (the active mode, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
@@ -54,7 +54,9 @@ relative (§6).
   (starting at the first) and `h` moves **left** back toward the message.
   Selection clamps at the last ref and resets to the message when the cursor
   moves to another row. This selection is the substrate for the planned
-  per-branch actions (collapse / hide / pin, §10); it has no effect yet.
+  per-branch actions (collapse / hide / pin, §10); it has no effect yet. The
+  row under the cursor also defines a **pivot** whose reachable history
+  (ancestors and descendants) is emphasised while everything else dims (§12).
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
 
@@ -130,62 +132,76 @@ sparse `Commit` placeholder (as above).
 
 ## 5. Graph layout
 
-Each commit occupies one **row** — it carries that commit's message, so there
-is exactly one commit per row. A row is a sequence of **cells**, one per
-column. A cell holds zero or more **lanes**, where a lane is one wire passing
-through the cell:
+The layout is the visual projection of the commit graph. Its vocabulary, from
+the model outward:
 
-```
-Lane = { id, child: Commit, parent: Commit, connectivity: {up,down,left,right} }
-```
+- **Commit** — a node in the DAG (§4).
+- **Lane** — one drawn **edge, child → parent**:
 
-- **id** — stable visual identity (drives color).
-- **child** — the already-placed commit (above) the lane emanates from; its
-  owner / attribution anchor.
-- **parent** — the commit (below) the lane leads to and terminates at.
-- **connectivity** — which of the cell's four sides this wire touches.
+  ```
+  Lane = { id, begin: Commit, end: Commit, highlighted: bool }
+  ```
 
-A lane represents the edge **child → parent**. The graph is walked top to
-bottom (newest heads on top, roots at the bottom), so the child is always
-already placed and the parent is the downward target; reaching a commit
-matches it against its children's active lanes.
+  `begin` is the child (above), `end` the parent (below); `id` drives colour
+  (kept continuous along a first-parent chain, so a line of history reads as one
+  colour); `highlighted` marks it for the reachability emphasis (§12). There is
+  one Lane per parent/child edge. *(A future **Route** — a contiguous run of
+  Lanes forming a path — is not modelled yet.)*
+- **OrderItem** — the visual unit for one Commit: its order position, the Commit
+  it shows, the Lanes incident to it (`parent_lanes` out to its parents,
+  `child_lanes` in from its children), and its rendered **Lines**. This is the
+  commit ↔ visual bridge.
+- **Line** — one rendered row: a sequence of **Columns**. An OrderItem has a
+  *commit line* and, per the merge style (§5.2), an optional *split line* (above)
+  and/or *merge line* (below). Exactly one Commit's node sits on the commit line;
+  the split/merge lines carry only wires.
+- **Column** — one cell of a Line: the **Segments** through it, plus the Commit
+  node when one sits here. (`GraphColumn` in the code.)
+- **Segment** — a single wire within a Column: its `connectivity`
+  {up, down, left, right} and the **Lane(s)** it carries. Each drawn edge gets
+  its own Segment — one per Column normally, two where wires cross. The one
+  exception is the single descent into a merge (or ascent out of a split) on a
+  separate split/merge line: that wire is shared by every converging/diverging
+  edge, so it is one **multi-edge** Segment, highlighted when *any* of them is —
+  which keeps a non-trunk cone lane connected through the hub (§12).
 
-The cell's rendered **glyph** is the function of the **union** of its lanes'
-connectivity. The cell's **color** is the id of one of its lanes, chosen by a
-configurable "top" strategy.
+The graph is walked top to bottom (newest heads on top, roots at the bottom), so
+a Lane's `begin` (child) is always already placed when its `end` (parent) is
+reached. A Column's rendered **glyph** is a function of the union of its
+Segments' connectivity; its **colour** is one carried Lane's `id`, chosen by a
+"top" strategy that prefers a highlighted Lane (§12). A commit's first parent
+continues in the commit's column and **reuses the incoming lane's `id`**, so a
+straight first-parent chain reads as one colour; a new `id` is assigned only
+where a lane is born — a branch head, or a merge's second-and-later parent.
 
 ### 5.1 Invariants
 
-- **One commit per row.** Exactly one commit is placed per commit row; the
-  virtual split/merge sub-lines carry none.
-- **Two-sided lanes.** Each lane touches exactly two of the cell's sides (a
-  wire enters and exits) — one side only where it is an endpoint (born at or
-  terminating at a commit). This forces crossings (`─│─`) and tees to be
-  modeled as *separate* lanes, not one over-connected wire.
-- **Leads somewhere.** Every lane has a `parent`; its run terminates exactly
-  at the row where that parent is placed (or the fetched-range boundary). No
-  lane fizzles out into nothing.
-- **No accidental crossing.** A lane keeps its `(id, child, parent)` along its
-  run; two lanes that share a column or cross stay distinct because their
-  edges differ.
-- **Per-lane continuity.** A lane with `down` at one row meets a lane with the
-  same id and `up` in the same column on the next row.
-- **Color is active.** The color a cell shows is the id of one of its lanes.
+- **One commit per Line.** Exactly one Commit's node is placed on a commit line;
+  the virtual split/merge lines carry none.
+- **Two-sided Segments.** Each Segment touches exactly two of its Column's sides
+  (a wire enters and exits) — one side only at an endpoint (a Lane's `begin` or
+  `end`). This forces crossings (`─│─`) and tees to be modelled as *separate*
+  Segments, not one over-connected wire.
+- **Every Lane is an edge.** A Lane has both a `begin` (child) and an `end`
+  (parent), both placed Commits (or the fetched-range boundary). Its Segments run
+  from `begin`'s line down to `end`'s line; no Lane fizzles into nothing.
+- **Edge attribution.** Each Segment carries the actual Lane(s) it draws — the
+  edge `(begin, end)` — so two wires that share a Column or cross stay distinct
+  by edge identity. The shared descent/ascent Segment at a separate split/merge
+  hub carries the set of edges converging/diverging there.
+- **Per-Lane continuity.** A Segment of Lane L with `down` on one Line meets a
+  Segment of the *same* Lane L with `up` in the same Column on the next Line.
+- **Colour comes from a carried Lane.** A Column's colour is the `id` of one Lane
+  on one of its Segments.
 - **Connectivity consistency.** The glyph's wired sides equal the union of the
-  cell's lanes' connectivity (every wired side has a lane providing it).
-- Merges (commit with >1 parent) fan out additional lanes; splits (>1 child)
-  fan lanes in.
+  Column's Segments' connectivity (every wired side has a Segment providing it).
+- Merges (commit with >1 parent) fan out `parent_lanes`; splits (>1 child) fan in
+  `child_lanes`.
 
-Current limitation: a cell's vertical lanes number at most one. A "bus" of
-several bundled vertical lanes is reserved for future collapse/reflow work;
-`Lane` arrays are kept symmetric (vertical and horizontal alike) to admit it.
-
-Implementation status: lane `id`, `connectivity`, and the handoff split are
-implemented and tested. Per-lane **`child`** and a *precise* per-lane
-**`parent`** are not yet threaded — every lane currently carries its track's
-parent, sufficient for `leads-somewhere`. Full edge attribution (the
-`(id, child, parent)` identity behind `no accidental crossing`) is the next
-step toward §10.
+Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
+contract that makes the §12 reachability emphasis exact and the planned §10 view
+work and lane navigation possible. The handoff split (an incoming child-lane and
+an outgoing parent-lane sharing a column) remains two distinct Lanes.
 
 ### 5.2 Merge style
 
@@ -287,13 +303,16 @@ actions).
 - The window uses `cursorline` as the current-row indicator and keeps the
   cursor parked at the commit message (or, when a ref is selected, on that ref);
   see §2.
+- The pivot's reachability cone is emphasised by dimming everything outside it
+  (§12); the cone is recomputed over the visible rows on row change and scroll
+  (debounced — see §12).
 
 ## 8. Configuration
 
 `GraphOptions` (see [README.md](README.md) for the full default table):
 
 ```
-GraphOptions = { win, palette, merge_style, icons, branches, mirror,
+GraphOptions = { win, palette, merge_style, icons, branches, mirror, highlight,
                  date_format, date_mode, message_min, diff }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -306,7 +325,13 @@ DiffRange    = { rev: string, from: Commit?, to: Commit }
   (§2; default `Visual`); `diff`, a sub-table of highlight groups for the
   commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,
   `DiffDelete`, `Title`, `Comment`; §11.3); and `action`, the highlight for the
-  commit view's diff action label (default `Special`; §11.5).
+  commit view's diff action label (default `Special`; §11.5); and `dim`, the
+  blend factor (`0`–`1`) toward the window background used to de-emphasise
+  out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
+  terminals without true colour, dimming falls back to a flat `NonText`
+  highlight instead.
+- `highlight` — whether reachability dimming (§12) starts enabled. **Default
+  true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
@@ -506,3 +531,70 @@ is unset) the label is omitted and `D` is a no-op.
 
 Planned: graph-side range selection (building on the §2 selection substrate and
 §10 view work) to pick two commits and feed the same provider.
+
+## 12. Reachability emphasis
+
+The row under the cursor defines a **pivot** commit. gitloom continuously
+de-emphasises everything not causally related to the pivot, so the pivot's
+history and what descends from it stand out.
+
+### 12.1 The causal cone
+
+The pivot's **cone** is computed by walking the **Lane graph** (§5) from the
+pivot in two monotonic sweeps:
+
+- **ancestors** — follow `parent_lanes` (each leads to a parent), recursing;
+- **descendants** — follow `child_lanes` (each leads to a child), recursing.
+
+Every Lane reached is set `highlighted`, and the commits it connects (`begin`,
+`end`) form the cone. Because each Lane is one edge, the walk is exact: at a
+shared fan, the pivot's edge is a distinct Lane from a sibling's, so only the
+pivot's edges light. Each sweep never reverses direction, so the cone is exactly
+the commits causally related to the pivot — not the whole connected component.
+
+The walk stays within the **currently visible rows**. Because rows are in
+topological order (a parent is always at a later row than its child), restricting
+to the contiguous viewport loses nothing about relationships *between* on-screen
+commits — it only clips the *recursion* at the viewport edges. A cone Lane whose
+far endpoint is off-screen is still highlighted (its on-screen stub lights); the
+walk simply does not recurse past it.
+
+### 12.2 Dimming
+
+Content **outside** the cone is rendered **dimmed**; the cone keeps full colour:
+
+- a commit **row** — its date, author, message, refs, and commit marker — dims
+  when that commit is not in the cone (not a `begin`/`end` of any highlighted
+  Lane);
+- a **Segment** dims unless a Lane it carries is highlighted. Because a Segment
+  carries the exact edge(s) it draws (§5.1), a cone wire stays lit through every
+  split and merge it passes — including the shared descent/ascent Segment at a
+  separate split/merge hub, lit when one of *its* converging edges is in the cone
+  — while an unrelated bar it crosses stays dim.
+
+A Column's glyph is the union of the connectivity of its **highlighted**
+Segments (or of all of them when none is highlighted), so at a junction the arms
+leading only to out-of-cone edges drop to a small gap while the cone arms stay
+connected; a vertical crossing is left whole. The glyph takes the colour of a
+highlighted Lane it carries when one is present (so the cone colour wins a shared
+cell), else the §5 default.
+
+Dimming preserves colour identity rather than flattening to one grey: each
+field's / Lane's own highlight colour is blended toward the window background by
+`palette.dim` (§8), so a dimmed Lane keeps its hue and stays individually
+recognisable. On terminals without true colour, dimming falls back to a single
+flat highlight group (`NonText`).
+
+The emphasis is **on by default** and follows the cursor; it is recomputed when
+the cursor moves to a new row and when the view scrolls (the window-bounded cone
+tracks the visible rows). Those recomputes are **debounced** — only the last,
+once the cursor settles, walks the cone — so fast `j`/`k` navigation stays
+responsive. `H` toggles it off and on live (and `highlight`
+configures the initial state, §8) — when off, the whole graph renders at full
+colour, **identical regardless of the cursor row** (highlight state never affects
+colour while it is off).
+
+Planned: lane-anchored navigation — selecting a Lane (`h`/`l`) and stepping
+along it commit-to-commit (`j`/`k`) via its `begin`/`end`, with splits and
+merges stepping in visual order — building on this Lane model and the §2
+selection substrate.

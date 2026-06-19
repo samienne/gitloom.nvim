@@ -62,7 +62,7 @@ local function create_win(opts)
 end
 
 --- 1-based indexing
----@param win integer
+---@param win integer?   the list window (unused here; nil in unit tests)
 ---@param model ListViewModel
 ---@param first integer
 ---@param last integer
@@ -73,7 +73,7 @@ local function refresh_columns(win, model, first, last)
 
     local changed = false
 
-    for _, field in ipairs({ "above", "line", "text" }) do
+    for _, field in ipairs({ "above", "below", "line", "text" }) do
         for i = first, last do
             local item = model.items[i]
             if item and not item.columns then
@@ -95,22 +95,20 @@ local function refresh_columns(win, model, first, last)
         if not changed then
             for i = first, last do
                 local item = model.items[i]
-                if item.columns[field] then
-                    if item then
-                        if #item.columns[field] ~= #model.columns then
+                if item and item.columns[field] then
+                    if #item.columns[field] ~= #model.columns then
+                        changed = true
+                    end
+
+                    for j = 1, #item.columns[field] do
+                        if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[field][j].text) ~= model.columns[j] then
                             changed = true
-                        end
-
-                        for j = 1, #item.columns[field] do
-                            if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[field][j].text) ~= model.columns[j] then
-                                changed = true
-                                break
-                            end
-                        end
-
-                        if changed then
                             break
                         end
+                    end
+
+                    if changed then
+                        break
                     end
                 end
             end
@@ -121,7 +119,7 @@ local function refresh_columns(win, model, first, last)
         local new_columns = {}
         for i = first, last do
             local item = model.items[i]
-            for _, field in ipairs({ "above", "line", "text" }) do
+            for _, field in ipairs({ "above", "below", "line", "text" }) do
                 if item and item.columns[field] then
                     for j, column in ipairs(item.columns[field]) do
                         -- The flex column (e.g. the message) fills the remaining
@@ -151,7 +149,7 @@ end
 
 ---@class DisplayItem
 ---@field text string
----@field highlight HighlightInfo
+---@field highlight? HighlightInfo
 ---@field align? "left"|"right"  column padding side (default left)
 
 ---@class DisplayElement
@@ -162,11 +160,13 @@ end
 
 --- Requested width in display cells. With `ellipsis`, truncation appends "…"
 --- (reserving one cell) instead of a hard cut.
----@param item DisplayItem
+---@param item DisplayItem|string
 ---@param requested_utf_len integer
 ---@param ellipsis boolean?
 ---@return DisplayItem
 local function fix_width(item, requested_utf_len, ellipsis)
+    -- above/below lines mix plain string spacers with DisplayItems; normalise.
+    if type(item) == "string" then item = { text = item } end
     local text = item.text or ""
     local utf_len = vim.fn.strdisplaywidth(text)
 
@@ -663,6 +663,7 @@ end
 -- Exposed for testing only. Not part of the public API.
 M._internal = {
     pack_right = pack_right,
+    refresh_columns = refresh_columns,
 }
 
 return M
