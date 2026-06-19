@@ -156,19 +156,23 @@ the model outward:
   and/or *merge line* (below). Exactly one Commit's node sits on the commit line;
   the split/merge lines carry only wires.
 - **Column** — one cell of a Line: the **Segments** through it, plus the Commit
-  node when one sits here. *(Named `Track` in the code for now; `Column` is the
-  intended name — a deferred rename.)*
+  node when one sits here. (`GraphColumn` in the code.)
 - **Segment** — a single wire within a Column: its `connectivity`
-  {up, down, left, right} and the **Lane(s)** it carries. One Segment per Column
-  normally; two where wires cross. A shared fan **bus** Segment carries the *set*
-  of edges routing through it, and so is highlighted when *any* of them is — this
-  is what makes the reachability emphasis exact across splits and merges (§12).
+  {up, down, left, right} and the **Lane(s)** it carries. Each drawn edge gets
+  its own Segment — one per Column normally, two where wires cross. The one
+  exception is the single descent into a merge (or ascent out of a split) on a
+  separate split/merge line: that wire is shared by every converging/diverging
+  edge, so it is one **multi-edge** Segment, highlighted when *any* of them is —
+  which keeps a non-trunk cone lane connected through the hub (§12).
 
 The graph is walked top to bottom (newest heads on top, roots at the bottom), so
 a Lane's `begin` (child) is always already placed when its `end` (parent) is
 reached. A Column's rendered **glyph** is a function of the union of its
 Segments' connectivity; its **colour** is one carried Lane's `id`, chosen by a
-"top" strategy that prefers a highlighted Lane (§12).
+"top" strategy that prefers a highlighted Lane (§12). A commit's first parent
+continues in the commit's column and **reuses the incoming lane's `id`**, so a
+straight first-parent chain reads as one colour; a new `id` is assigned only
+where a lane is born — a branch head, or a merge's second-and-later parent.
 
 ### 5.1 Invariants
 
@@ -183,8 +187,8 @@ Segments' connectivity; its **colour** is one carried Lane's `id`, chosen by a
   from `begin`'s line down to `end`'s line; no Lane fizzles into nothing.
 - **Edge attribution.** Each Segment carries the actual Lane(s) it draws — the
   edge `(begin, end)` — so two wires that share a Column or cross stay distinct
-  by edge identity. A shared fan **bus** Segment carries the set of edges routing
-  through it.
+  by edge identity. The shared descent/ascent Segment at a separate split/merge
+  hub carries the set of edges converging/diverging there.
 - **Per-Lane continuity.** A Segment of Lane L with `down` on one Line meets a
   Segment of the *same* Lane L with `up` in the same Column on the next Line.
 - **Colour comes from a carried Lane.** A Column's colour is the `id` of one Lane
@@ -300,7 +304,8 @@ actions).
   cursor parked at the commit message (or, when a ref is selected, on that ref);
   see §2.
 - The pivot's reachability cone is emphasised by dimming everything outside it
-  (§12); the cone is recomputed on row change, over the visible rows.
+  (§12); the cone is recomputed over the visible rows on row change and scroll
+  (debounced — see §12).
 
 ## 8. Configuration
 
@@ -563,13 +568,16 @@ Content **outside** the cone is rendered **dimmed**; the cone keeps full colour:
   Lane);
 - a **Segment** dims unless a Lane it carries is highlighted. Because a Segment
   carries the exact edge(s) it draws (§5.1), a cone wire stays lit through every
-  split and merge it passes — including a shared fan bus, where the Segment is
-  lit only when one of *its* routing edges is in the cone — while an unrelated
-  bar it crosses stays dim.
+  split and merge it passes — including the shared descent/ascent Segment at a
+  separate split/merge hub, lit when one of *its* converging edges is in the cone
+  — while an unrelated bar it crosses stays dim.
 
-A Column's glyph takes the colour of a highlighted Lane it carries when one is
-present (so the cone colour wins a shared cell), else the §5 default; it dims
-unless one of its Segments' Lanes is highlighted.
+A Column's glyph is the union of the connectivity of its **highlighted**
+Segments (or of all of them when none is highlighted), so at a junction the arms
+leading only to out-of-cone edges drop to a small gap while the cone arms stay
+connected; a vertical crossing is left whole. The glyph takes the colour of a
+highlighted Lane it carries when one is present (so the cone colour wins a shared
+cell), else the §5 default.
 
 Dimming preserves colour identity rather than flattening to one grey: each
 field's / Lane's own highlight colour is blended toward the window background by
@@ -579,7 +587,9 @@ flat highlight group (`NonText`).
 
 The emphasis is **on by default** and follows the cursor; it is recomputed when
 the cursor moves to a new row and when the view scrolls (the window-bounded cone
-tracks the visible rows). `H` toggles it off and on live (and `highlight`
+tracks the visible rows). Those recomputes are **debounced** — only the last,
+once the cursor settles, walks the cone — so fast `j`/`k` navigation stays
+responsive. `H` toggles it off and on live (and `highlight`
 configures the initial state, §8) — when off, the whole graph renders at full
 colour, **identical regardless of the cursor row** (highlight state never affects
 colour while it is off).

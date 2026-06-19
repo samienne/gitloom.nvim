@@ -44,23 +44,21 @@ place; **view state** does not yet exist:
 
 - The repository model exists as `repo.commits` (an identity-stable DAG), and
   **ordering is still seeded from `git log --topo-order`**.
-- Layout is exposed two ways over a shared pure core (`layout_item`):
-  - `build_graph(opts, items)` — lays out an ordered item list **from
-    scratch**, deterministically (fresh lane-id sequence each call). This is
-    the reflow primitive and the test entry point.
-  - `refresh_tracks(opts, order, start_pos)` — the production **incremental**
-    path: a thin adapter that calls `layout_item` for newly streamed commits
-    and assigns the result onto the `OrderItem` in place.
-- There is no view state yet. The view is a single fixed projection, so
-  `build_graph` is currently only driven by tests; production uses the
-  incremental path.
+- Layout (Phase 1) is `columns.layout(opts, items)` — a pure, deterministic
+  pass that lays out an ordered item list from scratch. Two entry points wrap it:
+  - `build_graph(opts, items)` — the from-scratch reflow primitive and the test
+    entry point (just calls `columns.layout`).
+  - `refresh_columns(opts, order)` — the production path: re-runs
+    `columns.layout` over the live order and copies the fresh lines/lanes back
+    onto each `OrderItem` in place (the view holds references). The lane layout
+    with compaction is global, so it is a full rebuild rather than incremental.
+- There is no view state yet. The view is a single fixed projection.
 
 What remains for the target is **ordering ownership** (move ordering out of
 `git log` into the builder) and a **view state** input (per-branch
-visibility, pinned heads) that `build_graph` reflows against. The lane
-algorithm (`handle_commit_line` / `handle_merge_line` / `handle_split_line`,
-behind `layout_item`) is reused as-is; what changes is *what feeds it* — a
-filtered, possibly reordered commit set instead of the raw git stream.
+visibility, pinned heads) that `columns.layout` reflows against. Phase 1 is
+reused as-is; what changes is *what feeds it* — a filtered, possibly reordered
+commit set instead of the raw git stream.
 
 The central unsolved problem is **commit attribution** (specification.md
 §10.4): deciding which commits "belong to" a branch being collapsed or hidden
@@ -71,21 +69,26 @@ when commits are shared across the DAG.
 ```
 lua/gitloom/
   init.lua       Thin facade: setup() + :GitloomGraph command registration
-  graph.lua      Git I/O, DAG construction, lane layout, glyph rendering
+  graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
+  columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
   listview.lua   Reusable virtualized list widget (snacks.win)
 ```
 
 - **init.lua** — registers the `:GitloomGraph` user command (bound directly
   to `graph.open`) and exposes `setup(opts)`, which merges options into
   `M.config`. It is intentionally minimal.
-- **graph.lua** — the bulk of the plugin. Owns everything from spawning git
-  to producing styled display rows.
+- **graph.lua** — the bulk of the plugin: git I/O, DAG construction, the
+  window/keymap glue, Phase 2 rendering (`get_column_chars`), reachability, and
+  the commit view.
+- **columns.lua** — Phase 1, the lane-layout algorithm (`columns.layout`). Pure
+  and git-agnostic; takes the ordered, DAG-wired commits and returns the rendered
+  lines with per-segment connectivity.
 - **listview.lua** — a generic, incrementally-rendered list view. It knows
   nothing about git; it renders rows produced by a `display` callback and
   only materializes the visible range.
 
-graph.lua is the only consumer of listview.lua. listview.lua is written to
-be reusable in isolation.
+graph.lua is the only consumer of columns.lua and listview.lua; both are
+written to be reusable in isolation.
 
 ## Data flow
 
@@ -114,7 +117,7 @@ on_controller(controller)
           │    merge into repo.commits (fills ref placeholders, keeps their refs)
           │    resolve parent hashes → Commit refs (+ child links, placeholders)
           │    append OrderItem to repo.order
-          │    refresh_tracks(order, #order)   ← incremental lane layout
+          │    refresh_columns(order)          ← Phase 1 relayout (columns.layout)
           │    controller.insert(order_item)   ← inserts a blank buffer line
           ▼
    (rendering is deferred)
@@ -232,81 +235,90 @@ a placeholder so the graph stays connected. Child links are populated on the
 parent side. Refs are resolved the same way (a `Ref` holds a direct `Commit`
 reference, and `Commit.refs` is the inverse).
 
-### Lane layout (the core algorithm)
+### Lane layout — Phase 1 (`columns.lua`)
 
-Each commit becomes an `OrderItem` with a `tracks` array describing the lanes
-on that row. A `Track` is one vertical lane:
+The graph is built as a **two-phase pipeline**:
+
+- **Phase 1** (`columns.lua`, `columns.layout`) owns lane placement. It assigns
+  lanes to columns and emits, per rendered line, the connectivity of every
+  **Segment** in every **GraphColumn** — one Segment per drawn edge, each with
+  its own connectivity. It does *not* pick glyphs or colours.
+- **Phase 2** (`get_column_chars`, in graph.lua) renders glyphs and colour from
+  those Segments (below).
+
+The model:
 
 ```
-Track = { id, connectivity = {up,down,left,right}, has_commit, commit?, parent? }
+Lane        = { id, begin (child Commit), parent (Commit), highlighted }
+Segment     = { connectivity = {up,down,left,right}, edges = Lane[], id, begin, parent }
+GraphColumn = { connectivity, lanes = Segment[], has_commit, commit?, id, … }
 ```
 
-`layout_item(opts, prev_tracks, item)` is the pure core: given the previous
-row's carry-over lanes it returns `{ tracks, split?, merge?, carry }` without
-mutating the item or touching the view. Both `build_graph` (from scratch) and
-`refresh_tracks` (incremental) call it. Internally it produces the new lane
-set from the previous row's lanes via:
+A **Lane** is one edge child→parent — a *persistent object* that lives from the
+child's row down to the parent's row. Reusing the same object across rows is
+what makes vertical continuity hold by construction (same id up and down). A
+Segment usually draws one Lane; the shared trunk wire at a fan hub draws several
+(see descent/ascent below).
 
-- `handle_split_line` (optional) — when a commit has multiple children and
-  `split_on_separate_line` is set, lanes fan in on a virtual line *above*.
-- `handle_commit_line` — the commit row itself: continues passing-through
-  lanes, places the commit glyph, and fans out new lanes for extra parents.
-- `handle_merge_line` (optional) — when a commit has multiple parents and
-  `merge_on_separate_line` is set, lanes fan out on a virtual line *below*.
+`columns.layout(opts, items)` sweeps the order **top-to-bottom**, carrying one
+piece of state: `active`, a map `column → Lane` of the lanes flowing *down* into
+the current row. For each commit `C`:
 
-These share a `TrackState` (`space_available`, `merge`/`split` bookkeeping,
-`merge_id`). Lane identity (`id`) is allocated by a `get_next_id()` counter
-and drives lane color; `reset_ids()` restarts the sequence so each
-`build_graph` (and each opened graph window) is deterministic.
+1. **Classify** `active`: lanes whose `parent == C` are **incoming** (its child
+   edges, terminating here); the rest are **survivors** (pass-throughs).
+2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
+   column for a tip.
+3. **Outgoing** = one Lane per parent. The first parent **reuses the trunk
+   child's id** (so a straight chain keeps one colour); a new id is minted only
+   where a lane is born — a branch head (a tip's first parent) and every extra
+   parent of a merge.
+4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
+   (drawn as a horizontal turn), never a column another lane vacates this same
+   row — that is what keeps two turns out of one cell, so freed columns are
+   reclaimed over a ripple.
+5. **Emit Segments** for the split line (children converge, when
+   `split_on_separate_line`), the commit line (the marker + first-parent handoff
+   + inline fans), and the merge line (parents fan out, when
+   `merge_on_separate_line`). On a separate split/merge line the single
+   descent-into / ascent-out of the commit is one **multi-edge Segment** carrying
+   every converging/diverging edge, so a non-trunk cone lane stays connected
+   through the hub.
+6. **Advance** `active` to the out-columns for the next row, and attach the
+   `parent_lanes`/`child_lanes` to the `OrderItem` for reachability.
 
-### Lane / Segment model (specification.md §5)
+Per-column well-formedness (validated by the tests): at most one vertical
+(`up+down`) Segment and at most one *turning* Segment; the exception is
+`allow_merge_on_split`, which permits the two-turn cell where an extra parent
+reuses a freed merge column. Empty columns are allowed.
 
-The layout produces, per cell (`Track`), a `lanes: Segment[]` decomposition
-(`attach_lanes`), and a post-pass (`build_lanes`) binds those Segments to
-first-class **Lane** objects (edges).
+`build_graph(opts, items)` lays out a whole ordered list from scratch (the test
+entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
+`columns.layout` over the live order and copies the fresh lines/lanes back into
+the existing `OrderItem`s (the view holds references). Both go through
+`columns.layout` — there is no separate incremental algorithm.
 
-- `attach_lanes(tracks, prev_line)` splits each cell's connectivity into
-  two-sided **Segments**: a crossing → vertical + horizontal; a tee → through +
-  branch; a turn → one bent wire; straights/endpoints → one. Each Segment records
-  the edge it draws — `begin`/`parent` — taken from this cell's track, the
-  cell above for the up half of a **handoff** (incoming child-lane id ≠ outgoing
-  parent-lane id), or the horizontal lookahead for a bus wire.
-- `build_lanes(rows, top, bottom)` creates one `Lane = { id, begin, parent,
-  highlighted }` per visible parent/child edge (from the DAG, authoritative),
-  attaches `parent_lanes`/`child_lanes` to each `OrderItem`, and points each
-  Segment at the Lane(s) it draws (shared objects). A **fan** (split or merge)
-  draws several edges over one horizontal run, so its bus Segments get the *set*
-  of edges routing through them: each edge spans the columns between its tap and
-  the commit's hub column, and a bus cell carries every edge whose span covers
-  it. This is what makes the §12 emphasis exact across shared fans — a sibling's
-  exclusive bus cell carries only the sibling's (dim) edge.
+### Rendering to glyphs — Phase 2
 
-`get_track_chars` colours a glyph by its top Segment's edge (`seg_color_id`,
-preferring a highlighted edge so the cone colour wins, else the segment's own
-layout id) and a connector by the lane its run terminates at (a direction-aware
-lookahead, for colour continuity under mirror). At a handoff a single cell shows
-one colour while the model keeps both Lanes. Invariants (two-sided,
-connectivity-consistency, every-lane-an-edge, per-lane continuity) are tested
-against this model.
-
-### Rendering to glyphs
-
-- `get_track_chars(opts, tracks)` — maps each track's connectivity to a
-  box-drawing glyph (`│ ├ ┤ ┬ ┴ ╭ ╮ ╯ ╰ ─ ○ ◉ ◎` …) plus inter-lane
-  horizontal connectors, coloring each by lane id against `palette.tracks`.
-- `mirror_tracks(tracks)` — when `opts.mirror` is set, `get_track_chars` runs
+- `get_column_chars(opts, columns, emphasis)` — maps each `GraphColumn` to a
+  box-drawing glyph (`│ ├ ┤ ┬ ┴ ╭ ╮ ╯ ╰ ─ ○ ◉ ◎` …) plus inter-lane horizontal
+  connectors. The glyph's connectivity is the **union of the highlighted
+  Segments'** connectivity (or of *all* Segments when none is highlighted), so an
+  out-of-cone arm of a junction drops to a small gap while the cone arm stays; a
+  vertical crossing is kept whole. Colour comes from a highlighted Segment's
+  Lane when present (the cone colour wins), else the Segment's own layout id,
+  against `palette.tracks`.
+- `mirror_columns(columns)` — when `opts.mirror` is set, `get_column_chars` runs
   the cells through this first: it reverses the column order and swaps each
   cell's `left`/`right` connectivity. Because the glyph is a pure function of
   connectivity, the mirrored glyphs (`╭`↔`╮`, `┤`↔`├`, `╴`↔`╶`) and connectors
-  fall out with no glyph-swap table, and color (lane id) is unchanged. A
+  fall out with no glyph-swap table, and colour (lane id) is unchanged. A
   horizontal connector is colored by the lane its run terminates at (found by
   scanning past pass-through crossings/jumps); that destination is to the right
-  normally but to the **left** once the cells are reversed, so `get_track_chars`
-  flips the scan direction under mirror (`i → 1` inclusive, mirroring the normal
-  `i+1 ..` range under the flip) — otherwise the connector is miscolored. It also
-  tags the column `align = "right"` so the listview right-aligns it (padding on
-  the left) — keeping vertical wires column-aligned across rows of differing
-  lane counts. Render-only; the model rows are untouched (specification.md §5.4).
+  normally but to the **left** once the cells are reversed, so the scan flips
+  direction under mirror — otherwise the connector is miscolored. It also tags
+  the column `align = "right"` so the listview right-aligns it (padding on the
+  left) — keeping vertical wires column-aligned across rows of differing lane
+  counts. Render-only; the model rows are untouched (specification.md §5.4).
 - `display_item(opts, item)` — assembles a `DisplayElement`: the commit `line`
   (date, author, graph glyphs, then the message as the flex column `FLEX_COL`)
   plus `line_right` — the ref decorations the listview pins to the right edge —
@@ -399,34 +411,40 @@ rows, walking the **Lane graph** (no flood, no id heuristics):
 - `mark_reachable(order, pivot_index, top, bottom)` walks the Lanes from the
   pivot: follow `parent_lanes` (ancestors), then `child_lanes` (descendants),
   setting `highlighted` on each Lane reached and `active` on each cone commit's
-  marker (others dim). It returns the cone commit set, which also drives the
-  **row-field** dimming (date/author/message/refs) in `display_item`. Each Lane
-  is one edge, so the walk is **exact**: a sibling sharing a fan is a distinct
-  Lane and never lights. Bounded to the visible rows. Assumes `build_lanes` ran.
-- `get_track_chars(opts, tracks, emphasis)` dims a glyph by whether its top
-  Segment draws a highlighted edge (`seg_hl`) — the commit marker by the track's
-  own `active` — and a connector by whether its horizontal Segment's edge set
-  contains a highlighted edge. `emphasis` is false when the toggle is off or
-  there is no pivot, so everything renders lit. Colour is unchanged from the
-  un-emphasised layout unless a highlighted edge overrides it.
+  marker (others dim). It first **resets** every Lane *drawn* in the window (via
+  each Segment's edges, so a pass-through whose endpoints are off-window is
+  cleared too) since Lanes persist across frames. It returns the cone commit set,
+  which also drives the **row-field** dimming (date/author/message/refs) in
+  `display_item`. Each Lane is one edge, so the walk is **exact**: a sibling
+  sharing a fan is a distinct Lane and never lights. Bounded to the visible rows.
+  Lanes are attached by Phase 1 (`columns.layout`), so no separate build step is
+  needed.
+- `get_column_chars(opts, columns, emphasis)` renders the cone by unioning the
+  highlighted Segments' connectivity (above) and dims everything out-of-cone:
+  a glyph whose top Segment draws no highlighted edge, the commit marker by the
+  column's own `active`, and a connector whose run carries no highlighted edge.
+  `emphasis` is false when the toggle is off or there is no pivot, so everything
+  renders lit.
 - `reachable_cone` (above) remains a pure helper (commit-set only) with its own
   property tests; the production path uses `mark_reachable` (which subsumes it).
-  `update_cone` calls `build_lanes(order, top, bottom)` then `mark_reachable`.
+  `update_cone` just calls `mark_reachable` over the visible window.
 - `dim_hl(opts, group)` returns a dimmed derivative of a highlight group:
   it resolves the group's `fg`, blends it toward `Normal`'s `bg` by
-  `palette.dim` (default `0.6`), and defines a cached `GitloomDim_<group>`
+  `palette.dim` (default `0.45`), and defines a cached `GitloomDim_<group>`
   group with that colour. Cached per `(group, factor)`; a `ColorScheme` autocmd
   clears the cache (the derived groups are wiped by `hi clear`) and refreshes.
   Without `termguicolors` it returns a flat `NonText` fallback.
 
 `display_item` dims the row's non-lane fields (date, author, message, refs)
-through `dim_hl` when the row's commit is outside the cone, and passes
-`emphasis` to `get_track_chars` for the lanes. With no pivot (or the toggle off)
-`emphasis` is false, so streaming and the pre-pivot state render lit. The cone
-is recomputed (Lanes rebuilt over the window and re-walked) on row change
-(`CursorMoved`), on scroll (`WinScrolled`, so the window-bounded cone tracks the
-visible rows), on the `m` reflow, and once the commit stream completes; the
-listview then refreshes the visible range.
+through the `rh` helper (which dims a field's group, or a group-less field's
+default `Normal` foreground) when the row's commit is outside the cone, and
+passes `emphasis` to `get_column_chars` for the lanes. With no pivot (or the
+toggle off) `emphasis` is false, so streaming and the pre-pivot state render lit.
+The cone is recomputed (`mark_reachable` over the window, then a listview
+refresh) on row change (`CursorMoved`) and on scroll (`WinScrolled`), both
+**debounced** (~60ms — only the last, once the cursor settles, does the walk, so
+held `j`/`k` stays responsive); the `m` reflow, the `H` toggle, and stream
+completion recompute immediately.
 
 ### Vendored helpers
 
@@ -449,8 +467,8 @@ A reusable virtualized list widget over `snacks.win`.
   re-renders the visible range. Two reflow patterns sit on top of it: a
   *display-only* change (e.g. the `i` lane-id toggle) just calls `refresh()`;
   a *layout* change (e.g. the `m` style cycle) first re-lays-out `repo.order`
-  via `refresh_tracks` (mutating each item's tracks in place) then calls
-  `refresh()`. Because there is one buffer line per commit (split/merge are
+  via `refresh_columns` (Phase 1, mutating each item's columns in place) then
+  calls `refresh()`. Because there is one buffer line per commit (split/merge are
   virtual lines), neither adds or removes buffer lines — this is the
   reflow-without-reopen path the §10 interactive views (collapse / pin /
   toggle) will build on.
@@ -469,11 +487,14 @@ A reusable virtualized list widget over `snacks.win`.
 - **Rendering** — `display(win, …)` writes real buffer lines for the `line`
   field and attaches `above`/`below` as virtual lines (extmarks). It takes the
   window (not just the buffer) because the flex/right layout needs its width.
-- **Width fitting** — `fix_width` pads/truncates a `DisplayItem` to a target
-  display width (UTF-8 and display-width aware), clamping highlight ranges; with
-  `ellipsis` it appends `…` when truncating. A `DisplayItem` with
-  `align = "right"` is padded on the left instead (highlight ranges shifted by
-  the pad), used for the mirrored graph column.
+- **Width fitting** — `fix_width` pads/truncates a `DisplayItem` (or a plain
+  string, normalised to one — the `above`/`below` lines mix string spacers with
+  items) to a target display width (UTF-8 and display-width aware), clamping
+  highlight ranges; with `ellipsis` it appends `…` when truncating. A
+  `DisplayItem` with `align = "right"` is padded on the left instead (highlight
+  ranges shifted by the pad), used for the mirrored graph column. The per-column
+  max widths it aligns against are driven by the `above`/`below`/`line` fields
+  (`refresh_columns`).
 - **Cursor offset** — `controller.col_offset(row, field, j)` returns the byte
   offset where column `j` starts (summing the fixed columns before it), used by
   graph to park the cursor at the message.
@@ -494,12 +515,17 @@ gitloom.nvim/
 ├── lua/gitloom/
 │   ├── init.lua
 │   ├── graph.lua
+│   ├── columns.lua        Phase 1 lane layout
 │   └── listview.lua
 ├── tests/
 │   ├── minimal_init.lua
-│   ├── refs_spec.lua
-│   ├── commit_spec.lua
-│   └── gitloom_spec.lua
+│   ├── refs_spec.lua / selection_spec.lua / commit_spec.lua / commit_view_spec.lua
+│   ├── reachability_spec.lua
+│   ├── columns_spec.lua / graph_layout_spec.lua / graph_mirror_spec.lua
+│   ├── graph_helpers.lua  Invariant checker for the layout tests
+│   ├── gitloom_spec.lua
+│   └── types/luassert.lua ---@meta stub for lua-language-server
+├── .luarc.json            lua-language-server config (see `make lint`)
 ├── Makefile
 ├── README.md
 ├── ARCHITECTURE.md

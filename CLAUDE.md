@@ -99,6 +99,8 @@ Before merging ANY branch, verify:
    the change are current (no stale or missing fields)
 6. **Comments** — comments near changed lines are still accurate
 7. **Tests pass** — `make test`
+8. **Diagnostics clean** — `make lint` (lua-language-server, see Testing)
+   reports no problems
 
 **Do not merge if documentation is out of sync.** Fix docs first. If the
 user does not ask for this check, remind them before merging.
@@ -118,6 +120,11 @@ Tests use plenary.busted.
 
 - `make test` — run every spec in `tests/`
 - `make test-file FILE=tests/<name>_spec.lua` — run one spec
+- `make lint` — type-check with lua-language-server (`--check`, using
+  `.luarc.json`). Resolves the Neovim runtime from `nvim` so `vim.*` is known;
+  `tests/types/luassert.lua` is a `---@meta` stub for the busted `assert`
+  matchers. Override the binary with `LUALS=...`. Part of the pre-merge
+  checklist — keep it at zero problems.
 - `tests/minimal_init.lua` sets up the runtime path (plugin + plenary from
   the lazy.nvim install dir) and disables swap/shada.
 
@@ -140,8 +147,13 @@ Coverage:
   descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
   attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and
   `mark_reachable` (the Lane walk): cone markers light, an edge is highlighted iff
-  it's in the cone, and a sibling sharing a fan stays fully dim (exact, no bus
-  over-lighting)
+  it's in the cone, a sibling sharing a fan stays fully dim (exact, no bus
+  over-lighting), and the shared descent/ascent at a separate split/merge line
+  keeps a non-trunk cone lane connected through the hub
+- `tests/columns_spec.lua` — Phase 1 (`columns.layout`) directly: per-cell
+  well-formedness (≤1 vertical, the turn cap), vertical continuity, and a fuzz
+  sweep across all five styles; plus track-id reuse (a straight chain is one id;
+  a new id only at a branch head or an extra merge parent)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
@@ -157,9 +169,11 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
-`reachable_cone`, `build_lanes`, `mark_reachable`, `build_graph`,
-`get_track_chars`, `reset_ids`.
-`listview._internal` exposes `pack_right` (the right-pin budget packer).
+`reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
+`columns.layout`), and `get_column_chars` (Phase 2, the renderer).
+`columns.layout` is reached via `require("gitloom.columns")`.
+`listview._internal` exposes `pack_right` (the right-pin budget packer) and
+`refresh_columns` (the column-width packer).
 
 ### Layout testing approach
 
@@ -199,10 +213,14 @@ runtime). Its pure helpers are testable — `snacks.win` loads lazily (only
 
 - **Commit** — a node in the DAG (hash, parents, children, refs, metadata).
   Identity-stable across the stream.
-- **Track / lane** — one vertical line of history on a row, with connectivity
-  and an id that drives its color.
-- **OrderItem** — a rendered row (`commit`, `merge`, or `split` type) with its
-  lane set, plus optional `above`/`below` virtual-line lane sets.
+- **Lane** — one drawn edge child→parent (`{id, begin, parent, highlighted}`),
+  a persistent object living from the child's row to the parent's row; its id
+  drives the colour.
+- **GraphColumn** — one cell of a rendered line: its connectivity plus the
+  **Segment**s (per-edge wires) it draws. (Was `Track`; renamed.)
+- **OrderItem** — a rendered row (`commit`, `merge`, or `split` type) holding
+  its commit line `columns` plus optional `split`/`merge` virtual lines and the
+  `parent_lanes`/`child_lanes` for reachability.
 - **GraphOptions / MergeStyle** — configuration; see specification.md §8.
 - **listview** — the generic virtualized list widget the graph renders into.
 
@@ -212,32 +230,32 @@ See specification.md §4–§5 for full definitions.
 
 Details not covered by the spec or architecture:
 
-- **init.lua is a thin facade**; graph.lua holds git I/O + layout + render;
+- **Two-phase pipeline** (see ARCHITECTURE.md): **Phase 1** `columns.lua`
+  (`columns.layout`) owns lane placement — it assigns lanes to columns and emits
+  one Segment per drawn edge with its own connectivity, validated for
+  continuity. **Phase 2** `get_column_chars` (in graph.lua) renders glyphs and
+  colour from those Segments. `build_graph`/`refresh_columns` are Phase 1 entry
+  points (both go through `columns.layout`).
+- **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
+  glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
-  `build_graph`/`get_track_chars`/`reset_ids` layout seam). Do not route
-  production code through it.
+  `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua
   and listview.lua, and `make_future` is gitloom's own minimal promise. See
   "Relationship to loomworks" before deduplicating.
 - **setup() config is not yet wired** to `:GitloomGraph` (specification.md
   §8 "Known gap"). The command uses built-in defaults.
-- **`allow_merge_on_split` — the lane handoff**: with that flag on (inline
-  merges/splits), an incoming child-lane and an outgoing parent-lane can share
-  a column, so a cell's `up` and `down` segments are *different* lanes. The
-  **model** handles this faithfully: `attach_lanes` compares each cell's `up`
-  id (from the line above, column-aligned) against its own `down` id and, when
-  they differ, splits the vertical into two lanes — so `check_lane_continuity`
-  (per-lane, on the model) holds for *all* styles. The **rendered** color is
-  best-effort: `top_lane_id` prefers the `down` lane, so a `│` reads
-  continuously into the lane below even though the model knows it's two lanes.
-  Grid-level *color* continuity is therefore still not asserted for this style
-  (the rendered cell has one color); a characterization test
-  (`random_dag(7, 108)`) locks the current look. The other four styles pass
-  the full suite incl. grid color.
-- **graph.lua contains commented-out experiment scaffolding** (`--override`
-  lines, alternate-style blocks). These are dev aids; treat with care when
-  cleaning up and prefer removing dead scaffolding over leaving it.
+- **`allow_merge_on_split` — the lane handoff**: with that flag on, an extra
+  parent reuses a column the merge just freed, so one cell legitimately holds an
+  ending child edge and a starting parent edge — two turns, two different lanes.
+  Phase 1 still emits them as distinct per-edge Segments (each continuous), so
+  the model is faithful; but the rendered cell shows a single colour, so its
+  vertical colour changes mid-column. Grid colour-continuity is therefore not
+  asserted for this style (structural invariants only) and a characterization
+  test (`random_dag(7, 108)`) locks the current look. The other four styles pass
+  the full suite incl. grid colour. This is the one place a cell may have two
+  turns (the per-column cap is 1 otherwise).
 - **git runs in Neovim's cwd** — `jobstart` is called without an explicit
   `cwd`, so the graph reflects the current working directory's repo.
 - **External diff is a pluggable provider** (specification.md §11.5): the
@@ -248,20 +266,23 @@ Details not covered by the spec or architecture:
   dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
   `commit_range` is.
 - **Reachability dimming = Lane model + walk** (specification.md §5, §12):
-  `build_lanes` makes one **Lane** (edge `{id, begin, parent, highlighted}`) per
-  visible parent/child edge, wires `OrderItem.parent_lanes`/`child_lanes`, and
-  binds each **Segment** to the Lane(s) it draws — a fan **bus** Segment carries
-  the *set* of edges routing through it (span between each tap and the commit's
-  hub column). `mark_reachable` walks the Lanes from the pivot (parent_lanes =
-  ancestors, child_lanes = descendants), setting `highlighted`. This is **exact**
-  — a sibling sharing a fan is a distinct Lane, so it stays fully dim (the old
-  flood's best-effort over-lighting is gone). `get_track_chars(opts, tracks,
-  emphasis)` dims a glyph by whether its top Segment draws a highlighted edge
-  (colour unchanged unless a highlighted edge overrides it) and a connector by
-  its horizontal Segment's edge set; `dim_hl` is the cached, `ColorScheme`-rebuilt
-  hue-preserving blend (flat `NonText` without truecolor). Recomputed on row
-  change / scroll (`WinScrolled`) / `m` reflow / stream completion; `emphasis` is
-  false (all lit) on `H` off or no pivot. `reachable_cone` stays a pure, tested helper; production uses
-  `mark_reachable`. Deferred: `Track`→`Column` rename; a `Route` (run of Lanes).
+  Phase 1 (`columns.layout`) makes one **Lane** (edge `{id, begin, parent,
+  highlighted}`) per parent/child edge, wires `OrderItem.parent_lanes`/
+  `child_lanes`, and binds each Segment to the Lane it draws. A separate split/
+  merge line's shared descent-into-the-commit / ascent-out-of-the-commit is one
+  multi-edge Segment (so a non-trunk cone lane stays connected through the hub).
+  `mark_reachable` walks the Lanes from the pivot (parent_lanes = ancestors,
+  child_lanes = descendants), setting `highlighted`, and first resets every Lane
+  *drawn* in the window (via each Segment's edges) so persistent lanes don't keep
+  stale highlights. This is **exact** — a sibling sharing a fan is a distinct
+  Lane, so it stays dim. `get_column_chars(opts, columns, emphasis)` renders by
+  unioning the highlighted Segments' connectivity (or all when none is lit) and
+  dims out-of-cone wires via `dim_hl` (the cached, `ColorScheme`-rebuilt
+  hue-preserving blend, factor `palette.dim`; flat `NonText` without truecolor).
+  Out-of-cone row fields (date/author/message/refs) dim via the `rh` helper.
+  Recompute is **debounced** (~60ms) on cursor move / scroll (only the last,
+  after the cursor settles, walks); `m` reflow / `H` toggle / stream completion
+  recompute immediately. `emphasis` is false (all lit) on `H` off or no pivot.
+  `reachable_cone` stays a pure, tested helper; production uses `mark_reachable`.
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.
