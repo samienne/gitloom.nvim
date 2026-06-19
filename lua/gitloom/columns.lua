@@ -14,8 +14,8 @@
 ---     segment; at most one segment turning horizontal -> up/down (two — one up,
 ---     one down — only when `allow_merge_on_split`). Empty columns are allowed.
 ---
---- Output shape matches the legacy build_graph so Phase 2 (get_track_chars) and
---- the invariant tests consume it unchanged: rows of { tracks, parent_lanes,
+--- Output shape matches the legacy build_graph so Phase 2 (get_column_chars) and
+--- the invariant tests consume it unchanged: rows of { columns, parent_lanes,
 --- child_lanes }, each track { connectivity, lanes (Segment[]), has_commit,
 --- commit, id, begin, parent }.
 local M = {}
@@ -81,16 +81,16 @@ function M.layout(opts, items)
         end
         return cells, draw, add_seg
     end
-    -- Turn a line's cells into a Track[] (the legacy shape). `commit_col` marks
-    -- which column carries the commit marker (nil on a split/merge line).
+    -- Turn a line's cells into a GraphColumn[]. `commit_col` marks which column
+    -- carries the commit marker (nil on a split/merge line).
     local function assemble(cells, commit_col, C)
         local width = 0
         for j in pairs(cells) do if j > width then width = j end end
         if commit_col and commit_col > width then width = commit_col end
-        local tracks = {}
+        local columns = {}
         for j = 1, width do
             local segs = cells[j] or {}
-            tracks[j] = {
+            columns[j] = {
                 connectivity = union_conn(segs),
                 lanes = segs,
                 has_commit = commit_col ~= nil and j == commit_col,
@@ -100,7 +100,7 @@ function M.layout(opts, items)
                 parent = segs[1] and segs[1].parent or nil,
             }
         end
-        return tracks
+        return columns
     end
 
     for _, item in ipairs(items) do
@@ -245,7 +245,7 @@ function M.layout(opts, items)
                 draw(o.lane, math.min(o.out, cc), math.max(o.out, cc), nil, o.out)
             end
         end
-        row.tracks = assemble(cells, cc, C)
+        row.columns = assemble(cells, cc, C)
 
         -- Advance active past the commit line.
         active = {}

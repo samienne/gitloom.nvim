@@ -168,7 +168,7 @@ describe("lane model decomposition", function()
 
         local max_lanes = 0
         for _, row in ipairs(rows) do
-            for _, lst in ipairs({ row.tracks, row.split or {}, row.merge or {} }) do
+            for _, lst in ipairs({ row.columns, row.split or {}, row.merge or {} }) do
                 for _, t in ipairs(lst) do
                     max_lanes = math.max(max_lanes, #(t.lanes or {}))
                 end
@@ -223,16 +223,16 @@ describe("invariant checker self-test", function()
         -- A column whose lane id changes between two connected cells without
         -- being modeled as two lanes — exactly what the handoff split prevents.
         local rows = {
-            { tracks = { { connectivity = { down = true }, lanes = { { id = 1, connectivity = { down = true } } } } } },
-            { tracks = { { connectivity = { up = true }, lanes = { { id = 2, connectivity = { up = true } } } } } },
+            { columns = { { connectivity = { down = true }, lanes = { { id = 1, connectivity = { down = true } } } } } },
+            { columns = { { connectivity = { up = true }, lanes = { { id = 2, connectivity = { up = true } } } } } },
         }
         assert(has(h.check_lane_continuity(rows), "up-lane id"))
     end)
 
     it("lane continuity accepts a matching column", function()
         local rows = {
-            { tracks = { { connectivity = { down = true }, lanes = { { id = 7, connectivity = { down = true } } } } } },
-            { tracks = { { connectivity = { up = true }, lanes = { { id = 7, connectivity = { up = true } } } } } },
+            { columns = { { connectivity = { down = true }, lanes = { { id = 7, connectivity = { down = true } } } } } },
+            { columns = { { connectivity = { up = true }, lanes = { { id = 7, connectivity = { up = true } } } } } },
         }
         assert.equals(0, #h.check_lane_continuity(rows))
     end)

@@ -529,15 +529,15 @@ local function fetch_commits(opts)
 end
 
 --- The rendered lines of an OrderItem in display order (split / commit / merge),
---- skipping absent ones. A plain `{item.split, item.tracks, item.merge}` can't be
+--- skipping absent ones. A plain `{item.split, item.columns, item.merge}` can't be
 --- `ipairs`-ed because a nil `split` truncates the list.
 ---@param item OrderItem|nil
----@return Track[][]
+---@return GraphColumn[][]
 local function item_lines(item)
     local out = {}
     if not item then return out end
     if item.split then out[#out + 1] = item.split end
-    if item.tracks then out[#out + 1] = item.tracks end
+    if item.columns then out[#out + 1] = item.columns end
     if item.merge then out[#out + 1] = item.merge end
     return out
 end
@@ -553,7 +553,7 @@ end
 local function build_graph(opts, items)
     -- Phase 1 of the two-phase pipeline (see lua/gitloom/columns.lua): lane
     -- layout into columns with per-segment connectivity, validated for continuity.
-    -- Phase 2 (get_track_chars) renders glyphs/colour from the segments.
+    -- Phase 2 (get_column_chars) renders glyphs/colour from the segments.
     return require("gitloom.columns").layout(opts, items)
 end
 
@@ -587,9 +587,9 @@ end
 ---@field parent Commit
 ---@field highlighted boolean
 
---- A **Segment** is one wire within a Column (today's `Track`): its
---- connectivity plus the Lane(s) it draws (a list — usually one, but a shared
---- fan bus carries the set of edges routing through it).
+--- A **Segment** is one wire within a `GraphColumn`: its connectivity plus the
+--- Lane(s) it draws (a list — usually one, but a shared fan bus carries the set
+--- of edges routing through it).
 ---@class Segment
 ---@field id integer|nil
 ---@field connectivity Connectivity
@@ -597,7 +597,7 @@ end
 ---@field parent? Commit
 ---@field edges? Lane[]   the edge(s) this wire draws (§5)
 
----@class Track
+---@class GraphColumn
 ---@field id integer|nil
 ---@field connectivity Connectivity
 ---@field has_commit boolean
@@ -610,9 +610,9 @@ end
 ---@class OrderItem
 ---@field type "commit"|"merge"|"split"
 ---@field commit? Commit
----@field tracks Track[]
----@field split? Track[]
----@field merge? Track[]
+---@field columns GraphColumn[]
+---@field split? GraphColumn[]
+---@field merge? GraphColumn[]
 ---@field parent_lanes? Lane[]  edges out to this commit's parents (§5)
 ---@field child_lanes? Lane[]   edges in from this commit's children (§5)
 
@@ -625,11 +625,11 @@ end
 --- would be incorrect; a full rebuild is simplest and cheap enough here.
 ---@param opts GraphOptions
 ---@param order OrderItem[]
-local function refresh_tracks(opts, order, _start_pos)
+local function refresh_columns(opts, order, _start_pos)
     local rebuilt = require("gitloom.columns").layout(opts, order)
     for i = 1, #order do
         local r = rebuilt[i]
-        order[i].tracks = r.tracks
+        order[i].columns = r.columns
         order[i].split = r.split
         order[i].merge = r.merge
         order[i].parent_lanes = r.parent_lanes
@@ -663,7 +663,7 @@ local function compose(list)
 end
 
 ---@param opts GraphOptions
----@param tracks Track[]
+---@param columns GraphColumn[]
 --- The "top" lane that colors (and sets the dim state of) a cell: prefer the
 --- lane heading *down* (so a column reads continuously into the lane below),
 --- then the up lane, then any. This is the configurable color strategy
@@ -742,16 +742,16 @@ end
 --- Mirror a row's cells for right-aligned rendering (specification.md §5.4).
 --- Reverses the column order (so lane 1 becomes the rightmost column, nearest
 --- the message) and swaps each cell's left/right connectivity. Because the
---- glyph is a pure function of connectivity (get_track_chars), the mirrored
+--- glyph is a pure function of connectivity (get_column_chars), the mirrored
 --- glyphs (╭↔╮, ┤↔├, ╴↔╶) and the inter-lane connectors fall out automatically
 --- — no glyph-swap table. Color is unaffected (it comes from each lane's
 --- up/down). Returns a fresh array; the model rows are left untouched.
----@param tracks Track[]
----@return Track[]
-local function mirror_tracks(tracks)
+---@param columns GraphColumn[]
+---@return GraphColumn[]
+local function mirror_columns(columns)
     local out = {}
-    for i = #tracks, 1, -1 do
-        local t = tracks[i]
+    for i = #columns, 1, -1 do
+        local t = columns[i]
         local c = t.connectivity
         local m = {}
         for k, v in pairs(t) do m[k] = v end
@@ -761,18 +761,18 @@ local function mirror_tracks(tracks)
     return out
 end
 
-local function get_track_chars(opts, tracks, emphasis)
+local function get_column_chars(opts, columns, emphasis)
     -- Right-aligned mirror: flip the cells before deriving glyphs. The graph
     -- column is then right-aligned by the listview (fix_width align = "right").
     if opts.mirror then
-        tracks = mirror_tracks(tracks)
+        columns = mirror_columns(columns)
     end
 
     local result = {}
 
-    for i = 1, #tracks do
-        local track = tracks[i]
-        local next = tracks[i + 1]
+    for i = 1, #columns do
+        local track = columns[i]
+        local next = columns[i + 1]
 
         -- A *crossing* is an independent through-vertical + through-horizontal in
         -- one cell (a `│` a wire passes across). It is left whole so a passing
@@ -898,7 +898,7 @@ local function get_track_chars(opts, tracks, emphasis)
         -- the left once mirrored (cells reversed), so the scan flips direction
         -- (§5.4). Keeping this lookahead preserves colour continuity along a run.
         local function real_id(j)
-            local t = tracks[j]
+            local t = columns[j]
             if not t then return nil end
             local cc = t.connectivity
             local is_cross = cc.down and cc.up and cc.left and cc.right
@@ -907,7 +907,7 @@ local function get_track_chars(opts, tracks, emphasis)
             return t.id
         end
         local next_track_id
-        local from, to, step = i + 1, #tracks, 1
+        local from, to, step = i + 1, #columns, 1
         if opts.mirror then from, to, step = i, 1, -1 end
         for j = from, to, step do
             local id = real_id(j)
@@ -1119,7 +1119,7 @@ local function display_item(opts, item, selection_state, cone)
 
     -- Reachability dimming (§12): when a cone is active and this commit is
     -- outside it, the row's non-lane fields render dimmed (the lanes dim
-    -- per-cell via track.active in get_track_chars). `cone == nil` means no
+    -- per-cell via track.active in get_column_chars). `cone == nil` means no
     -- pivot yet, so nothing dims. `rh` is "row highlight": the field's group,
     -- or its dimmed derivative on an out-of-cone row.
     -- Emphasis is active only with a pivot (cone) and the toggle on; otherwise
@@ -1171,12 +1171,12 @@ local function display_item(opts, item, selection_state, cone)
         return items
     end
 
-    local get_tracks = function(tracks)
+    local get_columns = function(columns)
         if not show_lane_ids then
             return highlight_text("")
         end
         local result = "("
-        for i, t in ipairs(tracks) do
+        for i, t in ipairs(columns) do
             result = result .. (i > 1 and ", " or "") .. (t.id or "-")
         end
         result = result .. ") "
@@ -1192,27 +1192,27 @@ local function display_item(opts, item, selection_state, cone)
             line = {
                 rh(format_date(item.commit.date, opts) .. " ", palette.date),
                 rh(item.commit.author .. " ", palette.author),
-                get_track_chars(opts, item.tracks, emphasis),
+                get_column_chars(opts, item.columns, emphasis),
                 -- The flex (message) column: optional lane-id debug prefix, then
                 -- the subject. Refs go in line_right, pinned to the right edge.
                 compose({
-                    get_tracks(item.tracks),
+                    get_columns(item.columns),
                     rh(item.commit.message, palette.message) or "",
                 }),
             },
             line_right = get_ref_items(item.commit),
         }
         if item.split then
-            element.above = { "", "", get_track_chars(opts, item.split, emphasis), get_tracks(item.split) }
+            element.above = { "", "", get_column_chars(opts, item.split, emphasis), get_columns(item.split) }
         end
 
         if item.merge then
-            element.below = { "", "", get_track_chars(opts, item.merge, emphasis), get_tracks(item.merge) }
+            element.below = { "", "", get_column_chars(opts, item.merge, emphasis), get_columns(item.merge) }
         end
 
         return element
     else
-        return { line = { "", "", get_track_chars(opts, item.tracks), "", "" } }
+        return { line = { "", "", get_column_chars(opts, item.columns), "", "" } }
     end
 end
 
@@ -1234,10 +1234,10 @@ local function format_lane_info(item)
     local lines = {}
     lines[#lines + 1] = ("commit %s  %s"):format(short(item.commit), item.commit.message or "")
 
-    local function dump(label, tracks)
-        if not tracks then return end
+    local function dump(label, columns)
+        if not columns then return end
         lines[#lines + 1] = label .. ":"
-        for i, t in ipairs(tracks) do
+        for i, t in ipairs(columns) do
             local head = ("  #%d %s"):format(i, t.has_commit and "●" or "·")
             local lanes = t.lanes or {}
             if #lanes == 0 then
@@ -1252,7 +1252,7 @@ local function format_lane_info(item)
     end
 
     dump("split (above)", item.split)
-    dump("commit line", item.tracks)
+    dump("commit line", item.columns)
     dump("merge (below)", item.merge)
     return lines
 end
@@ -1767,7 +1767,7 @@ end
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
----@field tracks? string[]
+---@field tracks? string[]  highlight groups cycled by lane id (the lane palette)
 
 ---@class MergeStyle
 ---@field allow_merge_on_split boolean
@@ -1958,11 +1958,11 @@ function M.open(folder, opts)
                             local split_item = {
                                 type = "split",
                                 commit = item,
-                                tracks = {},
+                                columns = {},
                             }
 
                             table.insert(repo.order, split_item)
-                            refresh_tracks(opts, repo.order, #repo.order)
+                            refresh_columns(opts, repo.order, #repo.order)
                             controller.insert({ split_item }, #repo.order)
                         end
                         --]]
@@ -1971,10 +1971,10 @@ function M.open(folder, opts)
                         local order_item = {
                             type = "commit",
                             commit = item,
-                            tracks = {},
+                            columns = {},
                         }
                         table.insert(repo.order, order_item)
-                        refresh_tracks(opts, repo.order, #repo.order)
+                        refresh_columns(opts, repo.order, #repo.order)
                         controller.insert({ order_item }, #repo.order)
 
                         --[[
@@ -1983,11 +1983,11 @@ function M.open(folder, opts)
                             local merge_item = {
                                 type = "merge",
                                 commit = item,
-                                tracks = {},
+                                columns = {},
                             }
 
                             table.insert(repo.order, merge_item)
-                            refresh_tracks(opts, repo.order, #repo.order)
+                            refresh_columns(opts, repo.order, #repo.order)
                             controller.insert({ merge_item }, #repo.order)
                         end
                         --]]
@@ -2011,12 +2011,12 @@ function M.open(folder, opts)
     -- m: cycle the merge/split style and reflow in place (no re-fetch). This
     -- is the reflow path the interactive views (collapse/pin/toggle) will use:
     -- relayout repo.order, then re-render. One buffer line per commit doesn't
-    -- change, so no insert/remove churn — only tracks and virtual lines update.
+    -- change, so no insert/remove churn — only columns and virtual lines update.
     opts.win.keys.m = function()
         merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
         opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
-        refresh_tracks(opts, repo.order, 1)
-        update_cone() -- tracks regenerated → re-mark active for the cone (§12)
+        refresh_columns(opts, repo.order, 1)
+        update_cone() -- columns regenerated → re-mark active for the cone (§12)
         if lv and lv.controller then
             lv.controller.refresh()
         end
@@ -2172,7 +2172,7 @@ function M.open(folder, opts)
             local bottom = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
             local cur = vim.api.nvim_win_get_cursor(win)[1]
             -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
-            -- refresh_tracks); walk them from the pivot to mark highlights (§12).
+            -- refresh_columns); walk them from the pivot to mark highlights (§12).
             local item = repo.order[cur]
             if not (item and item.commit) then
                 view_state.cone = nil
@@ -2263,7 +2263,7 @@ M._internal = {
     reachable_cone = reachable_cone,
     mark_reachable = mark_reachable,
     build_graph = build_graph,
-    get_track_chars = get_track_chars,
+    get_column_chars = get_column_chars,
 }
 
 return M

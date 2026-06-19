@@ -172,15 +172,15 @@ describe("lane model (build_graph)", function()
 end)
 
 describe("rendered dimming (per-lane)", function()
-    local get_track_chars = internal.get_track_chars
+    local get_column_chars = internal.get_column_chars
 
     -- Count rendered highlight groups across the whole laid-out grid.
     local function grid_hls(opts, rows)
         local set = {}
         for _, row in ipairs(rows) do
-            for _, sub in ipairs({ row.split, row.tracks, row.merge }) do
+            for _, sub in ipairs({ row.split, row.columns, row.merge }) do
                 if sub then
-                    local res = get_track_chars(opts, sub)
+                    local res = get_column_chars(opts, sub)
                     for _, h in ipairs(res.highlight or {}) do
                         set[h.hl] = (set[h.hl] or 0) + 1
                     end
@@ -192,7 +192,7 @@ describe("rendered dimming (per-lane)", function()
 
     local function commit_lane_id(rows, hash)
         for _, row in ipairs(rows) do
-            for _, t in ipairs(row.tracks) do
+            for _, t in ipairs(row.columns) do
                 if t.has_commit and t.commit.hash == hash then return t.id end
             end
         end
@@ -201,7 +201,7 @@ describe("rendered dimming (per-lane)", function()
     -- The commit marker track on a laid-out row.
     local function marker(rows, hash)
         for _, row in ipairs(rows) do
-            for _, t in ipairs(row.tracks) do
+            for _, t in ipairs(row.columns) do
                 if t.has_commit and t.commit.hash == hash then return t end
             end
         end
@@ -286,7 +286,7 @@ describe("rendered dimming (per-lane)", function()
     local function render_split(opts, rows, emphasis)
         for _, row in ipairs(rows) do
             if row.split then
-                local res = get_track_chars(opts, row.split, emphasis)
+                local res = get_column_chars(opts, row.split, emphasis)
                 local text, hls, out, i = res.text, res.highlight or {}, {}, 1
                 local function hl_at(bp)
                     for _, h in ipairs(hls) do
@@ -364,7 +364,7 @@ end)
 describe("mark_reachable", function()
     local function marker(rows, hash)
         for _, row in ipairs(rows) do
-            for _, t in ipairs(row.tracks) do
+            for _, t in ipairs(row.columns) do
                 if t.has_commit and t.commit.hash == hash then return t end
             end
         end

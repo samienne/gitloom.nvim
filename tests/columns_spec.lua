@@ -17,7 +17,7 @@ local function check(opts, rows)
     local function err(m) errs[#errs + 1] = m end
 
     for ri, row in ipairs(rows) do
-        for _, line in ipairs({ row.split or {}, row.tracks, row.merge or {} }) do
+        for _, line in ipairs({ row.split or {}, row.columns, row.merge or {} }) do
         for ti, t in ipairs(line) do
             local segs = t.lanes or {}
             -- union of segments == cell connectivity
@@ -54,7 +54,7 @@ local function check(opts, rows)
     local lines = {}
     for _, row in ipairs(rows) do
         if row.split then lines[#lines + 1] = row.split end
-        lines[#lines + 1] = row.tracks
+        lines[#lines + 1] = row.columns
         if row.merge then lines[#lines + 1] = row.merge end
     end
     local function up_id(x) for _, s in ipairs(x.lanes or {}) do if s.connectivity.up then return s.id end end end
@@ -75,10 +75,10 @@ end
 
 -- Render every line of every row (split above, commit, merge below).
 local function render(opts, rows)
-    local gtc = graph._internal.get_track_chars
+    local gtc = graph._internal.get_column_chars
     local out = {}
     for _, row in ipairs(rows) do
-        for _, line in ipairs({ row.split or false, row.tracks, row.merge or false }) do
+        for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
             if line then out[#out + 1] = (gtc(opts, line, false).text or ""):gsub("%s+$", "") end
         end
     end
@@ -150,7 +150,7 @@ describe("columns.layout track-id reuse", function()
     local function distinct_ids(rows)
         local ids = {}
         for _, row in ipairs(rows) do
-            for _, line in ipairs({ row.split or false, row.tracks, row.merge or false }) do
+            for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
                 if line then
                     for _, t in ipairs(line) do if t.id then ids[t.id] = true end end
                 end
