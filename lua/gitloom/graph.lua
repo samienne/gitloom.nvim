@@ -149,7 +149,7 @@ end
 local function dim_hl(opts, group)
     if not group then return nil end
     if not vim.o.termguicolors then return DIM_FALLBACK end
-    local factor = (opts.palette and type(opts.palette.dim) == "number") and opts.palette.dim or 0.6
+    local factor = (opts.palette and type(opts.palette.dim) == "number") and opts.palette.dim or 0.45
     local key = group .. "\x1f" .. tostring(factor)
     if dim_cache[key] then return dim_cache[key] end
 
@@ -1123,8 +1123,12 @@ local function display_item(opts, item, selection_state, cone)
     -- `row_active` (this commit in the cone).
     local emphasis = (opts.highlight ~= false) and (cone ~= nil)
     local row_active = (not emphasis) or (item.commit ~= nil and cone ~= nil and cone[item.commit] == true)
+    -- On an out-of-cone row, dim the field's group; a field with no group (e.g.
+    -- the message, palette.message = nil) dims its default `Normal` foreground so
+    -- it recedes with the rest of the row rather than staying full-bright.
     local function rh(text, group)
-        return highlight_text(text, row_active and group or dim_hl(opts, group))
+        if row_active then return highlight_text(text, group) end
+        return highlight_text(text, dim_hl(opts, group or "Normal"))
     end
 
     -- Refs (§6) as a list of right-pinned items: a HEAD marker, then branch
@@ -1814,7 +1818,7 @@ function M.open(folder, opts)
             action = "Special",  -- the commit-view diff action label (§11.5)
             -- Reachability dimming (§12): blend factor toward the bg for the
             -- out-of-cone rows/lanes. Higher = more muted.
-            dim = 0.6,
+            dim = 0.45,
             -- Commit-view diff colors (§11.3): per-role highlight groups.
             diff = {
                 add = "DiffAdd",

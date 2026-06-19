@@ -322,7 +322,7 @@ DiffRange    = { rev: string, from: Commit?, to: Commit }
   `DiffDelete`, `Title`, `Comment`; §11.3); and `action`, the highlight for the
   commit view's diff action label (default `Special`; §11.5); and `dim`, the
   blend factor (`0`–`1`) toward the window background used to de-emphasise
-  out-of-cone rows and lanes (§12; default `0.6`; higher is more muted). On
+  out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
   terminals without true colour, dimming falls back to a flat `NonText`
   highlight instead.
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default

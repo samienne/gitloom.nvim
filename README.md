@@ -160,7 +160,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         tags = "Comment",
         selected = "Visual",     -- the h/l-selected ref decoration
         action = "Special",      -- the commit-view diff action label (§11.5)
-        dim = 0.6,               -- blend toward bg for out-of-cone rows/lanes (§12)
+        dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
 
