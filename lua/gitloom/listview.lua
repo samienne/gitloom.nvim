@@ -62,7 +62,7 @@ local function create_win(opts)
 end
 
 --- 1-based indexing
----@param win integer
+---@param win integer?   the list window (unused here; nil in unit tests)
 ---@param model ListViewModel
 ---@param first integer
 ---@param last integer
@@ -149,7 +149,7 @@ end
 
 ---@class DisplayItem
 ---@field text string
----@field highlight HighlightInfo
+---@field highlight? HighlightInfo
 ---@field align? "left"|"right"  column padding side (default left)
 
 ---@class DisplayElement
@@ -160,11 +160,13 @@ end
 
 --- Requested width in display cells. With `ellipsis`, truncation appends "…"
 --- (reserving one cell) instead of a hard cut.
----@param item DisplayItem
+---@param item DisplayItem|string
 ---@param requested_utf_len integer
 ---@param ellipsis boolean?
 ---@return DisplayItem
 local function fix_width(item, requested_utf_len, ellipsis)
+    -- above/below lines mix plain string spacers with DisplayItems; normalise.
+    if type(item) == "string" then item = { text = item } end
     local text = item.text or ""
     local utf_len = vim.fn.strdisplaywidth(text)
 

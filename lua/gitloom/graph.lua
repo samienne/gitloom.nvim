@@ -246,7 +246,7 @@ local function fetch_refs(repo)
                         local parts = vim.split(line, " ")
                         local hash, refname, deref = parts[1], parts[2], parts[3]
                         local kind, name = classify_ref(refname or "")
-                        if kind and hash then
+                        if kind and name and hash then
                             local target = (deref and deref ~= "") and deref or hash
                             add_ref(repo, name, kind, target)
                         end
@@ -316,7 +316,9 @@ end
 ---@param fmt string?
 ---@return string
 local function format_absolute(ts, fmt)
-    return os.date("!" .. (fmt or "%Y-%m-%d %H:%M"), ts.epoch + ts.offset)
+    -- os.date returns string for a string format (osdate only for "*t"); cast so
+    -- the annotated string return type holds.
+    return os.date("!" .. (fmt or "%Y-%m-%d %H:%M"), ts.epoch + ts.offset) --[[@as string]]
 end
 
 local REL_UNITS = {
@@ -406,7 +408,7 @@ end
 --- The plain text of each selectable ref decoration on a commit, in selection
 --- order (branch groups then tags). The single source of truth so the rendered
 --- text and the cursor-target search use byte-identical strings.
----@param commit Commit?
+---@param commit { refs: Ref[] }?   only the ref list is read
 ---@return string[]
 local function decoration_texts(commit)
     local g = group_refs(commit and commit.refs or {})
@@ -612,6 +614,7 @@ end
 ---@field parent? Commit  the parent end of this wire's edge (lane end); §5
 ---@field override? string
 ---@field lanes? Segment[]  per-wire decomposition of the cell (Segments; §5)
+---@field active? boolean  commit-marker emphasis state, set by mark_reachable (§12)
 
 ---@class OrderItem
 ---@field type "commit"|"merge"|"split"
@@ -864,7 +867,7 @@ local function get_column_chars(opts, columns, emphasis)
             vim.notify(vim.inspect(c))
         end
 
-        ---@return string
+        ---@return string?
         local get_highlight = function(id)
             return id and opts.palette.tracks[(id % #opts.palette.tracks) + 1] or nil
         end
@@ -1119,7 +1122,7 @@ local function display_item(opts, item, selection_state, cone)
     -- everything renders lit. Lane dimming reads `emphasis`; row fields read
     -- `row_active` (this commit in the cone).
     local emphasis = (opts.highlight ~= false) and (cone ~= nil)
-    local row_active = (not emphasis) or (item.commit ~= nil and cone[item.commit] == true)
+    local row_active = (not emphasis) or (item.commit ~= nil and cone ~= nil and cone[item.commit] == true)
     local function rh(text, group)
         return highlight_text(text, row_active and group or dim_hl(opts, group))
     end
@@ -1747,6 +1750,7 @@ end
 ---@field height number|fun():number
 ---@field title string
 ---@field footer string
+---@field keys? table  keymaps installed on the graph window (snacks.win keys)
 
 ---@class GraphPalette
 ---@field date? string
@@ -1898,6 +1902,11 @@ function M.open(folder, opts)
     -- after the listview opens; forward-declared for the key handlers.
     local update_cone = function() end
 
+    -- The listview instance. Forward-declared so the on_controller/stream
+    -- callbacks below close over this local (not a stray global) and see it once
+    -- it is assigned after the window opens.
+    local lv
+
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
@@ -1938,7 +1947,9 @@ function M.open(folder, opts)
                         -- Convert parent hashes to references
                         local newParents = {}
                         for _, p in ipairs(item.parents) do
-                            local parent = get_or_create_commit(repo, p)
+                            -- At this point parents are still the hash strings
+                            -- parsed from `git log`, being resolved to Commits.
+                            local parent = get_or_create_commit(repo, p --[[@as string]])
                             table.insert(parent.children, item)
                             table.insert(newParents, parent)
                         end
@@ -1998,8 +2009,6 @@ function M.open(folder, opts)
         end,
     }
 
-    ---@type table
-    local lv
     opts.win.keys = opts.win.keys or {}
     -- m: cycle the merge/split style and reflow in place (no re-fetch). This
     -- is the reflow path the interactive views (collapse/pin/toggle) will use:
@@ -2041,7 +2050,7 @@ function M.open(folder, opts)
     end
     -- <CR>: open the commit view for the commit on the current row (§11).
     opts.win.keys["<CR>"] = function(self)
-        local line = vim.api.nvim_win_get_cursor(self.win)[1]
+        local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = repo.order[line]
         if not item or not item.commit then
             return
@@ -2050,7 +2059,9 @@ function M.open(folder, opts)
     end
     -- D: open the commit's diff in the external diff viewer (§11.5).
     opts.win.keys.D = function(self)
-        local line = vim.api.nvim_win_get_cursor(self.win)[1]
+        local w = self and self.win
+        if not w then return end
+        local line = vim.api.nvim_win_get_cursor(w)[1]
         local item = repo.order[line]
         if not item or not item.commit then
             return
@@ -2059,7 +2070,9 @@ function M.open(folder, opts)
     end
     -- K: float with the full lane breakdown for the commit under the cursor.
     opts.win.keys.K = function(self)
-        local line = vim.api.nvim_win_get_cursor(self.win)[1]
+        local w = self and self.win
+        if not w then return end
+        local line = vim.api.nvim_win_get_cursor(w)[1]
         local item = repo.order[line]
         if not item or not item.commit then
             return
@@ -2108,7 +2121,7 @@ function M.open(folder, opts)
     local selection_visible = false -- a decoration (not the message) is selected
     local function move_ref(dir)
         return function(self)
-            local line = vim.api.nvim_win_get_cursor(self.win)[1]
+            local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
             local item = repo.order[line]
             local commit = item and item.commit or nil
             if not commit then

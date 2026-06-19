@@ -20,6 +20,7 @@ describe("parse_commit_line", function()
         local c = parse_commit_line(line({
             "abc123", "def456", "Alice", "1704110400", "2024-01-01 12:00:00 +0000", "Initial commit",
         }))
+        ---@cast c -nil
         assert.equals("abc123", c.hash)
         assert.same({ "def456" }, c.parents)
         assert.equals("Alice", c.author)
@@ -31,16 +32,19 @@ describe("parse_commit_line", function()
 
     it("parses multiple parents", function()
         local c = parse_commit_line(line({ "h", "p1 p2", "A", "0", "d", "merge" }))
+        ---@cast c -nil
         assert.same({ "p1", "p2" }, c.parents)
     end)
 
     it("handles a root commit with no parents", function()
         local c = parse_commit_line(line({ "h", "", "A", "0", "d", "root" }))
+        ---@cast c -nil
         assert.same({}, c.parents)
     end)
 
     it("starts with an empty refs list (refs are resolved separately)", function()
         local c = parse_commit_line(line({ "h", "", "A", "0", "d", "subj" }))
+        ---@cast c -nil
         assert.same({}, c.refs)
     end)
 end)
@@ -79,7 +83,7 @@ end)
 
 describe("format_relative", function()
     local function rel(secs_ago)
-        return format_relative({ epoch = 1000000 - secs_ago }, 1000000)
+        return format_relative({ epoch = 1000000 - secs_ago, offset = 0 }, 1000000)
     end
 
     it("buckets by the largest fitting unit, pluralizing", function()
@@ -93,6 +97,6 @@ describe("format_relative", function()
     end)
 
     it("treats future timestamps as just now", function()
-        assert.equals("just now", format_relative({ epoch = 2000000 }, 1000000))
+        assert.equals("just now", format_relative({ epoch = 2000000, offset = 0 }, 1000000))
     end)
 end)

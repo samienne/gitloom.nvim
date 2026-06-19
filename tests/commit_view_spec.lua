@@ -283,6 +283,8 @@ describe("commit_range", function()
     end)
 
     it("treats a missing parents field as a root", function()
+        -- deliberately partial: exercises commit_range's `parents or {}` fallback
+        ---@diagnostic disable-next-line: missing-fields
         local r = commit_range({ hash = "x" })
         assert.equals("4b825dc642cb6eb9a060e54bf8d69288fbee4904..x", r.rev)
         assert.is_nil(r.from)
