@@ -145,3 +145,34 @@ describe("columns.layout dumps", function()
         assert.is_true(true)
     end)
 end)
+
+describe("columns.layout track-id reuse", function()
+    local function distinct_ids(rows)
+        local ids = {}
+        for _, row in ipairs(rows) do
+            for _, line in ipairs({ row.split or false, row.tracks, row.merge or false }) do
+                if line then
+                    for _, t in ipairs(line) do if t.id then ids[t.id] = true end end
+                end
+            end
+        end
+        local n = 0
+        for _ in pairs(ids) do n = n + 1 end
+        return n
+    end
+
+    it("keeps one id along a straight chain", function()
+        -- A linear history is a single continuous lane: one track id (colour).
+        local rows = columns.layout(h.big_opts(),
+            h.dag({ { "a", { "b" } }, { "b", { "c" } }, { "c", {} } }))
+        assert.equals(1, distinct_ids(rows))
+    end)
+
+    it("mints a new id only at branch heads and merges", function()
+        -- diamond m->{a,b}->base: the first-parent mainline (m->a->base) keeps the
+        -- tip's id; only the second parent (m->b->base) is a new lane. Two ids.
+        local rows = columns.layout(h.big_opts(),
+            h.dag({ { "m", { "a", "b" } }, { "a", { "base" } }, { "b", { "base" } }, { "base", {} } }))
+        assert.equals(2, distinct_ids(rows))
+    end)
+end)

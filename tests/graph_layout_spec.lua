@@ -136,12 +136,12 @@ describe("graph layout [inline+mergesplit] characterization", function()
     -- colour changes mid-column. Repro: random_dag(7, 108).
     local EXPECTED = [[
 ◉─╮  233
-○ │  4.3
-│ │ ◉─╮  4.3.566
-│ │ │ │ ◉  4.3.5.6.1
-○─│─│─╯ │  2636566.1
-○─│─┴───╯  453551111
-◎─╯  433]]
+○ │  2.3
+│ │ ◉─╮  2.3.455
+│ │ │ │ ◉  2.3.4.5.6
+○─│─│─╯ │  2515455.6
+○─│─┴───╯  241446666
+◎─╯  211]]
 
     it("renders the known merge-handoff repro unchanged", function()
         local opts = h.opts({

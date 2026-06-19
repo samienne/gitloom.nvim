@@ -119,10 +119,16 @@ function M.layout(opts, items)
         table.sort(incoming, function(a, b) return a.col < b.col end)
         table.sort(survivors, function(a, b) return a.col < b.col end)
 
-        -- Outgoing lanes: one per parent.
+        -- Outgoing lanes: one per parent. The first parent continues the commit's
+        -- column, so it *reuses the track id* of the lane flowing in there (the
+        -- trunk child) — a straight chain keeps one colour. A new id is minted only
+        -- where a lane is genuinely born: a branch head (a tip's first parent) and
+        -- every extra parent of a merge.
+        local trunk_id = incoming[1] and incoming[1].lane.id
         local outgoing = {}
-        for _, p in ipairs(C.parents or {}) do
-            outgoing[#outgoing + 1] = { lane = { id = new_id(), begin = C, parent = p, highlighted = false } }
+        for i, p in ipairs(C.parents or {}) do
+            local id = (i == 1 and trunk_id) or new_id()
+            outgoing[#outgoing + 1] = { lane = { id = id, begin = C, parent = p, highlighted = false } }
         end
 
         -- The commit sits where its leftmost child arrives, or the leftmost free
