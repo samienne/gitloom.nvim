@@ -73,7 +73,7 @@ local function refresh_columns(win, model, first, last)
 
     local changed = false
 
-    for _, field in ipairs({ "above", "line", "text" }) do
+    for _, field in ipairs({ "above", "below", "line", "text" }) do
         for i = first, last do
             local item = model.items[i]
             if item and not item.columns then
@@ -119,7 +119,7 @@ local function refresh_columns(win, model, first, last)
         local new_columns = {}
         for i = first, last do
             local item = model.items[i]
-            for _, field in ipairs({ "above", "line", "text" }) do
+            for _, field in ipairs({ "above", "below", "line", "text" }) do
                 if item and item.columns[field] then
                     for j, column in ipairs(item.columns[field]) do
                         -- The flex column (e.g. the message) fills the remaining
@@ -661,6 +661,7 @@ end
 -- Exposed for testing only. Not part of the public API.
 M._internal = {
     pack_right = pack_right,
+    refresh_columns = refresh_columns,
 }
 
 return M

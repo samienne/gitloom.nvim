@@ -1400,25 +1400,10 @@ end
 ---@param items OrderItem[]   ordered items, each carrying a wired `.commit`
 ---@return OrderItem[]
 local function build_graph(opts, items)
-    reset_ids()
-
-    local rows = {}
-    local carry = {}
-    for _, item in ipairs(items) do
-        local result = layout_item(opts, carry, item)
-        ---@type OrderItem
-        rows[#rows + 1] = {
-            type = item.type or "commit",
-            commit = item.commit,
-            tracks = result.tracks,
-            split = result.split,
-            merge = result.merge,
-        }
-        carry = result.carry
-    end
-
-    build_lanes(rows)
-    return rows
+    -- Phase 1 of the two-phase pipeline (see lua/gitloom/columns.lua): lane
+    -- layout into columns with per-segment connectivity, validated for continuity.
+    -- Phase 2 (get_track_chars) renders glyphs/colour from the segments.
+    return require("gitloom.columns").layout(opts, items)
 end
 
 ---@class Ref
@@ -1498,18 +1483,21 @@ end
 ---@param opts GraphOptions
 ---@param order OrderItem[]
 ---@param start_pos integer
-local function refresh_tracks(opts, order, start_pos)
-    start_pos = start_pos or 1
-    local carry = start_pos > 1 and (order[start_pos - 1].merge or order[start_pos - 1].tracks) or {}
-    for i = start_pos, #order do
-        ---@type OrderItem
-        local item = order[i]
-
-        local result = layout_item(opts, carry, item)
-        item.tracks = result.tracks
-        item.split = result.split
-        item.merge = result.merge
-        carry = result.carry
+--- Re-run Phase 1 over the whole order and copy the fresh lines/lanes back into
+--- the existing OrderItems (the view holds references to them). `start_pos` is
+--- ignored — the lane layout (with compaction) is global, so a partial relayout
+--- would be incorrect; a full rebuild is simplest and cheap enough here.
+---@param opts GraphOptions
+---@param order OrderItem[]
+local function refresh_tracks(opts, order, _start_pos)
+    local rebuilt = require("gitloom.columns").layout(opts, order)
+    for i = 1, #order do
+        local r = rebuilt[i]
+        order[i].tracks = r.tracks
+        order[i].split = r.split
+        order[i].merge = r.merge
+        order[i].parent_lanes = r.parent_lanes
+        order[i].child_lanes = r.child_lanes
     end
 end
 
@@ -1740,6 +1728,8 @@ local function get_track_chars(opts, tracks, emphasis)
             char = "╷"
         elseif c.up and c.down then
             char = "│"
+        elseif not c.left and not c.up and not c.right and not c.down then
+            char = " " -- empty column (allowed; e.g. a gap awaiting compaction)
         else
             char = "x"
             vim.notify(vim.inspect(c))
@@ -1903,7 +1893,10 @@ local function mark_reachable(order, pivot_index, top, bottom)
         end
     end
 
-    -- Reset: clear every visible Lane's highlight; dim every commit marker.
+    -- Reset: clear the highlight on every Lane *drawn* in the window (via each
+    -- Segment's edges, so a pass-through lane whose endpoints are off-window is
+    -- cleared too) and the incident edges of every visible commit; dim every
+    -- commit marker.
     for i = top, bottom do
         local it = order[i]
         if it then
@@ -1911,6 +1904,9 @@ local function mark_reachable(order, pivot_index, top, bottom)
             for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
             for _, line in ipairs(item_lines(it)) do
                 for _, t in ipairs(line) do
+                    for _, s in ipairs(t.lanes or {}) do
+                        for _, e in ipairs(s.edges or {}) do e.highlighted = false end
+                    end
                     if t.has_commit then t.active = false end
                 end
             end
@@ -3042,9 +3038,8 @@ function M.open(folder, opts)
             local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
             local bottom = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
             local cur = vim.api.nvim_win_get_cursor(win)[1]
-            -- (Re)build Lanes over the visible window (layout may have changed or
-            -- streamed), then walk them from the pivot to mark highlights (§12).
-            build_lanes(repo.order, top, bottom)
+            -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
+            -- refresh_tracks); walk them from the pivot to mark highlights (§12).
             local item = repo.order[cur]
             if not (item and item.commit) then
                 view_state.cone = nil

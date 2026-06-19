@@ -12,7 +12,6 @@
 local internal = require("gitloom.graph")._internal
 local reachable_cone = internal.reachable_cone
 local mark_reachable = internal.mark_reachable
-local build_lanes = internal.build_lanes
 local build_graph = internal.build_graph
 local helpers = require("tests.graph_helpers")
 
@@ -231,6 +230,58 @@ describe("rendered dimming (per-lane)", function()
         assert.is_false(lane_hl(rows, "c1", "c4"))
     end)
 
+    -- Whether a `dir`-bearing segment of the cell carrying that direction has a
+    -- highlighted edge (the renderer's union-of-highlighted glyph would keep it).
+    local function lit_in_dir(line, dir)
+        for _, t in ipairs(line or {}) do
+            if t.connectivity[dir] then
+                for _, s in ipairs(t.lanes or {}) do
+                    if s.connectivity[dir] then
+                        for _, e in ipairs(s.edges or {}) do
+                            if e.highlighted then return true end
+                        end
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    it("keeps the descent into a merge lit for a non-trunk cone child", function()
+        -- octopus c5 split line: the single descent into c5 is shared by every
+        -- converging child. Pivot c3 (a non-trunk child) — even though the trunk
+        -- child c2 is dim, the descent must stay lit so the cone reaches c5 (else
+        -- the convergence glyph loses its `down`).
+        local items = helpers.dag({
+            { "c1", { "c2", "c3", "c4" } },
+            { "c2", { "c5" } }, { "c3", { "c5" } }, { "c4", { "c5" } }, { "c5", {} },
+        })
+        local rows = build_graph(helpers.big_opts(), items) -- split on its own line
+        mark_reachable(rows, 3, 1, #rows)                   -- pivot c3
+        local split
+        for _, row in ipairs(rows) do if row.commit.hash == "c5" then split = row.split end end
+        assert.is_not_nil(split)
+        assert.is_true(lit_in_dir(split, "down"))
+    end)
+
+    it("keeps the ascent out of a split lit for a non-first cone parent", function()
+        -- c has parents d, e on a merge line; the single ascent out of c is shared
+        -- by both. Pivot e (the non-first parent) — even though the first parent d
+        -- is dim, the ascent must stay lit (else the convergence glyph loses `up`).
+        local items = helpers.dag({
+            { "c", { "d", "e" } }, { "d", { "f" } }, { "e", { "f" } }, { "f", {} },
+        })
+        local opts = helpers.big_opts({ split_on_separate_line = false, merge_on_separate_line = true })
+        local rows = build_graph(opts, items)
+        local pidx
+        for i, r in ipairs(rows) do if r.commit.hash == "e" then pidx = i end end
+        mark_reachable(rows, pidx, 1, #rows)
+        local merge
+        for _, row in ipairs(rows) do if row.commit.hash == "c" then merge = row.merge end end
+        assert.is_not_nil(merge)
+        assert.is_true(lit_in_dir(merge, "up"))
+    end)
+
     -- A row's split line rendered as a "glyph(hl) glyph(hl) ..." string.
     local function render_split(opts, rows, emphasis)
         for _, row in ipairs(rows) do
@@ -353,8 +404,7 @@ describe("mark_reachable", function()
         -- cone ancestor edge, so its visible stub must light (the window bound
         -- clips the walk, not the highlight of on-screen wires).
         local rows = build_graph(helpers.big_opts(), make_order(LINEAR))
-        build_lanes(rows, 1, 3)             -- window excludes c4
-        mark_reachable(rows, 2, 1, 3)       -- pivot c2
+        mark_reachable(rows, 2, 1, 3)       -- pivot c2, window excludes c4
         assert.is_true(lane_hl(rows, "c2", "c3")) -- in-window
         assert.is_true(lane_hl(rows, "c3", "c4")) -- to the off-window parent
     end)

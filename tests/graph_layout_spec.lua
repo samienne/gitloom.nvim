@@ -132,16 +132,16 @@ describe("graph layout [inline+mergesplit] characterization", function()
     -- Locks the current (debatable) rendering of the merge lane-handoff so any
     -- change is flagged for review. NOT an assertion of correctness: at a merge
     -- under allow_merge_on_split an incoming lane terminates and a new parent
-    -- lane reuses the same column, so the vertical color changes mid-column
-    -- (col 3, rows 4→5: Hl3→Hl1). Repro: random_dag(7, 108).
+    -- lane reuses the same column (the sanctioned two-turn cell), so the vertical
+    -- colour changes mid-column. Repro: random_dag(7, 108).
     local EXPECTED = [[
 ◉─╮  233
-○ │  2.3
-│ │ ◉─╮  2.3.455
-│ │ │ │ ◉  2.3.4.5.6
-○─│─│─╯ │  2515455.6
-○─│─┴───╯  241446666
-◎─╯  211]]
+○ │  4.3
+│ │ ◉─╮  4.3.566
+│ │ │ │ ◉  4.3.5.6.1
+○─│─│─╯ │  2636566.1
+○─│─┴───╯  453551111
+◎─╯  433]]
 
     it("renders the known merge-handoff repro unchanged", function()
         local opts = h.opts({
