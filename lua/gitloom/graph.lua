@@ -2181,6 +2181,26 @@ function M.open(folder, opts)
             view_state.cone = mark_reachable(repo.order, cur, top, bottom)
         end
 
+        -- Recomputing the cone and redrawing on *every* CursorMoved makes held
+        -- j/k feel sluggish on large graphs, so debounce it: each move re-arms a
+        -- short timer and only the last one — once the cursor settles — does the
+        -- work. The walk stays synchronous (Lua is single-threaded and the editor
+        -- API isn't usable off the main loop); we just run it far less often.
+        -- `applying` suppresses the WinScrolled the deferred refresh may emit.
+        local CONE_DEBOUNCE_MS = 60
+        local cone_gen, applying = 0, false
+        local function schedule_cone_update()
+            cone_gen = cone_gen + 1
+            local gen = cone_gen
+            vim.defer_fn(function()
+                if gen ~= cone_gen or not vim.api.nvim_win_is_valid(win) then return end
+                update_cone()
+                applying = true
+                if lv and lv.controller then lv.controller.refresh() end
+                applying = false
+            end, CONE_DEBOUNCE_MS)
+        end
+
         -- Rebuild the dimmed highlight groups after a colorscheme change (the
         -- derived groups are wiped by `hi clear`) and redraw (§12).
         vim.api.nvim_create_autocmd("ColorScheme", {
@@ -2209,29 +2229,22 @@ function M.open(folder, opts)
                 selection_state.commit = item and item.commit or nil
                 selection_state.index = nil
                 selection_visible = false
-                update_cone()
-                if lv.controller then
-                    lv.controller.refresh()
-                end
+                -- Park the cursor now (responsive); the cone + dimming redraw is
+                -- debounced so it lands once movement stops.
                 place_cursor()
+                schedule_cone_update()
             end,
         })
 
         -- Scrolling (no row change) shifts the visible window, so the
         -- window-bounded cone must be recomputed for the newly visible rows too.
         -- Scoped to this window; a guard prevents re-entry from the refresh.
-        local in_scroll = false
         vim.api.nvim_create_autocmd("WinScrolled", {
             group = group,
             pattern = tostring(win),
             callback = function()
-                if in_scroll or not vim.api.nvim_win_is_valid(win) then return end
-                in_scroll = true
-                update_cone()
-                if lv.controller then
-                    lv.controller.refresh()
-                end
-                in_scroll = false
+                if applying or not vim.api.nvim_win_is_valid(win) then return end
+                schedule_cone_update()
             end,
         })
 
