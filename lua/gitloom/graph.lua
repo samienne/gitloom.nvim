@@ -482,6 +482,7 @@ local function parse_commit_line(line)
     return {
         hash = hash,
         parents = new_parents,
+        children = {},
         author = author,
         date = date,
         message = subject,
@@ -562,14 +563,19 @@ end
 ---@field kind "local"|"remote"|"tag"|"head"
 ---@field commit Commit   the commit this ref points at (a direct reference)
 
+--- A node in the commit DAG. `hash`/`parents`/`children`/`refs` exist from the
+--- moment a commit is created (a ref or another commit's parent can create it as
+--- a placeholder); `author`/`date`/`message` are filled in lazily when its own
+--- `git log` line arrives (`loaded` then becomes true), so they are optional.
 ---@class Commit
 ---@field hash string
----@field parents Commit[]|string[]
----@field children Commit[]|string[]
+---@field parents Commit[]|string[]   parent hashes from `git log`, resolved to Commits
+---@field children Commit[]           back-links, set as children stream in
 ---@field refs Ref[]
----@field author string
----@field date string
----@field message string
+---@field author? string
+---@field date? Timestamp
+---@field message? string
+---@field loaded? boolean   true once the commit's own log line has been parsed
 
 ---@class Connectivity
 ---@field up boolean
@@ -616,9 +622,6 @@ end
 ---@field parent_lanes? Lane[]  edges out to this commit's parents (§5)
 ---@field child_lanes? Lane[]   edges in from this commit's children (§5)
 
----@param opts GraphOptions
----@param order OrderItem[]
----@param start_pos integer
 --- Re-run Phase 1 over the whole order and copy the fresh lines/lanes back into
 --- the existing OrderItems (the view holds references to them). `start_pos` is
 --- ignored — the lane layout (with compaction) is global, so a partial relayout
@@ -662,16 +665,6 @@ local function compose(list)
     }
 end
 
----@param opts GraphOptions
----@param columns GraphColumn[]
---- The "top" lane that colors (and sets the dim state of) a cell: prefer the
---- lane heading *down* (so a column reads continuously into the lane below),
---- then the up lane, then any. This is the configurable color strategy
---- (specification.md §5); the chosen lane is always one of the cell's. At a
---- handoff the up and down segments are different lanes — only one color can
---- show, so the visual is best-effort while the model keeps both lanes.
----@param lanes Lane[]?
----@return Lane|nil
 --- Whether a Segment draws any highlighted edge (specification.md §12).
 ---@param seg Segment
 ---@return boolean
@@ -1191,13 +1184,13 @@ local function display_item(opts, item, selection_state, cone)
         local element = {
             line = {
                 rh(format_date(item.commit.date, opts) .. " ", palette.date),
-                rh(item.commit.author .. " ", palette.author),
+                rh((item.commit.author or "") .. " ", palette.author),
                 get_column_chars(opts, item.columns, emphasis),
                 -- The flex (message) column: optional lane-id debug prefix, then
                 -- the subject. Refs go in line_right, pinned to the right edge.
                 compose({
                     get_columns(item.columns),
-                    rh(item.commit.message, palette.message) or "",
+                    rh(item.commit.message or "", palette.message) or "",
                 }),
             },
             line_right = get_ref_items(item.commit),
