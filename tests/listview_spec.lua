@@ -114,4 +114,25 @@ describe("multi-line rendering (windowed)", function()
         assert.equals(3, ctrl.item_at(4))
         assert.equals(2, ctrl.item_start(2)) -- item 2 starts at buffer line 2
     end)
+
+    it("set_items swaps the whole list and re-lays the buffer (reflow, §10.5)", function()
+        local inst = listview.open({
+            win = {},
+            flex = 4,
+            line_count = function() return 1 end,
+            display = function(d) return { line = { "", "", "", "X" .. d.id } } end,
+            on_controller = function(c) ctrl = c end,
+        })
+        buf = inst.win.buf
+
+        ctrl.insert({ { id = 1 }, { id = 2 }, { id = 3 }, { id = 4 } }, 1)
+        assert.equals(4, vim.api.nvim_buf_line_count(buf))
+
+        -- Reflow to a shorter projection (a region contracted to one head).
+        ctrl.set_items({ { id = 1 }, { id = 9 } })
+        assert.equals(2, vim.api.nvim_buf_line_count(buf))
+        assert.equals(1, ctrl.item_at(1))
+        assert.equals(2, ctrl.item_at(2))
+        assert.equals(2, ctrl.item_start(2))
+    end)
 end)

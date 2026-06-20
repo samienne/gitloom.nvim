@@ -188,7 +188,7 @@ local STUBS = {
     [" "] = {},
 }
 
-local NODES = { ["○"] = true, ["◉"] = true, ["◎"] = true }
+local NODES = { ["○"] = true, ["◉"] = true, ["◎"] = true, ["◍"] = true }
 
 ----------------------------------------------------------------------
 -- Invariants

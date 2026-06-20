@@ -60,9 +60,39 @@ visibility, pinned heads) that `columns.layout` reflows against. Phase 1 is
 reused as-is; what changes is *what feeds it* — a filtered, possibly reordered
 commit set instead of the raw git stream.
 
-The central unsolved problem is **commit attribution** (specification.md
-§10.4): deciding which commits "belong to" a branch being collapsed or hidden
-when commits are shared across the DAG.
+Commit attribution — deciding which commits "belong to" a branch being
+collapsed or hidden when commits are shared across the DAG — is resolved by the
+**reachability-signature** model (specification.md §10.2): per-commit signature
+→ regions of equal signature → a display-mode join over each region's owners.
+
+### OrderItem graphs as derived projections
+
+`repo.commits` is the immutable commit graph (the source of truth). An
+**OrderItem graph** — an ordered list of **DisplayNodes** plus their re-pointed
+parent/child edges — is a *projection* of it, produced by `view.lua` (the
+model→rows transform that feeds Phase 1) from `(commit graph, view state)`. Several OrderItem graphs may coexist over one commit graph (the
+live projection, a recomputed one mid-reflow, future alternate views). A
+**DisplayNode** is either a commit-backed item or a synthetic **collapsed
+head** (`{tip, refs, count, region_hashes}`); `columns.layout` (Phase 1) is
+unchanged — it lays out whatever DisplayNode DAG it is handed.
+
+Consequences for the build:
+
+- **Reflow swaps the graph** rather than mutating in place. The listview points
+  at an OrderItem-graph value; a view-state change builds a fresh one and
+  re-points. This supersedes `refresh_columns`' current copy-back-onto-existing-
+  items path.
+- **Caching split** to bound work (specification.md §10.5): `sig()` is cached
+  against (DAG + owner set) and invalidated only by new commits or owner
+  changes — *not* by mode toggles; the per-region join is recomputed cheaply on
+  every toggle; contraction + `columns.layout` rebuild only when the display
+  set actually changes.
+- Row order is derived from the existing `git log --topo-order` by dropping
+  hidden rows and contracting collapsed regions to their tip's position, so
+  **ordering ownership is not a prerequisite** for branch modes.
+
+What remains for the broader target is **ordering ownership** (move ordering
+out of `git log` into the builder), still future.
 
 ## Layers
 
@@ -70,6 +100,7 @@ when commits are shared across the DAG.
 lua/gitloom/
   init.lua       Thin facade: setup() + :GitloomGraph command registration
   graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
+  view.lua       View builder: commit DAG + view state → OrderItem graph (spec §10)
   columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
   color.lua      OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua   Reusable virtualized list widget (snacks.win)
@@ -676,13 +707,14 @@ gitloom.nvim/
 ├── lua/gitloom/
 │   ├── init.lua
 │   ├── graph.lua
+│   ├── view.lua           View builder: projection under view state (§10)
 │   ├── columns.lua        Phase 1 lane layout
 │   ├── color.lua          OKLCH colour generation (§5.5)
 │   └── listview.lua
 ├── tests/
 │   ├── minimal_init.lua
 │   ├── refs_spec.lua / selection_spec.lua / commit_spec.lua / commit_view_spec.lua
-│   ├── reachability_spec.lua
+│   ├── reachability_spec.lua / view_spec.lua
 │   ├── columns_spec.lua / graph_layout_spec.lua / graph_mirror_spec.lua
 │   ├── graph_helpers.lua  Invariant checker for the layout tests
 │   ├── gitloom_spec.lua

@@ -36,16 +36,19 @@ exists primarily to exercise and validate the graph algorithm.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
-  placements can be compared at a glance; `<CR>` opens the **commit view** for
-  the commit on the current row (§11); `D` opens that commit's diff in an
-  external diff viewer via the configured provider (§11.5). Two debug
+  placements can be compared at a glance. `<CR>` is context-dependent (§10): on a
+  **selected ref** it cycles that branch's mode (normal → collapsed → hidden) and
+  reflows; on a **collapsed head** with no ref selected it expands the region;
+  otherwise it opens the **commit view** for the commit on the current row (§11).
+  `D` opens that commit's diff in an external diff viewer via the configured
+  provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on.
   `?` opens a float listing all keybindings. The footer shows live status
-  (the active merge mode and ref label mode, and `(mirrored)` when mirroring is
-  on).
+  (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
+  when any branch modes are set, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
   rows), with `cursorline` marking the current row (§7). The cursor is parked at
   the **commit message** rather than left at column 0. `h`/`l` move a selection
@@ -250,6 +253,7 @@ Lanes render as box-drawing characters derived from connectivity
 | `◎`    | root commit (no parents) |
 | `◉`    | tip commit (no children) |
 | `○`    | ordinary commit |
+| `◍`    | collapsed head (a contracted region, §10.3) |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
 
 ### 5.4 Mirroring
@@ -463,56 +467,98 @@ default diffview) rather than gitloom rendering its own rich diff. These are
 secondary to the graph itself and must not compromise the model-ownership
 principle (§1.1).
 
-## 10. Planned: view model and transformations
+## 10. View model and transformations
 
-> Status: **direction, not yet implemented.** This section records intended
-> behavior so design and code can converge on it. It does not describe
-> current behavior.
+> Status: **specified contract; implementation in progress.** The graph is a
+> *projection* of the immutable commit model under a **view state**. Changing
+> the view state reflows the projection.
 
-The graph is a *projection* of the full in-memory commit model under a
-**view state**. Changing the view state reflows the graph.
+### 10.1 Branch modes
 
-### 10.1 Branch visibility
+Each **owner** has a mode. In v1 an owner is a ref; anonymous merge-parents
+become owners later (§10.7). Modes:
 
-Each branch (identified by a ref / head) has a visibility mode:
+- **normal** — the owner's commits are shown in full.
+- **collapsed** — the owner's commits are contracted to a single *collapsed
+  head* row.
+- **hidden** — the owner's commits are removed from the view.
 
-- **visible** — its commits are shown in full.
-- **collapsed** — its commits are represented compactly (conceptually a
-  single row) while connectivity to visible lanes is preserved.
-- **hidden** — its commits are removed from the view.
+Modes are independent: any owner may take any mode. The UI may restrict the
+choices it offers; the model does not.
 
-Toggling a branch's mode reflows the graph to match.
+### 10.2 Attribution — the reachability signature
 
-### 10.2 Pinned heads
+For each commit `c`, its **signature** `sig(c)` is the set of non-hidden
+owners that can reach `c` (i.e. `c` is an ancestor-or-self of the owner's
+tip). Signatures are monotone along the DAG: an ancestor's signature is a
+superset of its descendants'. Commits therefore partition into **regions** —
+maximal connected runs of equal signature — whose boundaries fall exactly at
+junctions where an owner joins or leaves.
 
-A branch head may be **pinned**. Pinning guarantees that everything the
-pinned head references (its reachable history, subject to the attribution
-rule in §10.4) stays visible regardless of other visibility settings.
+A region's display mode is the **join** over the owners in its signature:
 
-### 10.3 Reflow
+- empty signature (reached by **no** owner) → **normal**; only owners can hide,
+  so an uncovered commit stays visible
+- some owner, but no non-hidden one (all hidden) → **hidden**
+- any **normal** owner in the signature → **normal**
+- otherwise (all collapsed) → **collapsed**
 
-Any change to view state produces a freshly computed ordering + lane layout
-over the visible/collapsed commit set — recomputed from scratch, not
-appended. Reflow must be deterministic and stable enough that unaffected
-regions of the graph do not visually churn.
+Intended consequences:
 
-### 10.4 Open design questions
+- A commit reachable from only one owner B follows B's mode.
+- A commit shared by a hidden owner and a retained one stays visible — hidden
+  owners never force removal of a commit a retained owner still reaches.
+- A combined region below a junction is normal if *either* side is normal, and
+  collapsed only if *all* its owners are collapsed; hidden owners don't vote.
 
-These must be specified before implementation:
+### 10.3 Contraction — collapse preserves shape, hide removes
 
-- **Commit attribution (the central problem).** Commits are shared across
-  branches in a DAG. Collapsing or hiding "a branch" requires a precise rule
-  for which commits belong to that branch versus are shared with retained
-  branches — e.g. first-parent ownership, or reachable-minus-other-retained-
-  heads. Pinning and hiding both depend on this rule.
-- **Collapsed rendering.** What a collapsed branch's single row shows
-  (summary, commit count) and how merges into/out of it connect to visible
-  lanes.
-- **Hidden connectivity.** Whether a merge from a hidden branch into a
-  visible one leaves a phantom indicator or vanishes entirely.
-- **Scale.** Reading all commits is unbounded in large repositories; the
-  loading strategy (limits, lazy/streamed loading, on-demand reachability)
-  must keep reflow responsive.
+A collapsed region is contracted to exactly **one** collapsed-head row.
+Junction commits (where two or more retained owners meet) remain as their own
+rows. The projection therefore has the **same topology as the commit graph
+with each collapsed region contracted to a point**: branch and merge structure
+is preserved, only the in-between commits are gone. Edges crossing a collapsed
+region's boundary re-point to its head.
+
+Hiding removes a region's rows outright and, unlike collapse, does **not**
+preserve shape. An edge from a hidden region into a retained commit is dropped
+(a phantom indicator is an open question, §10.7).
+
+### 10.4 Collapsed head content
+
+A collapsed head shows the owning ref name(s) and a collapsed indicator (e.g. a
+commit count), and optionally the tip's subject. Exact content is provisional.
+
+Currently a head renders as a single row: the `◍` node (§5.3), a "⋯ N commits"
+summary followed by the region tip's subject, and the region's ref label(s) in
+the active label placement (right-pinned, or inline). Date and author are the
+tip's.
+
+### 10.5 Reflow
+
+Any view-state change recomputes the projection from scratch (not appended) and
+is **stable**: regions unaffected by the change keep their relative order and
+do not visually churn. Row order is derived from the existing topological order
+by dropping hidden rows and contracting each collapsed region to its tip's
+position — so ordering ownership (§1.1) is *not* a prerequisite for this
+feature.
+
+### 10.6 Pinned heads
+
+A ref may be **pinned**. Pinning forces its regions to **normal** regardless of
+other settings, subject to the §10.2 attribution rule.
+
+### 10.7 Open / deferred
+
+- **Anonymous merge-parent owners** and a default **seed policy** (first-parent
+  line normal, merged-in parents collapsed → mainline full, merged work
+  collapsed). Deferred; the model is designed to accommodate it.
+- **Hidden connectivity** — phantom indicator vs. vanish.
+- **Scale** — unbounded reads in large repositories; the loading strategy
+  (limits, lazy/streamed loading, on-demand reachability) must keep reflow
+  responsive.
+- **Toggle UX** — `<CR>` on a selected ref cycles its mode and `<CR>` on a head
+  expands it (implemented); a picker for setting many at once is still future.
 
 ## 11. Commit view
 
