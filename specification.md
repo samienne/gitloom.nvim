@@ -620,10 +620,14 @@ all-normal.
 
 ### 10.8 Open / deferred
 
-- **Adaptive layout** — packing *junctions* (splits/merges) as markers too, and
-  letting markers ride on message-bearing lines when they fit, toward a fully
-  adaptive density (greedy row packing). Deferred; Phase A packs only collapsed
-  heads onto marker-only lines.
+- **Adaptive layout** — Phase A packs only *consecutive* concurrent markers, so
+  in a first-parent focus view (where each merged head sits between mainline
+  commits, not next to other heads) packing rarely fires. Making it effective
+  needs **reordering**: cluster concurrent markers into a band within their valid
+  topological range (a merged head's range is its merge … its fork), then pack.
+  Beyond that: packing *junctions* (splits/merges) as markers too, and letting
+  markers ride on message-bearing lines when they fit, toward a fully adaptive
+  density (greedy row packing). Deferred.
 - **Hidden connectivity** — phantom indicator vs. vanish.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
