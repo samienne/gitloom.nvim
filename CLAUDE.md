@@ -153,7 +153,10 @@ Coverage:
 - `tests/columns_spec.lua` — Phase 1 (`columns.layout`) directly: per-cell
   well-formedness (≤1 vertical, the turn cap), vertical continuity, and a fuzz
   sweep across all five styles; plus track-id reuse (a straight chain is one id;
-  a new id only at a branch head or an extra merge parent)
+  a new id only at a branch head or an extra merge parent); plus free-list
+  colouring (spec §5.5): each lane keeps one colour for life, concurrent lanes
+  get distinct colours, a first-parent chain is one colour, and an ended lane's
+  slot is recycled so a later fan stays distinct under a small palette
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
@@ -192,11 +195,14 @@ maintenance treadmill. Two layers, both in `graph_helpers.lua`:
 
 Color/id-continuity is the **id-continuity** invariant: a lane's id must not
 silently change along a straight `│` run (a "lane handoff"). Tests use
-`big_opts` (a 64-entry palette) so color is a 1:1 proxy for lane id — with the
-default wrapping palette, two ids can share a color and mask a handoff. The
-four stable styles pass this exactly across fuzzing; only `allow_merge_on_split`
-fails it (column reuse at a merge — see known gaps), which is why that style
-asserts structural-only invariants plus the characterization snapshot.
+`big_opts` (a 64-entry palette) so color is a 1:1 proxy for the *concurrent*
+lane id — the colour free list (spec §5.5) only recycles a slot once a lane
+ends, so two lanes alive at the same time always differ in colour as long as the
+palette outnumbers the live lanes; `big_opts` guarantees that for the test DAGs,
+so a handoff can't be masked. The four stable styles pass this exactly across
+fuzzing; only `allow_merge_on_split` fails it (column reuse at a merge — see
+known gaps), which is why that style asserts structural-only invariants plus the
+characterization snapshot.
 
 Invariants must be **sound** (never flag correct output) before being strict.
 Glyph-level color/continuity is subtle because junction glyphs (`├ ┤ ┬ ┴`,
@@ -213,9 +219,10 @@ runtime). Its pure helpers are testable — `snacks.win` loads lazily (only
 
 - **Commit** — a node in the DAG (hash, parents, children, refs, metadata).
   Identity-stable across the stream.
-- **Lane** — one drawn edge child→parent (`{id, begin, parent, highlighted}`),
-  a persistent object living from the child's row to the parent's row; its id
-  drives the colour.
+- **Lane** — one drawn edge child→parent
+  (`{id, color, begin, parent, highlighted}`), a persistent object living from
+  the child's row to the parent's row; `id` is its stable identity and `color`
+  (a palette slot from the recycling free list, spec §5.5) drives the colour.
 - **GraphColumn** — one cell of a rendered line: its connectivity plus the
   **Segment**s (per-edge wires) it draws. (Was `Track`; renamed.)
 - **OrderItem** — a rendered row (`commit`, `merge`, or `split` type) holding

@@ -591,6 +591,7 @@ end
 --- parent/child edge, shared by every Segment that draws it.
 ---@class Lane
 ---@field id integer|nil
+---@field color integer|nil   palette slot (1-based) from the free list; drives colour
 ---@field begin Commit
 ---@field parent Commit
 ---@field highlighted boolean
@@ -600,6 +601,7 @@ end
 --- of edges routing through it).
 ---@class Segment
 ---@field id integer|nil
+---@field color integer|nil   palette slot of the Lane(s) this wire draws
 ---@field connectivity Connectivity
 ---@field begin? Commit
 ---@field parent? Commit
@@ -607,6 +609,7 @@ end
 
 ---@class GraphColumn
 ---@field id integer|nil
+---@field color integer|nil   palette slot for the cell's glyph colour
 ---@field connectivity Connectivity
 ---@field has_commit boolean
 ---@field commit? Commit
@@ -678,20 +681,20 @@ local function seg_hl(seg)
     return false
 end
 
---- The colour id a Segment renders in: with `emphasis`, a highlighted edge's id
---- wins (so the cone colour shows); otherwise (and as the fallback) the
---- segment's own layout id — so colour is pivot-independent when emphasis is off.
+--- The palette slot a Segment renders in: with `emphasis`, a highlighted edge's
+--- colour wins (so the cone colour shows); otherwise (and as the fallback) the
+--- segment's own slot — so colour is pivot-independent when emphasis is off.
 ---@param seg Segment|nil
 ---@param emphasis boolean|nil
 ---@return integer|nil
-local function seg_color_id(seg, emphasis)
+local function seg_color(seg, emphasis)
     if not seg then return nil end
     if emphasis then
         for _, e in ipairs(seg.edges or {}) do
-            if e.highlighted and e.id then return e.id end
+            if e.highlighted and e.color then return e.color end
         end
     end
-    return seg.id
+    return seg.color
 end
 
 --- The "top" Segment a Column's glyph takes its colour/dim from. With
@@ -814,7 +817,7 @@ local function get_column_chars(opts, columns, emphasis)
         -- Segment whose edge colours the glyph (a highlighted edge wins, but
         -- only with emphasis — so the picture is unchanged when it is off).
         local color_seg = top_lane(track.lanes, emphasis)
-        local track_id = seg_color_id(color_seg, emphasis)
+        local track_color = seg_color(color_seg, emphasis)
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
@@ -867,9 +870,12 @@ local function get_column_chars(opts, columns, emphasis)
             vim.notify(vim.inspect(c))
         end
 
+        --- Resolve a palette slot (1-based, from Phase 1's free list) to its
+        --- highlight group. Wraps defensively in case a slot exceeds the palette.
+        ---@param color integer|nil
         ---@return string?
-        local get_highlight = function(id)
-            return id and opts.palette.tracks[(id % #opts.palette.tracks) + 1] or nil
+        local get_highlight = function(color)
+            return color and opts.palette.tracks[((color - 1) % #opts.palette.tracks) + 1] or nil
         end
 
         -- Reachability dimming (§12): a cell outside the cone renders its colour
@@ -885,7 +891,7 @@ local function get_column_chars(opts, columns, emphasis)
         else
             cell_active = not color_seg or seg_hl(color_seg)
         end
-        local cell_hl = get_highlight(track_id)
+        local cell_hl = get_highlight(track_color)
         if not cell_active then cell_hl = dim_hl(opts, cell_hl) end
         result = compose({ result, highlight_text(char, cell_hl) })
 
@@ -893,21 +899,21 @@ local function get_column_chars(opts, columns, emphasis)
         -- scanning past pass-through crossings/jumps — to the right normally, to
         -- the left once mirrored (cells reversed), so the scan flips direction
         -- (§5.4). Keeping this lookahead preserves colour continuity along a run.
-        local function real_id(j)
+        local function real_color(j)
             local t = columns[j]
             if not t then return nil end
             local cc = t.connectivity
             local is_cross = cc.down and cc.up and cc.left and cc.right
             local is_jump = not cc.down and not cc.up and cc.right and cc.left
             if is_cross or is_jump then return false end
-            return t.id
+            return t.color
         end
-        local next_track_id
+        local next_color
         local from, to, step = i + 1, #columns, 1
         if opts.mirror then from, to, step = i, 1, -1 end
         for j = from, to, step do
-            local id = real_id(j)
-            if id ~= false then next_track_id = id; break end
+            local color = real_color(j)
+            if color ~= false then next_color = color; break end
         end
 
         -- Connector dim/colour: it lights iff a *highlighted* Segment leaves this
@@ -915,13 +921,13 @@ local function get_column_chars(opts, columns, emphasis)
         -- mirrored reverses the cells). Its colour is that cone edge's, else the
         -- run's terminating lane (continuity).
         local conn_dir = opts.mirror and "left" or "right"
-        local conn_lit, conn_id = false, next_track_id
+        local conn_lit, conn_color = false, next_color
         if emphasis then
             for _, s in ipairs(track.lanes or {}) do
                 if s.connectivity[conn_dir] and seg_hl(s) then
                     conn_lit = true
                     for _, e in ipairs(s.edges or {}) do
-                        if e.highlighted and e.id then conn_id = e.id; break end
+                        if e.highlighted and e.color then conn_color = e.color; break end
                     end
                     break
                 end
@@ -929,7 +935,7 @@ local function get_column_chars(opts, columns, emphasis)
         end
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
-            local hl = get_highlight(conn_id)
+            local hl = get_highlight(conn_color)
             if emphasis and not conn_lit then hl = dim_hl(opts, hl) end
             result = compose({ result, highlight_text("─", hl) })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then

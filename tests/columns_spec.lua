@@ -70,6 +70,7 @@ local function check(opts, rows)
             end
         end
     end
+
     return errs
 end
 
@@ -174,5 +175,116 @@ describe("columns.layout track-id reuse", function()
         local rows = columns.layout(h.big_opts(),
             h.dag({ { "m", { "a", "b" } }, { "a", { "base" } }, { "b", { "base" } }, { "base", {} } }))
         assert.equals(2, distinct_ids(rows))
+    end)
+end)
+
+describe("columns.layout free-list colouring", function()
+    local function all_lines(rows)
+        local lines = {}
+        for _, row in ipairs(rows) do
+            if row.split then lines[#lines + 1] = row.split end
+            lines[#lines + 1] = row.columns
+            if row.merge then lines[#lines + 1] = row.merge end
+        end
+        return lines
+    end
+
+    -- A lane keeps one colour for its whole life: every Segment edge carrying a
+    -- given lane id resolves to a single, non-nil colour slot.
+    it("assigns each lane a single stable colour", function()
+        for style, ms in pairs(STYLES) do
+            local opts = h.big_opts(ms)
+            for seed = 1, 40 do
+                local rows = columns.layout(opts, h.dag(h.random_dag(3 + (seed % 10), seed)))
+                local id_color = {}
+                for _, line in ipairs(all_lines(rows)) do
+                    for _, t in ipairs(line) do
+                        for _, s in ipairs(t.lanes or {}) do
+                            for _, e in ipairs(s.edges or {}) do
+                                assert.is_not_nil(e.color, style .. " seed " .. seed .. ": lane without colour")
+                                if id_color[e.id] then
+                                    assert.equals(id_color[e.id], e.color)
+                                else
+                                    id_color[e.id] = e.color
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    -- Lanes alive at the same time never share a colour: on any line, two
+    -- distinct straight-through verticals (`│`) must differ in colour. big_opts
+    -- has 64 slots, so the palette is never exhausted into a duplicate here.
+    it("gives concurrent lanes distinct colours", function()
+        for style, ms in pairs(STYLES) do
+            local opts = h.big_opts(ms)
+            for seed = 1, 40 do
+                local rows = columns.layout(opts, h.dag(h.random_dag(3 + (seed % 10), seed)))
+                for li, line in ipairs(all_lines(rows)) do
+                    local seen = {}
+                    for ci, t in ipairs(line) do
+                        for _, s in ipairs(t.lanes or {}) do
+                            local c = s.connectivity
+                            if c.up and c.down and #(s.edges or {}) == 1 then
+                                assert.is_nil(seen[s.color],
+                                    ("%s seed %d line %d col %d: colour %s reused by a concurrent vertical")
+                                        :format(style, seed, li, ci, tostring(s.color)))
+                                seen[s.color] = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    it("keeps one colour along a straight first-parent chain", function()
+        local rows = columns.layout(h.big_opts(),
+            h.dag({ { "a", { "b" } }, { "b", { "c" } }, { "c", {} } }))
+        local colors = {}
+        for _, line in ipairs(all_lines(rows)) do
+            for _, t in ipairs(line) do if t.color then colors[t.color] = true end end
+        end
+        local n = 0
+        for _ in pairs(colors) do n = n + 1 end
+        assert.equals(1, n)
+    end)
+
+    -- A colour is returned to the free list when its lane ends, so it is
+    -- available again later. With a 4-slot palette, six short-lived side branches
+    -- (born and ended one row later) are far more lanes than colours; only
+    -- because their slots are recycled can the trailing 4-way fan still draw four
+    -- distinct colours. (Without recycling the list would be drained into
+    -- duplicates before the fan.)
+    it("recycles colours of ended lanes so a later fan stays distinct", function()
+        local o = h.opts()
+        o.palette.tracks = { "T1", "T2", "T3", "T4" }
+        local rows = columns.layout(o, h.dag({
+            { "t0", { "t1", "r0" } }, { "r0", {} },
+            { "t1", { "t2", "r1" } }, { "r1", {} },
+            { "t2", { "t3", "r2" } }, { "r2", {} },
+            { "t3", { "t4", "r3" } }, { "r3", {} },
+            { "t4", { "t5", "r4" } }, { "r4", {} },
+            { "t5", { "t6", "r5" } }, { "r5", {} },
+            { "t6", { "f1", "f2", "f3", "f4" } },
+            { "f1", {} }, { "f2", {} }, { "f3", {} }, { "f4", {} },
+        }))
+        local fork
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.hash == "t6" then fork = row end
+        end
+        assert.is_not_nil(fork)
+        local seen, n = {}, 0
+        for _, lane in ipairs(fork.parent_lanes) do
+            assert.is_not_nil(lane.color)
+            assert.is_true(lane.color >= 1 and lane.color <= 4)
+            if not seen[lane.color] then
+                seen[lane.color] = true; n = n + 1
+            end
+        end
+        assert.equals(4, n)
     end)
 end)

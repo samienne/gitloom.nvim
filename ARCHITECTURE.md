@@ -269,9 +269,14 @@ the current row. For each commit `C`:
 2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
    column for a tip.
 3. **Outgoing** = one Lane per parent. The first parent **reuses the trunk
-   child's id** (so a straight chain keeps one colour); a new id is minted only
-   where a lane is born — a branch head (a tip's first parent) and every extra
-   parent of a merge.
+   child's id and colour** (so a straight chain keeps one colour); a fresh id and
+   a free-list colour slot are taken only where a lane is born — a branch head (a
+   tip's first parent) and every extra parent of a merge. Colours come from a
+   recycling **free list** sized to `palette.tracks`: a born lane takes a slot
+   from the front, an ended lane returns its slot to the back (FIFO; idempotent).
+   New lanes allocate *before* the line's ended lanes return their slots, so
+   concurrent lanes always differ in colour while slots last; on exhaustion a
+   slot is duplicated round-robin.
 4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
    (drawn as a horizontal turn), never a column another lane vacates this same
    row — that is what keeps two turns out of one cell, so freed columns are
@@ -305,13 +310,14 @@ the existing `OrderItem`s (the view holds references). Both go through
   Segments'** connectivity (or of *all* Segments when none is highlighted), so an
   out-of-cone arm of a junction drops to a small gap while the cone arm stays; a
   vertical crossing is kept whole. Colour comes from a highlighted Segment's
-  Lane when present (the cone colour wins), else the Segment's own layout id,
-  against `palette.tracks`.
+  Lane when present (the cone colour wins), else the Segment's own colour slot,
+  indexed directly into `palette.tracks` (the slot is assigned in Phase 1's free
+  list, not `id mod #tracks`).
 - `mirror_columns(columns)` — when `opts.mirror` is set, `get_column_chars` runs
   the cells through this first: it reverses the column order and swaps each
   cell's `left`/`right` connectivity. Because the glyph is a pure function of
   connectivity, the mirrored glyphs (`╭`↔`╮`, `┤`↔`├`, `╴`↔`╶`) and connectors
-  fall out with no glyph-swap table, and colour (lane id) is unchanged. A
+  fall out with no glyph-swap table, and colour (lane colour slot) is unchanged. A
   horizontal connector is colored by the lane its run terminates at (found by
   scanning past pass-through crossings/jumps); that destination is to the right
   normally but to the **left** once the cells are reversed, so the scan flips

@@ -139,14 +139,17 @@ the model outward:
 - **Lane** — one drawn **edge, child → parent**:
 
   ```
-  Lane = { id, begin: Commit, end: Commit, highlighted: bool }
+  Lane = { id, color, begin: Commit, end: Commit, highlighted: bool }
   ```
 
-  `begin` is the child (above), `end` the parent (below); `id` drives colour
-  (kept continuous along a first-parent chain, so a line of history reads as one
-  colour); `highlighted` marks it for the reachability emphasis (§12). There is
-  one Lane per parent/child edge. *(A future **Route** — a contiguous run of
-  Lanes forming a path — is not modelled yet.)*
+  `begin` is the child (above), `end` the parent (below); `id` is the lane's
+  stable identity (born once, never reused); `color` is its palette slot, which
+  drives the rendered colour (kept continuous along a first-parent chain, so a
+  line of history reads as one colour); `highlighted` marks it for the
+  reachability emphasis (§12). There is one Lane per parent/child edge. Colours
+  are drawn from a recycling **free list** (§5.5), so concurrent lanes get
+  distinct colours. *(A future **Route** — a contiguous run of Lanes forming a
+  path — is not modelled yet.)*
 - **OrderItem** — the visual unit for one Commit: its order position, the Commit
   it shows, the Lanes incident to it (`parent_lanes` out to its parents,
   `child_lanes` in from its children), and its rendered **Lines**. This is the
@@ -168,11 +171,12 @@ the model outward:
 The graph is walked top to bottom (newest heads on top, roots at the bottom), so
 a Lane's `begin` (child) is always already placed when its `end` (parent) is
 reached. A Column's rendered **glyph** is a function of the union of its
-Segments' connectivity; its **colour** is one carried Lane's `id`, chosen by a
-"top" strategy that prefers a highlighted Lane (§12). A commit's first parent
-continues in the commit's column and **reuses the incoming lane's `id`**, so a
-straight first-parent chain reads as one colour; a new `id` is assigned only
-where a lane is born — a branch head, or a merge's second-and-later parent.
+Segments' connectivity; its **colour** is one carried Lane's `color`, chosen by
+a "top" strategy that prefers a highlighted Lane (§12). A commit's first parent
+continues in the commit's column and **reuses the incoming lane's `id` and
+`color`**, so a straight first-parent chain reads as one colour; a fresh `id`
+and a free-list `color` (§5.5) are taken only where a lane is born — a branch
+head, or a merge's second-and-later parent.
 
 ### 5.1 Invariants
 
@@ -191,8 +195,8 @@ where a lane is born — a branch head, or a merge's second-and-later parent.
   hub carries the set of edges converging/diverging there.
 - **Per-Lane continuity.** A Segment of Lane L with `down` on one Line meets a
   Segment of the *same* Lane L with `up` in the same Column on the next Line.
-- **Colour comes from a carried Lane.** A Column's colour is the `id` of one Lane
-  on one of its Segments.
+- **Colour comes from a carried Lane.** A Column's colour is the `color` slot of
+  one Lane on one of its Segments (§5.5).
 - **Connectivity consistency.** The glyph's wired sides equal the union of the
   Column's Segments' connectivity (every wired side has a Segment providing it).
 - Merges (commit with >1 parent) fan out `parent_lanes`; splits (>1 child) fan in
@@ -250,8 +254,23 @@ layout, and the lane model (ids, `child`/`parent`, per-lane continuity) are
 unchanged — only the projection to glyphs is flipped. Because the glyph is a
 pure function of connectivity (§5), the mirrored glyphs (`╭`↔`╮`, `┤`↔`├`,
 `╴`↔`╶`) and the inter-lane connectors fall out of the model with no separate
-glyph-swap table, and color (lane id) is preserved. All §5.1 invariants hold on
-the mirrored output.
+glyph-swap table, and color (lane color slot) is preserved. All §5.1 invariants
+hold on the mirrored output.
+
+### 5.5 Lane colouring (the free list)
+
+A lane's colour is a **palette slot** drawn from a recycling **free list** sized
+to `palette.tracks` (§8), not `id mod #tracks`. The list starts holding every
+slot. When a lane is born it **takes** a slot from the front; when a lane ends
+without being continued it **returns** its slot to the back (FIFO, so a colour
+is not reused immediately) — a return is idempotent (a slot already free is not
+re-enqueued). Allocation happens **before** the same line's ended lanes return
+their slots, so a colour just vacated on a line is never reused by a lane born on
+that line. The consequence: lanes alive at the same time always have distinct
+colours while slots last. If the list is exhausted (more concurrent lanes than
+palette colours) a slot is **duplicated** (round-robin) so the graph still
+draws. A first-parent continuation keeps the trunk's slot (one colour per
+first-parent chain, §5); only a branch head or a merge's extra parent allocates.
 
 ## 6. Row content
 
@@ -287,7 +306,7 @@ short, while a long message still keeps at least `message_min` columns
 (truncated with `…`). Ref labels are shown in order (leftmost first) until the
 budget is reached; labels that do not fit collapse into a trailing `+N` overflow
 marker. Each field is colored by its `palette` highlight group; lanes are
-colored by lane id cycled through `palette.tracks`.
+colored by a palette slot allocated from a recycling free list (§5.5).
 
 The `h`/`l` selection (§2) cycles all of a row's ref decorations. One collapsed
 into the `+N` overflow can still be selected, but until it is visible it is not
@@ -320,7 +339,8 @@ DiffRange    = { rev: string, from: Commit?, to: Commit }
 ```
 
 - `win` — floating-window geometry (snacks.win).
-- `palette` — highlight group per field, plus a `tracks` list cycled by lane id.
+- `palette` — highlight group per field, plus a `tracks` list whose entries are
+  the lane colour slots, allocated from a recycling free list (§5.5).
   Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
   (§2; default `Visual`); `diff`, a sub-table of highlight groups for the
   commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,

@@ -135,13 +135,13 @@ describe("graph layout [inline+mergesplit] characterization", function()
     -- lane reuses the same column (the sanctioned two-turn cell), so the vertical
     -- colour changes mid-column. Repro: random_dag(7, 108).
     local EXPECTED = [[
-◉─╮  233
-○ │  2.3
-│ │ ◉─╮  2.3.455
-│ │ │ │ ◉  2.3.4.5.6
-○─│─│─╯ │  2515455.6
-○─│─┴───╯  241446666
-◎─╯  211]]
+◉─╮  122
+○ │  1.2
+│ │ ◉─╮  1.2.344
+│ │ │ │ ◉  1.2.3.4.5
+○─│─│─╯ │  1464344.5
+○─│─┴───╯  136335555
+◎─╯  166]]
 
     it("renders the known merge-handoff repro unchanged", function()
         local opts = h.opts({
