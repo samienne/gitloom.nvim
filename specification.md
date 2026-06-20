@@ -269,14 +269,21 @@ A lane's colour is a **palette slot** drawn from a recycling **free list** sized
 to `palette.tracks` (§8), not `id mod #tracks`. The list starts holding every
 slot. When a lane is born it **takes** a slot from the front; when a lane ends
 without being continued it **returns** its slot to the back (FIFO, so a colour
-is not reused immediately) — a return is idempotent (a slot already free is not
-re-enqueued). Allocation happens **before** the same line's ended lanes return
-their slots, so a colour just vacated on a line is never reused by a lane born on
-that line. The consequence: lanes alive at the same time always have distinct
-colours while slots last. If the list is exhausted (more concurrent lanes than
-palette colours) a slot is **duplicated** (round-robin) so the graph still
-draws. A first-parent continuation keeps the trunk's slot (one colour per
-first-parent chain, §5); only a branch head or a merge's extra parent allocates.
+is not reused immediately). Allocation happens **before** the same line's ended
+lanes return their slots, so a colour just vacated on a line is never reused by a
+lane born on that line. The consequence: lanes alive at the same time always have
+distinct colours while slots last.
+
+If the list is exhausted (more concurrent lanes than palette colours) a slot must
+be **shared**: the least-shared slot is reused (so sharing stays minimal and
+spread out). Sharing is reference-counted — a slot returns to the free list only
+when its **last** holder ends, never while a live lane still draws it. (Returning
+a shared slot too early would hand a still-live colour to a later lane — a
+collision even when colours are plentiful again.) Once two lanes share a colour
+they keep it for life: a lane is never recoloured, since that would break its
+colour continuity. A first-parent continuation keeps the trunk's slot (one colour
+per first-parent chain, §5); only a branch head or a merge's extra parent
+allocates.
 
 ## 6. Row content
 

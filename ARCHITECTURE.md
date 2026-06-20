@@ -277,10 +277,12 @@ the current row. For each commit `C`:
    a free-list colour slot are taken only where a lane is born — a branch head (a
    tip's first parent) and every extra parent of a merge. Colours come from a
    recycling **free list** sized to `palette.tracks`: a born lane takes a slot
-   from the front, an ended lane returns its slot to the back (FIFO; idempotent).
-   New lanes allocate *before* the line's ended lanes return their slots, so
-   concurrent lanes always differ in colour while slots last; on exhaustion a
-   slot is duplicated round-robin.
+   from the front, an ended lane returns its slot to the back (FIFO). New lanes
+   allocate *before* the line's ended lanes return their slots, so concurrent
+   lanes always differ in colour while slots last. On exhaustion a slot is
+   shared (the least-shared one); sharing is **reference-counted** so a slot
+   returns to the free list only when its last holder ends — never while a live
+   lane still holds it (else a later lane would be handed a still-live colour).
 4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
    (drawn as a horizontal turn), never a column another lane vacates this same
    row — that is what keeps two turns out of one cell, so freed columns are

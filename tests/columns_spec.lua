@@ -339,4 +339,45 @@ describe("columns.layout free-list colouring", function()
         end
         assert.equals(4, n)
     end)
+
+    -- After a brief exhaustion forces a slot to be shared, that slot must not be
+    -- returned to the free list until its *last* holder ends. Otherwise a lane
+    -- born later (when colours are plentiful again) is handed a colour still in
+    -- use by a live lane — a collision that should not exist (the recycling
+    -- leak). Here a 3-slot palette and a 4-way octopus exhaust the pool once;
+    -- later only the main line and a fresh branch are alive, so their colours
+    -- must differ.
+    it("does not hand a live colour to a later lane after exhaustion", function()
+        local o = h.opts()
+        o.palette.tracks = { "P1", "P2", "P3" }
+        local rows = columns.layout(o, h.dag({
+            { "m0", { "m1", "b1", "c1", "d1" } }, -- octopus: 3 slots + 1 duplicate
+            { "d1", { "d2" } }, { "d2", {} },     -- d ends, returns its (shared) slot
+            { "b1", { "b2" } }, { "b2", {} },
+            { "c1", { "c2" } }, { "c2", {} },
+            { "m1", { "m2" } },
+            { "m2", { "m3", "n1" } },             -- main continues (m3); n1 is new
+            { "n1", { "n2" } }, { "n2", {} },
+            { "m3", {} },
+        }))
+        local line
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.hash == "n1" then line = row.columns end
+        end
+        assert.is_not_nil(line)
+        local id_by_color, ids = {}, {}
+        for _, t in ipairs(line) do
+            for _, s in ipairs(t.lanes or {}) do
+                if s.id and s.color then
+                    assert.is_true(id_by_color[s.color] == nil or id_by_color[s.color] == s.id,
+                        "two live lanes share colour " .. tostring(s.color) .. " on n1's line")
+                    id_by_color[s.color] = s.id
+                    ids[s.id] = true
+                end
+            end
+        end
+        local n = 0
+        for _ in pairs(ids) do n = n + 1 end
+        assert.is_true(n >= 2) -- the main line and n1 are both present (non-vacuous)
+    end)
 end)
