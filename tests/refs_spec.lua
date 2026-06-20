@@ -4,6 +4,7 @@
 local internal = require("gitloom.graph")._internal
 local classify_ref = internal.classify_ref
 local group_refs = internal.group_refs
+local owners_from_refs = internal.owners_from_refs
 
 describe("classify_ref", function()
     it("classifies a local branch", function()
@@ -94,5 +95,50 @@ describe("group_refs", function()
         assert.is_true(g.branches[1].has_local)
         assert.same({}, g.branches[1].remotes)
         assert.same({ "v1.0" }, g.tags)
+    end)
+end)
+
+describe("owners_from_refs", function()
+    -- The view builder's owner list (spec §10): one owner per ref, keyed by ref
+    -- name, carrying its current mode; the HEAD symref is skipped.
+    local function refs(spec)
+        local out = {}
+        for name, r in pairs(spec) do
+            out[name] = { name = name, kind = r.kind, commit = { hash = r.hash } }
+        end
+        return out
+    end
+
+    it("emits one owner per ref, defaulting to normal", function()
+        local owners = owners_from_refs(refs({
+            main = { kind = "local", hash = "a" },
+            ["origin/main"] = { kind = "remote", hash = "a" },
+        }), {})
+        assert.equals(2, #owners)
+        local by_id = {}
+        for _, o in ipairs(owners) do by_id[o.id] = o end
+        assert.equals("a", by_id.main.tip.hash)
+        assert.equals("normal", by_id.main.mode)
+        assert.equals("normal", by_id["origin/main"].mode)
+    end)
+
+    it("applies the mode keyed by ref name", function()
+        local owners = owners_from_refs(refs({
+            feat = { kind = "local", hash = "f" },
+            main = { kind = "local", hash = "m" },
+        }), { feat = "collapsed" })
+        local mode = {}
+        for _, o in ipairs(owners) do mode[o.id] = o.mode end
+        assert.equals("collapsed", mode.feat)
+        assert.equals("normal", mode.main)
+    end)
+
+    it("skips the HEAD marker (it is a symref onto a branch already present)", function()
+        local owners = owners_from_refs(refs({
+            HEAD = { kind = "head", hash = "m" },
+            main = { kind = "local", hash = "m" },
+        }), {})
+        assert.equals(1, #owners)
+        assert.equals("main", owners[1].id)
     end)
 end)

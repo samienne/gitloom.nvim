@@ -656,6 +656,7 @@ end
 ---@field remove fun(pos: integer)
 ---@field refresh fun()
 ---@field relayout fun()
+---@field set_items fun(items: OrderItem[])
 ---@field item_at fun(buffer_line: integer): integer
 ---@field item_start fun(i: integer): integer
 ---@field col_offset fun(buffer_line: integer, field: string, j: integer): integer
@@ -718,6 +719,29 @@ function M.open(opts)
 
     local win = create_win(opts or {})
 
+    -- Re-render after a change that alters per-item line counts (the B label-mode
+    -- cycle, or a reflow that swaps the item list). Rebuilds the buffer-line map,
+    -- resizes the buffer to the new total, and redraws the visible range.
+    local function do_relayout()
+        rebuild_starts(model, 1)
+        for _, item in ipairs(model.items) do
+            item.columns = nil
+        end
+        local buf = win.buf
+        local blanks = {}
+        for _ = 1, math.max(model.total, 1) do blanks[#blanks + 1] = "" end
+        vim.bo[buf].modifiable = true
+        vim.bo[buf].readonly = false
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, blanks)
+        vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+        vim.bo[buf].modifiable = false
+        vim.bo[buf].readonly = true
+        local bf, bl = get_visible_range(win.win)
+        local first, last = item_index_at(model, bf), item_index_at(model, bl)
+        refresh_columns(win.win, model, first, last)
+        display(win.win, win.buf, model, first, last)
+    end
+
     ---@type ListViewController
     local controller = {
         -- 1-based indexing
@@ -763,26 +787,18 @@ function M.open(opts)
             display(win.win, win.buf, model, first, last)
         end,
         -- Re-render after a change that alters per-item line counts (e.g. the B
-        -- label-mode cycle turning labelled commits into two rows). Rebuilds the
-        -- buffer-line map, resizes the buffer to the new total, and redraws.
-        relayout = function()
-            rebuild_starts(model, 1)
-            for _, item in ipairs(model.items) do
-                item.columns = nil
+        -- label-mode cycle turning labelled commits into two rows).
+        relayout = do_relayout,
+        -- Replace the whole item list — a reflow that swaps the OrderItem graph
+        -- (e.g. a branch-mode change, spec §10.5). Rewraps each OrderItem and
+        -- relays the buffer out from scratch.
+        set_items = function(items)
+            local wrapped = {}
+            for i, item in ipairs(items) do
+                wrapped[i] = { index = i, data = item, columns = nil }
             end
-            local buf = win.buf
-            local blanks = {}
-            for _ = 1, math.max(model.total, 1) do blanks[#blanks + 1] = "" end
-            vim.bo[buf].modifiable = true
-            vim.bo[buf].readonly = false
-            vim.api.nvim_buf_set_lines(buf, 0, -1, false, blanks)
-            vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
-            vim.bo[buf].modifiable = false
-            vim.bo[buf].readonly = true
-            local bf, bl = get_visible_range(win.win)
-            local first, last = item_index_at(model, bf), item_index_at(model, bl)
-            refresh_columns(win.win, model, first, last)
-            display(win.win, win.buf, model, first, last)
+            model.items = wrapped
+            do_relayout()
         end,
         -- Byte offset where column `j` starts on a given *buffer* line: resolve
         -- the line to its item and sub-row, then sum the fixed columns before `j`.

@@ -725,6 +725,23 @@ local function refresh_columns(opts, order, _start_pos)
     end
 end
 
+--- Owners for the view builder (specification.md §10): one per ref, carrying
+--- its current mode. The `HEAD` marker is skipped — it is a symref onto a branch
+--- already present as its own owner, not an independent branch. The owner id is
+--- the ref's table key (its name), so a mode keyed by that name survives reflow.
+---@param refs table<string, Ref>
+---@param modes table<string, string>  -- ref name → "normal"|"collapsed"|"hidden"
+---@return table[]  -- { id, tip = Commit, mode }
+local function owners_from_refs(refs, modes)
+    local out = {}
+    for name, ref in pairs(refs) do
+        if ref.kind ~= "head" and ref.commit then
+            out[#out + 1] = { id = name, tip = ref.commit, mode = modes[name] or "normal" }
+        end
+    end
+    return out
+end
+
 local function compose(list)
     local text = ""
     local highlight = {}
@@ -2076,7 +2093,8 @@ function M.open(folder, opts)
 
     ---@class Repo
     ---@field commits table<string, Commit>  hash → Commit (the resolution table)
-    ---@field order OrderItem[]
+    ---@field order OrderItem[]              raw commit items, 1:1 with commits (projection input)
+    ---@field display? OrderItem[]           the projected OrderItem graph the view renders (§10; set at init)
     ---@field refs table<string, Ref>        name → Ref ("HEAD" for the head)
     ---@field head? string                   current branch name
 
@@ -2086,6 +2104,10 @@ function M.open(folder, opts)
         order = {},
         refs = {},
     }
+    -- The displayed graph is a projection of `order` under the view state. With
+    -- no non-normal branch modes it is the identity, so it shares the same list
+    -- (streaming appends to both) until a reflow swaps in a projected one (§10).
+    repo.display = repo.order
 
     local palette = opts.palette
 
@@ -2096,7 +2118,9 @@ function M.open(folder, opts)
     }
 
     -- Reachability cone for the dimming pass (§12); nil until a pivot exists.
-    local view_state = { cone = nil }
+    -- `modes` is the branch-mode view state (ref name → mode); empty = all normal
+    -- (the projection is then the identity). The reflow below reads it (§10).
+    local view_state = { cone = nil, modes = {} }
 
     -- Parks the cursor at the message (or the selected ref). Assigned after the
     -- listview opens; forward-declared so the key handlers can call it.
@@ -2104,6 +2128,10 @@ function M.open(folder, opts)
     -- Recomputes the pivot's cone + re-marks track activeness (§12). Assigned
     -- after the listview opens; forward-declared for the key handlers.
     local update_cone = function() end
+    -- Rebuilds the projected OrderItem graph under the current view state and
+    -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
+    -- forward-declared so the stream and key handlers can close over it.
+    local reflow = function() end
 
     -- The listview instance. Forward-declared so the on_controller/stream
     -- callbacks below close over this local (not a stray global) and see it once
@@ -2120,7 +2148,24 @@ function M.open(folder, opts)
             idx = lv.controller.item_at(line)
             first = lv.controller.item_start and lv.controller.item_start(idx) or idx
         end
-        return repo.order[idx], idx, line - first
+        return repo.display[idx], idx, line - first
+    end
+
+    -- A full reflow (§10.5): project the raw commit order under the current
+    -- branch modes into a fresh OrderItem graph, lay it out, and swap it into the
+    -- listview. With all-normal modes the projection is the identity; this is the
+    -- path every branch-mode change takes (and the stream takes once the
+    -- projection is no longer the identity). Recomputes the cone over the new map.
+    reflow = function()
+        local proj = require("gitloom.view").project(
+            repo.order, owners_from_refs(repo.refs, view_state.modes))
+        refresh_columns(opts, proj.items)
+        repo.display = proj.items
+        if lv and lv.controller and lv.controller.set_items then
+            lv.controller.set_items(repo.display)
+        end
+        update_cone()
+        if lv and lv.controller then lv.controller.refresh() end
     end
 
     ---@type ListViewOptions
@@ -2200,8 +2245,16 @@ function M.open(folder, opts)
                             columns = {},
                         }
                         table.insert(repo.order, order_item)
-                        refresh_columns(opts, repo.order, #repo.order)
-                        controller.insert({ order_item }, #repo.order)
+                        -- Fast path while the projection is the identity (the
+                        -- common all-normal case): lay out and append one row.
+                        -- Once a branch mode makes the display a separate
+                        -- projection, a streamed commit needs a full reflow (§10).
+                        if repo.display == repo.order then
+                            refresh_columns(opts, repo.order, #repo.order)
+                            controller.insert({ order_item }, #repo.order)
+                        else
+                            reflow()
+                        end
 
                         --[[
                         if opts.merge_style.merge_on_separate_line and #item.parents > 1 and #item.children > 0 then
@@ -2239,7 +2292,7 @@ function M.open(folder, opts)
     opts.win.keys.m = function()
         merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
         opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
-        refresh_columns(opts, repo.order, 1)
+        refresh_columns(opts, repo.display, 1)
         update_cone() -- columns regenerated → re-mark active for the cone (§12)
         if lv and lv.controller then
             lv.controller.refresh()
@@ -2441,7 +2494,7 @@ function M.open(folder, opts)
                 view_state.cone = nil
                 return
             end
-            view_state.cone = mark_reachable(repo.order, cur, top, bottom)
+            view_state.cone = mark_reachable(repo.display, cur, top, bottom)
         end
 
         -- Recomputing the cone and redrawing on *every* CursorMoved makes held
@@ -2549,6 +2602,7 @@ M._internal = {
     build_graph = build_graph,
     get_column_chars = get_column_chars,
     passthrough_columns = passthrough_columns,
+    owners_from_refs = owners_from_refs,
 }
 
 return M
