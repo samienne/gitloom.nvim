@@ -8,6 +8,7 @@
 --- projection that columns.layout can't lay out is caught.
 
 local view = require("gitloom.view")
+local graph = require("gitloom.graph")
 local helpers = require("tests.graph_helpers")
 
 --- Build wired commit items from a compact spec (reuses the graph helper) and
@@ -165,6 +166,28 @@ describe("view.project — collapsed", function()
             if n.collapsed then roots[#roots + 1] = n end
         end
         assert.is_true(#roots >= 2, "expected at least two distinct collapsed heads")
+    end)
+end)
+
+describe("view.project — collapsed-head rendering", function()
+    it("renders a collapsed head with the ◍ node glyph (once)", function()
+        local items, by_hash = dag({
+            { "m1", { "fork" } },
+            { "f1", { "f2" } },
+            { "f2", { "fork" } },
+            { "fork", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            main = { "m1" },
+            feat = { "f1", "collapsed" },
+        }))
+        local opts = helpers.big_opts()
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local grid = helpers.render_grid(opts, rows)
+        local s = helpers.grid_to_string(grid)
+        assert.truthy(s:find("◍"), "expected a collapsed head glyph in:\n" .. s)
+        local _, n = s:gsub("◍", "")
+        assert.equals(1, n) -- exactly one head for the one collapsed region
     end)
 end)
 

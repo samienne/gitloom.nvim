@@ -657,6 +657,12 @@ end
 ---@field date? Timestamp
 ---@field message? string
 ---@field loaded? boolean   true once the commit's own log line has been parsed
+--- View-builder fields, present only on a synthetic **collapsed head** node
+--- (specification.md §10.3); a real commit leaves them nil. The head flows
+--- through `OrderItem.commit`/`GraphColumn.commit` as a commit-like node.
+---@field collapsed? boolean  marks a collapsed head (a contracted region)
+---@field tip? Commit         the region's newest member (for the date/author/subject)
+---@field count? integer      number of commits the head contracts
 
 ---@class Connectivity
 ---@field up boolean
@@ -956,8 +962,10 @@ local function get_column_chars(opts, columns, emphasis)
         if track.override ~= nil then
             char = track.override
         elseif track.has_commit then
-            -- "⏺"
-            char = (#track.commit.parents == 0) and "◎" or
+            -- "⏺". A collapsed head (spec §10.3) gets its own glyph so a
+            -- contracted region reads differently from a real commit.
+            char = track.commit.collapsed and "◍" or
+                (#track.commit.parents == 0) and "◎" or
                 not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and opts.icons.merge or
                 (#track.commit.children == 0) and "◉" or "○"
             --"o"
@@ -1252,7 +1260,8 @@ end
 ---@param commit Commit|nil
 ---@return boolean
 local function dual_two_line(opts, commit)
-    return opts.label_mode == "dual" and commit ~= nil and #decoration_texts(commit) > 0
+    return opts.label_mode == "dual" and commit ~= nil and not commit.collapsed
+        and #decoration_texts(commit) > 0
 end
 
 ---@param opts GraphOptions
@@ -1342,6 +1351,38 @@ local function display_item(opts, item, selection_state, cone)
     end
 
 
+
+    -- A collapsed head (spec §10.3) stands for a whole contracted region: one
+    -- row showing the ◍ node, a "⋯ N commits" summary with the region tip's
+    -- subject, and the region's ref label(s). Always a single row (dual_two_line
+    -- excludes it), so line_count and this stay in agreement.
+    local head = item.commit
+    if head and head.collapsed then
+        local tip = head.tip
+        local graph_item = get_column_chars(opts, item.columns, emphasis)
+        local date_item = rh(format_date(tip and tip.date, opts) .. " ", palette.date)
+        local author_item = rh((tip and tip.author or "") .. " ", palette.author)
+        local summary = compose({
+            rh(("⋯ %d commits "):format(head.count or 0), "Comment"),
+            rh((tip and tip.message) or "", palette.message),
+        })
+        local ref_items = get_ref_items(head)
+        ---@type DisplayElement
+        local element = { line = { date_item, author_item, graph_item, summary } }
+        if (opts.label_mode or "right") == "inline" then
+            local parts = {}
+            for _, it in ipairs(ref_items) do
+                parts[#parts + 1] = it
+                parts[#parts + 1] = " "
+            end
+            parts[#parts + 1] = summary
+            element.line = { date_item, author_item, graph_item, compose(parts) }
+        else
+            -- "right" and "dual" both pin the region's labels to the right edge.
+            element.line_right = #ref_items > 0 and ref_items or nil
+        end
+        return element
+    end
 
     if item.type == "commit" then
         local label_mode = opts.label_mode or "right"

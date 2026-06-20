@@ -250,6 +250,7 @@ Lanes render as box-drawing characters derived from connectivity
 | `◎`    | root commit (no parents) |
 | `◉`    | tip commit (no children) |
 | `○`    | ordinary commit |
+| `◍`    | collapsed head (a contracted region, §10.3) |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
 
 ### 5.4 Mirroring
@@ -524,6 +525,11 @@ preserve shape. An edge from a hidden region into a retained commit is dropped
 
 A collapsed head shows the owning ref name(s) and a collapsed indicator (e.g. a
 commit count), and optionally the tip's subject. Exact content is provisional.
+
+Currently a head renders as a single row: the `◍` node (§5.3), a "⋯ N commits"
+summary followed by the region tip's subject, and the region's ref label(s) in
+the active label placement (right-pinned, or inline). Date and author are the
+tip's.
 
 ### 10.5 Reflow
 
