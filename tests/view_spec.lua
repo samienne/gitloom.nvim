@@ -191,6 +191,30 @@ describe("view.project — collapsed-head rendering", function()
     end)
 end)
 
+describe("view.project — precomputed signatures (caching split)", function()
+    it("a reused sig yields the same projection as computing it fresh", function()
+        local items, by_hash = dag({
+            { "m1", { "fork" } },
+            { "f1", { "f2" } },
+            { "f2", { "fork" } },
+            { "fork", {} },
+        })
+        local os = owners(by_hash, { main = { "m1" }, feat = { "f1", "collapsed" } })
+        local sig = view.signatures(items, os)
+        local a = view.project(items, os)        -- computes its own sig
+        local b = view.project(items, os, sig)   -- reuses the cached one
+        local function shape(p)
+            local out = {}
+            for _, it in ipairs(p.items) do
+                out[#out + 1] = it.commit.hash .. (it.commit.collapsed and "*" or "")
+            end
+            return out
+        end
+        assert.same(shape(a), shape(b))
+        assert.same(a.mode, b.mode)
+    end)
+end)
+
 describe("view.project — combined-region join", function()
     -- ta, tb merge histories sharing `base`; vary their modes and read base.
     local function base_mode(mode_a, mode_b)

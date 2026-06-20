@@ -91,10 +91,16 @@ local function mode_of(full_sig, owner_mode)
 end
 
 --- Project the commit DAG under a view state into an OrderItem graph.
+---
+--- `sig` (the per-commit signatures) may be passed in precomputed: it depends
+--- only on the DAG and the owner *tips*, not on modes, so a caller reflowing
+--- after a mode change can reuse a cached one and skip the O(N·owners) pass
+--- (the caching split, ARCHITECTURE.md / spec §10.5). Omit it to compute fresh.
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired (repo.order)
 ---@param owners table[] -- { id, tip = Commit, mode? = "normal"|"collapsed"|"hidden" }
+---@param sig table<string, table<string, boolean>>?  -- precomputed signatures
 ---@return table  -- { items = OrderItem[], nodes = DisplayNode[], sig, mode, node_of_hash }
-function M.project(items, owners)
+function M.project(items, owners, sig)
     owners = owners or {}
     local owner_mode = {}
     for _, o in ipairs(owners) do owner_mode[o.id] = o.mode or "normal" end
@@ -102,7 +108,7 @@ function M.project(items, owners)
     local idx = {} -- hash -> position in items (newest-first; smaller = newer)
     for i, it in ipairs(items) do idx[it.commit.hash] = i end
 
-    local sig = M.signatures(items, owners)
+    sig = sig or M.signatures(items, owners)
 
     local mode = {}
     for _, it in ipairs(items) do

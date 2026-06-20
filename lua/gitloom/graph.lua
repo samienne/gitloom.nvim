@@ -2206,6 +2206,11 @@ function M.open(folder, opts)
     -- `modes` is the branch-mode view state (ref name → mode); empty = all normal
     -- (the projection is then the identity). The reflow below reads it (§10).
     local view_state = { cone = nil, modes = {} }
+    -- Cached per-commit signatures for the projection (spec §10.5). They depend
+    -- only on the commit set and the owner tips, not on modes, so a mode toggle
+    -- reuses them; invalidated when the commit/owner counts change (the stream
+    -- grows the order, refs resolve). Keyed by those counts.
+    local sig_cache = { norder = -1, nowners = -1, sig = nil }
 
     -- Parks the cursor at the message (or the selected ref). Assigned after the
     -- listview opens; forward-declared so the key handlers can call it.
@@ -2242,8 +2247,15 @@ function M.open(folder, opts)
     -- path every branch-mode change takes (and the stream takes once the
     -- projection is no longer the identity). Recomputes the cone over the new map.
     reflow = function()
-        local proj = require("gitloom.view").project(
-            repo.order, owners_from_refs(repo.refs, view_state.modes))
+        local viewbuilder = require("gitloom.view")
+        local owners = owners_from_refs(repo.refs, view_state.modes)
+        -- Reuse cached signatures unless the commit or owner set changed; only
+        -- the join + contraction (mode-dependent) recompute on a toggle (§10.5).
+        if sig_cache.norder ~= #repo.order or sig_cache.nowners ~= #owners or not sig_cache.sig then
+            sig_cache.sig = viewbuilder.signatures(repo.order, owners)
+            sig_cache.norder, sig_cache.nowners = #repo.order, #owners
+        end
+        local proj = viewbuilder.project(repo.order, owners, sig_cache.sig)
         refresh_columns(opts, proj.items)
         repo.display = proj.items
         if lv and lv.controller and lv.controller.set_items then
