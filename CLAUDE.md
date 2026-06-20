@@ -156,7 +156,9 @@ Coverage:
   a new id only at a branch head or an extra merge parent); plus free-list
   colouring (spec §5.5): each lane keeps one colour for life, concurrent lanes
   get distinct colours, a first-parent chain is one colour, and an ended lane's
-  slot is recycled so a later fan stays distinct under a small palette; plus root
+  slot is recycled so a later fan stays distinct under a small palette, and a
+  slot shared during a brief exhaustion is not returned (and handed to a live
+  lane) until its last holder ends (the recycling-leak regression); plus root
   column break (spec §5.1): a branch head is not stacked under a root, and a run
   of stacked roots alternates columns
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
