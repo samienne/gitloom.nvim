@@ -36,16 +36,19 @@ exists primarily to exercise and validate the graph algorithm.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
-  placements can be compared at a glance; `<CR>` opens the **commit view** for
-  the commit on the current row (§11); `D` opens that commit's diff in an
-  external diff viewer via the configured provider (§11.5). Two debug
+  placements can be compared at a glance. `<CR>` is context-dependent (§10): on a
+  **selected ref** it cycles that branch's mode (normal → collapsed → hidden) and
+  reflows; on a **collapsed head** with no ref selected it expands the region;
+  otherwise it opens the **commit view** for the commit on the current row (§11).
+  `D` opens that commit's diff in an external diff viewer via the configured
+  provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on.
   `?` opens a float listing all keybindings. The footer shows live status
-  (the active merge mode and ref label mode, and `(mirrored)` when mirroring is
-  on).
+  (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
+  when any branch modes are set, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
   rows), with `cursorline` marking the current row (§7). The cursor is parked at
   the **commit message** rather than left at column 0. `h`/`l` move a selection
@@ -554,7 +557,8 @@ other settings, subject to the §10.2 attribution rule.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
   responsive.
-- **Toggle UX** — mode-switch on the selected ref vs. pickers.
+- **Toggle UX** — `<CR>` on a selected ref cycles its mode and `<CR>` on a head
+  expands it (implemented); a picker for setting many at once is still future.
 
 ## 11. Commit view
 

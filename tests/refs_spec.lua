@@ -5,6 +5,8 @@ local internal = require("gitloom.graph")._internal
 local classify_ref = internal.classify_ref
 local group_refs = internal.group_refs
 local owners_from_refs = internal.owners_from_refs
+local next_mode = internal.next_mode
+local selected_owner_ids = internal.selected_owner_ids
 
 describe("classify_ref", function()
     it("classifies a local branch", function()
@@ -140,5 +142,39 @@ describe("owners_from_refs", function()
         }), {})
         assert.equals(1, #owners)
         assert.equals("main", owners[1].id)
+    end)
+end)
+
+describe("branch-mode toggle helpers", function()
+    local function commit(spec)
+        local out = {}
+        for _, r in ipairs(spec) do out[#out + 1] = { kind = r[1], name = r[2] } end
+        return { refs = out }
+    end
+
+    it("next_mode cycles normal → collapsed → hidden → normal", function()
+        assert.equals("collapsed", next_mode(nil))
+        assert.equals("collapsed", next_mode("normal"))
+        assert.equals("hidden", next_mode("collapsed"))
+        assert.equals("normal", next_mode("hidden"))
+    end)
+
+    it("selected_owner_ids maps a branch group to its local + remote owners", function()
+        local c = commit({ { "local", "main" }, { "remote", "origin/main" } })
+        assert.same({ "main", "origin/main" }, selected_owner_ids(c, 1))
+    end)
+
+    it("selected_owner_ids maps a remote-only group to its remote owner", function()
+        local c = commit({ { "remote", "origin/feature" } })
+        assert.same({ "origin/feature" }, selected_owner_ids(c, 1))
+    end)
+
+    it("selected_owner_ids maps a tag decoration (after the branches)", function()
+        local c = commit({ { "local", "main" }, { "tag", "v1.0" } })
+        assert.same({ "v1.0" }, selected_owner_ids(c, 2))
+    end)
+
+    it("selected_owner_ids is nil out of range", function()
+        assert.is_nil(selected_owner_ids(commit({ { "local", "main" } }), 5))
     end)
 end)

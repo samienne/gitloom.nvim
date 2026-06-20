@@ -42,7 +42,7 @@ local KEYBINDS = {
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
-    { "<CR>", "Open the commit view for the row" },
+    { "<CR>", "Selected ref: cycle mode · head: expand · else commit view" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref on the row" },
@@ -55,9 +55,17 @@ local KEYBINDS = {
 -- The graph window footer: live status (the current mode, and whether the graph
 -- is mirrored) plus a hint to the help float.
 ---@param mirror boolean?
-local function footer_text(mirror)
+---@param modes table<string, string>?  -- branch modes (§10); summarised when non-empty
+local function footer_text(mirror, modes)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
+    local nc, nh = 0, 0
+    for _, m in pairs(modes or {}) do
+        if m == "collapsed" then nc = nc + 1 elseif m == "hidden" then nh = nh + 1 end
+    end
+    if nc > 0 or nh > 0 then
+        status = status .. (" | %d collapsed, %d hidden"):format(nc, nh)
+    end
     if mirror then status = status .. "  (mirrored)" end
     return status .. "    ?: help"
 end
@@ -505,6 +513,41 @@ local function decoration_texts(commit)
     return out
 end
 
+-- The branch-mode cycle order (spec §10.1), driven by `<CR>` on a selected ref.
+local MODE_CYCLE = { "normal", "collapsed", "hidden" }
+
+--- The next mode after `m` in the cycle (nil/normal → collapsed → hidden → …).
+---@param m string?
+---@return string
+local function next_mode(m)
+    m = m or "normal"
+    for i, v in ipairs(MODE_CYCLE) do
+        if v == m then return MODE_CYCLE[(i % #MODE_CYCLE) + 1] end
+    end
+    return "collapsed"
+end
+
+--- The owner ids (repo.refs keys, i.e. view-builder owner ids) a selected ref
+--- decoration stands for. A branch group covers its local ref and each remote
+--- (`origin/<name>`), so they cycle together as one branch; a tag is itself.
+--- Mirrors decoration_texts' order (branch groups then tags). nil if no match.
+---@param commit { refs: Ref[] }
+---@param index integer  -- 1-based decoration index (selection_state.index)
+---@return string[]|nil
+local function selected_owner_ids(commit, index)
+    if not index then return nil end
+    local g = group_refs(commit.refs)
+    if index <= #g.branches then
+        local b = g.branches[index]
+        local ids = {}
+        if b.has_local then ids[#ids + 1] = b.name end
+        for _, r in ipairs(b.remotes) do ids[#ids + 1] = r .. "/" .. b.name end
+        return #ids > 0 and ids or nil
+    end
+    local tag = g.tags[index - #g.branches]
+    return tag and { tag } or nil
+end
+
 --- Move the ref selection. `nil` is the message (the default; the message is to
 --- the left, refs are pinned to the right edge); 1..count are the ref
 --- decorations, left to right. `l` (dir +1) moves right onto the refs starting
@@ -663,6 +706,7 @@ end
 ---@field collapsed? boolean  marks a collapsed head (a contracted region)
 ---@field tip? Commit         the region's newest member (for the date/author/subject)
 ---@field count? integer      number of commits the head contracts
+---@field signature? table<string, boolean>  owner ids reaching the region (for expand)
 
 ---@class Connectivity
 ---@field up boolean
@@ -2209,6 +2253,19 @@ function M.open(folder, opts)
         if lv and lv.controller then lv.controller.refresh() end
     end
 
+    -- Recompute the footer (active modes + the branch-mode summary, §10) and
+    -- apply it to the floating window. Centralised so every state change updates
+    -- it the same way.
+    local function update_footer()
+        if lv and lv.win and lv.win.win then
+            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes)
+            pcall(vim.api.nvim_win_set_config, lv.win.win, {
+                footer = lv.win.opts.footer,
+                footer_pos = "center",
+            })
+        end
+    end
+
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
@@ -2338,14 +2395,7 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.refresh()
         end
-        -- Reflect the new mode live in the footer (no transient notify).
-        if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text(opts.mirror)
-            pcall(vim.api.nvim_win_set_config, lv.win.win, {
-                footer = lv.win.opts.footer,
-                footer_pos = "center",
-            })
-        end
+        update_footer() -- reflect the new mode live in the footer
         place_cursor() -- widths shifted; keep the cursor on message/ref
     end
     -- M: toggle graph mirroring (lane 1 on the right). A render-only change, so
@@ -2355,13 +2405,7 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.refresh()
         end
-        if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text(opts.mirror)
-            pcall(vim.api.nvim_win_set_config, lv.win.win, {
-                footer = lv.win.opts.footer,
-                footer_pos = "center",
-            })
-        end
+        update_footer()
         place_cursor()
     end
     -- B: cycle the ref label placement (right / inline / dual; §6.1). The layout
@@ -2376,22 +2420,43 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.relayout()
         end
-        if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text(opts.mirror)
-            pcall(vim.api.nvim_win_set_config, lv.win.win, {
-                footer = lv.win.opts.footer,
-                footer_pos = "center",
-            })
-        end
+        update_footer()
         update_cone() -- buffer lines shifted; recompute the cone over the new map
         place_cursor()
     end
-    -- <CR>: open the commit view for the commit on the current row (§11). In dual
-    -- mode either of a labelled commit's two rows resolves to the same commit.
+    -- <CR>: context-dependent (§10). On a *selected* ref, cycle that branch's
+    -- mode (normal → collapsed → hidden) and reflow. On a collapsed head with no
+    -- ref selected, expand it (its collapsed owners → normal). Otherwise open the
+    -- commit view (§11). In dual mode either of a labelled commit's two rows
+    -- resolves to the same commit.
     opts.win.keys["<CR>"] = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = order_at(line)
         if not item or not item.commit then
+            return
+        end
+        -- A selected ref → cycle its (group's) branch mode.
+        if selection_state.index and selection_state.commit == item.commit then
+            local ids = selected_owner_ids(item.commit, selection_state.index)
+            if ids then
+                local nxt = next_mode(view_state.modes[ids[1]])
+                for _, id in ipairs(ids) do
+                    view_state.modes[id] = (nxt ~= "normal") and nxt or nil
+                end
+                reflow()
+                update_footer()
+                place_cursor()
+                return
+            end
+        end
+        -- A collapsed head (no ref selected) → expand the region it stands for.
+        if item.commit.collapsed then
+            for oid in pairs(item.commit.signature or {}) do
+                if view_state.modes[oid] == "collapsed" then view_state.modes[oid] = nil end
+            end
+            reflow()
+            update_footer()
+            place_cursor()
             return
         end
         open_commit_view(opts, item.commit)
@@ -2402,8 +2467,8 @@ function M.open(folder, opts)
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
         local item = order_at(line)
-        if not item or not item.commit then
-            return
+        if not item or not item.commit or item.commit.collapsed then
+            return -- a collapsed head has no single commit to diff
         end
         open_diff(opts, item.commit)
     end
@@ -2644,6 +2709,8 @@ M._internal = {
     get_column_chars = get_column_chars,
     passthrough_columns = passthrough_columns,
     owners_from_refs = owners_from_refs,
+    next_mode = next_mode,
+    selected_owner_ids = selected_owner_ids,
 }
 
 return M
