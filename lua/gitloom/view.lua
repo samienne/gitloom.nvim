@@ -44,15 +44,22 @@ end
 --- (modes ignored here — hidden owners still define regions). Computed in one
 --- newest-first pass: a commit's signature is the owners tipped at it unioned
 --- with every child's signature (a child is newer, so already computed).
+---
+--- A **first-parent-only** owner (`o.fp_only`, the trunk; §10.1/§10.2) flows
+--- from a child down only to that child's *first* parent, so it covers its
+--- tip's first-parent mainline and stops at every merge rather than descending
+--- the merged-in side. Ordinary owners flow to every parent (full reachability).
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired
----@param owners table[] -- { id, tip = Commit, mode? }
+---@param owners table[] -- { id, tip = Commit, mode?, fp_only? }
 ---@return table<string, table<string, boolean>>  -- hash -> owner-id set
 function M.signatures(items, owners)
     local tips = {} -- hash -> { owner id, ... }
+    local fp = {}   -- owner id -> true if first-parent-only
     for _, o in ipairs(owners) do
         local h = o.tip.hash
         tips[h] = tips[h] or {}
         tips[h][#tips[h] + 1] = o.id
+        if o.fp_only then fp[o.id] = true end
     end
     local sig = {}
     for _, it in ipairs(items) do
@@ -62,12 +69,55 @@ function M.signatures(items, owners)
         for _, ch in ipairs(c.children or {}) do
             local cs = sig[ch.hash]
             if cs then
-                for oid in pairs(cs) do s[oid] = true end
+                -- c is on ch's first-parent edge iff it is ch.parents[1].
+                local first = ch.parents and ch.parents[1] == c
+                for oid in pairs(cs) do
+                    if first or not fp[oid] then s[oid] = true end
+                end
             end
         end
         sig[c.hash] = s
     end
     return sig
+end
+
+--- Build the full owner set for a projection under the first-parent default
+--- (spec §10.7). `ref_owners` are `{id, tip}` per ref; `trunk_id` is the id of
+--- the current branch's ref (HEAD), or nil if there is none.
+---
+--- With `collapse_merged` off (or no trunk) every owner defaults **normal** and
+--- no trunk/anonymous owners are added — the plain full graph. With it on: the
+--- trunk owner becomes **first-parent-only + normal** (it covers only HEAD's
+--- mainline), and every other ref **and** every non-first merge parent (an
+--- anonymous owner, keyed `merge:<hash>:<i>`) defaults **collapsed** — so the
+--- mainline shows in full and everything else collapses (§10.7). `modes`
+--- overrides the default per owner id.
+---@param items table[]
+---@param ref_owners table[]  -- { {id, tip}, ... }
+---@param trunk_id string|nil
+---@param modes table<string, string>?
+---@param collapse_merged boolean
+---@return table[]  -- { {id, tip, mode, fp_only}, ... }
+function M.owners(items, ref_owners, trunk_id, modes, collapse_merged)
+    modes = modes or {}
+    local on = collapse_merged and trunk_id ~= nil
+    local out = {}
+    for _, o in ipairs(ref_owners) do
+        local default, fp = "normal", false
+        if on and o.id ~= trunk_id then default = "collapsed" end
+        if on and o.id == trunk_id then fp = true end
+        out[#out + 1] = { id = o.id, tip = o.tip, mode = modes[o.id] or default, fp_only = fp }
+    end
+    if on then
+        for _, it in ipairs(items) do
+            local ps = it.commit.parents or {}
+            for i = 2, #ps do
+                local id = "merge:" .. it.commit.hash .. ":" .. i
+                out[#out + 1] = { id = id, tip = ps[i], mode = modes[id] or "collapsed", fp_only = false }
+            end
+        end
+    end
+    return out
 end
 
 --- The display-mode join for one commit's signature (spec §10.2). A commit

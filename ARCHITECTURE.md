@@ -64,6 +64,10 @@ Commit attribution — deciding which commits "belong to" a branch being
 collapsed or hidden when commits are shared across the DAG — is resolved by the
 **reachability-signature** model (specification.md §10.2): per-commit signature
 → regions of equal signature → a display-mode join over each region's owners.
+Owners are refs, plus anonymous non-first merge-parents, plus a *first-parent-
+only* trunk owner (HEAD) whose coverage stops at every merge — which is what lets
+the **first-parent focus** default (§10.7) show HEAD's mainline in full while
+collapsing every branch merged into or diverging from it.
 
 ### OrderItem graphs as derived projections
 

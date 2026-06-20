@@ -56,6 +56,26 @@ describe("view.project — signatures", function()
         assert.is_true(sig.c3.a)
     end)
 
+    it("a first-parent-only owner covers only its first-parent mainline", function()
+        -- h -> m(merge: p1 first, p2 second) ; p1,p2 -> base. A fp_only trunk
+        -- owner at h reaches the first-parent chain (h,m,p1,base) but not p2.
+        local items, by_hash = dag({
+            { "h", { "m" } },
+            { "m", { "p1", "p2" } },
+            { "p1", { "base" } },
+            { "p2", { "base" } },
+            { "base", {} },
+        })
+        local sig = view.signatures(items, {
+            { id = "trunk", tip = by_hash.h, fp_only = true },
+        })
+        assert.is_true(sig.h.trunk)
+        assert.is_true(sig.m.trunk)
+        assert.is_true(sig.p1.trunk)
+        assert.is_true(sig.base.trunk) -- shared ancestor, reached via p1 (first)
+        assert.is_nil(sig.p2.trunk)    -- the merged-in (second-parent) side
+    end)
+
     it("unions owners across a merge", function()
         -- m (merge) -> a1, b1 ; a/b refs on a1/b1's own tips above
         --   ta(ref a) -> m ; tb(ref b) -> m  is awkward; use two tips merging:
@@ -188,6 +208,70 @@ describe("view.project — collapsed-head rendering", function()
         assert.truthy(s:find("◍"), "expected a collapsed head glyph in:\n" .. s)
         local _, n = s:gsub("◍", "")
         assert.equals(1, n) -- exactly one head for the one collapsed region
+    end)
+end)
+
+describe("view.owners — first-parent default (spec §10.7)", function()
+    -- HEAD mainline h -> m(merge: main1 first, f1 second) ; main1,f1 -> base.
+    -- f1 is a one-commit feature merged into the trunk (ref "feat").
+    local function fixture()
+        local items, by_hash = dag({
+            { "h", { "m" } },
+            { "m", { "main1", "f1" } },
+            { "main1", { "base" } },
+            { "f1", { "base" } },
+            { "base", {} },
+        })
+        local ref_owners = {
+            { id = "head", tip = by_hash.h },
+            { id = "feat", tip = by_hash.f1 },
+        }
+        return items, ref_owners
+    end
+
+    it("collapse_merged off → every owner normal, no anonymous owners", function()
+        local items, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, "head", {}, false)
+        assert.equals(#ref_owners, #os) -- no anonymous merge owners added
+        for _, o in ipairs(os) do
+            assert.equals("normal", o.mode)
+            assert.falsy(o.fp_only)
+        end
+    end)
+
+    it("collapse_merged on → trunk normal+fp, others collapsed, merge owner added", function()
+        local items, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, "head", {}, true)
+        local by_id = {}
+        for _, o in ipairs(os) do by_id[o.id] = o end
+        assert.equals("normal", by_id.head.mode)
+        assert.is_true(by_id.head.fp_only)
+        assert.equals("collapsed", by_id.feat.mode)
+        assert.falsy(by_id.feat.fp_only)
+        assert.is_not_nil(by_id["merge:m:2"]) -- f1 is m's second parent
+        assert.equals("collapsed", by_id["merge:m:2"].mode)
+    end)
+
+    it("an explicit mode overrides the default", function()
+        local items, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, "head", { feat = "normal" }, true)
+        for _, o in ipairs(os) do
+            if o.id == "feat" then assert.equals("normal", o.mode) end
+        end
+    end)
+
+    it("projects to mainline-full, merged-branch-collapsed", function()
+        local items, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, "head", {}, true)
+        local proj = view.project(items, os)
+        assert.equals("normal", proj.mode.h)
+        assert.equals("normal", proj.mode.m)
+        assert.equals("normal", proj.mode.main1)
+        assert.equals("normal", proj.mode.base) -- shared, reached by the trunk
+        assert.equals("collapsed", proj.mode.f1) -- the merged-in feature
+        local heads = 0
+        for _, n in ipairs(proj.nodes) do if n.collapsed then heads = heads + 1 end end
+        assert.equals(1, heads)
     end)
 end)
 

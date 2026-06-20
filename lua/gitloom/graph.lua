@@ -47,6 +47,7 @@ local KEYBINDS = {
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref on the row" },
     { "H", "Toggle reachability highlighting (dimming)" },
+    { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },
@@ -55,16 +56,18 @@ local KEYBINDS = {
 -- The graph window footer: live status (the current mode, and whether the graph
 -- is mirrored) plus a hint to the help float.
 ---@param mirror boolean?
----@param modes table<string, string>?  -- branch modes (§10); summarised when non-empty
-local function footer_text(mirror, modes)
+---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
+---@param focus boolean?  -- the first-parent focus default is on (§10.7)
+local function footer_text(mirror, modes, focus)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
+    if focus then status = status .. " | focus" end
     local nc, nh = 0, 0
     for _, m in pairs(modes or {}) do
         if m == "collapsed" then nc = nc + 1 elseif m == "hidden" then nh = nh + 1 end
     end
     if nc > 0 or nh > 0 then
-        status = status .. (" | %d collapsed, %d hidden"):format(nc, nh)
+        status = status .. (" (%d collapsed, %d hidden)"):format(nc, nh)
     end
     if mirror then status = status .. "  (mirrored)" end
     return status .. "    ?: help"
@@ -2066,6 +2069,7 @@ end
 ---@field icons Icons
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
+---@field collapse_merged? boolean  first-parent focus on/off (default true); §10.7
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
@@ -2134,6 +2138,10 @@ function M.open(folder, opts)
         mirror = true,
         -- Reachability highlighting (§12) on by default; toggle live with H.
         highlight = true,
+        -- First-parent focus (§10.7): on open, show HEAD's first-parent mainline
+        -- in full and collapse every other branch (merged and divergent). Toggle
+        -- live with `c`; set false to open the plain full graph.
+        collapse_merged = true,
         -- Date column: absolute (os.date format) or relative ("3 days ago").
         -- Toggle live with d.
         date_format = "%Y-%m-%d %H:%M",
@@ -2205,12 +2213,15 @@ function M.open(folder, opts)
     -- Reachability cone for the dimming pass (§12); nil until a pivot exists.
     -- `modes` is the branch-mode view state (ref name → mode); empty = all normal
     -- (the projection is then the identity). The reflow below reads it (§10).
-    local view_state = { cone = nil, modes = {} }
+    -- `modes` is explicit per-owner overrides; `effective` is the resolved mode
+    -- per owner id after the first-parent default (§10.7), kept for the footer
+    -- and the `<CR>` cycle. Both filled by reflow.
+    local view_state = { cone = nil, modes = {}, effective = {} }
     -- Cached per-commit signatures for the projection (spec §10.5). They depend
-    -- only on the commit set and the owner tips, not on modes, so a mode toggle
-    -- reuses them; invalidated when the commit/owner counts change (the stream
-    -- grows the order, refs resolve). Keyed by those counts.
-    local sig_cache = { norder = -1, nowners = -1, sig = nil }
+    -- only on the commit set, the owner tips/fp-flags and the focus policy, not on
+    -- modes, so a mode toggle reuses them; invalidated when those change. Keyed by
+    -- the commit/owner counts and the collapse_merged flag.
+    local sig_cache = { norder = -1, nowners = -1, cm = nil, sig = nil }
 
     -- Parks the cursor at the message (or the selected ref). Assigned after the
     -- listview opens; forward-declared so the key handlers can call it.
@@ -2248,12 +2259,21 @@ function M.open(folder, opts)
     -- projection is no longer the identity). Recomputes the cone over the new map.
     reflow = function()
         local viewbuilder = require("gitloom.view")
-        local owners = owners_from_refs(repo.refs, view_state.modes)
-        -- Reuse cached signatures unless the commit or owner set changed; only
-        -- the join + contraction (mode-dependent) recompute on a toggle (§10.5).
-        if sig_cache.norder ~= #repo.order or sig_cache.nowners ~= #owners or not sig_cache.sig then
+        -- Owners under the first-parent default (§10.7): the trunk (HEAD's
+        -- branch) is first-parent-only + normal, every other ref and merge parent
+        -- defaults collapsed; view_state.modes overrides. No trunk ⇒ all-normal.
+        local cm = opts.collapse_merged ~= false
+        local trunk_id = (repo.head and repo.refs[repo.head]) and repo.head or nil
+        local owners = viewbuilder.owners(
+            repo.order, owners_from_refs(repo.refs, {}), trunk_id, view_state.modes, cm)
+        view_state.effective = {}
+        for _, o in ipairs(owners) do view_state.effective[o.id] = o.mode end
+        -- Reuse cached signatures unless the commit/owner set or focus changed;
+        -- only the join + contraction (mode-dependent) recompute on a toggle.
+        if sig_cache.norder ~= #repo.order or sig_cache.nowners ~= #owners
+            or sig_cache.cm ~= cm or not sig_cache.sig then
             sig_cache.sig = viewbuilder.signatures(repo.order, owners)
-            sig_cache.norder, sig_cache.nowners = #repo.order, #owners
+            sig_cache.norder, sig_cache.nowners, sig_cache.cm = #repo.order, #owners, cm
         end
         local proj = viewbuilder.project(repo.order, owners, sig_cache.sig)
         refresh_columns(opts, proj.items)
@@ -2270,7 +2290,7 @@ function M.open(folder, opts)
     -- it the same way.
     local function update_footer()
         if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes)
+            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes, opts.collapse_merged ~= false)
             pcall(vim.api.nvim_win_set_config, lv.win.win, {
                 footer = lv.win.opts.footer,
                 footer_pos = "center",
@@ -2383,12 +2403,11 @@ function M.open(folder, opts)
                     end,
                 })
             end).next(function()
-                -- Initial dimming once the graph is populated (§12): compute the
-                -- cone for the parked pivot, then refresh and re-park.
-                update_cone()
-                if lv and lv.controller then
-                    lv.controller.refresh()
-                end
+                -- Stream done: apply the projection (the first-parent default
+                -- collapse, §10.7) and compute the initial dimming (§12). reflow
+                -- swaps in the projected graph, recomputes the cone, and refreshes.
+                reflow()
+                update_footer()
                 place_cursor()
             end)
         end,
@@ -2451,20 +2470,22 @@ function M.open(folder, opts)
         if selection_state.index and selection_state.commit == item.commit then
             local ids = selected_owner_ids(item.commit, selection_state.index)
             if ids then
-                local nxt = next_mode(view_state.modes[ids[1]])
-                for _, id in ipairs(ids) do
-                    view_state.modes[id] = (nxt ~= "normal") and nxt or nil
-                end
+                -- Cycle from the *effective* current mode (which may be a
+                -- first-parent default, §10.7), and store the result explicitly so
+                -- it overrides the default.
+                local nxt = next_mode(view_state.effective[ids[1]])
+                for _, id in ipairs(ids) do view_state.modes[id] = nxt end
                 reflow()
                 update_footer()
                 place_cursor()
                 return
             end
         end
-        -- A collapsed head (no ref selected) → expand the region it stands for.
+        -- A collapsed head (no ref selected) → expand the region it stands for by
+        -- explicitly setting its owners normal (overriding any collapsed default).
         if item.commit.collapsed then
             for oid in pairs(item.commit.signature or {}) do
-                if view_state.modes[oid] == "collapsed" then view_state.modes[oid] = nil end
+                view_state.modes[oid] = "normal"
             end
             reflow()
             update_footer()
@@ -2513,6 +2534,14 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.refresh()
         end
+        place_cursor()
+    end
+    -- c: toggle the first-parent focus (§10.7) — collapse every non-mainline
+    -- branch vs. show the full graph. Changes per-item line counts, so reflow.
+    opts.win.keys.c = function()
+        opts.collapse_merged = opts.collapse_merged == false
+        reflow()
+        update_footer()
         place_cursor()
     end
     -- i: toggle the per-lane id column before the message.
