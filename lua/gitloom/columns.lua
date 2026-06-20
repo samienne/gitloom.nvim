@@ -79,6 +79,13 @@ function M.layout(opts, items)
 
     local rows = {}
     local active = {} -- col -> Lane flowing down into the current row
+    -- Columns a root occupied on the *previous* row. A root ends its lane with
+    -- nothing below it, so reusing its column on the next row would stack an
+    -- unrelated history under it and read as one continuous lane. We block the
+    -- column for one row (tip placement, compaction, and fresh fan-out all skip
+    -- it), which offsets the next history and breaks the line; consecutive
+    -- stacked roots then simply alternate columns (spec §5.1 "root column break").
+    local blocked = {}
 
     -- A fresh line buffer: `add` appends a Segment, `draw` lays one lane across
     -- columns lo..hi with `up`/`down` at the given columns (the bus connects them).
@@ -174,7 +181,7 @@ function M.layout(opts, items)
             cc = incoming[1].col
         else
             cc = 1
-            while active[cc] do cc = cc + 1 end
+            while active[cc] or blocked[cc] do cc = cc + 1 end
         end
 
         local row = {
@@ -228,7 +235,7 @@ function M.layout(opts, items)
         for _, s in ipairs(survivors) do
             local k = s.col
             for c = 1, s.col - 1 do
-                if not occ0[c] and not used[c] then
+                if not occ0[c] and not used[c] and not blocked[c] then
                     k = c; break
                 end
             end
@@ -255,7 +262,7 @@ function M.layout(opts, items)
             if fi <= #freed then
                 k = freed[fi]; fi = fi + 1
             else
-                while used[nextc] do nextc = nextc + 1 end
+                while used[nextc] or blocked[nextc] do nextc = nextc + 1 end
                 k = nextc; nextc = nextc + 1
             end
             outgoing[i].out = k
@@ -313,6 +320,11 @@ function M.layout(opts, items)
             row.merge = assemble(mcells, nil, nil)
             for i = 2, #outgoing do active[outgoing[i].out] = outgoing[i].lane end
         end
+
+        -- Block this commit's column for the next row iff it is a root (no
+        -- parents continue out of it), so nothing stacks under it.
+        blocked = {}
+        if #outgoing == 0 then blocked[cc] = true end
 
         rows[#rows + 1] = row
     end

@@ -267,7 +267,11 @@ the current row. For each commit `C`:
 1. **Classify** `active`: lanes whose `parent == C` are **incoming** (its child
    edges, terminating here); the rest are **survivors** (pass-throughs).
 2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
-   column for a tip.
+   column for a tip. A column a **root** (no-parent commit) occupied on the
+   previous row is **blocked** for this row — tip placement, compaction targets,
+   and fresh fan-out columns all skip it — so an independent history does not
+   stack directly under a root (the "root column break" invariant). The block
+   lasts one row, so consecutive stacked roots simply alternate columns.
 3. **Outgoing** = one Lane per parent. The first parent **reuses the trunk
    child's id and colour** (so a straight chain keeps one colour); a fresh id and
    a free-list colour slot are taken only where a lane is born — a branch head (a
