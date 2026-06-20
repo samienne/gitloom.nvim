@@ -345,8 +345,18 @@ the existing `OrderItem`s (the view holds references). Both go through
   counts. Render-only; the model rows are untouched (specification.md §5.4).
 - `display_item(opts, item)` — assembles a `DisplayElement`: the commit `line`
   (date, author, graph glyphs, then the message as the flex column `FLEX_COL`)
-  plus `line_right` — the ref decorations the listview pins to the right edge —
-  and optional `above`/`below` virtual lines for separate split/merge rows.
+  plus optional `above`/`below` virtual rows for separate split/merge lines. How
+  the ref decorations are placed depends on `opts.label_mode` (spec §6.1): in
+  `right` (default) they go in `line_right`, which the listview pins to the right
+  edge; in `inline` they are composed into the flex column before the message; in
+  `dual` they go on a dedicated **branch line** added as an extra `above` row,
+  whose graph column is `passthrough_columns(item.columns)` — a vertical-only
+  projection of the commit's lanes (each lane that enters from above continues as
+  a `│` in its colour, carrying the same edges so §12 dimming still applies) so
+  the labels sit to the right of the continuing wires. `B` cycles the mode.
+- `passthrough_columns(columns)` — builds the dual-mode branch line's graph: one
+  vertical-only `GraphColumn` per input column (up-going lanes become a `│`, the
+  rest blank), reusing `get_column_chars` for glyphs/colour/dimming and mirroring.
 
 ### Selection and navigation
 
@@ -360,7 +370,12 @@ reflow) tracks the selection. `index` is `nil` for the **message** (the default)
 or `1..N` for a ref decoration. Refs are pinned to the right edge, so `l`
 (dir +1) moves right onto the refs starting at the first and `h` (dir -1) moves
 left back to the message; `move_selection(pos, count, dir)` is the pure
-clamp-step (no wrap).
+clamp-step (no wrap). In the `dual` label mode the refs live on a virtual branch
+line the cursor cannot reach: `place_cursor` finds the selected ref's byte column
+via `ref_byte_col`, which fails on a virtual-line label, so the cursor falls back
+to the message while the label highlights on the branch line (the same fallback
+the `+N` overflow uses). The `CursorMoved` handler pre-selects index `1` when it
+lands on a labelled row in `dual` mode, so the first label is already active.
 
 `decoration_texts(commit)` is the single source for the decoration strings
 (branch groups then tags), so `display_item` (rendering + the `palette.selected`
@@ -492,14 +507,22 @@ A reusable virtualized list widget over `snacks.win`.
   *display-only* change (e.g. the `i` lane-id toggle) just calls `refresh()`;
   a *layout* change (e.g. the `m` style cycle) first re-lays-out `repo.order`
   via `refresh_columns` (Phase 1, mutating each item's columns in place) then
-  calls `refresh()`. Because there is one buffer line per commit (split/merge are
-  virtual lines), neither adds or removes buffer lines — this is the
+  calls `refresh()`. Because there is one buffer line per commit (split/merge and
+  the dual-mode branch line are virtual lines), neither adds or removes buffer
+  lines — this is the
   reflow-without-reopen path the §10 interactive views (collapse / pin /
   toggle) will build on.
 - **Lazy column computation** — `refresh_columns` computes an item's display
   columns (via `model.display`) only when first needed, and recomputes the
   shared per-column max widths used to align `above`/`line`/`below` fields. The
-  `flex` column is excluded from that max (it sizes per row, not by alignment).
+  `flex` column is excluded from that max (it sizes per row, not by alignment) —
+  in every field, since the dual-mode branch line carries its labels in the flex
+  column and they must not drive the aligned widths.
+- **Stacked virtual rows** — `above`/`below` are each a **list of rows** (every
+  row a column array), so a single buffer line can carry several stacked virtual
+  lines. The graph uses this for `dual` mode, emitting `[split, branch]` above a
+  commit (top to bottom; the last row renders nearest the commit line). A row
+  whose only content is a single column array is just a one-row list.
 - **Flex column + right-pinned items** — `build_line` lays out the `line` field:
   columns before `model.flex` are fixed (aligned); the flex column fills the
   remaining window width (truncated with `…`); and the row's `line_right` items
@@ -509,7 +532,8 @@ A reusable virtualized list widget over `snacks.win`.
   message keeps its floor; the leftover collapses into a `+N` marker. This is
   per-row, not an aligned column, so navigation stays line-by-line (spec §6).
 - **Rendering** — `display(win, …)` writes real buffer lines for the `line`
-  field and attaches `above`/`below` as virtual lines (extmarks). It takes the
+  field and attaches each `above`/`below` row as a virtual line within one
+  extmark per buffer line (`virt_lines` holding the stacked rows). It takes the
   window (not just the buffer) because the flex/right layout needs its width.
 - **Width fitting** — `fix_width` pads/truncates a `DisplayItem` (or a plain
   string, normalised to one — the `above`/`below` lines mix string spacers with
@@ -529,8 +553,10 @@ A reusable virtualized list widget over `snacks.win`.
   it. `pack_right` is exposed via `listview._internal` for testing.
 
 The buffer holds one (blank, then filled) line per item; all graph content
-for `line` rows lives in the real buffer text, while split/merge rows are
-virtual lines anchored to their commit.
+for `line` rows lives in the real buffer text, while the split/merge rows and the
+dual-mode branch line are virtual lines anchored to their commit (so the
+one-buffer-line-per-commit model — and the navigation/cone math that rests on it
+— is unchanged regardless of label mode).
 
 ## File layout
 

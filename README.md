@@ -93,6 +93,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `q` | Close the graph |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
+| `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<CR>` | Open the commit view for the commit on the current row |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
@@ -102,11 +103,17 @@ Opens the graph for the repository at Neovim's current working directory.
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
 
-The footer shows the active mode and whether the graph is mirrored
-(e.g. `Mode: inline  (mirrored)`).
+The footer shows the active merge mode, the ref label mode, and whether the graph
+is mirrored (e.g. `Mode: inline | Refs: refs right  (mirrored)`).
 
-Ref labels are pinned to the right edge of each row, with the message filling
-the gap (truncated with `…`); a `+N` marker stands in for labels that don't fit.
+Ref labels have three placements, cycled with `B` (`label_mode`):
+
+- **right** (default) — pinned to the right edge of each row, with the message
+  filling the gap (truncated with `…`); a `+N` marker stands in for labels that
+  don't fit.
+- **inline** — left-aligned right after the graph, before the message.
+- **dual** — on their own line above the commit's message (only for commits that
+  have labels); landing on such a row pre-selects the first label.
 
 Pressing `<CR>` on a commit opens the **commit view** — a read-only float with
 that commit's full details (hash, refs, author, committer when it differs,
@@ -180,6 +187,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
+    label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     diff = {
         -- External diff provider, operating on a git range (§11.5). Default opens
         -- diffview; override to use another plugin, or set open = nil to disable.
@@ -209,9 +217,14 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =
   "relative"`). Toggle live with `d`.
-- **`message_min`** — ref labels are pinned to the right edge of the row and use
-  the free width; the message keeps at least `message_min` columns (truncated
-  with `…`), and refs that don't fit collapse into a `+N` marker.
+- **`message_min`** — in the default `right` label mode the ref labels are pinned
+  to the right edge of the row and use the free width; the message keeps at least
+  `message_min` columns (truncated with `…`), and refs that don't fit collapse
+  into a `+N` marker.
+- **`label_mode`** — where ref labels are placed: `"right"` (default, the
+  right-edge layout above), `"inline"` (left-aligned before the message), or
+  `"dual"` (on a separate line above the commit's message). Cycle live with `B`.
+  See [specification.md](specification.md) §6.1.
 - **`diff`** — the external diff provider (`D` and the commit view's action
   label). `open` is called with a `DiffRange` (`{ rev, from, to }` — `rev` is a
   git rev-range like `<hash>^!`) and defaults to opening diffview; `label` is the

@@ -95,7 +95,8 @@ describe("refresh_columns", function()
     -- Regression: aligned column widths must be driven by `below` (merge) lines
     -- too, not just `above`/`line`/`text`. A `below` line wider than every other
     -- line previously left model.columns[j] = nil, which fix_width then compared
-    -- against (listview.lua "attempt to compare number with nil").
+    -- against (listview.lua "attempt to compare number with nil"). `below` is now
+    -- a list of rows (stacked virtual lines), so the row is wrapped once.
     it("sizes columns from below (merge) lines", function()
         local model = {
             flex = nil,
@@ -105,10 +106,10 @@ describe("refresh_columns", function()
                 if data == 1 then
                     return { line = { { text = "A" } } }
                 end
-                -- a merge line below, wider than any commit line
+                -- a merge line below (one row), wider than any commit line
                 return {
                     line = { { text = "B" } },
-                    below = { { text = "X" }, { text = "Y" }, { text = "Z" } },
+                    below = { { { text = "X" }, { text = "Y" }, { text = "Z" } } },
                 }
             end,
         }
@@ -116,5 +117,27 @@ describe("refresh_columns", function()
         assert.equals(3, #model.columns)
         assert.is_not_nil(model.columns[3]) -- was nil before the fix
         assert.equals(1, model.columns[3])
+    end)
+
+    -- Stacked virtual rows: `above`/`below` may carry several rows (e.g. the
+    -- dual-mode branch line on top of a split line), each driving the shared
+    -- widths independently.
+    it("sizes columns from every stacked above/below row", function()
+        local model = {
+            flex = nil,
+            columns = {},
+            items = { { data = 1 } },
+            display = function()
+                return {
+                    line = { { text = "B" } },
+                    above = {
+                        { { text = "" }, { text = "" }, { text = "wide split" } },
+                        { { text = "" }, { text = "" }, { text = "x" } },
+                    },
+                }
+            end,
+        }
+        refresh_columns(nil, model, 1, 1)
+        assert.equals(#"wide split", model.columns[3]) -- the wider row wins
     end)
 end)

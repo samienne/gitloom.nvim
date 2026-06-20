@@ -132,8 +132,15 @@ Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display)
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
-  `ref_byte_col` (h/l ref selection + cursor parking), and `pack_right`
-  (the right-pinned ref width budget)
+  `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
+  (the right-pinned ref width budget), and `refresh_columns` width aggregation
+  from `below` and from every stacked `above`/`below` row (spec §6.1)
+- `tests/label_mode_spec.lua` — the dual label mode's branch line (spec §6.1):
+  `passthrough_columns` (a lane entering from above → a vertical keeping its
+  colour/edges; a column with no up-lane → blank; a crossing keeps only its
+  through-vertical; edge objects shared so §12 dimming still applies) and its
+  rendering via `get_column_chars` (only `│`/blanks — no node or junctions — each
+  vertical coloured by its lane slot)
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
   date formatters (`format_absolute`, `format_relative`)
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
@@ -182,7 +189,8 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
-`columns.layout`), and `get_column_chars` (Phase 2, the renderer).
+`columns.layout`), `get_column_chars` (Phase 2, the renderer), and
+`passthrough_columns` (the dual label mode's vertical-only branch line; §6.1).
 `columns.layout` is reached via `require("gitloom.columns")`.
 `listview._internal` exposes `pack_right` (the right-pin budget packer) and
 `refresh_columns` (the column-width packer).
@@ -262,6 +270,17 @@ Details not covered by the spec or architecture:
   "Relationship to loomworks" before deduplicating.
 - **setup() config is not yet wired** to `:GitloomGraph` (specification.md
   §8 "Known gap"). The command uses built-in defaults.
+- **Ref label modes** (`opts.label_mode`, cycled by `B`; spec §6.1) are a
+  render-only choice in `display_item`: `right` puts refs in `line_right`
+  (right-pinned, default), `inline` composes them into the flex column before the
+  message, `dual` emits them on a virtual **branch line** above the commit. The
+  branch line is a stacked `above` row (the listview's `above`/`below` are now a
+  *list of rows*) whose graph is `passthrough_columns(item.columns)`. Dual keeps
+  the cursor on the commit line (the label is on a virtual line `ref_byte_col`
+  can't find) and the `CursorMoved` handler pre-selects the first label on a
+  labelled row — so the one-buffer-line-per-commit model is unchanged. This was
+  built virtual-line-first by design; switching the branch line to a real buffer
+  line (cursor physically on it) is the deferred, more invasive alternative.
 - **`allow_merge_on_split` — the lane handoff**: with that flag on, an extra
   parent reuses a column the merge just freed, so one cell legitimately holds an
   ending child edge and a starting parent edge — two turns, two different lanes.

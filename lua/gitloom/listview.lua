@@ -61,6 +61,20 @@ local function create_win(opts)
     return w
 end
 
+--- The column-array rows of a DisplayElement field. `line`/`text` are a single
+--- row (a flat column array); `above`/`below` are a **list of rows** (stacked
+--- virtual lines), so a commit can carry several (e.g. a split line and the
+--- dual-mode branch line). Always returns a list of rows.
+---@param element table
+---@param field string
+---@return table[]
+local function field_rows(element, field)
+    local v = element[field]
+    if not v then return {} end
+    if field == "above" or field == "below" then return v end
+    return { v }
+end
+
 --- 1-based indexing
 ---@param win integer?   the list window (unused here; nil in unit tests)
 ---@param model ListViewModel
@@ -73,45 +87,52 @@ local function refresh_columns(win, model, first, last)
 
     local changed = false
 
-    for _, field in ipairs({ "above", "below", "line", "text" }) do
+    -- The flex column (e.g. the message, or the dual-mode branch line's labels)
+    -- sizes per row, not by alignment, so it never drives the shared max widths.
+    local function counts(j)
+        return not (model.flex and j == model.flex)
+    end
+
+    -- Compute any newly-visible items and normalise string columns to
+    -- DisplayItems. A freshly computed item means the widths may need a redo.
+    for i = first, last do
+        local item = model.items[i]
+        if item and not item.columns then
+            item.columns = model.display(item.data)
+            for _, field in ipairs({ "above", "below", "line", "text" }) do
+                for _, row in ipairs(field_rows(item.columns, field)) do
+                    for j, column in ipairs(row) do
+                        if type(column) == "string" then
+                            row[j] = { text = column, highlight = nil }
+                        end
+                    end
+                end
+            end
+            changed = true
+        end
+    end
+
+    -- Even without a new item, a row whose column widths no longer match the
+    -- shared maxima forces a recompute (e.g. after a display-mode toggle).
+    if not changed then
         for i = first, last do
             local item = model.items[i]
-            if item and not item.columns then
-                item.columns = model.display(item.data)
-                if item.columns[field] then
-                    for j, column in ipairs(item.columns[field]) do
-                        if type(column) == "string" then
-                            item.columns[field][j] = {
-                                text = column,
-                                highlight = nil
-                            }
+            if item and item.columns then
+                for _, field in ipairs({ "above", "below", "line", "text" }) do
+                    for _, row in ipairs(field_rows(item.columns, field)) do
+                        for j = 1, #row do
+                            if counts(j) and (not model.columns[j]
+                                    or vim.fn.strdisplaywidth(row[j].text) ~= model.columns[j]) then
+                                changed = true
+                                break
+                            end
                         end
+                        if changed then break end
                     end
-                    changed = true
+                    if changed then break end
                 end
             end
-        end
-
-        if not changed then
-            for i = first, last do
-                local item = model.items[i]
-                if item and item.columns[field] then
-                    if #item.columns[field] ~= #model.columns then
-                        changed = true
-                    end
-
-                    for j = 1, #item.columns[field] do
-                        if not model.columns[j] or vim.fn.strdisplaywidth(item.columns[field][j].text) ~= model.columns[j] then
-                            changed = true
-                            break
-                        end
-                    end
-
-                    if changed then
-                        break
-                    end
-                end
-            end
+            if changed then break end
         end
     end
 
@@ -120,15 +141,13 @@ local function refresh_columns(win, model, first, last)
         for i = first, last do
             local item = model.items[i]
             for _, field in ipairs({ "above", "below", "line", "text" }) do
-                if item and item.columns[field] then
-                    for j, column in ipairs(item.columns[field]) do
-                        -- The flex column (e.g. the message) fills the remaining
-                        -- width per row, so it must not drive the aligned widths.
-                        if not (field == "line" and model.flex and j == model.flex) then
-                            if #new_columns < j then
-                                new_columns[j] = vim.fn.strdisplaywidth(column.text)
-                            else
-                                new_columns[j] = math.max(vim.fn.strdisplaywidth(column.text), new_columns[j])
+                if item and item.columns then
+                    for _, row in ipairs(field_rows(item.columns, field)) do
+                        for j, column in ipairs(row) do
+                            if counts(j) then
+                                new_columns[j] = math.max(
+                                    vim.fn.strdisplaywidth(column.text),
+                                    new_columns[j] or 0)
                             end
                         end
                     end
@@ -153,9 +172,9 @@ end
 ---@field align? "left"|"right"  column padding side (default left)
 
 ---@class DisplayElement
----@field above? (DisplayItem|string)[]
+---@field above? (DisplayItem|string)[][]  stacked virtual rows above (each a column array)
 ---@field line (DisplayItem|string)[]
----@field below? (DisplayItem|string)[]
+---@field below? (DisplayItem|string)[][]  stacked virtual rows below (each a column array)
 ---@field line_right? DisplayItem[]  right-pinned items for the line (e.g. refs)
 
 --- Requested width in display cells. With `ellipsis`, truncation appends "…"
@@ -405,6 +424,29 @@ local function build_line(win, model, columns, right)
     return line, highlights
 end
 
+--- Build the extmark `virt_lines` entries for one buffer line's stacked virtual
+--- rows (each `above`/`below` row → one virtual line). The flex column is drawn
+--- at its natural width (no pad/truncate) so the dual-mode branch line's labels
+--- are not clipped; the other columns align to the shared maxima.
+---@param model ListViewModel
+---@param rows table[]   list of column-array rows
+---@return table[]       list of virt_text chunk-lists
+local function build_virt_rows(model, rows)
+    local out = {}
+    for _, row in ipairs(rows) do
+        local cols = {}
+        for j, column in ipairs(row) do
+            if model.flex and j == model.flex then
+                cols[#cols + 1] = (type(column) == "string") and { text = column } or column
+            else
+                cols[#cols + 1] = fix_width(column, model.columns[j] or 0)
+            end
+        end
+        out[#out + 1] = build_virt_text_chunks(compose(cols))
+    end
+    return out
+end
+
 --- 1-based indexing, inclusive last
 ---@param win integer
 ---@param buf integer
@@ -423,8 +465,8 @@ local function display(win, buf, model, first, last)
         local item = model.items[i]
 
         local line = ""
-        local above = {}
-        local below = {}
+        local above_rows = {}
+        local below_rows = {}
         if item then
             local built, hls = build_line(win, model, item.columns.line, item.columns.line_right)
             line = built
@@ -437,31 +479,16 @@ local function display(win, buf, model, first, last)
                 }
             end
 
-            for j, column in ipairs(item.columns.above or {}) do
-                local fixed = fix_width(column, model.columns[j])
-                table.insert(above, fixed)
-            end
-
-            for j, column in ipairs(item.columns.below or {}) do
-                local fixed = fix_width(column, model.columns[j])
-                table.insert(below, fixed)
-            end
+            above_rows = build_virt_rows(model, field_rows(item.columns, "above"))
+            below_rows = build_virt_rows(model, field_rows(item.columns, "below"))
         end
 
-        if #above > 0 then
-            local chunks = build_virt_text_chunks(compose(above))
-            table.insert(virt_lines, {
-                line = i - 1,
-                chunks = chunks
-            })
+        if #above_rows > 0 then
+            table.insert(virt_lines, { line = i - 1, rows = above_rows })
         end
 
-        if #below > 0 then
-            local chunks = build_virt_text_chunks(compose(below))
-            table.insert(virt_lines_below, {
-                line = i - 1,
-                chunks = chunks
-            })
+        if #below_rows > 0 then
+            table.insert(virt_lines_below, { line = i - 1, rows = below_rows })
         end
 
         table.insert(lines, line)
@@ -481,17 +508,19 @@ local function display(win, buf, model, first, last)
         })
     end
 
-    for _, line in ipairs(virt_lines) do
-        vim.api.nvim_buf_set_extmark(buf, namespace, line.line, 0, {
-            virt_lines = { line.chunks },
+    -- Each entry's `rows` are stacked top-to-bottom; above a line the last row
+    -- renders nearest the buffer line (so graph emits [split, branch]).
+    for _, vl in ipairs(virt_lines) do
+        vim.api.nvim_buf_set_extmark(buf, namespace, vl.line, 0, {
+            virt_lines = vl.rows,
             virt_text_pos = "eol",
             virt_lines_above = true,
         })
     end
 
-    for _, line in ipairs(virt_lines_below) do
-        vim.api.nvim_buf_set_extmark(buf, namespace, line.line, 0, {
-            virt_lines = { line.chunks },
+    for _, vl in ipairs(virt_lines_below) do
+        vim.api.nvim_buf_set_extmark(buf, namespace, vl.line, 0, {
+            virt_lines = vl.rows,
             virt_text_pos = "eol",
             virt_lines_above = false,
         })
