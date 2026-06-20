@@ -17,7 +17,8 @@
 --- Output shape matches the legacy build_graph so Phase 2 (get_column_chars) and
 --- the invariant tests consume it unchanged: rows of { columns, parent_lanes,
 --- child_lanes }, each track { connectivity, lanes (Segment[]), has_commit,
---- commit, id, begin, parent }.
+--- commit, id, color, begin, parent }. `id` is the lane's stable identity;
+--- `color` is its palette slot, allocated from a recycling free list (below).
 local M = {}
 
 ---@param t table
@@ -51,6 +52,31 @@ function M.layout(opts, items)
         return next_id
     end
 
+    -- Lane colour is allocated from a FIFO **free list** of palette slots, sized
+    -- to `palette.tracks`. A slot is removed when a lane takes it and returned
+    -- (to the back, so it is not reused immediately) when a lane ends without
+    -- being continued — so concurrent lanes never share a colour while slots
+    -- last. When the list runs out, a slot is *duplicated* (round-robin) so wide
+    -- graphs still draw. New lanes allocate *before* ended lanes return their
+    -- slots, so a colour just vacated on a line is never reused on that same line.
+    local ntracks = (opts.palette and opts.palette.tracks and #opts.palette.tracks) or 8
+    local free, in_free = {}, {} -- queue array + membership set (uniqueness check)
+    for i = 1, ntracks do free[i] = i; in_free[i] = true end
+    local qhead, qtail, dup = 1, ntracks, 0
+    local function alloc_color()
+        if qhead <= qtail then
+            local c = free[qhead]
+            free[qhead] = nil; qhead = qhead + 1; in_free[c] = false
+            return c
+        end
+        dup = (dup % ntracks) + 1 -- exhausted: hand out a duplicate
+        return dup
+    end
+    local function free_color(c)
+        if not c or in_free[c] then return end -- uniqueness check
+        in_free[c] = true; qtail = qtail + 1; free[qtail] = c
+    end
+
     local rows = {}
     local active = {} -- col -> Lane flowing down into the current row
 
@@ -63,14 +89,14 @@ function M.layout(opts, items)
         -- descent into a merge / ascent out of a split): it lights if *any* of its
         -- edges is in the cone, which is what keeps a non-trunk cone lane connected
         -- through the hub.
-        local function add_seg(j, c, edges, id)
+        local function add_seg(j, c, edges, id, color)
             cells[j] = cells[j] or {}
             cells[j][#cells[j] + 1] = {
-                id = id, begin = edges[1] and edges[1].begin, parent = edges[1] and edges[1].parent,
+                id = id, color = color, begin = edges[1] and edges[1].begin, parent = edges[1] and edges[1].parent,
                 connectivity = conn(c), edges = edges,
             }
         end
-        local function add(j, lane, c) add_seg(j, c, { lane }, lane.id) end
+        local function add(j, lane, c) add_seg(j, c, { lane }, lane.id, lane.color) end
         local function draw(lane, lo, hi, up_col, down_col)
             for m = lo, hi do
                 local c = { left = m > lo or nil, right = m < hi or nil }
@@ -96,6 +122,7 @@ function M.layout(opts, items)
                 has_commit = commit_col ~= nil and j == commit_col,
                 commit = (commit_col ~= nil and j == commit_col) and C or nil,
                 id = segs[1] and segs[1].id or nil,
+                color = segs[1] and segs[1].color or nil,
                 begin = segs[1] and segs[1].begin or nil,
                 parent = segs[1] and segs[1].parent or nil,
             }
@@ -125,11 +152,20 @@ function M.layout(opts, items)
         -- where a lane is genuinely born: a branch head (a tip's first parent) and
         -- every extra parent of a merge.
         local trunk_id = incoming[1] and incoming[1].lane.id
+        local trunk_color = incoming[1] and incoming[1].lane.color
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
             local id = (i == 1 and trunk_id) or new_id()
-            outgoing[#outgoing + 1] = { lane = { id = id, begin = C, parent = p, highlighted = false } }
+            local color = (i == 1 and trunk_color) or alloc_color()
+            outgoing[#outgoing + 1] = { lane = { id = id, color = color, begin = C, parent = p, highlighted = false } }
         end
+
+        -- Return ended lanes' colours *after* allocating the outgoing ones above,
+        -- so a slot freed here cannot be reused by a lane born on the same line.
+        -- Every non-trunk incoming child terminates at C; the trunk terminates
+        -- too only when C has no parents (no first-parent lane continues it).
+        for i = 2, #incoming do free_color(incoming[i].lane.color) end
+        if #incoming > 0 and #outgoing == 0 then free_color(incoming[1].lane.color) end
 
         -- The commit sits where its leftmost child arrives, or the leftmost free
         -- column for a tip.
@@ -164,10 +200,10 @@ function M.layout(opts, items)
             -- Only the trunk arrives from directly above the commit column; the
             -- single descent into the commit is shared by every converging child,
             -- so it carries them all (lights if any child is in the cone).
-            add_seg(cc, { up = true }, { trunk.lane }, trunk.lane.id)
+            add_seg(cc, { up = true }, { trunk.lane }, trunk.lane.id, trunk.lane.color)
             local descent = {}
             for _, inc in ipairs(incoming) do descent[#descent + 1] = inc.lane end
-            add_seg(cc, { down = true }, descent, trunk.lane.id)
+            add_seg(cc, { down = true }, descent, trunk.lane.id, trunk.lane.color)
             for i = 2, #incoming do
                 local inc = incoming[i]
                 draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
@@ -267,8 +303,8 @@ function M.layout(opts, items)
             if outgoing[1] then
                 local ascent = {}
                 for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
-                madd(cc, { up = true }, ascent, outgoing[1].lane.id)
-                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id)
+                madd(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
+                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
             end
             for i = 2, #outgoing do
                 local o = outgoing[i]
