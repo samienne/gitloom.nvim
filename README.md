@@ -205,6 +205,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     highlight = true,        -- reachability dimming (§12) on; toggle with H
     collapse_merged = true,  -- first-parent focus (§10.7) on; toggle with c
     pack_markers = true,     -- pack concurrent collapsed heads (§10.4) on; toggle with p
+    junction_markers = true, -- draw kept fork/merge junctions node-less (§10.4)
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
@@ -237,6 +238,11 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`collapse_merged`** — whether the first-parent focus (§10.7) starts enabled
   (default `true`): the current branch's mainline in full, every other branch
   collapsed. Toggle live with `c`.
+- **`pack_markers`** — whether concurrent collapsed heads pack onto shared lines
+  (§10.4; default `true`). Toggle live with `p`.
+- **`junction_markers`** — whether a fork/merge kept inside collapsed branches
+  renders node-less (just the split lanes, no message; §10.4; default `true`).
+  Off shows those junction commits in full.
 - **`date_format`** / **`date_mode`** — the author date is parsed into a
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =

@@ -251,7 +251,8 @@ row itself.
 ### 5.3 Glyphs
 
 Lanes render as box-drawing characters derived from connectivity
-(`│ ├ ┤ ┬ ┴ ╭ ╮ ╯ ╰ ─` and the terminal half-segments). Commit markers:
+(`│ ├ ┤ ┬ ┴ ┼ ╭ ╮ ╯ ╰ ─` and the terminal half-segments; `┼` only as a
+node-less junction, §10.4). Commit markers:
 
 | Marker | Meaning |
 |--------|---------|
@@ -550,12 +551,17 @@ preserve shape. An edge from a hidden region into a retained commit is dropped
 
 ### 10.4 Markers and packing
 
-A **marker** is a messageless node: a node glyph plus optional labels, and no
-message. Today the only markers are **collapsed heads** (§10.3); later, split and
-merge junctions may also become markers (§10.8). A collapsed-head marker shows
-the `◍` node (§5.3), its region's ref label(s), and a compact collapsed indicator
-(a commit count) — but no message/subject. Markers exist to show topology, not
-content.
+A **marker** is a messageless node: it shows topology, not content. There are
+two kinds:
+
+- a **collapsed head** (§10.3) — the `◍` node, the region's ref label(s), and a
+  compact collapsed indicator (a commit count), but no message/subject;
+- a **kept junction** (§10.3) — a fork/merge inside collapsed branches whose
+  commit is just a split point. It renders **node-less**: the cell draws the
+  fork/merge as box-drawing lanes (`├ ┬ ┼ …`) instead of a node, with no
+  message — so the split topology shows without the commit's visual weight. Any
+  refs on it are still shown. Controlled by the `junction_markers` option
+  (default on); off renders those junctions as full commits.
 
 **Packing.** Because markers carry no message, several may share one physical
 line. A maximal run of consecutive markers that are **mutually concurrent** (none
@@ -625,9 +631,9 @@ all-normal.
   commits, not next to other heads) packing rarely fires. Making it effective
   needs **reordering**: cluster concurrent markers into a band within their valid
   topological range (a merged head's range is its merge … its fork), then pack.
-  Beyond that: packing *junctions* (splits/merges) as markers too, and letting
-  markers ride on message-bearing lines when they fit, toward a fully adaptive
-  density (greedy row packing). Deferred.
+  Beyond that: *packing* junction markers (they already render node-less, §10.4,
+  but don't yet share lines), and letting markers ride on message-bearing lines
+  when they fit, toward a fully adaptive density (greedy row packing). Deferred.
 - **Hidden connectivity** — phantom indicator vs. vanish.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow

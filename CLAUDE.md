@@ -145,8 +145,10 @@ Coverage:
   default (§10.7: trunk normal+fp, others collapsed, merge owners; mainline-full /
   merged-collapsed projection), `pack_markers` (§10.4: packing concurrent
   collapsed heads onto one line with the packed grid passing the wires-connect
-  checker; no-op when there are no markers), and a fuzz sweep feeding projections
-  through the real layout's wires-connect checks
+  checker; no-op when there are no markers), **node-less junction markers**
+  (§10.4: a kept junction renders no node glyph — node count drops — vs. a node
+  when `junction_markers` is off), and a fuzz sweep feeding projections through
+  the real layout's wires-connect checks
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), and `refresh_columns` width aggregation
@@ -323,6 +325,13 @@ Details not covered by the spec or architecture:
   ≤1 lane id and no horizontal overlap; compaction makes only safe merges
   compatible. On a packed line `h`/`l` selects a marker (`marker_units`) and
   `<CR>` expands it; the listview stays 1-item-per-line (a group is one item).
+- **Junction markers** (`opts.junction_markers`, default on; spec §10.4): a kept
+  fork/merge inside collapsed branches (a junction, flagged `junction=true` in
+  `view.project`, `collapsed=false`) renders **node-less** — `get_column_chars`
+  draws its cell as box-drawing lanes (`├ ┬ ┼ …`, the new `is_node` gate) instead
+  of a commit node, and `display_item` blanks date/author/message (keeps refs +
+  the split/merge fan lines). So the split topology shows without the commit's
+  weight. Topology model/invariants are unchanged (it stays a real node).
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic

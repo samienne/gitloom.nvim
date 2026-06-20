@@ -174,6 +174,7 @@ local STUBS = {
     ["─"] = { l = true, r = true },
     ["├"] = { u = true, d = true, r = true },
     ["┤"] = { u = true, d = true, l = true },
+    ["┼"] = { u = true, d = true, l = true, r = true },
     ["┬"] = { l = true, r = true, d = true },
     ["┴"] = { l = true, r = true, u = true },
     ["╭"] = { d = true, r = true },

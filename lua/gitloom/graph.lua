@@ -723,6 +723,7 @@ end
 --- (specification.md §10.3); a real commit leaves them nil. The head flows
 --- through `OrderItem.commit`/`GraphColumn.commit` as a commit-like node.
 ---@field collapsed? boolean  marks a collapsed head (a contracted region)
+---@field junction? boolean   a collapsed-region fork/merge kept for topology (§10.4)
 ---@field tip? Commit         the region's newest member (for the date/author/subject)
 ---@field count? integer      number of commits the head contracts
 ---@field signature? table<string, boolean>  owner ids reaching the region (for expand)
@@ -1099,6 +1100,11 @@ local function get_column_chars(opts, columns, emphasis)
             if s.connectivity.left and s.connectivity.right then cross_h = true end
         end
         local is_crossing = cross_v ~= nil and cross_h
+        -- A kept junction (§10.4) is drawn node-less — its cell renders the fork/
+        -- merge as box-drawing lanes, not a commit node — so the split topology
+        -- shows without the commit's weight. Disabled by opts.junction_markers.
+        local is_node = track.has_commit
+            and not (opts.junction_markers ~= false and track.commit and track.commit.junction)
 
         -- The glyph's connectivity: the full cell by default, but under emphasis a
         -- real junction keeps only the arms its *highlighted* Segments draw (each
@@ -1111,7 +1117,7 @@ local function get_column_chars(opts, columns, emphasis)
             up = track.connectivity.up,
             down = track.connectivity.down,
         }
-        if emphasis and not track.has_commit and not is_crossing then
+        if emphasis and not is_node and not is_crossing then
             local hc, any = { up = false, down = false, left = false, right = false }, false
             for _, s in ipairs(track.lanes or {}) do
                 if seg_hl(s) then
@@ -1137,7 +1143,7 @@ local function get_column_chars(opts, columns, emphasis)
         local track_color = seg_color(color_seg, emphasis)
         if track.override ~= nil then
             char = track.override
-        elseif track.has_commit then
+        elseif is_node then
             -- "⏺". A collapsed head (spec §10.3) gets its own glyph so a
             -- contracted region reads differently from a real commit.
             char = track.commit.collapsed and "◍" or
@@ -1180,6 +1186,8 @@ local function get_column_chars(opts, columns, emphasis)
             char = "╵"
         elseif not c.left and not c.up and not c.right and c.down then
             char = "╷"
+        elseif c.up and c.down and c.left and c.right then
+            char = "┼" -- a node-less junction fanning both sides (§10.4)
         elseif c.up and c.down then
             char = "│"
         elseif not c.left and not c.up and not c.right and not c.down then
@@ -1439,7 +1447,9 @@ end
 ---@param commit Commit|nil
 ---@return boolean
 local function dual_two_line(opts, commit)
-    return opts.label_mode == "dual" and commit ~= nil and not commit.collapsed
+    local is_marker = commit ~= nil
+        and (commit.collapsed or (commit.junction and opts.junction_markers ~= false))
+    return opts.label_mode == "dual" and commit ~= nil and not is_marker
         and #decoration_texts(commit) > 0
 end
 
@@ -1563,6 +1573,32 @@ local function display_item(opts, item, selection_state, cone)
         end
         parts[#parts + 1] = rh(("(%d)"):format(head.count or 0), "Comment")
         return { line = { date_item, author_item, graph_item, compose(parts) } }
+    end
+
+    -- A kept junction drawn as a marker (spec §10.4): the split/merge topology
+    -- only — node-less graph (get_column_chars), any refs, but no date/author/
+    -- message. Keeps the split/merge fan virtual lines. opts.junction_markers off
+    -- falls through to the full commit render below.
+    if item.commit and item.commit.junction and opts.junction_markers ~= false then
+        local graph_item = get_column_chars(opts, item.columns, emphasis)
+        local above = {}
+        if item.split then
+            above[#above + 1] = { "", "", get_column_chars(opts, item.split, emphasis), "" }
+        end
+        local below
+        if item.merge then
+            below = { { "", "", get_column_chars(opts, item.merge, emphasis), "" } }
+        end
+        local parts = {}
+        for _, it in ipairs(get_ref_items(item.commit)) do
+            parts[#parts + 1] = it
+            parts[#parts + 1] = " "
+        end
+        return {
+            above = #above > 0 and above or nil,
+            below = below,
+            line = { "", "", graph_item, compose(parts) },
+        }
     end
 
     if item.type == "commit" then
@@ -2205,6 +2241,7 @@ end
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
 ---@field collapse_merged? boolean  first-parent focus on/off (default true); §10.7
 ---@field pack_markers? boolean  marker packing on/off (default true); §10.4
+---@field junction_markers? boolean  draw kept junctions node-less (default true); §10.4
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
@@ -2280,6 +2317,10 @@ function M.open(folder, opts)
         -- Marker packing (§10.4): merge concurrent collapsed heads onto shared
         -- lines. Toggle live with `p`; set false for one marker per line.
         pack_markers = true,
+        -- Junction markers (§10.4): draw a kept fork/merge inside collapsed
+        -- branches node-less (just the split lanes, no message). Set false to
+        -- show those junction commits in full.
+        junction_markers = true,
         -- Date column: absolute (os.date format) or relative ("3 days ago").
         -- Toggle live with d.
         date_format = "%Y-%m-%d %H:%M",

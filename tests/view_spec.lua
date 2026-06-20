@@ -353,6 +353,51 @@ describe("view.project — branch topology preservation", function()
     end)
 end)
 
+describe("junction markers — node-less junctions (§10.4)", function()
+    local function node_count(grid)
+        local n = 0
+        for _, line in ipairs(grid) do
+            for _, cell in ipairs(line) do
+                if cell.ch == "○" or cell.ch == "◉" or cell.ch == "◎" or cell.ch == "◍" then
+                    n = n + 1
+                end
+            end
+        end
+        return n
+    end
+
+    -- a,b fork from x; x->y->root, all collapsed ⇒ x is a kept junction.
+    local function fixture()
+        local items, by_hash = dag({
+            { "a", { "x" } }, { "b", { "x" } }, { "x", { "y" } },
+            { "y", { "root" } }, { "root", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            A = { "a", "collapsed" }, B = { "b", "collapsed" },
+        }))
+        return proj
+    end
+
+    it("flags a kept junction and draws it node-less (default on)", function()
+        local proj = fixture()
+        assert.is_true(proj.node_of_hash.x.junction) -- x flagged
+        local opts = helpers.big_opts() -- junction_markers defaults on
+        local grid = helpers.render_grid(opts, graph._internal.build_graph(opts, proj.items))
+        assert.same({}, helpers.check_grid(grid, opts)) -- wires still connect
+        -- the 3 heads (head_a, head_b, head_{y,root}) render nodes; x does not
+        assert.equals(3, node_count(grid))
+    end)
+
+    it("junction_markers = false renders the junction with a node", function()
+        local proj = fixture()
+        local opts = helpers.big_opts()
+        opts.junction_markers = false
+        local grid = helpers.render_grid(opts, graph._internal.build_graph(opts, proj.items))
+        assert.same({}, helpers.check_grid(grid, opts))
+        assert.equals(4, node_count(grid)) -- x now shows a node too
+    end)
+end)
+
 describe("view.project — collapsed-head rendering", function()
     it("renders a collapsed head with the ◍ node glyph (once)", function()
         local items, by_hash = dag({
