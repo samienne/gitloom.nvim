@@ -130,7 +130,15 @@ Tests use plenary.busted.
 
 Coverage:
 
-- `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display)
+- `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display),
+  `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), and the
+  branch-mode toggle helpers `next_mode` / `selected_owner_ids` (§10)
+- `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
+  signatures, the all-normal identity, hidden removal (shared ancestors kept),
+  collapsed contraction to one head with junctions kept, distinct-signature
+  regions staying separate heads, the display-mode join truth-table, the
+  collapsed `◍` glyph render, the precomputed-sig caching equivalence, and a
+  fuzz sweep feeding projections through the real layout's wires-connect checks
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), and `refresh_columns` width aggregation
@@ -146,7 +154,8 @@ Coverage:
   counts, clamping, the incremental append path) and a windowed smoke test (snacks
   stubbed with a real window) that an item renders the right number of real buffer
   lines and that `relayout` grows the buffer when a mode switch makes a commit two
-  rows
+  rows, and that `set_items` swaps the whole list and re-lays the buffer (the
+  reflow-swap primitive; §10.5)
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
   date formatters (`format_absolute`, `format_relative`)
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
@@ -195,9 +204,12 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
-`columns.layout`), `get_column_chars` (Phase 2, the renderer), and
-`passthrough_columns` (the dual label mode's vertical-only branch line; §6.1).
-`columns.layout` is reached via `require("gitloom.columns")`.
+`columns.layout`), `get_column_chars` (Phase 2, the renderer),
+`passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
+`owners_from_refs` (refs → view-builder owners; §10), and the branch-mode toggle
+helpers `next_mode` / `selected_owner_ids` (§10). `columns.layout` is reached via
+`require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
+via `require("gitloom.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
 `refresh_columns` (the column-width packer), and `rebuild_starts`/`item_index_at`
 (the buffer-line ↔ item offset map for multi-real-line items; §6.1).
@@ -267,9 +279,23 @@ Details not covered by the spec or architecture:
   continuity. **Phase 2** `get_column_chars` (in graph.lua) renders glyphs and
   colour from those Segments. `build_graph`/`refresh_columns` are Phase 1 entry
   points (both go through `columns.layout`).
+- **Branch modes — the view builder** (`view.lua`, spec §10): a pure
+  pre-Phase-1 stage projecting the immutable commit DAG + a view state (per-ref
+  `normal`/`collapsed`/`hidden`) into an **OrderItem graph** of DisplayNodes that
+  `columns.layout` lays out unchanged. `view.project` computes each commit's
+  reachability **signature**, partitions into equal-signature regions, joins to a
+  display mode, contracts each collapsed region to one `◍` head (keeping
+  junctions), drops hidden commits, and re-points edges. graph.lua keeps
+  `repo.order` (raw, 1:1 with commits) as the projection input and `repo.display`
+  (the projection) as what the listview renders and `order_at`/`mark_reachable`
+  index; `reflow()` rebuilds it and swaps via `controller.set_items`. With
+  all-normal modes the projection is the identity, so `repo.display == repo.order`
+  and streaming keeps its fast incremental path. `<CR>` cycles a selected ref's
+  mode / expands a head; signatures are cached across mode toggles (§10.5).
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
-  listview.lua is a git-agnostic reusable widget.
+  view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic
+  reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua
