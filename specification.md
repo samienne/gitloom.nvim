@@ -55,11 +55,11 @@ relative (§6). `H` toggles reachability highlighting (§12) off and on.
   since refs are pinned to the right edge, `l` moves **right** onto the refs
   (starting at the first) and `h` moves **left** back toward the message.
   Selection clamps at the last ref and resets to the message when the cursor
-  moves to another row. In the **dual** label mode (§6.1) the refs sit on their
-  own line *above* the commit, which the cursor cannot occupy: the selected
-  decoration is highlighted there while the cursor stays on the commit/message
-  line, and landing on a row that has refs **pre-selects the first** one (so
-  `h`/`l` only refine an already-active selection). This selection is the
+  moves to another row. In the **dual** label mode (§6.1) the refs sit on the
+  commit's first row (with the node) and the message on its second row, both real
+  lines the cursor occupies normally: landing on a labelled commit's first row
+  **pre-selects the first** ref (so `h`/`l` refine an already-active selection),
+  and the cursor sits physically on the selected ref. This selection is the
   substrate for the planned
   per-branch actions (collapse / hide / pin, §10); it has no effect yet. The
   row under the cursor also defines a **pivot** whose reachable history
@@ -358,16 +358,20 @@ mode — only the placement differs:
   above. This is the layout the rest of §6 describes.
 - **`inline`** — refs are rendered **left-aligned immediately after the graph,
   before the message**, on the commit line (branch first, then the subject).
-- **`dual`** — refs are moved onto a separate **branch line** drawn directly
-  above the commit's message line (left-aligned, after the graph's lanes, which
-  continue through it as vertical wires); the message stays on the commit line
-  below. Only commits that actually have ref decorations get this extra line.
-  The branch line is a virtual line (it does not change the one-buffer-line-per-
-  commit model), so selection there behaves as described in §2 (the cursor stays
-  on the commit line; landing on a labelled row pre-selects the first label). The
-  branch line stacks with the §5.2 split/merge virtual lines: a commit shows, top
-  to bottom, its split line (fan-in), then the branch line, then the commit line,
-  then its merge line (fan-out).
+- **`dual`** — a labelled commit is drawn on **two real rows**: the **first row**
+  carries the graph (with the commit's node) and the **ref labels** left-aligned
+  after it; the **second row**, directly below, carries the commit **message**,
+  with the graph's lanes continued downward as vertical wires (the same lane
+  layout, with **no node placed** on that row). Only commits that actually have
+  ref decorations get the second row; a commit without labels stays a single row
+  (node + message, as in `right` without the right-pin). Both rows are real buffer
+  lines and belong to the same commit: navigation (§2) treats them as two rows of
+  one commit — `<CR>`/`D` act on that commit from either row, and reachability
+  (§12) dims both together. The cursor parks on the **labels** on the first row
+  (landing on a labelled commit pre-selects the first label, so `h`/`l` refine it)
+  and on the **message** on the second row. The two rows stack with the §5.2
+  split/merge virtual lines as: split line (fan-in), label row, message row, merge
+  line (fan-out).
 
 In every mode an out-of-cone row dims its refs with the rest of the row (§12),
 and a selected ref is drawn with `palette.selected`.

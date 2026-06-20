@@ -80,6 +80,28 @@ describe("passthrough_columns (spec §6.1)", function()
     end)
 end)
 
+describe("passthrough_columns down (dual message row, §6.1)", function()
+    it("continues lanes leaving below as verticals", function()
+        local pt = g.passthrough_columns({
+            -- a lane born at the commit (down only, no up) -> continues below
+            col({ up = false, down = true, left = false, right = false }, 7),
+            -- a lane that only entered from above (up only) -> nothing below
+            col({ up = true, down = false, left = false, right = false }, 2),
+        }, "down")
+        assert.is_true(pt[1].connectivity.up and pt[1].connectivity.down)
+        assert.equals(7, pt[1].color)
+        assert.is_nil(pt[2].connectivity.up)
+        assert.is_nil(pt[2].connectivity.down)
+        assert.equals(0, #pt[2].lanes)
+    end)
+
+    it("keeps a pass-through lane (both up and down) on both directions", function()
+        local through = { up = true, down = true, left = false, right = false }
+        assert.is_true(g.passthrough_columns({ col(through, 4) }, "up")[1].connectivity.down)
+        assert.is_true(g.passthrough_columns({ col(through, 4) }, "down")[1].connectivity.down)
+    end)
+end)
+
 describe("branch-line rendering", function()
     local opts = helpers.opts()
 

@@ -112,8 +112,10 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   filling the gap (truncated with `…`); a `+N` marker stands in for labels that
   don't fit.
 - **inline** — left-aligned right after the graph, before the message.
-- **dual** — on their own line above the commit's message (only for commits that
-  have labels); landing on such a row pre-selects the first label.
+- **dual** — a labelled commit spans two rows: the graph + node + labels on the
+  first, the message on the second (only for commits that have labels). Both are
+  real lines for the same commit; landing on the first row pre-selects the first
+  label.
 
 Pressing `<CR>` on a commit opens the **commit view** — a read-only float with
 that commit's full details (hash, refs, author, committer when it differs,

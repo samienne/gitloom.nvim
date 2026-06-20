@@ -62,17 +62,71 @@ local function create_win(opts)
 end
 
 --- The column-array rows of a DisplayElement field. `line`/`text` are a single
---- row (a flat column array); `above`/`below` are a **list of rows** (stacked
---- virtual lines), so a commit can carry several (e.g. a split line and the
---- dual-mode branch line). Always returns a list of rows.
+--- row (a flat column array); `above`/`below`/`lines` are a **list of rows**
+--- (`above`/`below` stack as virtual lines; `lines` are the item's real buffer
+--- rows, e.g. the dual-mode label row + message row). Always returns a list of
+--- rows.
 ---@param element table
 ---@param field string
 ---@return table[]
 local function field_rows(element, field)
     local v = element[field]
     if not v then return {} end
-    if field == "above" or field == "below" then return v end
+    if field == "above" or field == "below" or field == "lines" then return v end
     return { v }
+end
+
+--- The item's **real** buffer rows (one per buffer line it occupies): the
+--- `lines` list when present (multi-line items, e.g. dual mode), else the single
+--- `line`. Each row is a column array.
+---@param element table
+---@return table[]
+local function real_rows(element)
+    if not element then return {} end
+    if element.lines then return element.lines end
+    if element.line then return { element.line } end
+    return {}
+end
+
+--- Number of real buffer lines item `i` occupies (>= 1), from the cheap
+--- `line_count` callback (reads only the item data + mode, never the rendered
+--- columns) so the buffer-line map is known without laying the item out.
+local function item_line_count(model, i)
+    local it = model.items[i]
+    if not it then return 1 end
+    return (model.line_count and model.line_count(it.data)) or 1
+end
+
+--- Rebuild the item -> first-buffer-line map (`model.starts`, 1-based) from item
+--- `from` onward, and refresh `model.total` (the buffer's real line count).
+local function rebuild_starts(model, from)
+    from = from or 1
+    local acc
+    if from <= 1 then
+        acc = 1
+    else
+        acc = model.starts[from - 1] + item_line_count(model, from - 1)
+    end
+    for i = from, #model.items do
+        model.starts[i] = acc
+        acc = acc + item_line_count(model, i)
+    end
+    model.total = acc - 1
+end
+
+--- The item index whose real-line block contains 1-based buffer line `bl`
+--- (clamped to the item range). Binary search over `model.starts`.
+local function item_index_at(model, bl)
+    local n = #model.items
+    if n == 0 then return 1 end
+    if bl <= model.starts[1] then return 1 end
+    if bl >= model.starts[n] then return n end
+    local lo, hi = 1, n
+    while lo < hi do
+        local mid = math.floor((lo + hi + 1) / 2)
+        if model.starts[mid] <= bl then lo = mid else hi = mid - 1 end
+    end
+    return lo
 end
 
 --- 1-based indexing
@@ -99,7 +153,7 @@ local function refresh_columns(win, model, first, last)
         local item = model.items[i]
         if item and not item.columns then
             item.columns = model.display(item.data)
-            for _, field in ipairs({ "above", "below", "line", "text" }) do
+            for _, field in ipairs({ "above", "below", "lines", "line", "text" }) do
                 for _, row in ipairs(field_rows(item.columns, field)) do
                     for j, column in ipairs(row) do
                         if type(column) == "string" then
@@ -118,7 +172,7 @@ local function refresh_columns(win, model, first, last)
         for i = first, last do
             local item = model.items[i]
             if item and item.columns then
-                for _, field in ipairs({ "above", "below", "line", "text" }) do
+                for _, field in ipairs({ "above", "below", "lines", "line", "text" }) do
                     for _, row in ipairs(field_rows(item.columns, field)) do
                         for j = 1, #row do
                             if counts(j) and (not model.columns[j]
@@ -140,7 +194,7 @@ local function refresh_columns(win, model, first, last)
         local new_columns = {}
         for i = first, last do
             local item = model.items[i]
-            for _, field in ipairs({ "above", "below", "line", "text" }) do
+            for _, field in ipairs({ "above", "below", "lines", "line", "text" }) do
                 if item and item.columns then
                     for _, row in ipairs(field_rows(item.columns, field)) do
                         for j, column in ipairs(row) do
@@ -173,7 +227,8 @@ end
 
 ---@class DisplayElement
 ---@field above? (DisplayItem|string)[][]  stacked virtual rows above (each a column array)
----@field line (DisplayItem|string)[]
+---@field line? (DisplayItem|string)[]   the single real row (when not multi-line)
+---@field lines? (DisplayItem|string)[][]  multiple real buffer rows (supersedes `line`)
 ---@field below? (DisplayItem|string)[][]  stacked virtual rows below (each a column array)
 ---@field line_right? DisplayItem[]  right-pinned items for the line (e.g. refs)
 
@@ -447,59 +502,68 @@ local function build_virt_rows(model, rows)
     return out
 end
 
---- 1-based indexing, inclusive last
+--- 1-based item indexing, inclusive last. An item may render several real
+--- buffer lines (`real_rows`); each item's block starts at `model.starts[i]`, so
+--- the rendered slice spans the buffer lines those blocks cover. `above`/`below`
+--- virtual rows attach to the item's first / last real line.
 ---@param win integer
 ---@param buf integer
 ---@param model ListViewModel
 ---@param first integer
 ---@param last integer
 local function display(win, buf, model, first, last)
-    first = first or 1
-    last = last or #model.items
+    if #model.items == 0 then return end
+    first = math.max(1, first or 1)
+    last = math.min(#model.items, last or #model.items)
+    if last < first then return end
 
+    local base = model.starts[first] -- 1-based first buffer line of the slice
     local lines = {}
     local highlight = {}
     local virt_lines = {}
     local virt_lines_below = {}
     for i = first, last do
         local item = model.items[i]
-
-        local line = ""
-        local above_rows = {}
-        local below_rows = {}
-        if item then
-            local built, hls = build_line(win, model, item.columns.line, item.columns.line_right)
-            line = built
-            for _, hl in ipairs(hls) do
-                highlight[#highlight + 1] = {
-                    line = i - 1,
-                    start_pos = hl.start_pos,
-                    end_pos = hl.end_pos,
-                    hl = hl.hl,
-                }
+        local abs0 = model.starts[i] - 1 -- 0-based first buffer line of this item
+        local rows = real_rows(item.columns)
+        -- The rendered rows must match the line count the buffer was allocated for
+        -- (item_line_count / line_count); clamp/pad so the slice stays aligned.
+        local n = item_line_count(model, i)
+        for r = 1, n do
+            local row = rows[r]
+            if row then
+                -- line_right (right-pinned refs) belongs to the first real row only.
+                local built, hls = build_line(win, model, row, (r == 1) and item.columns.line_right or nil)
+                lines[#lines + 1] = built
+                for _, hl in ipairs(hls) do
+                    highlight[#highlight + 1] = {
+                        line = abs0 + (r - 1),
+                        start_pos = hl.start_pos,
+                        end_pos = hl.end_pos,
+                        hl = hl.hl,
+                    }
+                end
+            else
+                lines[#lines + 1] = "" -- pad if fewer rows than allocated
             end
-
-            above_rows = build_virt_rows(model, field_rows(item.columns, "above"))
-            below_rows = build_virt_rows(model, field_rows(item.columns, "below"))
         end
 
+        local above_rows = build_virt_rows(model, field_rows(item.columns, "above"))
         if #above_rows > 0 then
-            table.insert(virt_lines, { line = i - 1, rows = above_rows })
+            table.insert(virt_lines, { line = abs0, rows = above_rows })
         end
-
+        local below_rows = build_virt_rows(model, field_rows(item.columns, "below"))
         if #below_rows > 0 then
-            table.insert(virt_lines_below, { line = i - 1, rows = below_rows })
+            table.insert(virt_lines_below, { line = abs0 + (n - 1), rows = below_rows })
         end
-
-        table.insert(lines, line)
     end
 
     vim.bo[buf].modifiable = true
     vim.bo[buf].readonly = false
 
-    -- Convert first,last from 1-based inclusive last to 0-based exclusive last.
-    vim.api.nvim_buf_set_lines(buf, first - 1, last, false, lines)
-    vim.api.nvim_buf_clear_namespace(buf, namespace, first - 1, last)
+    -- Replace exactly the buffer lines the rendered item blocks cover.
+    vim.api.nvim_buf_set_lines(buf, base - 1, base - 1 + #lines, false, lines)
+    vim.api.nvim_buf_clear_namespace(buf, namespace, base - 1, base - 1 + #lines)
 
     for _, hl in ipairs(highlight) do
         vim.api.nvim_buf_set_extmark(buf, namespace, hl.line, hl.start_pos, {
@@ -551,30 +615,37 @@ end
 ---@param items DisplayItem[]
 ---@param pos integer
 local function insert(win, model, items, pos)
-    local lines = {}
+    local old_count = #model.items
+    pos = pos or (old_count + 1)
+
+    -- Buffer line (1-based) where the new block goes, from the *pre-insert* map:
+    -- an append lands after the last real line; a mid-insert at the item's start.
+    local at = (pos <= old_count) and model.starts[pos] or (model.total + 1)
+
+    -- One blank real line per real line each new item will occupy (line_count
+    -- is known now — refs resolve before the commit stream).
+    local blanks = {}
     for i, item in ipairs(items) do
-        local table_item = {
-            index = pos, -- 1-based indexing
-            data = item
-        }
-        table_item.columns = nil
-        table_item.index = pos + i - 1
-
-        if pos then
-            table.insert(model.items, pos, table_item)
-        else
-            table.insert(model.items, table_item)
+        table.insert(model.items, pos + i - 1, { index = pos + i - 1, data = item, columns = nil })
+        local n = (model.line_count and model.line_count(item)) or 1
+        for _ = 1, n do
+            blanks[#blanks + 1] = ""
         end
-
-        table.insert(lines, "")
     end
+
+    rebuild_starts(model, pos)
 
     preserve_cursor_visual_pos(win.win, win.buf, function()
         local buf = win.buf
         vim.bo[buf].modifiable = true
         vim.bo[buf].readonly = false
-        -- Convert first,last from 1-based inclusive last to 0-based exclusive last.
-        vim.api.nvim_buf_set_lines(buf, pos - 1, pos, false, lines)
+        if old_count == 0 then
+            -- Replace the buffer's initial lone empty line, else it lingers below.
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, #blanks > 0 and blanks or { "" })
+        else
+            -- Pure insertion (start == end) at the block's buffer offset.
+            vim.api.nvim_buf_set_lines(buf, at - 1, at - 1, false, blanks)
+        end
         vim.bo[buf].modifiable = false
         vim.bo[buf].readonly = true
     end)
@@ -584,7 +655,10 @@ end
 ---@field insert fun(items: OrderItem[], pos: integer)
 ---@field remove fun(pos: integer)
 ---@field refresh fun()
----@field col_offset fun(row: integer, field: string, j: integer): integer
+---@field relayout fun()
+---@field item_at fun(buffer_line: integer): integer
+---@field item_start fun(i: integer): integer
+---@field col_offset fun(buffer_line: integer, field: string, j: integer): integer
 
 ---@alias DisplayFunction fun(item): DisplayElement
 
@@ -600,6 +674,9 @@ end
 ---@field items ListItem[]
 ---@field columns integer[]
 ---@field display DisplayFunction
+---@field line_count? fun(data: any): integer  real buffer lines per item (default 1)
+---@field starts integer[]      item -> first buffer line (1-based), see rebuild_starts
+---@field total integer         total real buffer lines across all items
 ---@field flex? integer        index of the flex column in `line` (fills width)
 ---@field message_min? integer min width kept for the flex column
 ---@field overflow_hl? string  highlight for the "+N" overflow marker
@@ -609,6 +686,7 @@ end
 ---@field display DisplayFunction
 ---@field on_redraw? OnRedrawFunction
 ---@field on_controller OnControllerFunction
+---@field line_count? fun(data: any): integer
 ---@field flex? integer
 ---@field message_min? integer
 ---@field overflow_hl? string
@@ -620,6 +698,9 @@ function M.open(opts)
         items = {},
         columns = {},
         display = opts.display,
+        line_count = opts.line_count,
+        starts = {},
+        total = 0,
         flex = opts.flex,
         message_min = opts.message_min,
         overflow_hl = opts.overflow_hl,
@@ -627,9 +708,12 @@ function M.open(opts)
 
     opts = opts or {}
     opts.namespace = namespace
+    -- The decoration provider hands us a *buffer* line range; map it to the item
+    -- range (items can span several real lines) before laying out / drawing.
     opts.on_redraw = function(winid, bufnr, top, bottom)
-        local changed = refresh_columns(winid, model, top, bottom)
-        display(winid, bufnr, model, top, bottom)
+        local first, last = item_index_at(model, top), item_index_at(model, bottom)
+        refresh_columns(winid, model, first, last)
+        display(winid, bufnr, model, first, last)
     end
 
     local win = create_win(opts or {})
@@ -645,31 +729,78 @@ function M.open(opts)
             if not item then
                 return
             end
-
+            local at = model.starts[pos]
+            local n = item_line_count(model, pos)
             table.remove(model.items, pos)
+            rebuild_starts(model, pos)
+            local buf = win.buf
+            vim.bo[buf].modifiable = true
+            vim.bo[buf].readonly = false
+            vim.api.nvim_buf_set_lines(buf, at - 1, at - 1 + n, false, {})
+            vim.bo[buf].modifiable = false
+            vim.bo[buf].readonly = true
         end,
         move = function()
         end,
+        -- The item index whose real-line block contains a 1-based buffer line.
+        item_at = function(buffer_line)
+            return item_index_at(model, buffer_line)
+        end,
+        -- The 1-based first buffer line of item `i` (its block start).
+        item_start = function(i)
+            return model.starts[i] or i
+        end,
         -- Re-render the visible range from scratch (drops cached columns), for
         -- when the display function's output changes (e.g. a display toggle).
+        -- Line counts are unchanged here (use relayout for those).
         refresh = function()
             for _, item in ipairs(model.items) do
                 item.columns = nil
             end
-            local first, last = get_visible_range(win.win)
+            local bf, bl = get_visible_range(win.win)
+            local first, last = item_index_at(model, bf), item_index_at(model, bl)
             refresh_columns(win.win, model, first, last)
             display(win.win, win.buf, model, first, last)
         end,
-        -- Byte offset where column `j` of `field` starts on the rendered row,
-        -- summing the fixed columns before it (used to park the cursor).
-        col_offset = function(row, field, j)
-            local item = model.items[row]
-            if not item or not item.columns or not item.columns[field] then
+        -- Re-render after a change that alters per-item line counts (e.g. the B
+        -- label-mode cycle turning labelled commits into two rows). Rebuilds the
+        -- buffer-line map, resizes the buffer to the new total, and redraws.
+        relayout = function()
+            rebuild_starts(model, 1)
+            for _, item in ipairs(model.items) do
+                item.columns = nil
+            end
+            local buf = win.buf
+            local blanks = {}
+            for _ = 1, math.max(model.total, 1) do blanks[#blanks + 1] = "" end
+            vim.bo[buf].modifiable = true
+            vim.bo[buf].readonly = false
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, blanks)
+            vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
+            vim.bo[buf].modifiable = false
+            vim.bo[buf].readonly = true
+            local bf, bl = get_visible_range(win.win)
+            local first, last = item_index_at(model, bf), item_index_at(model, bl)
+            refresh_columns(win.win, model, first, last)
+            display(win.win, win.buf, model, first, last)
+        end,
+        -- Byte offset where column `j` starts on a given *buffer* line: resolve
+        -- the line to its item and sub-row, then sum the fixed columns before `j`.
+        col_offset = function(buffer_line, field, j)
+            local i = item_index_at(model, buffer_line)
+            local item = model.items[i]
+            if not item or not item.columns then
+                return 0
+            end
+            local sub = buffer_line - model.starts[i] -- 0-based row within item
+            local rows = real_rows(item.columns)
+            local row = rows[sub + 1] or rows[1]
+            if not row then
                 return 0
             end
             local off = 0
             for k = 1, (j or 1) - 1 do
-                local col = item.columns[field][k]
+                local col = row[k]
                 if col then
                     off = off + #(fix_width(col, model.columns[k] or 0).text)
                 end
@@ -693,6 +824,8 @@ end
 M._internal = {
     pack_right = pack_right,
     refresh_columns = refresh_columns,
+    rebuild_starts = rebuild_starts,
+    item_index_at = item_index_at,
 }
 
 return M
