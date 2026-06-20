@@ -243,6 +243,73 @@ describe("view.project — collapsed", function()
     end)
 end)
 
+describe("pack_markers — packing concurrent collapsed heads (§10.4)", function()
+    local function count_glyph(grid, ch)
+        local total = 0
+        for _, line in ipairs(grid) do
+            for _, cell in ipairs(line) do if cell.ch == ch then total = total + 1 end end
+        end
+        return total
+    end
+
+    it("packs two concurrent collapsed leaf heads onto one line, wires intact", function()
+        -- a and b both branch off root; both collapsed leaves ⇒ concurrent heads.
+        local items, by_hash = dag({
+            { "a", { "root" } },
+            { "b", { "root" } },
+            { "root", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            A = { "a", "collapsed" }, B = { "b", "collapsed" },
+        }))
+        local opts = helpers.big_opts()
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local packed = graph._internal.pack_markers(rows)
+        assert.is_true(#packed < #rows, "packing should reduce the row count")
+
+        local grid = helpers.render_grid(opts, packed)
+        assert.same({}, helpers.check_grid(grid, opts)) -- wires still connect
+        -- exactly the two heads, now sharing a line
+        assert.equals(2, count_glyph(grid, "◍"))
+        local shared = false
+        for _, line in ipairs(grid) do
+            local n = 0
+            for _, cell in ipairs(line) do if cell.ch == "◍" then n = n + 1 end end
+            if n >= 2 then shared = true end
+        end
+        assert.is_true(shared, "expected a line carrying two markers")
+    end)
+
+    it("does not merge non-marker (real) rows", function()
+        -- all-normal: no markers, so packing is a no-op.
+        local items = helpers.dag(helpers.random_dag(15, 3))
+        local proj = view.project(items, {})
+        local opts = helpers.big_opts()
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local packed = graph._internal.pack_markers(rows)
+        assert.equals(#rows, #packed)
+    end)
+
+    it("packed output still passes the wires-connect grid check (fuzz)", function()
+        -- The real safety net: pack random collapsed projections and feed the
+        -- packed grid through the same checker the layout uses — a bad overlay
+        -- shows up as a dangling/floating/unknown glyph or a colour break.
+        for seed = 1, 40 do
+            local items, by_hash = dag(helpers.random_dag(18, seed))
+            local ospec = {}
+            for i, it in ipairs(items) do
+                if i % 3 == 0 then ospec["r" .. i] = { it.commit.hash, "collapsed" } end
+            end
+            local proj = view.project(items, owners(by_hash, ospec))
+            local opts = helpers.big_opts()
+            local rows = graph._internal.build_graph(opts, proj.items)
+            local packed = graph._internal.pack_markers(rows)
+            local grid = helpers.render_grid(opts, packed)
+            assert.same({}, helpers.check_grid(grid, opts), "packed grid (seed " .. seed .. ")")
+        end
+    end)
+end)
+
 describe("view.project — branch topology preservation", function()
     it("keeps a fork inside a collapsed region as its own visible node", function()
         -- a,b both fork from x (x has two children); x->y->root. With A and B

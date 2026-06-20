@@ -143,8 +143,10 @@ Coverage:
   collapsed `◍` glyph render, the precomputed-sig caching equivalence, the
   first-parent-only signature (`fp_only`) and the `view.owners` first-parent
   default (§10.7: trunk normal+fp, others collapsed, merge owners; mainline-full /
-  merged-collapsed projection), and a fuzz sweep feeding projections through the
-  real layout's wires-connect checks
+  merged-collapsed projection), `pack_markers` (§10.4: packing concurrent
+  collapsed heads onto one line with the packed grid passing the wires-connect
+  checker; no-op when there are no markers), and a fuzz sweep feeding projections
+  through the real layout's wires-connect checks
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), and `refresh_columns` width aggregation
@@ -212,8 +214,9 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
-`owners_from_refs` (refs → view-builder owners; §10), and the branch-mode toggle
-helpers `next_mode` / `selected_owner_ids` (§10). `columns.layout` is reached via
+`owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
+helpers `next_mode` / `selected_owner_ids` (§10), and `pack_markers` (the
+marker-packing pass; §10.4). `columns.layout` is reached via
 `require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
 / `view.owners` via `require("gitloom.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
@@ -310,6 +313,16 @@ Details not covered by the spec or architecture:
   overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
+- **Marker packing** (`opts.pack_markers`, default on; spec §10.4, toggled by
+  `p`): a **marker** is a messageless node (today a collapsed head — `◍` + ref
+  labels + count, no subject). `pack_markers` is a post-Phase-1 pass run in
+  `reflow` after layout: it merges adjacent overlay-compatible marker rows into
+  one **marker-group** OrderItem (`type == "markers"`, holding the marker
+  DisplayNodes + merged columns) — multiple `◍` on one line, the one exception to
+  "one commit per line" (§5.1). Overlay-compatible = each column has ≤1 node and
+  ≤1 lane id and no horizontal overlap; compaction makes only safe merges
+  compatible. On a packed line `h`/`l` selects a marker (`marker_units`) and
+  `<CR>` expands it; the listview stays 1-item-per-line (a group is one item).
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic

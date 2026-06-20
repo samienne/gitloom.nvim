@@ -100,6 +100,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `h` / `l` | Select the previous / next ref decoration on the current row |
 | `H` | Toggle reachability highlighting (dimming) off / on |
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
+| `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
@@ -203,6 +204,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
     highlight = true,        -- reachability dimming (§12) on; toggle with H
     collapse_merged = true,  -- first-parent focus (§10.7) on; toggle with c
+    pack_markers = true,     -- pack concurrent collapsed heads (§10.4) on; toggle with p
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest

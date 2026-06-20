@@ -48,6 +48,7 @@ local KEYBINDS = {
     { "h/l", "Select previous / next ref on the row" },
     { "H", "Toggle reachability highlighting (dimming)" },
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
+    { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },
@@ -516,6 +517,21 @@ local function decoration_texts(commit)
     return out
 end
 
+--- The selectable units of a packed marker-group row (spec §10.4): one per
+--- marker, its text being the marker's ref decoration(s) or a "(N)" count when
+--- it carries no ref. Used for rendering, `h`/`l` selection, and `<CR>` expand.
+---@param item OrderItem  -- a type == "markers" item
+---@return { marker: table, text: string }[]
+local function marker_units(item)
+    local units = {}
+    for _, m in ipairs(item.markers or {}) do
+        local decos = decoration_texts(m)
+        local text = (#decos > 0) and table.concat(decos, " ") or ("(" .. (m.count or 0) .. ")")
+        units[#units + 1] = { marker = m, text = text }
+    end
+    return units
+end
+
 -- The branch-mode cycle order (spec §10.1), driven by `<CR>` on a selected ref.
 local MODE_CYCLE = { "normal", "collapsed", "hidden" }
 
@@ -752,8 +768,9 @@ end
 ---@field active? boolean  commit-marker emphasis state, set by mark_reachable (§12)
 
 ---@class OrderItem
----@field type "commit"|"merge"|"split"
+---@field type "commit"|"merge"|"split"|"markers"
 ---@field commit? Commit
+---@field markers? Commit[]  the packed marker DisplayNodes on a "markers" row (§10.4)
 ---@field columns GraphColumn[]
 ---@field split? GraphColumn[]
 ---@field merge? GraphColumn[]
@@ -776,6 +793,118 @@ local function refresh_columns(opts, order, _start_pos)
         order[i].parent_lanes = r.parent_lanes
         order[i].child_lanes = r.child_lanes
     end
+end
+
+--- Pack adjacent **marker** rows (collapsed heads, spec §10.4) that overlay
+--- cleanly into one *marker-group* row, so concurrent collapsed branches share a
+--- line. Conservative: across the group a column may hold at most one node and
+--- one lane id, and any overlapping (≥2-row) column must be horizontal-free —
+--- anything else ends the group. Compaction already makes only the safe merges
+--- compatible (a turn between two rows breaks vertical continuity). The packed
+--- grid is validated by the same wires-connect checker the layout uses.
+---@param items OrderItem[]
+---@return OrderItem[]
+local function pack_markers(items)
+    local function is_marker(it)
+        return it.commit ~= nil and it.commit.collapsed and it.split == nil and it.merge == nil
+    end
+
+    -- Overlay group rows into one columns array; nil if any column is incompatible.
+    local function overlay(group)
+        local width = 0
+        for _, it in ipairs(group) do
+            if #it.columns > width then width = #it.columns end
+        end
+        local cols = {}
+        for c = 1, width do
+            local node_cell, lane_id, occ, has_h, seg = nil, nil, 0, false, nil
+            for _, it in ipairs(group) do
+                local cell = it.columns[c]
+                if cell and (cell.has_commit or (cell.lanes and #cell.lanes > 0)) then
+                    occ = occ + 1
+                    if cell.has_commit then
+                        if node_cell then return nil end -- two nodes in one column
+                        node_cell = cell
+                    end
+                    for _, s in ipairs(cell.lanes or {}) do
+                        seg = seg or s
+                        if lane_id == nil then
+                            lane_id = s.id
+                        elseif lane_id ~= s.id then
+                            return nil -- two distinct lanes in one column
+                        end
+                    end
+                    local cc = cell.connectivity
+                    if cc and (cc.left or cc.right) then has_h = true end
+                end
+            end
+            if occ >= 2 and has_h then return nil end -- overlapping content + a turn
+            -- up from the topmost row, down from the bottom row; horizontals only
+            -- from a sole occupant (rejected above when overlapping).
+            local top, bot = group[1].columns[c], group[#group].columns[c]
+            local conn = {
+                up = (top and top.connectivity and top.connectivity.up) or false,
+                down = (bot and bot.connectivity and bot.connectivity.down) or false,
+                left = false,
+                right = false,
+            }
+            if occ == 1 then
+                for _, it in ipairs(group) do
+                    local cell = it.columns[c]
+                    if cell and (cell.has_commit or (cell.lanes and #cell.lanes > 0)) then
+                        conn.left = cell.connectivity.left or false
+                        conn.right = cell.connectivity.right or false
+                    end
+                end
+            end
+            local lanes = {}
+            if seg then
+                lanes[1] = {
+                    id = seg.id, color = seg.color, begin = seg.begin, parent = seg.parent,
+                    connectivity = conn, edges = seg.edges,
+                }
+            end
+            cols[c] = {
+                connectivity = conn,
+                lanes = lanes,
+                has_commit = node_cell ~= nil,
+                commit = node_cell and node_cell.commit or nil,
+                id = seg and seg.id or nil,
+                color = seg and seg.color or nil,
+                begin = seg and seg.begin or nil,
+                parent = seg and seg.parent or nil,
+            }
+        end
+        return cols
+    end
+
+    local out = {}
+    local i = 1
+    while i <= #items do
+        if is_marker(items[i]) then
+            local group, merged, j = { items[i] }, items[i].columns, i + 1
+            while j <= #items and is_marker(items[j]) do
+                local cand = vim.list_extend({}, group)
+                cand[#cand + 1] = items[j]
+                local m = overlay(cand)
+                if not m then break end
+                group, merged, j = cand, m, j + 1
+            end
+            if #group == 1 then
+                out[#out + 1] = items[i]
+            else
+                local markers = {}
+                for _, g in ipairs(group) do markers[#markers + 1] = g.commit end
+                ---@type OrderItem
+                out[#out + 1] = { type = "markers", markers = markers, columns = merged }
+            end
+            i = j
+        else
+            out[#out + 1] = items[i]
+            i = i + 1
+        end
+    end
+    return out
 end
 
 --- Owners for the view builder (specification.md §10): one per ref, carrying
@@ -1294,8 +1423,11 @@ end
 --- Tracks the current ref selection (specification.md §2). Held by commit
 --- identity so it survives reflow; `index` is 1-based into the row's selectable
 --- decorations (branch groups then tags), or nil for no selection.
+--- `commit` is the selection anchor: a Commit on a normal row, or the OrderItem
+--- itself on a packed marker-group row (§10.4). `index` is 1-based into the row's
+--- selectable units (ref decorations, or markers in a group), or nil.
 ---@class SelectionState
----@field commit Commit|nil
+---@field commit Commit|OrderItem|nil
 ---@field index integer|nil
 
 --- Whether a commit renders as **two real buffer rows** in the current label
@@ -1399,36 +1531,38 @@ local function display_item(opts, item, selection_state, cone)
 
 
 
-    -- A collapsed head (spec §10.3) stands for a whole contracted region: one
-    -- row showing the ◍ node, a "⋯ N commits" summary with the region tip's
-    -- subject, and the region's ref label(s). Always a single row (dual_two_line
-    -- excludes it), so line_count and this stay in agreement.
+    -- A packed marker-group (spec §10.4): several concurrent collapsed heads on
+    -- one line — their ◍ nodes in the graph column, then each marker's ref
+    -- label(s) inline, the selected one highlighted (`h`/`l`). No message.
+    if item.type == "markers" then
+        local graph_item = get_column_chars(opts, item.columns, emphasis)
+        local sel = (selection_state and selection_state.commit == item) and selection_state.index or nil
+        local parts = {}
+        for i, u in ipairs(marker_units(item)) do
+            if i > 1 then parts[#parts + 1] = " " end
+            parts[#parts + 1] = (i == sel) and highlight_text(u.text, palette.selected)
+                or rh(u.text, palette.branch)
+        end
+        return { line = { "", "", graph_item, compose(parts) } }
+    end
+
+    -- A collapsed head is a **marker** (spec §10.4): a messageless node standing
+    -- for a contracted region — the ◍ node, the region's ref label(s), and a
+    -- compact commit count, but no subject. Labels render inline in the flex
+    -- column regardless of label_mode. Always one row (dual_two_line excludes it).
     local head = item.commit
     if head and head.collapsed then
         local tip = head.tip
         local graph_item = get_column_chars(opts, item.columns, emphasis)
         local date_item = rh(format_date(tip and tip.date, opts) .. " ", palette.date)
         local author_item = rh((tip and tip.author or "") .. " ", palette.author)
-        local summary = compose({
-            rh(("⋯ %d commits "):format(head.count or 0), "Comment"),
-            rh((tip and tip.message) or "", palette.message),
-        })
-        local ref_items = get_ref_items(head)
-        ---@type DisplayElement
-        local element = { line = { date_item, author_item, graph_item, summary } }
-        if (opts.label_mode or "right") == "inline" then
-            local parts = {}
-            for _, it in ipairs(ref_items) do
-                parts[#parts + 1] = it
-                parts[#parts + 1] = " "
-            end
-            parts[#parts + 1] = summary
-            element.line = { date_item, author_item, graph_item, compose(parts) }
-        else
-            -- "right" and "dual" both pin the region's labels to the right edge.
-            element.line_right = #ref_items > 0 and ref_items or nil
+        local parts = {}
+        for _, it in ipairs(get_ref_items(head)) do
+            parts[#parts + 1] = it
+            parts[#parts + 1] = " "
         end
-        return element
+        parts[#parts + 1] = rh(("(%d)"):format(head.count or 0), "Comment")
+        return { line = { date_item, author_item, graph_item, compose(parts) } }
     end
 
     if item.type == "commit" then
@@ -2070,6 +2204,7 @@ end
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
 ---@field collapse_merged? boolean  first-parent focus on/off (default true); §10.7
+---@field pack_markers? boolean  marker packing on/off (default true); §10.4
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
@@ -2142,6 +2277,9 @@ function M.open(folder, opts)
         -- in full and collapse every other branch (merged and divergent). Toggle
         -- live with `c`; set false to open the plain full graph.
         collapse_merged = true,
+        -- Marker packing (§10.4): merge concurrent collapsed heads onto shared
+        -- lines. Toggle live with `p`; set false for one marker per line.
+        pack_markers = true,
         -- Date column: absolute (os.date format) or relative ("3 days ago").
         -- Toggle live with d.
         date_format = "%Y-%m-%d %H:%M",
@@ -2277,7 +2415,9 @@ function M.open(folder, opts)
         end
         local proj = viewbuilder.project(repo.order, owners, sig_cache.sig)
         refresh_columns(opts, proj.items)
-        repo.display = proj.items
+        -- Pack concurrent collapsed heads onto shared lines (spec §10.4) unless
+        -- packing is off. The unpacked, laid-out list stays the projection input.
+        repo.display = (opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
         if lv and lv.controller and lv.controller.set_items then
             lv.controller.set_items(repo.display)
         end
@@ -2414,18 +2554,13 @@ function M.open(folder, opts)
     }
 
     opts.win.keys = opts.win.keys or {}
-    -- m: cycle the merge/split style and reflow in place (no re-fetch). This
-    -- is the reflow path the interactive views (collapse/pin/toggle) will use:
-    -- relayout repo.order, then re-render. One buffer line per commit doesn't
-    -- change, so no insert/remove churn — only columns and virtual lines update.
+    -- m: cycle the merge/split style. A full reflow (re-layout from the raw order
+    -- then re-pack) — the packed display can't be relaid in place (its marker
+    -- groups aren't single commits).
     opts.win.keys.m = function()
         merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
         opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
-        refresh_columns(opts, repo.display, 1)
-        update_cone() -- columns regenerated → re-mark active for the cone (§12)
-        if lv and lv.controller then
-            lv.controller.refresh()
-        end
+        reflow()
         update_footer() -- reflect the new mode live in the footer
         place_cursor() -- widths shifted; keep the cursor on message/ref
     end
@@ -2463,7 +2598,22 @@ function M.open(folder, opts)
     opts.win.keys["<CR>"] = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = order_at(line)
-        if not item or not item.commit then
+        if not item then return end
+        -- A packed marker line: expand the selected marker (§10.4) — set its
+        -- collapsed owners normal so its branch comes back in full.
+        if item.type == "markers" then
+            local u = selection_state.index and marker_units(item)[selection_state.index]
+            if u then
+                for oid in pairs(u.marker.signature or {}) do
+                    view_state.modes[oid] = "normal"
+                end
+                reflow()
+                update_footer()
+                place_cursor()
+            end
+            return
+        end
+        if not item.commit then
             return
         end
         -- A selected ref → cycle its (group's) branch mode.
@@ -2544,6 +2694,14 @@ function M.open(folder, opts)
         update_footer()
         place_cursor()
     end
+    -- p: toggle marker packing (§10.4) — merge concurrent collapsed heads onto
+    -- shared lines vs. one per line. Changes line counts, so reflow.
+    opts.win.keys.p = function()
+        opts.pack_markers = opts.pack_markers == false
+        reflow()
+        update_footer()
+        place_cursor()
+    end
     -- i: toggle the per-lane id column before the message.
     opts.win.keys.i = function()
         show_lane_ids = not show_lane_ids
@@ -2568,6 +2726,17 @@ function M.open(folder, opts)
         return function(self)
             local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
             local item, _, sub = order_at(line)
+            -- On a packed marker line, selection moves among the markers (§10.4).
+            if item and item.type == "markers" then
+                local count = #marker_units(item)
+                local pos = (selection_state.commit == item) and selection_state.index or nil
+                selection_state.commit = item
+                selection_state.index = move_selection(pos, count, dir)
+                selection_visible = selection_state.index ~= nil
+                if lv and lv.controller then lv.controller.refresh() end
+                place_cursor()
+                return
+            end
             local commit = item and item.commit or nil
             if not commit then
                 return
@@ -2603,6 +2772,22 @@ function M.open(folder, opts)
         place_cursor = function()
             local line = vim.api.nvim_win_get_cursor(win)[1]
             local item = order_at(line)
+            -- A packed marker line: park on the selected marker's label (§10.4).
+            if item and item.type == "markers" then
+                local col = nil
+                if selection_state.commit == item and selection_state.index then
+                    local u = marker_units(item)[selection_state.index]
+                    if u then
+                        local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
+                        col = ref_byte_col(text, u.text)
+                    end
+                end
+                if not col and lv and lv.controller and lv.controller.col_offset then
+                    col = lv.controller.col_offset(line, "line", FLEX_COL)
+                end
+                pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
+                return
+            end
             if not item or not item.commit then return end
             local col = nil
             -- A selected ref: jump onto it. The label text lives on the rendered
@@ -2690,6 +2875,16 @@ function M.open(folder, opts)
                 if line == last_line then return end
                 last_line = line
                 local item, _, sub = order_at(line)
+                -- Landing on a packed marker line pre-selects its first marker
+                -- (§10.4), so h/l and <CR> act on a marker right away.
+                if item and item.type == "markers" then
+                    selection_state.commit = item
+                    selection_state.index = (#marker_units(item) > 0) and 1 or nil
+                    selection_visible = selection_state.index ~= nil
+                    place_cursor()
+                    schedule_cone_update()
+                    return
+                end
                 local commit = item and item.commit or nil
                 selection_state.commit = commit
                 -- In dual mode landing on a labelled commit's first row (sub 0,
@@ -2752,6 +2947,7 @@ M._internal = {
     owners_from_refs = owners_from_refs,
     next_mode = next_mode,
     selected_owner_ids = selected_owner_ids,
+    pack_markers = pack_markers,
 }
 
 return M
