@@ -35,15 +35,17 @@ exists primarily to exercise and validate the graph algorithm.
   working directory.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
-  graph mirroring (§5.4); `<CR>` opens the **commit view** for the commit on
-  the current row (§11); `D` opens that commit's diff in an external diff viewer
-  via the configured provider (§11.5). Two debug
+  graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
+  placements can be compared at a glance; `<CR>` opens the **commit view** for
+  the commit on the current row (§11); `D` opens that commit's diff in an
+  external diff viewer via the configured provider (§11.5). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on.
   `?` opens a float listing all keybindings. The footer shows live status
-  (the active mode, and `(mirrored)` when mirroring is on).
+  (the active merge mode and ref label mode, and `(mirrored)` when mirroring is
+  on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
   rows), with `cursorline` marking the current row (§7). The cursor is parked at
   the **commit message** rather than left at column 0. `h`/`l` move a selection
@@ -53,7 +55,12 @@ relative (§6). `H` toggles reachability highlighting (§12) off and on.
   since refs are pinned to the right edge, `l` moves **right** onto the refs
   (starting at the first) and `h` moves **left** back toward the message.
   Selection clamps at the last ref and resets to the message when the cursor
-  moves to another row. This selection is the substrate for the planned
+  moves to another row. In the **dual** label mode (§6.1) the refs sit on the
+  commit's first row (with the node) and the message on its second row, both real
+  lines the cursor occupies normally: landing on a labelled commit's first row
+  **pre-selects the first** ref (so `h`/`l` refine an already-active selection),
+  and the cursor sits physically on the selected ref. This selection is the
+  substrate for the planned
   per-branch actions (collapse / hide / pin, §10); it has no effect yet. The
   row under the cursor also defines a **pivot** whose reachable history
   (ancestors and descendants) is emphasised while everything else dims (§12).
@@ -307,12 +314,14 @@ A commit row displays, left to right:
 2. author name
 3. graph lanes (glyphs)
 4. commit subject (the message)
-5. ref decorations, pinned to the **right edge** of the row
+5. ref decorations — placed by the **label mode** (§6.1); by default pinned to
+   the **right edge** of the row
 
 The date, author, and graph are width-aligned across visible rows. The message
 and refs share the remaining width **per row** (not as a fixed aligned column,
-so navigation stays line-by-line): the refs are right-aligned at the window
-edge and the message fills the gap, truncated with `…` when it does not fit.
+so navigation stays line-by-line): in the default mode the refs are right-aligned
+at the window edge and the message fills the gap, truncated with `…` when it does
+not fit.
 
 **Ref decorations** — a `HEAD` marker on the current branch, then branch
 groups, then tags as `[name]`. Branch refs (local + remote) that share a
@@ -337,6 +346,36 @@ into the `+N` overflow can still be selected, but until it is visible it is not
 highlighted and the cursor falls back to the message (revisited with the §10
 actions).
 
+### 6.1 Ref label modes
+
+How a row's ref decorations are *placed* is selected by `label_mode` (§8) and
+cycled live with `B` (the footer shows the active mode). The grouping and the
+selectable order (HEAD marker, branch groups, then tags) are identical in every
+mode — only the placement differs:
+
+- **`right`** *(default)* — refs are pinned to the **right edge** of the commit
+  line and the message fills the gap, with the width budget and `+N` overflow
+  above. This is the layout the rest of §6 describes.
+- **`inline`** — refs are rendered **left-aligned immediately after the graph,
+  before the message**, on the commit line (branch first, then the subject).
+- **`dual`** — a labelled commit is drawn on **two real rows**: the **first row**
+  carries the graph (with the commit's node) and the **ref labels** left-aligned
+  after it; the **second row**, directly below, carries the commit **message**,
+  with the graph's lanes continued downward as vertical wires (the same lane
+  layout, with **no node placed** on that row). Only commits that actually have
+  ref decorations get the second row; a commit without labels stays a single row
+  (node + message, as in `right` without the right-pin). Both rows are real buffer
+  lines and belong to the same commit: navigation (§2) treats them as two rows of
+  one commit — `<CR>`/`D` act on that commit from either row, and reachability
+  (§12) dims both together. The cursor parks on the **labels** on the first row
+  (landing on a labelled commit pre-selects the first label, so `h`/`l` refine it)
+  and on the **message** on the second row. The two rows stack with the §5.2
+  split/merge virtual lines as: split line (fan-in), label row, message row, merge
+  line (fan-out).
+
+In every mode an out-of-cone row dims its refs with the rest of the row (§12),
+and a selected ref is drawn with `palette.selected`.
+
 ## 7. Rendering behavior
 
 - Rendering is **viewport-driven**: only rows within the visible range are
@@ -356,7 +395,7 @@ actions).
 
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, mirror, highlight,
-                 date_format, date_mode, message_min, diff }
+                 date_format, date_mode, message_min, label_mode, diff }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
 DiffRange    = { rev: string, from: Commit?, to: Commit }
@@ -394,6 +433,8 @@ DiffRange    = { rev: string, from: Commit?, to: Commit }
 - `message_min` — the minimum width always kept for the message (default `24`);
   the right-pinned refs use the rest of the free width, with overflow becoming
   `+N` (§6).
+- `label_mode` — where ref decorations are placed: `"right"` (default), `"inline"`,
+  or `"dual"` (§6.1). Cycle live with `B`.
 - `diff` — the external diff provider (§11.5): `open` is a function called with a
   `DiffRange` to open the diff (default opens diffview), and `label` is the
   commit view's action-label text (default `▶ Open diff (diffview)`). Override

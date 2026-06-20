@@ -316,6 +316,98 @@ entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
 the existing `OrderItem`s (the view holds references). Both go through
 `columns.layout` — there is no separate incremental algorithm.
 
+### Future direction: layout policies and lookahead (not yet built)
+
+This is a recorded design intent, **not** implemented. Today there is one
+layout algorithm. The note exists so that *if* we add alternative layout modes
+(below), we already agree on the shape; until then the current single-pass code
+stays as-is. Do not refactor toward this speculatively — revisit it when a
+second algorithm is actually wanted.
+
+**What varies by mode, and what never does.** Reading `columns.layout`'s
+per-commit loop, the steps sort cleanly into two buckets:
+
+- *Mode-invariant machinery* — lane lifecycle (id/trunk reuse,
+  `parent_lanes`/`child_lanes`), the colour free list, DAG classification
+  (incoming / survivors / outgoing), and Segment emission
+  (`new_line`/`draw`/`assemble` + the continuity validation). All driven by the
+  *DAG*, never by where a lane is drawn.
+- *Mode-specific policy* — **only** the column-placement decisions: the commit
+  column `cc`, the survivor compaction, the outgoing fan-out assignment (incl.
+  the `allow_merge_on_split` freed-column reuse), and the occupancy/blocking
+  model.
+
+So alternative layouts are not separate algorithms reusing shared pieces; they
+are **one driver with a replaceable placement policy**. The seam is a pure
+function:
+
+```
+place(ctx) -> { cc, survivor_cols, outgoing_cols, blocked_next }
+   ctx = { active (col -> lane), incoming, survivors, outgoing, blocked,
+           opts, hints? }
+```
+
+The driver does lifecycle + colour + emission and calls `place`; today's
+behaviour becomes the default `compact` policy. This is **functional core,
+imperative shell**: purify the part that varies (placement), and leave the
+inherently-stateful lifecycle (persistent Lane objects threaded row-to-row, the
+colour FIFO) as the shell — threading those through pure functions buys nothing.
+Decoupling lane id/colour from column placement (they are already DAG-driven,
+not column-driven) is what makes a placement policy expressible in isolation,
+and is the prerequisite for the lookahead work below.
+
+**Candidate modes.**
+
+- *Spread* — keep empty columns between occupied ones, with a restoring
+  "pressure" pulling lanes back toward the boundary. Static slack: a free
+  neighbour is usually nearby, so crossings are cheap to avoid locally. A local
+  policy; needs no lookahead.
+- *Lookahead crossing-minimization* — anticipate an incoming fan (e.g. an
+  octopus merge several rows below) and **make space early**, spreading the
+  horizontal travel over many rows (gentle diagonals) instead of one sharp cut
+  at the fan row. The current algorithm cannot do this: every decision sees only
+  the current `active` lanes and the current commit's parents — it is online,
+  greedy, single-pass.
+
+  Lookahead still fits the seam **without** breaking single-pass control flow:
+  add a mode-independent **annotation pass** that runs once and precomputes
+  forward-looking hints (lane lifespans = the row each lane's parent lands on;
+  upcoming fan widths; near-term column demand), fed into `ctx.hints`. A greedy
+  policy ignores `hints`; a lookahead policy consumes them. So lookahead is
+  "what is in `ctx`", not new control structure.
+
+Spread and lookahead are the same spectrum — spread is *static* slack, lookahead
+is *dynamic* anticipation — and may combine (spread + a small lookahead window).
+
+**Hard constraints that bound the ambition.**
+
+- *Streaming* — commits arrive incrementally from `jobstart`; you cannot look
+  past the stream frontier (those commits are not loaded). Lookahead must be
+  **bounded to a window** of already-known rows, not global.
+- *Reflow stability* — the planned interactive views (§10: collapse / pin /
+  toggle *with reflow*) rerun layout and must stay predictable: a small input
+  change must not reshuffle the whole graph. Global crossing-minimization
+  (iterative barycenter/median, Sugiyama-style) is both expensive and jumpy.
+  Prefer **bounded, local heuristics**.
+- *Determinism* — layout must be deterministic for stable rendering and testing
+  (no randomness).
+
+**Testing.** The invariant harness (`graph_helpers.lua`) tests *correctness*
+(wires connect, continuity). Crossing minimization is *quality*, so it needs a
+new kind of test: a **crossing counter** over the rendered grid, asserting a
+smart policy yields ≤ the greedy policy's count on the same DAGs (a comparative
+quality test) **while** the existing invariants still hold (a smart layout must
+still be a *valid* layout). The grid-building fuzz harness already exists, so the
+counter is a natural addition and doubles as a quality regression guard.
+
+**Sequencing, when we do this.** (1) Extract the placement-policy seam with
+current behaviour as `compact`, proven behaviour-preserving by the fuzz suite.
+(2) Add `spread` — a local policy, no lookahead — as the second real consumer
+that validates the seam's shape. (3) Add the `annotate` pass + a bounded
+lookahead policy last, against a seam already proven by a real second consumer.
+Steps 1–2 are behaviour-preserving refactors (within spec); step 3 introduces
+new layout behaviour and needs a specification.md §5 amendment first.
+
 ### Rendering to glyphs — Phase 2
 
 - `get_column_chars(opts, columns, emphasis)` — maps each `GraphColumn` to a
@@ -343,10 +435,22 @@ the existing `OrderItem`s (the view holds references). Both go through
   the column `align = "right"` so the listview right-aligns it (padding on the
   left) — keeping vertical wires column-aligned across rows of differing lane
   counts. Render-only; the model rows are untouched (specification.md §5.4).
-- `display_item(opts, item)` — assembles a `DisplayElement`: the commit `line`
-  (date, author, graph glyphs, then the message as the flex column `FLEX_COL`)
-  plus `line_right` — the ref decorations the listview pins to the right edge —
-  and optional `above`/`below` virtual lines for separate split/merge rows.
+- `display_item(opts, item)` — assembles a `DisplayElement`: the commit's real
+  line(s) plus optional `above`/`below` virtual rows for separate split/merge
+  lines. How the ref decorations are placed depends on `opts.label_mode`
+  (spec §6.1): in `right` (default) they go in `line_right`, which the listview
+  pins to the right edge; in `inline` they are composed into the flex column
+  before the message; in `dual` a **labelled** commit emits **two real rows**
+  (`DisplayElement.lines`): the first is the normal graph line (node) with the
+  labels left-aligned in the flex column, the second is a **message row** whose
+  graph column is `passthrough_columns(item.columns, "down")` — a vertical-only
+  projection of the commit's lanes that continues every down-going lane as a `│`
+  (no node), carrying the same edges so §12 dimming still applies. A `dual` commit
+  with no labels stays a single row. `B` cycles the mode.
+- `passthrough_columns(columns, dir)` — builds a vertical-only `GraphColumn` per
+  input column (`dir = "up"` keeps lanes entering from above, `"down"` lanes
+  leaving below; the rest blank), reused through `get_column_chars` for
+  glyphs/colour/dimming and mirroring. `down` is the dual-mode message row.
 
 ### Selection and navigation
 
@@ -360,7 +464,14 @@ reflow) tracks the selection. `index` is `nil` for the **message** (the default)
 or `1..N` for a ref decoration. Refs are pinned to the right edge, so `l`
 (dir +1) moves right onto the refs starting at the first and `h` (dir -1) moves
 left back to the message; `move_selection(pos, count, dir)` is the pure
-clamp-step (no wrap).
+clamp-step (no wrap). In the `dual` label mode a labelled commit occupies two
+real buffer lines: the label row (node + refs) and the message row. The graph
+keeps `repo.order` 1:1 with commits, so it translates a buffer line to its order
+index through the listview (`controller.item_at`) and remembers which sub-row the
+cursor is on; `place_cursor` parks on the selected ref on the label row (now a
+real line, so the cursor sits physically on it) and on the message on the message
+row. The `CursorMoved` handler pre-selects index `1` when it lands on a labelled
+commit's label row.
 
 `decoration_texts(commit)` is the single source for the decoration strings
 (branch groups then tags), so `display_item` (rendering + the `palette.selected`
@@ -484,22 +595,42 @@ now (see "Self-contained by design").
 A reusable virtualized list widget over `snacks.win`.
 
 - `M.open(opts)` — creates the float, a `model` (`items`, `columns`,
-  `display`), and a `controller` (`insert`, `remove`, `move`, `refresh`).
-  Installs a decoration provider that calls `on_redraw` for the visible range.
-  Returns `{ win, controller }`.
+  `display`), and a `controller` (`insert`, `remove`, `move`, `refresh`,
+  `relayout`, `item_at`). Installs a decoration provider that calls `on_redraw`
+  for the visible range. Returns `{ win, controller }`.
+- **Multi-line items** — an item may render more than one **real** buffer line
+  (the dual label mode's labelled commits are two: label row + message row). A
+  cheap `line_count(data)` callback (no `DisplayElement` build — it reads only the
+  data and current mode) gives each item its real-line count, and the model keeps
+  a prefix-sum `starts` map (item → first buffer line) plus the inverse
+  `item_at(buffer_line)`. `repo.order` stays 1:1 with items; only this map turns a
+  buffer line into an order index. `DisplayElement.lines` (a list of real rows)
+  generalises `line` (one row); a `DisplayElement` with both is read as `lines`.
+  `relayout()` recomputes the counts, resizes the buffer to the new total, rebuilds
+  `starts`, and redraws — used when a mode toggle changes line counts (`B`); the
+  count is known at `insert` time because refs resolve before the commit stream,
+  so streaming allocates the right number of blank lines up front.
 - **In-place view updates** — `controller.refresh()` drops cached columns and
   re-renders the visible range. Two reflow patterns sit on top of it: a
   *display-only* change (e.g. the `i` lane-id toggle) just calls `refresh()`;
   a *layout* change (e.g. the `m` style cycle) first re-lays-out `repo.order`
   via `refresh_columns` (Phase 1, mutating each item's columns in place) then
-  calls `refresh()`. Because there is one buffer line per commit (split/merge are
-  virtual lines), neither adds or removes buffer lines — this is the
-  reflow-without-reopen path the §10 interactive views (collapse / pin /
-  toggle) will build on.
+  calls `refresh()`; a *count* change (the `B` label-mode cycle, which turns a
+  labelled commit into two real lines or back) calls `relayout()` to resize the
+  buffer. The `m`/`M`/`d`/`H`/`i` toggles never change line counts, so they stay
+  on `refresh()`. This is the reflow-without-reopen path the §10 interactive views
+  (collapse / pin / toggle) will build on.
 - **Lazy column computation** — `refresh_columns` computes an item's display
   columns (via `model.display`) only when first needed, and recomputes the
-  shared per-column max widths used to align `above`/`line`/`below` fields. The
-  `flex` column is excluded from that max (it sizes per row, not by alignment).
+  shared per-column max widths used to align `above`/`line(s)`/`below` fields. The
+  `flex` column is excluded from that max (it sizes per row, not by alignment) —
+  in every field, since the dual-mode message row carries its message in the flex
+  column and the labels share it on the label row.
+- **Stacked virtual rows** — `above`/`below` are each a **list of rows** (every
+  row a column array), so a single buffer line can carry several stacked virtual
+  lines (e.g. split + the `down` continuation are separate concerns; split/merge
+  fan lines remain here). A row whose only content is a single column array is
+  just a one-row list.
 - **Flex column + right-pinned items** — `build_line` lays out the `line` field:
   columns before `model.flex` are fixed (aligned); the flex column fills the
   remaining window width (truncated with `…`); and the row's `line_right` items
@@ -508,9 +639,11 @@ A reusable virtualized list widget over `snacks.win`.
   natural width, capped at `message_min` — so refs fill empty space yet a long
   message keeps its floor; the leftover collapses into a `+N` marker. This is
   per-row, not an aligned column, so navigation stays line-by-line (spec §6).
-- **Rendering** — `display(win, …)` writes real buffer lines for the `line`
-  field and attaches `above`/`below` as virtual lines (extmarks). It takes the
-  window (not just the buffer) because the flex/right layout needs its width.
+- **Rendering** — `display(win, …)` writes each item's real line(s) at its mapped
+  buffer offset (`starts`) and attaches the `above`/`below` rows as virtual lines
+  (above the item's first real line, below its last) within one extmark per real
+  line (`virt_lines` holding the stacked rows). It takes the window (not just the
+  buffer) because the flex/right layout needs its width.
 - **Width fitting** — `fix_width` pads/truncates a `DisplayItem` (or a plain
   string, normalised to one — the `above`/`below` lines mix string spacers with
   items) to a target display width (UTF-8 and display-width aware), clamping
@@ -519,18 +652,22 @@ A reusable virtualized list widget over `snacks.win`.
   ranges shifted by the pad), used for the mirrored graph column. The per-column
   max widths it aligns against are driven by the `above`/`below`/`line` fields
   (`refresh_columns`).
-- **Cursor offset** — `controller.col_offset(row, field, j)` returns the byte
-  offset where column `j` starts (summing the fixed columns before it), used by
-  graph to park the cursor at the message.
+- **Cursor offset** — `controller.col_offset(buffer_line, field, j)` returns the
+  byte offset where column `j` starts on that buffer line (resolving the line to
+  its item and sub-row, then summing the fixed columns before `j`), used by graph
+  to park the cursor at the message or a label.
 - **virt_text chunks** — `build_virt_text_chunks` converts a `DisplayItem`
   into extmark `virt_text` chunks.
 - **Lazy snacks** — `snacks.win` is required lazily; only `create_win` errors if
   it is missing, so the pure helpers (e.g. `pack_right`) load under test without
   it. `pack_right` is exposed via `listview._internal` for testing.
 
-The buffer holds one (blank, then filled) line per item; all graph content
-for `line` rows lives in the real buffer text, while split/merge rows are
-virtual lines anchored to their commit.
+The buffer holds each item's blank-then-filled real line(s); graph content for
+the real rows lives in the real buffer text, while the split/merge fan lines stay
+virtual lines anchored to the item. An item is one real line everywhere except a
+labelled commit in `dual` mode (two real lines). `repo.order` stays 1:1 with
+*items* (commits); the listview's `starts`/`item_at` map turns a buffer line into
+that order index, so the navigation/cone math keeps working in order-index space.
 
 ## File layout
 

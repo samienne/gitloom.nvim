@@ -132,8 +132,21 @@ Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display)
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
-  `ref_byte_col` (h/l ref selection + cursor parking), and `pack_right`
-  (the right-pinned ref width budget)
+  `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
+  (the right-pinned ref width budget), and `refresh_columns` width aggregation
+  from `below` and from every stacked `above`/`below` row (spec §6.1)
+- `tests/label_mode_spec.lua` — the dual label mode's continuation graph
+  (spec §6.1): `passthrough_columns` in both directions (`up` keeps lanes
+  entering from above, `down` keeps lanes leaving below — the message row;
+  a crossing keeps only its through-vertical; edge objects shared so §12 dimming
+  still applies) and its rendering via `get_column_chars` (only `│`/blanks — no
+  node or junctions — each vertical coloured by its lane slot)
+- `tests/listview_spec.lua` — the multi-real-line bookkeeping (spec §6.1 dual):
+  the buffer-line ↔ item offset map (`rebuild_starts`/`item_index_at`: mixed line
+  counts, clamping, the incremental append path) and a windowed smoke test (snacks
+  stubbed with a real window) that an item renders the right number of real buffer
+  lines and that `relayout` grows the buffer when a mode switch makes a commit two
+  rows
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
   date formatters (`format_absolute`, `format_relative`)
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
@@ -182,10 +195,12 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
-`columns.layout`), and `get_column_chars` (Phase 2, the renderer).
+`columns.layout`), `get_column_chars` (Phase 2, the renderer), and
+`passthrough_columns` (the dual label mode's vertical-only branch line; §6.1).
 `columns.layout` is reached via `require("gitloom.columns")`.
-`listview._internal` exposes `pack_right` (the right-pin budget packer) and
-`refresh_columns` (the column-width packer).
+`listview._internal` exposes `pack_right` (the right-pin budget packer),
+`refresh_columns` (the column-width packer), and `rebuild_starts`/`item_index_at`
+(the buffer-line ↔ item offset map for multi-real-line items; §6.1).
 
 ### Layout testing approach
 
@@ -262,6 +277,27 @@ Details not covered by the spec or architecture:
   "Relationship to loomworks" before deduplicating.
 - **setup() config is not yet wired** to `:GitloomGraph` (specification.md
   §8 "Known gap"). The command uses built-in defaults.
+- **Ref label modes** (`opts.label_mode`, cycled by `B`; spec §6.1) are a
+  placement choice in `display_item`: `right` puts refs in `line_right`
+  (right-pinned, default), `inline` composes them into the flex column before the
+  message, `dual` draws a labelled commit on **two real buffer lines** — row 1 is
+  the graph (node) + labels, row 2 is the message with the graph continued
+  downward via `passthrough_columns(item.columns, "down")` (no node). A `dual`
+  commit with no labels stays one line. `dual_two_line(opts, commit)` is the
+  single predicate shared by the listview's `line_count` (buffer allocation) and
+  `display_item` (rendered rows) so they never disagree.
+- **Multi-real-line items**: `repo.order` stays 1:1 with commits; the listview
+  maps a *buffer line* to its order index via a prefix-sum offset
+  (`rebuild_starts`/`item_index_at`, exposed as `controller.item_at`/`item_start`).
+  graph.lua's `order_at(line)` is the only boundary translation (used by the
+  keymaps, cursor parking, and the cone viewport, which converts `w0`/`w$` to
+  order indices). `DisplayElement.lines` (a list of real rows) generalises `line`;
+  `above`/`below` are stacked virtual rows attached to the first/last real line.
+  `B` calls `controller.relayout()` (resize the buffer + rebuild the map) because
+  it changes per-item line counts; `m`/`M`/`d`/`H`/`i` stay on `refresh()`.
+  This is the deferred "real branch line" alternative, now built; the cursor sits
+  physically on the labels, and `CursorMoved` pre-selects the first label when it
+  lands on a labelled commit's first row.
 - **`allow_merge_on_split` — the lane handoff**: with that flag on, an extra
   parent reuses a column the merge just freed, so one cell legitimately holds an
   ending child edge and a starting parent edge — two turns, two different lanes.

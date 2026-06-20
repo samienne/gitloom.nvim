@@ -14,6 +14,18 @@ local MERGE_STYLES = {
 }
 local merge_style_index = 1
 
+-- Ref label placements the viewer cycles through with `B` (spec §6.1). `right`
+-- pins refs to the right edge (default); `inline` draws them left-aligned before
+-- the message on the commit line; `dual` moves them onto their own line above the
+-- message. opts.label_mode is the source of truth; this index drives the cycle
+-- and the footer label.
+local LABEL_MODES = {
+    { name = "refs right",        mode = "right" },
+    { name = "refs inline",       mode = "inline" },
+    { name = "refs on own line",  mode = "dual" },
+}
+local label_mode_index = 1
+
 -- Whether the per-lane id column (a debug aid) is shown before the message.
 -- Hidden by default; toggled with `i` in the graph window (see M.open).
 local show_lane_ids = false
@@ -29,6 +41,7 @@ local KEYBINDS = {
     { "q", "Close the graph" },
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
+    { "B", "Cycle ref label placement (right / inline / own line)" },
     { "<CR>", "Open the commit view for the row" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
@@ -43,7 +56,8 @@ local KEYBINDS = {
 -- is mirrored) plus a hint to the help float.
 ---@param mirror boolean?
 local function footer_text(mirror)
-    local status = ("Mode: %s"):format(MERGE_STYLES[merge_style_index].name)
+    local status = ("Mode: %s | Refs: %s"):format(
+        MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
     if mirror then status = status .. "  (mirrored)" end
     return status .. "    ?: help"
 end
@@ -825,6 +839,45 @@ local function mirror_columns(columns)
     return out
 end
 
+--- A vertical-only projection of a commit line's columns (spec §6.1). Every lane
+--- continuing in direction `dir` — `"up"` (entering from above) or `"down"`
+--- (leaving below; the dual-mode message row) — becomes a straight `│` in its own
+--- colour; every other column is blank. No node and no horizontal wires, so
+--- labels / the message sit cleanly to the right of the continuing graph. Each
+--- synthesized Segment keeps the original's `edges` and `color` so the
+--- reachability dimming (§12) and colour still apply. Fed through
+--- `get_column_chars` like any row (mirroring included).
+---@param columns GraphColumn[]
+---@param dir? "up"|"down"   which lanes to continue (default "up")
+---@return GraphColumn[]
+local function passthrough_columns(columns, dir)
+    dir = dir or "up"
+    local out = {}
+    for _, t in ipairs(columns or {}) do
+        if t.connectivity and t.connectivity[dir] then
+            local lanes = {}
+            for _, s in ipairs(t.lanes or {}) do
+                if s.connectivity and s.connectivity[dir] then
+                    lanes[#lanes + 1] = {
+                        connectivity = { up = true, down = true },
+                        edges = s.edges,
+                        color = s.color,
+                    }
+                end
+            end
+            out[#out + 1] = {
+                connectivity = { up = true, down = true },
+                color = t.color,
+                lanes = lanes,
+                has_commit = false,
+            }
+        else
+            out[#out + 1] = { connectivity = {}, lanes = {}, has_commit = false }
+        end
+    end
+    return out
+end
+
 local function get_column_chars(opts, columns, emphasis)
     -- Right-aligned mirror: flip the cells before deriving glyphs. The graph
     -- column is then right-aligned by the listview (fix_width align = "right").
@@ -1173,6 +1226,18 @@ end
 ---@field commit Commit|nil
 ---@field index integer|nil
 
+--- Whether a commit renders as **two real buffer rows** in the current label
+--- mode (spec §6.1): dual mode and the commit actually has selectable
+--- decorations. The single source of truth shared by the listview's
+--- `line_count` (buffer allocation) and `display_item` (the rendered rows), so
+--- they never disagree.
+---@param opts GraphOptions
+---@param commit Commit|nil
+---@return boolean
+local function dual_two_line(opts, commit)
+    return opts.label_mode == "dual" and commit ~= nil and #decoration_texts(commit) > 0
+end
+
 ---@param opts GraphOptions
 ---@param item OrderItem
 ---@param selection_state SelectionState
@@ -1262,27 +1327,61 @@ local function display_item(opts, item, selection_state, cone)
 
 
     if item.type == "commit" then
-        ---@type DisplayElement
-        local element = {
-            line = {
-                rh(format_date(item.commit.date, opts) .. " ", palette.date),
-                rh((item.commit.author or "") .. " ", palette.author),
-                get_column_chars(opts, item.columns, emphasis),
-                -- The flex (message) column: optional lane-id debug prefix, then
-                -- the subject. Refs go in line_right, pinned to the right edge.
-                compose({
-                    get_columns(item.columns),
-                    rh(item.commit.message or "", palette.message) or "",
-                }),
-            },
-            line_right = get_ref_items(item.commit),
-        }
+        local label_mode = opts.label_mode or "right"
+        local ids = get_columns(item.columns) -- optional lane-id debug prefix
+        local message = rh(item.commit.message or "", palette.message) or ""
+        local ref_items = get_ref_items(item.commit)
+
+        local date_item = rh(format_date(item.commit.date, opts) .. " ", palette.date)
+        local author_item = rh((item.commit.author or "") .. " ", palette.author)
+        local graph_item = get_column_chars(opts, item.columns, emphasis) -- the node line
+
+        -- Stacked virtual rows above (split fan-in) / below (merge fan-out).
+        local above = {}
         if item.split then
-            element.above = { "", "", get_column_chars(opts, item.split, emphasis), get_columns(item.split) }
+            above[#above + 1] = { "", "", get_column_chars(opts, item.split, emphasis), get_columns(item.split) }
+        end
+        local below
+        if item.merge then
+            below = { { "", "", get_column_chars(opts, item.merge, emphasis), get_columns(item.merge) } }
         end
 
-        if item.merge then
-            element.below = { "", "", get_column_chars(opts, item.merge, emphasis), get_columns(item.merge) }
+        ---@type DisplayElement
+        local element = { above = #above > 0 and above or nil, below = below }
+
+        if dual_two_line(opts, item.commit) then
+            -- Two real rows (§6.1): row 1 = graph (node) + labels; row 2 = the
+            -- message, the graph continued downward (down-passthrough, no node).
+            local labels = {}
+            for k, it in ipairs(ref_items) do
+                if k > 1 then labels[#labels + 1] = " " end
+                labels[#labels + 1] = it
+            end
+            element.lines = {
+                { date_item, author_item, graph_item, compose(labels) },
+                {
+                    "", "",
+                    get_column_chars(opts, passthrough_columns(item.columns, "down"), emphasis),
+                    compose({ ids, message }),
+                },
+            }
+        elseif label_mode == "inline" then
+            -- Labels left-aligned right after the graph, before the message.
+            ---@type (DisplayItem|string)[]
+            local parts = { ids }
+            for _, it in ipairs(ref_items) do
+                parts[#parts + 1] = it
+                parts[#parts + 1] = " "
+            end
+            parts[#parts + 1] = message
+            element.line = { date_item, author_item, graph_item, compose(parts) }
+        else
+            -- "right" (default) refs pinned to the right edge; "dual" commits with
+            -- no labels fall here too (single row: node + message).
+            element.line = { date_item, author_item, graph_item, compose({ ids, message }) }
+            if label_mode ~= "dual" then
+                element.line_right = ref_items
+            end
         end
 
         return element
@@ -1868,6 +1967,7 @@ end
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
+---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 
 ---@param opts GraphOptions
@@ -1939,6 +2039,9 @@ function M.open(folder, opts)
         -- Refs are pinned to the right edge and use the free width; the message
         -- keeps at least message_min, and ref overflow becomes a "+N" marker.
         message_min = 24,
+        -- Ref label placement (§6.1): "right" (default), "inline", or "dual".
+        -- Cycle live with B.
+        label_mode = "right",
         -- External diff provider (§11.5): open is called with a DiffRange; the
         -- default opens diffview. Override open/label to use another diff plugin,
         -- or set open = nil to disable (no action label, D is a no-op).
@@ -1962,6 +2065,12 @@ function M.open(folder, opts)
     -- must not mint generated slots (they would have no colour), so degrade to
     -- the curated palette + sharing.
     opts.palette.generate = (opts.palette.generate ~= false) and vim.o.termguicolors and true or false
+
+    -- Sync the cycle index to the configured label mode so B advances from it and
+    -- the footer shows the right name.
+    for i, m in ipairs(LABEL_MODES) do
+        if m.mode == opts.label_mode then label_mode_index = i break end
+    end
 
     local listview = require("gitloom.listview")
 
@@ -2001,6 +2110,19 @@ function M.open(folder, opts)
     -- it is assigned after the window opens.
     local lv
 
+    -- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
+    -- sub-row within the item. In dual mode a labelled commit spans two buffer
+    -- lines (sub 0 = label row, sub 1 = message row); the buffer line is mapped
+    -- via the listview. Without the map (or other modes) it is 1:1, sub 0.
+    local function order_at(line)
+        local idx, first = line, line
+        if lv and lv.controller and lv.controller.item_at then
+            idx = lv.controller.item_at(line)
+            first = lv.controller.item_start and lv.controller.item_start(idx) or idx
+        end
+        return repo.order[idx], idx, line - first
+    end
+
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
@@ -2009,6 +2131,12 @@ function M.open(folder, opts)
         flex = FLEX_COL,
         message_min = opts.message_min,
         overflow_hl = opts.palette.remote,
+        -- Real buffer lines per item: a dual-mode labelled commit is two rows
+        -- (label row + message row), everything else one. Cheap — reads only the
+        -- commit's refs + mode — so the listview's buffer-line map needs no layout.
+        line_count = function(item)
+            return dual_two_line(opts, item and item.commit) and 2 or 1
+        end,
         display = function(item)
             return display_item(opts, item, selection_state, view_state.cone)
         end,
@@ -2142,10 +2270,33 @@ function M.open(folder, opts)
         end
         place_cursor()
     end
-    -- <CR>: open the commit view for the commit on the current row (§11).
+    -- B: cycle the ref label placement (right / inline / dual; §6.1). The layout
+    -- is unchanged, but dual turns labelled commits into two real rows, which
+    -- changes per-item line counts — so relayout (resize the buffer + rebuild the
+    -- line map), not just refresh. Reset the selection so it re-derives under the
+    -- new mode (dual pre-selects the first label on the next cursor settle).
+    opts.win.keys.B = function()
+        label_mode_index = (label_mode_index % #LABEL_MODES) + 1
+        opts.label_mode = LABEL_MODES[label_mode_index].mode
+        selection_state.index = nil
+        if lv and lv.controller then
+            lv.controller.relayout()
+        end
+        if lv and lv.win and lv.win.win then
+            lv.win.opts.footer = footer_text(opts.mirror)
+            pcall(vim.api.nvim_win_set_config, lv.win.win, {
+                footer = lv.win.opts.footer,
+                footer_pos = "center",
+            })
+        end
+        update_cone() -- buffer lines shifted; recompute the cone over the new map
+        place_cursor()
+    end
+    -- <CR>: open the commit view for the commit on the current row (§11). In dual
+    -- mode either of a labelled commit's two rows resolves to the same commit.
     opts.win.keys["<CR>"] = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
-        local item = repo.order[line]
+        local item = order_at(line)
         if not item or not item.commit then
             return
         end
@@ -2156,7 +2307,7 @@ function M.open(folder, opts)
         local w = self and self.win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
-        local item = repo.order[line]
+        local item = order_at(line)
         if not item or not item.commit then
             return
         end
@@ -2167,7 +2318,7 @@ function M.open(folder, opts)
         local w = self and self.win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
-        local item = repo.order[line]
+        local item = order_at(line)
         if not item or not item.commit then
             return
         end
@@ -2216,9 +2367,14 @@ function M.open(folder, opts)
     local function move_ref(dir)
         return function(self)
             local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
-            local item = repo.order[line]
+            local item, _, sub = order_at(line)
             local commit = item and item.commit or nil
             if not commit then
+                return
+            end
+            -- In dual mode the labels live on the first row only; on the message
+            -- row (sub 1) there is nothing to select.
+            if opts.label_mode == "dual" and sub ~= 0 then
                 return
             end
             local count = #decoration_texts(commit)
@@ -2246,11 +2402,14 @@ function M.open(folder, opts)
 
         place_cursor = function()
             local line = vim.api.nvim_win_get_cursor(win)[1]
-            local item = repo.order[line]
+            local item = order_at(line)
             if not item or not item.commit then return end
             local col = nil
-            -- A selected ref: jump onto it (the listview pins refs to the right
-            -- edge, so find the decoration text in the rendered line).
+            -- A selected ref: jump onto it. The label text lives on the rendered
+            -- buffer line of the current row (the label row in dual; the commit
+            -- line otherwise), so find it there; if it is not on this row (e.g.
+            -- the message row, or a `+N`-collapsed ref) we fall back to the flex
+            -- column below.
             if selection_state.commit == item.commit and selection_state.index then
                 local texts = decoration_texts(item.commit)
                 if selection_state.index <= #texts then
@@ -2258,7 +2417,7 @@ function M.open(folder, opts)
                     col = ref_byte_col(text, texts[selection_state.index])
                 end
             end
-            -- Otherwise park at the start of the message column (FLEX_COL).
+            -- Otherwise park at the start of the flex column (message / labels).
             if not col and lv and lv.controller and lv.controller.col_offset then
                 col = lv.controller.col_offset(line, "line", FLEX_COL)
             end
@@ -2266,14 +2425,18 @@ function M.open(folder, opts)
         end
 
         -- Recompute the pivot's cone over the visible rows and re-mark track
-        -- activeness (§12). Cheap (O(visible)); the caller then refreshes.
+        -- activeness (§12). Cheap (O(visible)); the caller then refreshes. The
+        -- window gives *buffer* lines; map them to order indices (a dual labelled
+        -- commit spans two buffer lines) so the cone walk stays in order space.
         update_cone = function()
-            local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-            local bottom = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
-            local cur = vim.api.nvim_win_get_cursor(win)[1]
+            local topbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+            local curbuf = vim.api.nvim_win_get_cursor(win)[1]
+            local item, cur = order_at(curbuf)
+            local top = select(2, order_at(topbuf))
+            local bottom = select(2, order_at(botbuf))
             -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
             -- refresh_columns); walk them from the pivot to mark highlights (§12).
-            local item = repo.order[cur]
             if not (item and item.commit) then
                 view_state.cone = nil
                 return
@@ -2326,10 +2489,17 @@ function M.open(folder, opts)
                 local line = vim.api.nvim_win_get_cursor(win)[1]
                 if line == last_line then return end
                 last_line = line
-                local item = repo.order[line]
-                selection_state.commit = item and item.commit or nil
-                selection_state.index = nil
-                selection_visible = false
+                local item, _, sub = order_at(line)
+                local commit = item and item.commit or nil
+                selection_state.commit = commit
+                -- In dual mode landing on a labelled commit's first row (sub 0,
+                -- where the labels live) pre-selects the first one (§2/§6.1); the
+                -- message row and other modes default to the message (no
+                -- selection).
+                local auto = opts.label_mode == "dual" and sub == 0
+                    and commit and #decoration_texts(commit) > 0
+                selection_state.index = auto and 1 or nil
+                selection_visible = auto and true or false
                 -- Park the cursor now (responsive); the cone + dimming redraw is
                 -- debounced so it lands once movement stops.
                 place_cursor()
@@ -2378,6 +2548,7 @@ M._internal = {
     mark_reachable = mark_reachable,
     build_graph = build_graph,
     get_column_chars = get_column_chars,
+    passthrough_columns = passthrough_columns,
 }
 
 return M
