@@ -166,9 +166,24 @@ function M.project(items, owners, sig)
         mode[h] = mode_of(sig[h], owner_mode)
     end
 
-    -- Union-find over collapsed commits: merge adjacent same-signature ones so
-    -- each connected collapsed region becomes one head. Different signatures
-    -- stay distinct heads (the junctions between them stay visible, spec §10.3).
+    -- Only *linear* collapsed runs contract into a head; a collapsed commit that
+    -- is a **junction** — a fork (≥2 visible children) or a merge (≥2 visible
+    -- parents) — stays its own visible node so branch topology is preserved
+    -- (spec §10.3). "Visible" = not hidden, so hiding all-but-one branch demotes a
+    -- junction back to a linear commit that may collapse.
+    local function visible(h) return mode[h] ~= "hidden" end
+    local function nvis(list)
+        local n = 0
+        for _, x in ipairs(list or {}) do if visible(x.hash) then n = n + 1 end end
+        return n
+    end
+    local function is_head_member(c)
+        return mode[c.hash] == "collapsed" and nvis(c.children) <= 1 and nvis(c.parents) <= 1
+    end
+
+    -- Union-find over head-members: merge adjacent same-signature ones so each
+    -- connected linear collapsed run becomes one head. The union naturally stops
+    -- at junctions (excluded) and at signature boundaries.
     local uf = {}
     local function find(h)
         local root = h
@@ -179,15 +194,14 @@ function M.project(items, owners, sig)
         return root
     end
     for _, it in ipairs(items) do
-        local h = it.commit.hash
-        if mode[h] == "collapsed" then uf[h] = h end
+        if is_head_member(it.commit) then uf[it.commit.hash] = it.commit.hash end
     end
     for _, it in ipairs(items) do
         local c = it.commit
-        if mode[c.hash] == "collapsed" then
+        if is_head_member(c) then
             local sk = sig_key(sig[c.hash])
             for _, p in ipairs(c.parents or {}) do
-                if mode[p.hash] == "collapsed" and sig_key(sig[p.hash]) == sk then
+                if is_head_member(p) and sig_key(sig[p.hash]) == sk then
                     local ra, rb = find(c.hash), find(p.hash)
                     if ra ~= rb then uf[ra] = rb end
                 end
@@ -198,19 +212,14 @@ function M.project(items, owners, sig)
     -- Build the DisplayNodes. Newest-first iteration means the first member of a
     -- region is its newest (the tip).
     local nodes = {}
-    local node_of_hash = {} -- hash -> DisplayNode (head for collapsed members)
+    local node_of_hash = {} -- hash -> DisplayNode (head for head-members)
     local head_of_root = {}
     for _, it in ipairs(items) do
         local c = it.commit
         local h = c.hash
-        local m = mode[h]
-        if m == "normal" then
-            local dn = setmetatable(
-                { commit = c, collapsed = false, parents = {}, children = {} },
-                { __index = c })
-            nodes[#nodes + 1] = dn
-            node_of_hash[h] = dn
-        elseif m == "collapsed" then
+        if mode[h] == "hidden" then
+            -- dropped: no node
+        elseif is_head_member(c) then
             local root = find(h)
             local head = head_of_root[root]
             if not head then
@@ -229,8 +238,15 @@ function M.project(items, owners, sig)
             head.count = head.count + 1
             for _, r in ipairs(c.refs or {}) do head.refs[#head.refs + 1] = r end
             node_of_hash[h] = head
+        else
+            -- A normal commit, or a collapsed junction kept visible: a real node
+            -- (rendered as the commit, the "one commit for the junction" of §10.3).
+            local dn = setmetatable(
+                { commit = c, collapsed = false, parents = {}, children = {} },
+                { __index = c })
+            nodes[#nodes + 1] = dn
+            node_of_hash[h] = dn
         end
-        -- hidden: no node
     end
 
     -- Re-point edges through the node map: drop edges to hidden commits and

@@ -528,12 +528,18 @@ Intended consequences:
 
 ### 10.3 Contraction — collapse preserves shape, hide removes
 
-A collapsed region is contracted to exactly **one** collapsed-head row.
-Junction commits (where two or more retained owners meet) remain as their own
-rows. The projection therefore has the **same topology as the commit graph
-with each collapsed region contracted to a point**: branch and merge structure
-is preserved, only the in-between commits are gone. Edges crossing a collapsed
-region's boundary re-point to its head.
+Only a **linear run** of collapsed commits contracts to a single collapsed-head
+row. A collapsed commit that is a **junction** — a fork (two or more *visible*,
+i.e. non-hidden, children) or a merge (two or more visible parents) — is **never
+collapsed away**: it stays its own visible row, so the branching is intact. (A
+signature boundary, where owners meet, is likewise a region boundary.) Hiding
+all-but-one of a junction's branches demotes it to a linear commit that may then
+collapse.
+
+The projection therefore has the **same branch topology as the commit graph**:
+every fork and merge of the visible commits survives, with only the linear
+stretches between them contracted to heads. Edges crossing a collapsed region's
+boundary re-point to its head, so a head is never left floating.
 
 Hiding removes a region's rows outright and, unlike collapse, does **not**
 preserve shape. An edge from a hidden region into a retained commit is dropped

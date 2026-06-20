@@ -135,8 +135,11 @@ Coverage:
   branch-mode toggle helpers `next_mode` / `selected_owner_ids` (§10)
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
-  collapsed contraction to one head with junctions kept, distinct-signature
-  regions staying separate heads, the display-mode join truth-table, the
+  collapsed contraction to one head with junctions kept, **branch-topology
+  preservation** (a fork/merge — a commit with ≥2 visible children/parents — is
+  never collapsed away; no floating head; asserted on targeted cases and the
+  whole fuzz sweep), distinct-signature regions staying separate heads, the
+  display-mode join truth-table, the
   collapsed `◍` glyph render, the precomputed-sig caching equivalence, the
   first-parent-only signature (`fp_only`) and the `view.owners` first-parent
   default (§10.7: trunk normal+fp, others collapsed, merge owners; mainline-full /
@@ -287,8 +290,10 @@ Details not covered by the spec or architecture:
   `normal`/`collapsed`/`hidden`) into an **OrderItem graph** of DisplayNodes that
   `columns.layout` lays out unchanged. `view.project` computes each commit's
   reachability **signature**, partitions into equal-signature regions, joins to a
-  display mode, contracts each collapsed region to one `◍` head (keeping
-  junctions), drops hidden commits, and re-points edges. graph.lua keeps
+  display mode, contracts each **linear** collapsed run to one `◍` head while
+  keeping junctions (a fork/merge — ≥2 visible children/parents — stays a real
+  node so branch topology survives, §10.3), drops hidden commits, and re-points
+  edges. graph.lua keeps
   `repo.order` (raw, 1:1 with commits) as the projection input and `repo.display`
   (the projection) as what the listview renders and `order_at`/`mark_reachable`
   index; `reflow()` rebuilds it and swaps via `controller.set_items`. With

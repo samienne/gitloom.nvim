@@ -46,6 +46,60 @@ local function hash_set(list)
     return s
 end
 
+local function count_visible(list, mode)
+    local n = 0
+    for _, c in ipairs(list or {}) do
+        if mode[c.hash] ~= "hidden" then n = n + 1 end
+    end
+    return n
+end
+
+--- Branch topology must be preserved by the projection (the §10.3 contract): a
+--- collapsed head may only contract a *linear* run, so a commit with ≥2 visible
+--- children (a fork) or ≥2 visible parents (a merge) is never collapsed away — it
+--- stays its own visible node. Also: no visible commit is dropped, and no
+--- collapsed head floats (a region with external visible neighbours but no edge).
+local function assert_topology(proj, by_hash, label)
+    label = label and (" (" .. label .. ")") or ""
+    local mode, node_of = proj.mode, proj.node_of_hash
+    -- 1. no head's region contains a junction (fork or merge)
+    for _, n in ipairs(proj.nodes) do
+        if n.collapsed then
+            for _, h in ipairs(n.region) do
+                local c = by_hash[h]
+                assert.is_true(count_visible(c.children, mode) <= 1, "head absorbed a fork: " .. h .. label)
+                assert.is_true(count_visible(c.parents, mode) <= 1, "head absorbed a merge: " .. h .. label)
+            end
+        end
+    end
+    -- 2. every visible commit maps to a node; junctions stay real (not collapsed)
+    for h, c in pairs(by_hash) do
+        if mode[h] ~= "hidden" then
+            assert.is_not_nil(node_of[h], "visible commit dropped: " .. h .. label)
+            if count_visible(c.children, mode) >= 2 or count_visible(c.parents, mode) >= 2 then
+                assert.falsy(node_of[h].collapsed, "junction collapsed away: " .. h .. label)
+            end
+        end
+    end
+    -- 3. no floating head: an external visible neighbour ⇒ a corresponding edge
+    for _, n in ipairs(proj.nodes) do
+        if n.collapsed then
+            local ext_parent, ext_child = false, false
+            for _, h in ipairs(n.region) do
+                local c = by_hash[h]
+                for _, p in ipairs(c.parents) do
+                    if mode[p.hash] ~= "hidden" and node_of[p.hash] ~= n then ext_parent = true end
+                end
+                for _, ch in ipairs(c.children) do
+                    if mode[ch.hash] ~= "hidden" and node_of[ch.hash] ~= n then ext_child = true end
+                end
+            end
+            if ext_parent then assert.is_true(#n.parents >= 1, "floating head (no parent edge)" .. label) end
+            if ext_child then assert.is_true(#n.children >= 1, "floating head (no child edge)" .. label) end
+        end
+    end
+end
+
 describe("view.project — signatures", function()
     it("are monotone: a parent's signature is a superset of its child's", function()
         -- c1 (tip, ref a) -> c2 -> c3 (root)
@@ -186,6 +240,49 @@ describe("view.project — collapsed", function()
             if n.collapsed then roots[#roots + 1] = n end
         end
         assert.is_true(#roots >= 2, "expected at least two distinct collapsed heads")
+    end)
+end)
+
+describe("view.project — branch topology preservation", function()
+    it("keeps a fork inside a collapsed region as its own visible node", function()
+        -- a,b both fork from x (x has two children); x->y->root. With A and B
+        -- collapsed, x is a collapsed fork: it must NOT be absorbed into a head.
+        local items, by_hash = dag({
+            { "a", { "x" } },
+            { "b", { "x" } },
+            { "x", { "y" } },
+            { "y", { "root" } },
+            { "root", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            A = { "a", "collapsed" },
+            B = { "b", "collapsed" },
+        }))
+        assert_topology(proj, by_hash)
+        local x_in_head = false
+        for _, n in ipairs(proj.nodes) do
+            if n.collapsed then
+                for _, h in ipairs(n.region) do if h == "x" then x_in_head = true end end
+            end
+        end
+        assert.falsy(x_in_head) -- the fork commit stays a real node
+        assert.falsy(proj.node_of_hash.x.collapsed)
+    end)
+
+    it("keeps a merge inside a collapsed region as its own visible node", function()
+        -- root forks to p1,p2 which merge at m; m->tip. All collapsed ⇒ m is a
+        -- collapsed merge (two parents) and must stay its own node.
+        local items, by_hash = dag({
+            { "tip", { "m" } },
+            { "m", { "p1", "p2" } },
+            { "p1", { "root" } },
+            { "p2", { "root" } },
+            { "root", {} },
+        })
+        local proj = view.project(items, owners(by_hash, { T = { "tip", "collapsed" } }))
+        assert_topology(proj, by_hash)
+        assert.falsy(proj.node_of_hash.m.collapsed) -- the merge stays real
+        assert.falsy(proj.node_of_hash.root.collapsed) -- the fork stays real
     end)
 end)
 
@@ -366,6 +463,7 @@ describe("view.project — output is layout-valid", function()
             local items, by_hash = dag(helpers.random_dag(18, seed))
             local proj = view.project(items, fuzz_owners(items, by_hash, seed, { "normal", "collapsed" }))
             assert_topo(proj)
+            assert_topology(proj, by_hash, "seed " .. seed)
             local errors = helpers.check(helpers.big_opts(), proj.items)
             assert.same({}, errors, "layout invariants on projection (seed " .. seed .. ")")
         end
@@ -379,6 +477,7 @@ describe("view.project — output is layout-valid", function()
             local items, by_hash = dag(helpers.random_dag(18, seed))
             local proj = view.project(items, fuzz_owners(items, by_hash, seed, { "normal", "collapsed", "hidden" }))
             assert_topo(proj)
+            assert_topology(proj, by_hash, "seed " .. seed)
             local errors = helpers.check(helpers.big_opts(), proj.items)
             for _, e in ipairs(errors) do
                 assert.truthy(e:match("^floating node"),
