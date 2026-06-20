@@ -71,6 +71,27 @@ local function check(opts, rows)
         end
     end
 
+    -- Root column break: a root ends its lane, so the line directly below must
+    -- not reuse the root's column with a vertical wire or a node (a horizontal
+    -- crossing is fine). Otherwise an independent history stacks under the root
+    -- and reads as one continuous lane.
+    local flat = {} -- { line = GraphColumn[], root_col = int|nil }
+    for _, row in ipairs(rows) do
+        if row.split then flat[#flat + 1] = { line = row.split } end
+        local ccol
+        for j, t in ipairs(row.columns) do if t.has_commit then ccol = j end end
+        local is_root = row.commit and #(row.commit.parents or {}) == 0
+        flat[#flat + 1] = { line = row.columns, root_col = is_root and ccol or nil }
+        if row.merge then flat[#flat + 1] = { line = row.merge } end
+    end
+    for fi = 1, #flat - 1 do
+        local rc = flat[fi].root_col
+        local below = rc and flat[fi + 1].line[rc]
+        if below and (below.has_commit or below.connectivity.up or below.connectivity.down) then
+            err(("root col %d reused by a node/vertical on the line below"):format(rc))
+        end
+    end
+
     return errs
 end
 
@@ -175,6 +196,37 @@ describe("columns.layout track-id reuse", function()
         local rows = columns.layout(h.big_opts(),
             h.dag({ { "m", { "a", "b" } }, { "a", { "base" } }, { "b", { "base" } }, { "base", {} } }))
         assert.equals(2, distinct_ids(rows))
+    end)
+end)
+
+describe("columns.layout root column break", function()
+    local function commit_col(rows, hash)
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.hash == hash then
+                for j, t in ipairs(row.columns) do if t.has_commit then return j end end
+            end
+        end
+    end
+
+    it("does not stack a branch head under a root", function()
+        -- Two independent chains: a1->a2(root), then b1(head)->b2(root). Without
+        -- the break, b1 reuses a2's column and the four nodes read as one lane.
+        local rows = columns.layout(h.big_opts(), h.dag({
+            { "a1", { "a2" } }, { "a2", {} },
+            { "b1", { "b2" } }, { "b2", {} },
+        }))
+        assert.is_true(commit_col(rows, "a2") ~= commit_col(rows, "b1"))
+    end)
+
+    it("alternates columns for a run of stacked roots", function()
+        -- The block lasts one row, so consecutive single-commit roots zigzag
+        -- between two columns rather than marching ever rightward.
+        local rows = columns.layout(h.big_opts(), h.dag({
+            { "a", {} }, { "b", {} }, { "c", {} }, { "d", {} },
+        }))
+        local a, b, c = commit_col(rows, "a"), commit_col(rows, "b"), commit_col(rows, "c")
+        assert.is_true(a ~= b) -- b offset off a
+        assert.equals(a, c)    -- a's column free again by c
     end)
 end)
 

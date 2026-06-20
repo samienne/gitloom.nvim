@@ -195,6 +195,12 @@ head, or a merge's second-and-later parent.
   hub carries the set of edges converging/diverging there.
 - **Per-Lane continuity.** A Segment of Lane L with `down` on one Line meets a
   Segment of the *same* Lane L with `up` in the same Column on the next Line.
+- **Root column break.** A root (a commit with no parents) ends its lane with
+  nothing below it. The column it occupies is **not reused** by any vertical wire
+  or commit node on the immediately following Line, so an independent history
+  beneath a root is offset into another column instead of stacking under it (which
+  would read as one continuous lane). A horizontal wire may still cross that
+  column on the next Line (a crossing, not a continuation).
 - **Colour comes from a carried Lane.** A Column's colour is the `color` slot of
   one Lane on one of its Segments (§5.5).
 - **Connectivity consistency.** The glyph's wired sides equal the union of the
