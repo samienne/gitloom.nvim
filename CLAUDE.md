@@ -160,7 +160,12 @@ Coverage:
   slot shared during a brief exhaustion is not returned (and handed to a live
   lane) until its last holder ends (the recycling-leak regression); plus root
   column break (spec §5.1): a branch head is not stacked under a root, and a run
-  of stacked roots alternates columns
+  of stacked roots alternates columns; plus colour generation (spec §5.5): all
+  curated slots are used before any generated one, a released colour is not
+  reused within `buffer` allocations (breathing room), and surplus generated
+  slots are retired so a calmed graph returns to curated colours
+- `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
+  conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the

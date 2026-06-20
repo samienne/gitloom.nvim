@@ -381,3 +381,116 @@ describe("columns.layout free-list colouring", function()
         assert.is_true(n >= 2) -- the main line and n1 are both present (non-vacuous)
     end)
 end)
+
+describe("columns.layout colour generation (spec §5.5)", function()
+    -- Generation mints palette slots beyond #tracks; Phase 2 renders those as
+    -- OKLCH colours. Here we only check the slot *policy* (Phase 1).
+    local function gen_opts(ntracks, buffer)
+        local o = h.opts()
+        o.palette.tracks = {}
+        for i = 1, ntracks do o.palette.tracks[i] = "P" .. i end
+        o.palette.generate = true
+        o.palette.buffer = buffer or 3
+        return o
+    end
+
+    local function lane_color(rows, hash, parent_index)
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.hash == hash then
+                local l = row.parent_lanes[parent_index or 1]
+                return l and l.color
+            end
+        end
+    end
+
+    it("uses only curated colours below capacity", function()
+        -- A 3-way octopus exactly fills a 3-slot palette: no generation (no slot
+        -- exceeds #tracks).
+        local o = gen_opts(3)
+        local rows = columns.layout(o, h.dag({
+            { "o", { "a", "b", "c" } },
+            { "a", {} }, { "b", {} }, { "c", {} },
+        }))
+        for _, row in ipairs(rows) do
+            for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
+                if line then
+                    for _, t in ipairs(line) do
+                        if t.color then assert.is_true(t.color <= 3, "generated below capacity") end
+                    end
+                end
+            end
+        end
+    end)
+
+    it("mints an overflow colour past capacity", function()
+        -- A 4-way octopus exceeds the 3-slot palette: the 4th lane is generated.
+        local o = gen_opts(3)
+        local rows = columns.layout(o, h.dag({
+            { "o", { "a", "b", "c", "d" } },
+            { "a", {} }, { "b", {} }, { "c", {} }, { "d", {} },
+        }))
+        local maxc = 0
+        for _, lane in ipairs(rows[1].parent_lanes) do maxc = math.max(maxc, lane.color) end
+        assert.is_true(maxc > 3, "expected a generated slot > #tracks")
+    end)
+
+    it("keeps breathing room: a freed colour is not reused by the next lane", function()
+        -- 2 curated slots, buffer 3. x1's lane (slot 2) ends at x2; the next head
+        -- h2 is born while h1's lane still holds slot 1 — with the cooldown it
+        -- must NOT immediately reuse slot 2, so it generates instead.
+        local o = gen_opts(2, 3)
+        local rows = columns.layout(o, h.dag({
+            { "h1", { "p" } },
+            { "x1", { "x2" } }, { "x2", {} },
+            { "h2", { "p" } },
+            { "p", {} },
+        }))
+        local x1c, h2c = lane_color(rows, "x1"), lane_color(rows, "h2")
+        assert.is_not_nil(h2c)
+        assert.is_true(h2c ~= x1c) -- did not immediately reuse the freed colour
+        assert.is_true(h2c > 2)    -- generated an overflow colour instead
+    end)
+
+    it("retires surplus generated colours instead of recycling them", function()
+        -- Two independent 4-way octopuses over a 2-slot palette. The first's
+        -- generated slots are retired as its branches end, so the second mints
+        -- fresh slots rather than reusing the first's.
+        local o = gen_opts(2, 0)
+        local rows = columns.layout(o, h.dag({
+            { "o1", { "a", "b", "c", "d" } },
+            { "a", {} }, { "b", {} }, { "c", {} }, { "d", {} },
+            { "o2", { "e", "f", "g", "h" } },
+            { "e", {} }, { "f", {} }, { "g", {} }, { "h", {} },
+        }))
+        local function gen_set(hash)
+            local set = {}
+            for _, row in ipairs(rows) do
+                if row.commit and row.commit.hash == hash then
+                    for _, lane in ipairs(row.parent_lanes) do
+                        if lane.color > 2 then set[lane.color] = true end
+                    end
+                end
+            end
+            return set
+        end
+        local g1, g2 = gen_set("o1"), gen_set("o2")
+        assert.is_true(next(g1) ~= nil and next(g2) ~= nil) -- both generated
+        for c in pairs(g2) do
+            assert.is_nil(g1[c], "o2 reused a retired generated colour " .. tostring(c))
+        end
+    end)
+
+    it("no generation without the flag (curated + sharing unchanged)", function()
+        -- generate off (the default in tests): a 4-way octopus over 2 slots shares
+        -- curated colours rather than generating any.
+        local o = h.opts()
+        o.palette.tracks = { "P1", "P2" }
+        local rows = columns.layout(o, h.dag({
+            { "o", { "a", "b", "c", "d" } },
+            { "a", {} }, { "b", {} }, { "c", {} }, { "d", {} },
+        }))
+        for _, lane in ipairs(rows[1].parent_lanes) do
+            assert.is_true(lane.color <= 2, "no generation when the flag is off")
+        end
+    end)
+end)
