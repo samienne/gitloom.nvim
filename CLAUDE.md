@@ -135,10 +135,16 @@ Coverage:
   branch-mode toggle helpers `next_mode` / `selected_owner_ids` (§10)
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
-  collapsed contraction to one head with junctions kept, distinct-signature
-  regions staying separate heads, the display-mode join truth-table, the
-  collapsed `◍` glyph render, the precomputed-sig caching equivalence, and a
-  fuzz sweep feeding projections through the real layout's wires-connect checks
+  collapsed contraction to one head with junctions kept, **branch-topology
+  preservation** (a fork/merge — a commit with ≥2 visible children/parents — is
+  never collapsed away; no floating head; asserted on targeted cases and the
+  whole fuzz sweep), distinct-signature regions staying separate heads, the
+  display-mode join truth-table, the
+  collapsed `◍` glyph render, the precomputed-sig caching equivalence, the
+  first-parent-only signature (`fp_only`) and the `view.owners` first-parent
+  default (§10.7: trunk normal+fp, others collapsed, merge owners; mainline-full /
+  merged-collapsed projection), and a fuzz sweep feeding projections through the
+  real layout's wires-connect checks
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), and `refresh_columns` width aggregation
@@ -209,7 +215,7 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `owners_from_refs` (refs → view-builder owners; §10), and the branch-mode toggle
 helpers `next_mode` / `selected_owner_ids` (§10). `columns.layout` is reached via
 `require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
-via `require("gitloom.view")` (§10).
+/ `view.owners` via `require("gitloom.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
 `refresh_columns` (the column-width packer), and `rebuild_starts`/`item_index_at`
 (the buffer-line ↔ item offset map for multi-real-line items; §6.1).
@@ -284,14 +290,26 @@ Details not covered by the spec or architecture:
   `normal`/`collapsed`/`hidden`) into an **OrderItem graph** of DisplayNodes that
   `columns.layout` lays out unchanged. `view.project` computes each commit's
   reachability **signature**, partitions into equal-signature regions, joins to a
-  display mode, contracts each collapsed region to one `◍` head (keeping
-  junctions), drops hidden commits, and re-points edges. graph.lua keeps
+  display mode, contracts each **linear** collapsed run to one `◍` head while
+  keeping junctions (a fork/merge — ≥2 visible children/parents — stays a real
+  node so branch topology survives, §10.3), drops hidden commits, and re-points
+  edges. graph.lua keeps
   `repo.order` (raw, 1:1 with commits) as the projection input and `repo.display`
   (the projection) as what the listview renders and `order_at`/`mark_reachable`
   index; `reflow()` rebuilds it and swaps via `controller.set_items`. With
   all-normal modes the projection is the identity, so `repo.display == repo.order`
   and streaming keeps its fast incremental path. `<CR>` cycles a selected ref's
   mode / expands a head; signatures are cached across mode toggles (§10.5).
+- **First-parent focus** (`opts.collapse_merged`, default on; spec §10.7, toggled
+  by `c`): `view.owners` builds the owner set so the trunk (HEAD's branch ref) is
+  **first-parent-only** + normal while every other ref and every non-first merge
+  parent (an anonymous `merge:<hash>:<i>` owner) defaults **collapsed** — so the
+  graph opens with HEAD's mainline in full and every other branch a `◍` head.
+  `view.signatures` honours `fp_only` (propagate only through `parents[1]`). It is
+  a recomputed default, not a seed: `view_state.modes` holds only explicit user
+  overrides, `view_state.effective` the resolved mode per owner (drives the
+  `<CR>` cycle's starting point and the footer `focus` indicator). The
+  stream-completion handler calls `reflow()` so the default applies on open.
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic

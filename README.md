@@ -99,6 +99,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row |
 | `H` | Toggle reachability highlighting (dimming) off / on |
+| `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
@@ -109,6 +110,13 @@ single `◍` head row (showing a commit count, the tip's subject, and the ref);
 *hidden* removes them. A branch's local ref and its tracking remotes cycle
 together. `<CR>` on a collapsed head expands it again. See the design in
 [specification.md §10](specification.md).
+
+**First-parent focus (default).** By default the graph opens focused on the
+current branch: HEAD's first-parent mainline is shown in full and every other
+branch — merged-in *and* divergent — is collapsed to a `◍` head. Press `c` to
+toggle this off (the full graph) and on again; your explicit per-branch toggles
+are kept across the switch. Disable the default with `collapse_merged = false`
+(§10.7).
 
 The footer shows the active merge mode, the ref label mode, a `N collapsed,
 M hidden` summary when any branch modes are set, and whether the graph is
@@ -194,6 +202,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     branches = { "--all" },  -- refspec(s) passed to `git log`
     mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
     highlight = true,        -- reachability dimming (§12) on; toggle with H
+    collapse_merged = true,  -- first-parent focus (§10.7) on; toggle with c
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
@@ -223,6 +232,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   `M`. See [specification.md](specification.md) §5.4.
 - **`highlight`** — whether reachability dimming (§12) starts enabled (default
   `true`). Toggle live with `H`.
+- **`collapse_merged`** — whether the first-parent focus (§10.7) starts enabled
+  (default `true`): the current branch's mainline in full, every other branch
+  collapsed. Toggle live with `c`.
 - **`date_format`** / **`date_mode`** — the author date is parsed into a
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =

@@ -44,15 +44,22 @@ end
 --- (modes ignored here — hidden owners still define regions). Computed in one
 --- newest-first pass: a commit's signature is the owners tipped at it unioned
 --- with every child's signature (a child is newer, so already computed).
+---
+--- A **first-parent-only** owner (`o.fp_only`, the trunk; §10.1/§10.2) flows
+--- from a child down only to that child's *first* parent, so it covers its
+--- tip's first-parent mainline and stops at every merge rather than descending
+--- the merged-in side. Ordinary owners flow to every parent (full reachability).
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired
----@param owners table[] -- { id, tip = Commit, mode? }
+---@param owners table[] -- { id, tip = Commit, mode?, fp_only? }
 ---@return table<string, table<string, boolean>>  -- hash -> owner-id set
 function M.signatures(items, owners)
     local tips = {} -- hash -> { owner id, ... }
+    local fp = {}   -- owner id -> true if first-parent-only
     for _, o in ipairs(owners) do
         local h = o.tip.hash
         tips[h] = tips[h] or {}
         tips[h][#tips[h] + 1] = o.id
+        if o.fp_only then fp[o.id] = true end
     end
     local sig = {}
     for _, it in ipairs(items) do
@@ -62,12 +69,55 @@ function M.signatures(items, owners)
         for _, ch in ipairs(c.children or {}) do
             local cs = sig[ch.hash]
             if cs then
-                for oid in pairs(cs) do s[oid] = true end
+                -- c is on ch's first-parent edge iff it is ch.parents[1].
+                local first = ch.parents and ch.parents[1] == c
+                for oid in pairs(cs) do
+                    if first or not fp[oid] then s[oid] = true end
+                end
             end
         end
         sig[c.hash] = s
     end
     return sig
+end
+
+--- Build the full owner set for a projection under the first-parent default
+--- (spec §10.7). `ref_owners` are `{id, tip}` per ref; `trunk_id` is the id of
+--- the current branch's ref (HEAD), or nil if there is none.
+---
+--- With `collapse_merged` off (or no trunk) every owner defaults **normal** and
+--- no trunk/anonymous owners are added — the plain full graph. With it on: the
+--- trunk owner becomes **first-parent-only + normal** (it covers only HEAD's
+--- mainline), and every other ref **and** every non-first merge parent (an
+--- anonymous owner, keyed `merge:<hash>:<i>`) defaults **collapsed** — so the
+--- mainline shows in full and everything else collapses (§10.7). `modes`
+--- overrides the default per owner id.
+---@param items table[]
+---@param ref_owners table[]  -- { {id, tip}, ... }
+---@param trunk_id string|nil
+---@param modes table<string, string>?
+---@param collapse_merged boolean
+---@return table[]  -- { {id, tip, mode, fp_only}, ... }
+function M.owners(items, ref_owners, trunk_id, modes, collapse_merged)
+    modes = modes or {}
+    local on = collapse_merged and trunk_id ~= nil
+    local out = {}
+    for _, o in ipairs(ref_owners) do
+        local default, fp = "normal", false
+        if on and o.id ~= trunk_id then default = "collapsed" end
+        if on and o.id == trunk_id then fp = true end
+        out[#out + 1] = { id = o.id, tip = o.tip, mode = modes[o.id] or default, fp_only = fp }
+    end
+    if on then
+        for _, it in ipairs(items) do
+            local ps = it.commit.parents or {}
+            for i = 2, #ps do
+                local id = "merge:" .. it.commit.hash .. ":" .. i
+                out[#out + 1] = { id = id, tip = ps[i], mode = modes[id] or "collapsed", fp_only = false }
+            end
+        end
+    end
+    return out
 end
 
 --- The display-mode join for one commit's signature (spec §10.2). A commit
@@ -116,9 +166,24 @@ function M.project(items, owners, sig)
         mode[h] = mode_of(sig[h], owner_mode)
     end
 
-    -- Union-find over collapsed commits: merge adjacent same-signature ones so
-    -- each connected collapsed region becomes one head. Different signatures
-    -- stay distinct heads (the junctions between them stay visible, spec §10.3).
+    -- Only *linear* collapsed runs contract into a head; a collapsed commit that
+    -- is a **junction** — a fork (≥2 visible children) or a merge (≥2 visible
+    -- parents) — stays its own visible node so branch topology is preserved
+    -- (spec §10.3). "Visible" = not hidden, so hiding all-but-one branch demotes a
+    -- junction back to a linear commit that may collapse.
+    local function visible(h) return mode[h] ~= "hidden" end
+    local function nvis(list)
+        local n = 0
+        for _, x in ipairs(list or {}) do if visible(x.hash) then n = n + 1 end end
+        return n
+    end
+    local function is_head_member(c)
+        return mode[c.hash] == "collapsed" and nvis(c.children) <= 1 and nvis(c.parents) <= 1
+    end
+
+    -- Union-find over head-members: merge adjacent same-signature ones so each
+    -- connected linear collapsed run becomes one head. The union naturally stops
+    -- at junctions (excluded) and at signature boundaries.
     local uf = {}
     local function find(h)
         local root = h
@@ -129,15 +194,14 @@ function M.project(items, owners, sig)
         return root
     end
     for _, it in ipairs(items) do
-        local h = it.commit.hash
-        if mode[h] == "collapsed" then uf[h] = h end
+        if is_head_member(it.commit) then uf[it.commit.hash] = it.commit.hash end
     end
     for _, it in ipairs(items) do
         local c = it.commit
-        if mode[c.hash] == "collapsed" then
+        if is_head_member(c) then
             local sk = sig_key(sig[c.hash])
             for _, p in ipairs(c.parents or {}) do
-                if mode[p.hash] == "collapsed" and sig_key(sig[p.hash]) == sk then
+                if is_head_member(p) and sig_key(sig[p.hash]) == sk then
                     local ra, rb = find(c.hash), find(p.hash)
                     if ra ~= rb then uf[ra] = rb end
                 end
@@ -148,19 +212,14 @@ function M.project(items, owners, sig)
     -- Build the DisplayNodes. Newest-first iteration means the first member of a
     -- region is its newest (the tip).
     local nodes = {}
-    local node_of_hash = {} -- hash -> DisplayNode (head for collapsed members)
+    local node_of_hash = {} -- hash -> DisplayNode (head for head-members)
     local head_of_root = {}
     for _, it in ipairs(items) do
         local c = it.commit
         local h = c.hash
-        local m = mode[h]
-        if m == "normal" then
-            local dn = setmetatable(
-                { commit = c, collapsed = false, parents = {}, children = {} },
-                { __index = c })
-            nodes[#nodes + 1] = dn
-            node_of_hash[h] = dn
-        elseif m == "collapsed" then
+        if mode[h] == "hidden" then
+            -- dropped: no node
+        elseif is_head_member(c) then
             local root = find(h)
             local head = head_of_root[root]
             if not head then
@@ -179,8 +238,15 @@ function M.project(items, owners, sig)
             head.count = head.count + 1
             for _, r in ipairs(c.refs or {}) do head.refs[#head.refs + 1] = r end
             node_of_hash[h] = head
+        else
+            -- A normal commit, or a collapsed junction kept visible: a real node
+            -- (rendered as the commit, the "one commit for the junction" of §10.3).
+            local dn = setmetatable(
+                { commit = c, collapsed = false, parents = {}, children = {} },
+                { __index = c })
+            nodes[#nodes + 1] = dn
+            node_of_hash[h] = dn
         end
-        -- hidden: no node
     end
 
     -- Re-point edges through the node map: drop edges to hidden commits and

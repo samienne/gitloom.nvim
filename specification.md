@@ -45,7 +45,9 @@ exists primarily to exercise and validate the graph algorithm.
   aids: `K` opens a float with the full lane breakdown for the commit under
   the cursor, and `i` toggles the per-lane id column before the message (a
 debug aid, hidden by default). `d` toggles the date column between absolute and
-relative (§6). `H` toggles reachability highlighting (§12) off and on.
+relative (§6). `H` toggles reachability highlighting (§12) off and on. `c`
+toggles the first-parent focus (§10.7) — collapse every non-mainline branch, or
+show the full graph.
   `?` opens a float listing all keybindings. The footer shows live status
   (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
   when any branch modes are set, and `(mirrored)` when mirroring is on).
@@ -475,8 +477,18 @@ principle (§1.1).
 
 ### 10.1 Branch modes
 
-Each **owner** has a mode. In v1 an owner is a ref; anonymous merge-parents
-become owners later (§10.7). Modes:
+Each **owner** has a mode. An owner is one of:
+
+- a **ref** (its tip commit);
+- an **anonymous merge-parent** — each *non-first* parent of a merge, identified
+  by `(merge-hash, parent-index)`, so merged-in work that has no ref of its own
+  can still be collapsed/expanded (and so the first-parent default, §10.7, has
+  something to attach to);
+- the **trunk owner** — the current branch (HEAD), with *first-parent-only*
+  reachability (§10.2): it covers only HEAD's first-parent mainline, not the
+  branches merged into it.
+
+Modes:
 
 - **normal** — the owner's commits are shown in full.
 - **collapsed** — the owner's commits are contracted to a single *collapsed
@@ -488,12 +500,15 @@ choices it offers; the model does not.
 
 ### 10.2 Attribution — the reachability signature
 
-For each commit `c`, its **signature** `sig(c)` is the set of non-hidden
-owners that can reach `c` (i.e. `c` is an ancestor-or-self of the owner's
-tip). Signatures are monotone along the DAG: an ancestor's signature is a
-superset of its descendants'. Commits therefore partition into **regions** —
-maximal connected runs of equal signature — whose boundaries fall exactly at
-junctions where an owner joins or leaves.
+For each commit `c`, its **signature** `sig(c)` is the set of owners that can
+reach `c`. A normal owner reaches `c` if `c` is an ancestor-or-self of its tip
+(any parent edge); a **first-parent-only** owner (the trunk, §10.1) reaches `c`
+only along *first-parent* edges — so it covers its tip's mainline but stops at
+every merge instead of descending the merged-in side. Signatures are monotone
+along the DAG: an ancestor's signature is a superset of its descendants'.
+Commits therefore partition into **regions** — maximal connected runs of equal
+signature — whose boundaries fall exactly at junctions where an owner joins or
+leaves.
 
 A region's display mode is the **join** over the owners in its signature:
 
@@ -513,16 +528,22 @@ Intended consequences:
 
 ### 10.3 Contraction — collapse preserves shape, hide removes
 
-A collapsed region is contracted to exactly **one** collapsed-head row.
-Junction commits (where two or more retained owners meet) remain as their own
-rows. The projection therefore has the **same topology as the commit graph
-with each collapsed region contracted to a point**: branch and merge structure
-is preserved, only the in-between commits are gone. Edges crossing a collapsed
-region's boundary re-point to its head.
+Only a **linear run** of collapsed commits contracts to a single collapsed-head
+row. A collapsed commit that is a **junction** — a fork (two or more *visible*,
+i.e. non-hidden, children) or a merge (two or more visible parents) — is **never
+collapsed away**: it stays its own visible row, so the branching is intact. (A
+signature boundary, where owners meet, is likewise a region boundary.) Hiding
+all-but-one of a junction's branches demotes it to a linear commit that may then
+collapse.
+
+The projection therefore has the **same branch topology as the commit graph**:
+every fork and merge of the visible commits survives, with only the linear
+stretches between them contracted to heads. Edges crossing a collapsed region's
+boundary re-point to its head, so a head is never left floating.
 
 Hiding removes a region's rows outright and, unlike collapse, does **not**
 preserve shape. An edge from a hidden region into a retained commit is dropped
-(a phantom indicator is an open question, §10.7).
+(a phantom indicator is an open question, §10.8).
 
 ### 10.4 Collapsed head content
 
@@ -548,11 +569,39 @@ feature.
 A ref may be **pinned**. Pinning forces its regions to **normal** regardless of
 other settings, subject to the §10.2 attribution rule.
 
-### 10.7 Open / deferred
+### 10.7 First-parent default
 
-- **Anonymous merge-parent owners** and a default **seed policy** (first-parent
-  line normal, merged-in parents collapsed → mainline full, merged work
-  collapsed). Deferred; the model is designed to accommodate it.
+By default the graph opens **focused on the current branch**: HEAD's
+first-parent mainline is shown in full and everything else — branches merged
+into it *and* divergent branches — is collapsed. This is a per-owner **default
+mode**, not a one-off seed: each reflow recomputes it, and `view state` holds
+only the user's explicit overrides on top.
+
+The defaults are:
+
+- the **trunk owner** (HEAD, first-parent-only, §10.1) → **normal**; it covers
+  the mainline and the history shared below merge-bases, keeping those visible;
+- **every other owner** (other refs, and the anonymous merge-parents) →
+  **collapsed**.
+
+Because the trunk owner is first-parent-only, it does not reach a merged-in
+branch, so that branch's only owners are collapsed → it collapses, **even when a
+ref points at it** (the ref defaults collapsed too). A commit reachable only via
+collapsed owners collapses; the shared mainline, reached by the normal trunk
+owner, stays normal (the §10.2 join). The result is "current branch in full,
+every other branch a `◍` head."
+
+The user's explicit toggles (§10, the `<CR>` cycle) override the default per
+owner, so any collapsed branch can be expanded and any mainline ref hidden.
+
+This behavior is controlled by the **`collapse_merged`** option (default on) and
+can be toggled live; with it off, every owner defaults **normal** (the plain
+full graph) and no trunk/anonymous owners are introduced. When HEAD is absent
+(detached or a bare checkout) there is no trunk, so the graph also falls back to
+all-normal.
+
+### 10.8 Open / deferred
+
 - **Hidden connectivity** — phantom indicator vs. vanish.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
