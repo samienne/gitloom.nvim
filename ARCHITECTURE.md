@@ -316,6 +316,98 @@ entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
 the existing `OrderItem`s (the view holds references). Both go through
 `columns.layout` — there is no separate incremental algorithm.
 
+### Future direction: layout policies and lookahead (not yet built)
+
+This is a recorded design intent, **not** implemented. Today there is one
+layout algorithm. The note exists so that *if* we add alternative layout modes
+(below), we already agree on the shape; until then the current single-pass code
+stays as-is. Do not refactor toward this speculatively — revisit it when a
+second algorithm is actually wanted.
+
+**What varies by mode, and what never does.** Reading `columns.layout`'s
+per-commit loop, the steps sort cleanly into two buckets:
+
+- *Mode-invariant machinery* — lane lifecycle (id/trunk reuse,
+  `parent_lanes`/`child_lanes`), the colour free list, DAG classification
+  (incoming / survivors / outgoing), and Segment emission
+  (`new_line`/`draw`/`assemble` + the continuity validation). All driven by the
+  *DAG*, never by where a lane is drawn.
+- *Mode-specific policy* — **only** the column-placement decisions: the commit
+  column `cc`, the survivor compaction, the outgoing fan-out assignment (incl.
+  the `allow_merge_on_split` freed-column reuse), and the occupancy/blocking
+  model.
+
+So alternative layouts are not separate algorithms reusing shared pieces; they
+are **one driver with a replaceable placement policy**. The seam is a pure
+function:
+
+```
+place(ctx) -> { cc, survivor_cols, outgoing_cols, blocked_next }
+   ctx = { active (col -> lane), incoming, survivors, outgoing, blocked,
+           opts, hints? }
+```
+
+The driver does lifecycle + colour + emission and calls `place`; today's
+behaviour becomes the default `compact` policy. This is **functional core,
+imperative shell**: purify the part that varies (placement), and leave the
+inherently-stateful lifecycle (persistent Lane objects threaded row-to-row, the
+colour FIFO) as the shell — threading those through pure functions buys nothing.
+Decoupling lane id/colour from column placement (they are already DAG-driven,
+not column-driven) is what makes a placement policy expressible in isolation,
+and is the prerequisite for the lookahead work below.
+
+**Candidate modes.**
+
+- *Spread* — keep empty columns between occupied ones, with a restoring
+  "pressure" pulling lanes back toward the boundary. Static slack: a free
+  neighbour is usually nearby, so crossings are cheap to avoid locally. A local
+  policy; needs no lookahead.
+- *Lookahead crossing-minimization* — anticipate an incoming fan (e.g. an
+  octopus merge several rows below) and **make space early**, spreading the
+  horizontal travel over many rows (gentle diagonals) instead of one sharp cut
+  at the fan row. The current algorithm cannot do this: every decision sees only
+  the current `active` lanes and the current commit's parents — it is online,
+  greedy, single-pass.
+
+  Lookahead still fits the seam **without** breaking single-pass control flow:
+  add a mode-independent **annotation pass** that runs once and precomputes
+  forward-looking hints (lane lifespans = the row each lane's parent lands on;
+  upcoming fan widths; near-term column demand), fed into `ctx.hints`. A greedy
+  policy ignores `hints`; a lookahead policy consumes them. So lookahead is
+  "what is in `ctx`", not new control structure.
+
+Spread and lookahead are the same spectrum — spread is *static* slack, lookahead
+is *dynamic* anticipation — and may combine (spread + a small lookahead window).
+
+**Hard constraints that bound the ambition.**
+
+- *Streaming* — commits arrive incrementally from `jobstart`; you cannot look
+  past the stream frontier (those commits are not loaded). Lookahead must be
+  **bounded to a window** of already-known rows, not global.
+- *Reflow stability* — the planned interactive views (§10: collapse / pin /
+  toggle *with reflow*) rerun layout and must stay predictable: a small input
+  change must not reshuffle the whole graph. Global crossing-minimization
+  (iterative barycenter/median, Sugiyama-style) is both expensive and jumpy.
+  Prefer **bounded, local heuristics**.
+- *Determinism* — layout must be deterministic for stable rendering and testing
+  (no randomness).
+
+**Testing.** The invariant harness (`graph_helpers.lua`) tests *correctness*
+(wires connect, continuity). Crossing minimization is *quality*, so it needs a
+new kind of test: a **crossing counter** over the rendered grid, asserting a
+smart policy yields ≤ the greedy policy's count on the same DAGs (a comparative
+quality test) **while** the existing invariants still hold (a smart layout must
+still be a *valid* layout). The grid-building fuzz harness already exists, so the
+counter is a natural addition and doubles as a quality regression guard.
+
+**Sequencing, when we do this.** (1) Extract the placement-policy seam with
+current behaviour as `compact`, proven behaviour-preserving by the fuzz suite.
+(2) Add `spread` — a local policy, no lookahead — as the second real consumer
+that validates the seam's shape. (3) Add the `annotate` pass + a bounded
+lookahead policy last, against a seam already proven by a real second consumer.
+Steps 1–2 are behaviour-preserving refactors (within spec); step 3 introduces
+new layout behaviour and needs a specification.md §5 amendment first.
+
 ### Rendering to glyphs — Phase 2
 
 - `get_column_chars(opts, columns, emphasis)` — maps each `GraphColumn` to a
