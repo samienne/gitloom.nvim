@@ -71,6 +71,7 @@ lua/gitloom/
   init.lua       Thin facade: setup() + :GitloomGraph command registration
   graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
   columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
+  color.lua      OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua   Reusable virtualized list widget (snacks.win)
 ```
 
@@ -83,6 +84,9 @@ lua/gitloom/
 - **columns.lua** — Phase 1, the lane-layout algorithm (`columns.layout`). Pure
   and git-agnostic; takes the ordered, DAG-wired commits and returns the rendered
   lines with per-segment connectivity.
+- **color.lua** — pure colour maths: sRGB↔OKLab/OKLCH conversion and
+  golden-angle colour generation for overflow lane colours (§5.5). No Neovim
+  dependency; graph.lua realises its output into highlight groups.
 - **listview.lua** — a generic, incrementally-rendered list view. It knows
   nothing about git; it renders rows produced by a `display` callback and
   only materializes the visible range.
@@ -276,13 +280,17 @@ the current row. For each commit `C`:
    child's id and colour** (so a straight chain keeps one colour); a fresh id and
    a free-list colour slot are taken only where a lane is born — a branch head (a
    tip's first parent) and every extra parent of a merge. Colours come from a
-   recycling **free list** sized to `palette.tracks`: a born lane takes a slot
+   recycling **free list** seeded with `palette.tracks`: a born lane takes a slot
    from the front, an ended lane returns its slot to the back (FIFO). New lanes
    allocate *before* the line's ended lanes return their slots, so concurrent
-   lanes always differ in colour while slots last. On exhaustion a slot is
-   shared (the least-shared one); sharing is **reference-counted** so a slot
-   returns to the free list only when its last holder ends — never while a live
-   lane still holds it (else a later lane would be handed a still-live colour).
+   lanes always differ in colour while slots last. A returned slot is recycled
+   with a **cooldown** (`palette.buffer` allocations) for breathing room; if the
+   front of the list hasn't cooled when a lane is born, a **generated** slot (id
+   `> #tracks`) is minted instead. Curated slots are used first; a *generated*
+   slot is **retired** (dropped) once the list is comfortably full again, so a
+   calmed graph drifts back to the curated palette.
+   Without generation (no truecolor), exhaustion instead **shares** a curated
+   slot, reference-counted so it returns only when its last holder ends.
 4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
    (drawn as a horizontal turn), never a column another lane vacates this same
    row — that is what keeps two turns out of one cell, so freed columns are
@@ -316,9 +324,13 @@ the existing `OrderItem`s (the view holds references). Both go through
   Segments'** connectivity (or of *all* Segments when none is highlighted), so an
   out-of-cone arm of a junction drops to a small gap while the cone arm stays; a
   vertical crossing is kept whole. Colour comes from a highlighted Segment's
-  Lane when present (the cone colour wins), else the Segment's own colour slot,
-  indexed directly into `palette.tracks` (the slot is assigned in Phase 1's free
-  list, not `id mod #tracks`).
+  Lane when present (the cone colour wins), else the Segment's own colour slot
+  (assigned in Phase 1's free list, not `id mod #tracks`). A slot `≤ #tracks`
+  indexes `palette.tracks`; a slot beyond that is a **generated** colour, an
+  OKLCH hue realised lazily by `gitloom.color` into a cached `GitloomGen_*`
+  highlight group (same pattern as `dim_hl`, rebuilt on `ColorScheme`; §5.5). The
+  generated colours' lightness/chroma anchor is derived once from the curated
+  `tracks` (or `Normal`).
 - `mirror_columns(columns)` — when `opts.mirror` is set, `get_column_chars` runs
   the cells through this first: it reverses the column order and swaps each
   cell's `left`/`right` connectivity. Because the glyph is a pure function of
@@ -528,6 +540,7 @@ gitloom.nvim/
 │   ├── init.lua
 │   ├── graph.lua
 │   ├── columns.lua        Phase 1 lane layout
+│   ├── color.lua          OKLCH colour generation (§5.5)
 │   └── listview.lua
 ├── tests/
 │   ├── minimal_init.lua

@@ -52,32 +52,51 @@ function M.layout(opts, items)
         return next_id
     end
 
-    -- Lane colour is allocated from a FIFO **free list** of palette slots, sized
-    -- to `palette.tracks`. A slot is removed when a lane takes it and returned
-    -- (to the back, so it is not reused immediately) when a lane ends — so
-    -- concurrent lanes never share a colour while slots last. New lanes allocate
-    -- *before* ended lanes return their slots, so a colour just vacated on a line
-    -- is never reused on that same line.
+    -- Lane colour is a **palette slot** from a recycling FIFO **free list** seeded
+    -- with the curated `palette.tracks` colours (slots 1..ntracks). A born lane
+    -- takes the front; an ended lane returns its slot to the back, recycled with a
+    -- cooldown so it is not reused immediately. New lanes allocate *before* ended
+    -- lanes return their slots, so concurrent lanes never share a colour while
+    -- slots last (specification.md §5.5). Phase 2 maps a slot to a colour: <=
+    -- ntracks indexes `palette.tracks`, beyond that is a generated OKLCH colour.
     --
-    -- When the list runs out (more concurrent lanes than colours) a slot must be
-    -- *shared*. We track a per-slot use count so a slot returns to the free list
-    -- only when its **last** holder ends: otherwise a shared slot's first holder
-    -- to end would re-enqueue a colour still in use, handing a live colour to a
-    -- new lane (the recycling leak). On exhaustion we duplicate the least-shared
-    -- slot (rotating start), so sharing stays minimal and spread out.
+    -- Two modes (gated by `palette.generate`, which graph.lua turns off without
+    -- truecolor):
+    --  * generate: keep at least `buffer` slots free for breathing room — if a
+    --    take would drop below it, MINT a generated slot (id > ntracks). A
+    --    generated slot is RETIRED (dropped) once the list is comfortably full
+    --    again, so a calmed graph drifts back to curated colours.
+    --  * no generate: on exhaustion SHARE a curated slot, reference-counted so a
+    --    slot returns only when its last holder ends (never handing a live colour
+    --    to a new lane).
     local ntracks = (opts.palette and opts.palette.tracks and #opts.palette.tracks) or 8
-    local in_use = {} -- slot -> number of live lanes holding it
-    local free, qhead, qtail = {}, 1, ntracks -- FIFO queue of slots with use 0
-    for i = 1, ntracks do in_use[i] = 0; free[i] = i end
+    local generate = (opts.palette and opts.palette.generate) and true or false
+    local buffer = generate and (tonumber(opts.palette.buffer) or 3) or 0
+    local clock = 0     -- allocation counter; drives the recycle cooldown
+    local nextgen = ntracks -- last minted slot id (generated slots are > ntracks)
     local dup = 0
+    local in_use = {}   -- slot -> live holders (only the no-generate share path shares)
+    -- FIFO of { slot, ready }: a slot is reusable once `clock >= ready`.
+    local free, qhead, qtail = {}, 1, ntracks
+    for i = 1, ntracks do in_use[i] = 0; free[i] = { slot = i, ready = 0 } end
+    local function fcount() return qtail - qhead + 1 end
+
     local function alloc_color()
-        if qhead <= qtail then
-            local c = free[qhead]
+        clock = clock + 1
+        -- Reuse the front if it has cooled down; else mint (when generating).
+        if qhead <= qtail and free[qhead].ready <= clock then
+            local e = free[qhead]
             free[qhead] = nil; qhead = qhead + 1
-            in_use[c] = 1
-            return c
+            in_use[e.slot] = (in_use[e.slot] or 0) + 1
+            return e.slot
         end
-        local best -- exhausted: reuse the least-shared slot, rotating for fairness
+        if generate then
+            nextgen = nextgen + 1
+            in_use[nextgen] = 1
+            return nextgen
+        end
+        -- No truecolor and exhausted: share the least-shared curated slot.
+        local best
         for off = 0, ntracks - 1 do
             local c = ((dup + off) % ntracks) + 1
             if not best or in_use[c] < in_use[best] then best = c end
@@ -86,10 +105,15 @@ function M.layout(opts, items)
         in_use[best] = in_use[best] + 1
         return best
     end
+
     local function free_color(c)
         if not c then return end
-        in_use[c] = in_use[c] - 1
-        if in_use[c] == 0 then qtail = qtail + 1; free[qtail] = c end
+        in_use[c] = (in_use[c] or 0) - 1
+        if in_use[c] > 0 then return end -- still held (a shared slot's other holder)
+        -- Retire a surplus generated slot rather than recycling it, so quiet
+        -- stretches drift back to the curated palette.
+        if c > ntracks and fcount() >= ntracks then return end
+        qtail = qtail + 1; free[qtail] = { slot = c, ready = clock + buffer }
     end
 
     local rows = {}

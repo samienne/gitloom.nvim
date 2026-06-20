@@ -265,25 +265,36 @@ hold on the mirrored output.
 
 ### 5.5 Lane colouring (the free list)
 
-A lane's colour is a **palette slot** drawn from a recycling **free list** sized
-to `palette.tracks` (§8), not `id mod #tracks`. The list starts holding every
-slot. When a lane is born it **takes** a slot from the front; when a lane ends
-without being continued it **returns** its slot to the back (FIFO, so a colour
-is not reused immediately). Allocation happens **before** the same line's ended
-lanes return their slots, so a colour just vacated on a line is never reused by a
-lane born on that line. The consequence: lanes alive at the same time always have
-distinct colours while slots last.
+A lane's colour is a **palette slot** drawn from a recycling **free list**,
+seeded with the curated `palette.tracks` colours (§8). A born lane takes a slot
+from the front; an ended lane returns its slot to the back (FIFO), so a colour is
+not reused immediately. Allocation happens **before** the same line's ended lanes
+return their slots, so concurrent lanes always have distinct colours.
 
-If the list is exhausted (more concurrent lanes than palette colours) a slot must
-be **shared**: the least-shared slot is reused (so sharing stays minimal and
-spread out). Sharing is reference-counted — a slot returns to the free list only
-when its **last** holder ends, never while a live lane still draws it. (Returning
-a shared slot too early would hand a still-live colour to a later lane — a
-collision even when colours are plentiful again.) Once two lanes share a colour
-they keep it for life: a lane is never recoloured, since that would break its
-colour continuity. A first-parent continuation keeps the trunk's slot (one colour
-per first-parent chain, §5); only a branch head or a merge's extra parent
-allocates.
+**Breathing room.** A returned colour is held out of reuse for the next
+`palette.buffer` allocations (§8); if no colour is free *and* cooled down when a
+lane is born, a colour is **generated** instead. This guarantees at least
+`buffer` other colours are drawn before any colour repeats — a history that ends
+is never immediately followed by a new one in the same colour. Curated colours
+are used first (they start available), so generation only begins once branching
+outpaces the cooled-down curated colours.
+
+**Generation.** Overflow colours are generated in **OKLCH**, rotating hue by the
+golden angle (~137.5°) at a lightness/chroma **anchored to the theme** (derived
+from `palette.tracks`/`Normal`, or set explicitly, §8), so they stay in the
+theme's key while staying perceptually separated at any count. Generated colours
+recycle like curated ones but are **retired** (dropped, not returned) once the
+list is comfortably full again — so a graph that quiets down drifts back to the
+curated palette, and only sustained branching shows generated colours. **Curated
+colours are never retired.**
+
+Generation requires truecolor. Without `termguicolors`, nothing is generated: the
+curated palette is **shared** on exhaustion (a slot reused, reference-counted so
+it returns only when its last holder ends; a lane is never recoloured, since that
+would break its colour continuity).
+
+A first-parent continuation keeps the trunk's slot (one colour per first-parent
+chain, §5); only a branch head or a merge's extra parent allocates.
 
 ## 6. Row content
 
@@ -353,7 +364,13 @@ DiffRange    = { rev: string, from: Commit?, to: Commit }
 
 - `win` — floating-window geometry (snacks.win).
 - `palette` — highlight group per field, plus a `tracks` list whose entries are
-  the lane colour slots, allocated from a recycling free list (§5.5).
+  the curated lane colours, the seed of the recycling free list (§5.5). Lane
+  colouring is tuned by `buffer`, the minimum free-list length — the number of
+  other colours drawn before a released colour can repeat (default `3`);
+  `generate`, whether overflow colours are generated in OKLCH when the curated
+  ones run low (default `true`, automatically disabled without truecolor); and
+  `anchor`, the lightness/chroma the generated colours are built on (default
+  `nil` = derived from `tracks`/`Normal`; §5.5).
   Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
   (§2; default `Visual`); `diff`, a sub-table of highlight groups for the
   commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,

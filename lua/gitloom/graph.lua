@@ -1,5 +1,7 @@
 local M = {}
 
+local color = require("gitloom.color")
+
 -- merge_style presets the viewer cycles through with `m` (see M.open). Each
 -- toggles whether merges/splits get their own virtual line, or are folded
 -- onto the commit line (inline), plus the experimental allow_merge_on_split.
@@ -172,6 +174,69 @@ end
 --- ColorScheme change); they are recreated lazily on the next render.
 local function reset_dim_cache()
     for k in pairs(dim_cache) do dim_cache[k] = nil end
+end
+
+-- Generated lane colours (specification.md §5.5): lane colour slots beyond
+-- `#palette.tracks` are overflow colours generated in OKLCH. Each is realised
+-- lazily into a cached `GitloomGen_*` highlight group (mirroring dim_hl), wiped
+-- and recomputed on ColorScheme. The lightness/chroma anchor is derived once
+-- from the curated `tracks` (so generated colours sit in the theme's key).
+local gen_cache = {}      -- ordinal -> highlight group name
+local gen_anchor = nil    -- { L, C, base_hue } cached anchor
+
+---@param opts GraphOptions
+---@return { L: number, C: number, base_hue: number }
+local function generated_anchor(opts)
+    if gen_anchor then return gen_anchor end
+    local tracks = (opts.palette and opts.palette.tracks) or {}
+    local explicit = opts.palette and opts.palette.anchor
+    local Ls, Cs, first_h = {}, {}, nil
+    for _, grp in ipairs(tracks) do
+        local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = grp, link = false })
+        if ok and hl and hl.fg then
+            local L, C, H = color.rgb_to_oklch(hl.fg)
+            Ls[#Ls + 1] = L; Cs[#Cs + 1] = C
+            first_h = first_h or H
+        end
+    end
+    local function mean(t, d)
+        if #t == 0 then return d end
+        local s = 0
+        for _, v in ipairs(t) do s = s + v end
+        return s / #t
+    end
+    gen_anchor = {
+        L = (explicit and explicit.L) or mean(Ls, 0.72),
+        C = (explicit and explicit.C) or mean(Cs, 0.12),
+        base_hue = (explicit and explicit.base_hue) or first_h or 0,
+    }
+    return gen_anchor
+end
+
+--- Highlight group for the `ordinal`-th generated lane colour (1-based). Without
+--- truecolor (where Phase 1 won't mint generated slots anyway) it degrades to a
+--- curated colour so nothing renders blank.
+---@param opts GraphOptions
+---@param ordinal integer
+---@return string|nil
+local function generated_hl(opts, ordinal)
+    local tracks = (opts.palette and opts.palette.tracks) or {}
+    if not vim.o.termguicolors then
+        return tracks[((ordinal - 1) % math.max(#tracks, 1)) + 1]
+    end
+    if gen_cache[ordinal] then return gen_cache[ordinal] end
+    local rgb = color.generate(generated_anchor(opts), ordinal)
+    local name = "GitloomGen_" .. ordinal
+    pcall(vim.api.nvim_set_hl, 0, name, { fg = rgb })
+    gen_cache[ordinal] = name
+    return name
+end
+
+--- Clear the generated-colour caches (groups wiped by `hi clear`, and the anchor
+--- may shift with the theme); recreated lazily on the next render.
+local function reset_gen_cache()
+    gen_anchor = nil
+    for k in pairs(gen_cache) do gen_cache[k] = nil end
 end
 
 
@@ -871,11 +936,15 @@ local function get_column_chars(opts, columns, emphasis)
         end
 
         --- Resolve a palette slot (1-based, from Phase 1's free list) to its
-        --- highlight group. Wraps defensively in case a slot exceeds the palette.
-        ---@param color integer|nil
+        --- highlight group: a curated slot indexes `palette.tracks`; a slot beyond
+        --- the curated set is a generated OKLCH colour (§5.5).
+        ---@param slot integer|nil
         ---@return string?
-        local get_highlight = function(color)
-            return color and opts.palette.tracks[((color - 1) % #opts.palette.tracks) + 1] or nil
+        local get_highlight = function(slot)
+            if not slot then return nil end
+            local n = #opts.palette.tracks
+            if slot <= n then return opts.palette.tracks[slot] end
+            return generated_hl(opts, slot - n)
         end
 
         -- Reachability dimming (§12): a cell outside the cone renders its colour
@@ -1774,7 +1843,10 @@ end
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
----@field tracks? string[]  highlight groups cycled by lane id (the lane palette)
+---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
+---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
+---@field generate? boolean  generate overflow OKLCH colours when truecolor (§5.5)
+---@field anchor? { L?: number, C?: number, base_hue?: number }  generated-colour anchor (§5.5)
 
 ---@class MergeStyle
 ---@field allow_merge_on_split boolean
@@ -1844,6 +1916,14 @@ function M.open(folder, opts)
                 --"DiagnosticHint",
                 --"DiagnosticOk",
             },
+            -- Lane colouring (§5.5): generate overflow colours in OKLCH when the
+            -- curated `tracks` run low (auto-disabled without truecolor), keeping
+            -- at least `buffer` colours in reserve so a released colour is not
+            -- reused too soon. `anchor` (nil = derive L/C from the theme) sets the
+            -- generated colours' lightness/chroma.
+            generate = true,
+            buffer = 3,
+            anchor = nil,
         },
         --merge_style = "merge"
         merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style),
@@ -1878,6 +1958,10 @@ function M.open(folder, opts)
     if not user_footer then
         opts.win.footer = footer_text(opts.mirror)
     end
+    -- Colour generation (§5.5) needs truecolor to realise RGB; without it Phase 1
+    -- must not mint generated slots (they would have no colour), so degrade to
+    -- the curated palette + sharing.
+    opts.palette.generate = (opts.palette.generate ~= false) and vim.o.termguicolors and true or false
 
     local listview = require("gitloom.listview")
 
@@ -2223,6 +2307,7 @@ function M.open(folder, opts)
             group = vim.api.nvim_create_augroup("GitloomDim_" .. buf, { clear = true }),
             callback = function()
                 reset_dim_cache()
+                reset_gen_cache()
                 if lv and lv.controller then
                     lv.controller.refresh()
                 end
