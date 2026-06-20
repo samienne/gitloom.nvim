@@ -80,6 +80,15 @@ live projection, a recomputed one mid-reflow, future alternate views). A
 head** (`{tip, refs, count, region_hashes}`); `columns.layout` (Phase 1) is
 unchanged — it lays out whatever DisplayNode DAG it is handed.
 
+**Marker packing** (spec §10.4) is a post-Phase-1 pass over the laid-out rows:
+adjacent *marker* rows (collapsed heads — messageless nodes) that are
+overlay-compatible (no column has two nodes or two different lanes; lanes stay
+continuous) merge into one **marker-group** OrderItem carrying several markers'
+nodes on one line. Compaction makes only the safe merges compatible (a turn
+between two rows breaks continuity, so they won't merge). `columns.layout` and
+the listview's one-item-per-line model are unchanged — the group is one item; the
+packed grid is validated by the same wires-connect checker the layout uses.
+
 Consequences for the build:
 
 - **Reflow swaps the graph** rather than mutating in place. The listview points

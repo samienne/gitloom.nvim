@@ -47,7 +47,8 @@ exists primarily to exercise and validate the graph algorithm.
 debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on. `c`
 toggles the first-parent focus (§10.7) — collapse every non-mainline branch, or
-show the full graph.
+show the full graph. `p` toggles **marker packing** (§10.4) — merge concurrent
+collapsed heads onto shared lines, or one per line.
   `?` opens a float listing all keybindings. The footer shows live status
   (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
   when any branch modes are set, and `(mirrored)` when mirroring is on).
@@ -193,7 +194,9 @@ head, or a merge's second-and-later parent.
 ### 5.1 Invariants
 
 - **One commit per Line.** Exactly one Commit's node is placed on a commit line;
-  the virtual split/merge lines carry none.
+  the virtual split/merge lines carry none. *Exception:* a **packed marker line**
+  (§10.4) carries several markers' nodes — messageless collapsed heads merged
+  onto one line — each in its own lane column.
 - **Two-sided Segments.** Each Segment touches exactly two of its Column's sides
   (a wire enters and exits) — one side only at an endpoint (a Lane's `begin` or
   `end`). This forces crossings (`─│─`) and tees to be modelled as *separate*
@@ -545,15 +548,30 @@ Hiding removes a region's rows outright and, unlike collapse, does **not**
 preserve shape. An edge from a hidden region into a retained commit is dropped
 (a phantom indicator is an open question, §10.8).
 
-### 10.4 Collapsed head content
+### 10.4 Markers and packing
 
-A collapsed head shows the owning ref name(s) and a collapsed indicator (e.g. a
-commit count), and optionally the tip's subject. Exact content is provisional.
+A **marker** is a messageless node: a node glyph plus optional labels, and no
+message. Today the only markers are **collapsed heads** (§10.3); later, split and
+merge junctions may also become markers (§10.8). A collapsed-head marker shows
+the `◍` node (§5.3), its region's ref label(s), and a compact collapsed indicator
+(a commit count) — but no message/subject. Markers exist to show topology, not
+content.
 
-Currently a head renders as a single row: the `◍` node (§5.3), a "⋯ N commits"
-summary followed by the region tip's subject, and the region's ref label(s) in
-the active label placement (right-pinned, or inline). Date and author are the
-tip's.
+**Packing.** Because markers carry no message, several may share one physical
+line. A maximal run of consecutive markers that are **mutually concurrent** (none
+an ancestor of another) and whose lanes stay continuous is **packed** onto one
+line: each marker keeps its own lane column and its edges, so branch topology is
+unchanged, and the line lists the union of their ref labels. This is the one
+exception to "one commit per line" (§5.1). Message-bearing commit rows never pack
+(a Phase A limit; the general adaptive case is §10.8).
+
+Packing is **on by default**, toggled live with `p` and via a config option;
+with it off, every marker occupies its own line.
+
+**Interaction.** On a packed line, `h`/`l` selects among the markers by their
+labels and `<CR>` expands the selected one (§10, the mode cycle / expand).
+Reachability emphasis (§12) follows the selected marker, or is neutral when none
+is selected.
 
 ### 10.5 Reflow
 
@@ -602,6 +620,10 @@ all-normal.
 
 ### 10.8 Open / deferred
 
+- **Adaptive layout** — packing *junctions* (splits/merges) as markers too, and
+  letting markers ride on message-bearing lines when they fit, toward a fully
+  adaptive density (greedy row packing). Deferred; Phase A packs only collapsed
+  heads onto marker-only lines.
 - **Hidden connectivity** — phantom indicator vs. vanish.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
