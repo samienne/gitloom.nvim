@@ -230,6 +230,91 @@ describe("columns.layout root column break", function()
     end)
 end)
 
+describe("columns.layout compact column reuse (spec §5.1)", function()
+    -- A staircase of sequential feature-branch merges off one trunk: each mK is a
+    -- merge whose first parent is the next trunk commit and whose second parent is
+    -- a one-commit branch fK that forks from that same next trunk commit. The merge
+    -- fans must reuse interior gaps earlier branches vacated, so the graph stays a
+    -- bounded width instead of growing one column wider per merge (the regression).
+    local function staircase(n)
+        local rows = {}
+        for k = 1, n do
+            rows[#rows + 1] = { "m" .. k, { "m" .. (k + 1), "f" .. k } }
+            rows[#rows + 1] = { "f" .. k, { "m" .. (k + 1) } }
+        end
+        rows[#rows + 1] = { "m" .. (n + 1), {} }
+        return rows
+    end
+
+    local function max_width(rows)
+        local w = 0
+        for _, row in ipairs(rows) do
+            for _, line in ipairs({ row.split or {}, row.columns, row.merge or {} }) do
+                if #line > w then w = #line end
+            end
+        end
+        return w
+    end
+
+    it("keeps a staircase of merges bounded, not growing per merge", function()
+        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = false })
+        -- Width must not scale with the number of merges: a short and a long
+        -- staircase render the same bounded width (3: trunk + the alternating gap).
+        assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(3)))))
+        assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(12)))))
+    end)
+
+    it("stays well-formed and connected across the staircase", function()
+        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = false })
+        local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
+        assert.equals(0, #errs, table.concat(errs, "\n"))
+    end)
+
+    it("reuses a terminated child's column on a separate merge line", function()
+        -- merge_on_separate_line (split inline, the "merge on its own line" style):
+        -- a merge's fan-out is a row *below* the commit, where the just-merged
+        -- child has already ended — so the outgoing parent reuses that freed column
+        -- instead of leaving an empty-column gap. The gap made the width oscillate
+        -- (2 vs 3) and bounced a right-aligned mirror graph. Width must stay 2.
+        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = true })
+        assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(3)))))
+        assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(12)))))
+        local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
+        assert.equals(0, #errs, table.concat(errs, "\n"))
+    end)
+
+    it("compacts an expanded inline branch next to the trunk (no persistent gap)", function()
+        -- Inline mode, two-commit branches: each branch is born one column out (a
+        -- fork-merge can't reuse the just-freed inline cell, the gated handoff),
+        -- but its body must then compact next to the trunk via a single jog rather
+        -- than stranding an empty column its whole length. Every branch commit ends
+        -- up at column 2 (adjacent to the trunk at column 1), node and body alike.
+        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = false })
+        local rows = {}
+        for k = 1, 4 do
+            rows[#rows + 1] = { "m" .. k, { "m" .. (k + 1), "g" .. k .. "b" } }
+            rows[#rows + 1] = { "g" .. k .. "b", { "g" .. k .. "a" } }
+            rows[#rows + 1] = { "g" .. k .. "a", { "m" .. (k + 1) } }
+        end
+        rows[#rows + 1] = { "m5", {} }
+        local laid = columns.layout(opts, h.dag(rows))
+        local function col(hash)
+            for _, row in ipairs(laid) do
+                if row.commit and row.commit.hash == hash then
+                    for j, t in ipairs(row.columns) do if t.has_commit then return j end end
+                end
+            end
+        end
+        -- g1 is born at column 2 (no preceding terminator); g2..g4 are born at
+        -- column 3 then jog to 2. All branch commits sit adjacent to the trunk.
+        for k = 1, 4 do
+            assert.equals(2, col("g" .. k .. "b"))
+            assert.equals(2, col("g" .. k .. "a"))
+        end
+        assert.equals(0, #check(opts, laid), "ill-formed")
+    end)
+end)
+
 describe("columns.layout free-list colouring", function()
     local function all_lines(rows)
         local lines = {}

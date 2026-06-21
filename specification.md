@@ -224,6 +224,27 @@ head, or a merge's second-and-later parent.
   Column's Segments' connectivity (every wired side has a Segment providing it).
 - Merges (commit with >1 parent) fan out `parent_lanes`; splits (>1 child) fan in
   `child_lanes`.
+- **Compact column reuse.** A fanned-out parent lane (a merge's extra parent)
+  takes the **leftmost column that has been free since before its Line** — an
+  interior gap an earlier branch vacated — rather than always opening a new
+  rightmost column. So a staircase of sequential feature-branch merges stays a
+  bounded width instead of growing one column wider per merge. A column a
+  *terminating* child frees is reusable by an outgoing parent only when that does
+  not place two turns in one cell: when the fan-out is on a **separate merge Line**
+  below (the child already ended on the commit Line above, so the column is simply
+  free) or under `allow_merge_on_split` (the sanctioned inline two-turn cell, §5.2).
+  Otherwise — an inline fan-out sharing the commit Line with the fan-in — the
+  freed column is left for the next Line to reclaim, so two adjacent merges may
+  alternate columns by one. Reusing the column on a separate merge Line is what
+  keeps that style from leaving an empty-column gap that bounces a right-aligned
+  (mirrored, §5.4) graph.
+- **Commit compaction.** A *linear* commit (reached by a single child-lane) slides
+  into the leftmost column free since row start, its incoming lane turning into the
+  new column. So a branch born one column out — an inline merge-on-split that had
+  to fan past a freed cell — compacts next to the trunk after a single jog rather
+  than running stranded beside an empty column for its whole length. The slide
+  reserves its column before survivor compaction, so a survivor keeps any nearer
+  gap; the lone jog is a turn, not a straight run, so id-continuity holds.
 
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view
@@ -566,7 +587,10 @@ A **marker** is a messageless node: it shows topology, not content. There are
 two kinds:
 
 - a **collapsed head** (§10.3) — the `◍` node, the region's ref label(s), and a
-  compact collapsed indicator (a commit count), but no message/subject;
+  compact collapsed indicator (a commit count). It carries **no message, date, or
+  author**: a head stands for a whole region of commits, so any single value
+  would misrepresent it. It exists only to show that the region exists and how it
+  connects to the trunk — uncollapse for detail;
 - a **kept junction** (§10.3) — a fork/merge inside collapsed branches whose
   commit is just a split point. It renders **node-less**: the cell draws the
   fork/merge as box-drawing lanes (`├ ┬ ┼ …`) instead of a node, with no
