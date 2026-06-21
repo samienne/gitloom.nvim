@@ -415,6 +415,22 @@ describe("junction markers — node-less junctions (§10.4)", function()
         assert.equals(3, node_count(grid))
     end)
 
+    it("lays a node-less junction out inline — no separate split line", function()
+        -- x forks (children a,b) so under split-on-its-own-line it would get a
+        -- split row; as a node-less junction it renders inline (one row).
+        local proj = fixture()
+        local opts = helpers.big_opts() -- split_on_separate_line = true
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local saw_junction = false
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.junction then
+                saw_junction = true
+                assert.is_nil(row.split, "a node-less junction should have no separate split line")
+            end
+        end
+        assert.is_true(saw_junction)
+    end)
+
     it("junction_markers = false renders the junction with a node", function()
         local proj = fixture()
         local opts = helpers.big_opts()

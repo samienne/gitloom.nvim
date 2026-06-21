@@ -232,8 +232,12 @@ function M.layout(opts, items)
         for _, o in ipairs(outgoing) do row.parent_lanes[#row.parent_lanes + 1] = o.lane end
         for _, inc in ipairs(incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
 
-        local sep_split = opts.merge_style.split_on_separate_line and #incoming > 1
-        local sep_merge = opts.merge_style.merge_on_separate_line and #outgoing > 1
+        -- A node-less junction (spec §10.4) carries no message, so its fan needs
+        -- no separate line — render it inline so the join is one row, not a fan
+        -- line plus an empty lane row.
+        local inline_junction = C.junction and (opts.junction_markers ~= false)
+        local sep_split = opts.merge_style.split_on_separate_line and #incoming > 1 and not inline_junction
+        local sep_merge = opts.merge_style.merge_on_separate_line and #outgoing > 1 and not inline_junction
 
         -- SPLIT LINE (above): the non-trunk children converge into the commit
         -- column and terminate; the leftmost child (the trunk) continues straight
