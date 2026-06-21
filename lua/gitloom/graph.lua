@@ -1121,15 +1121,18 @@ local function get_column_chars(opts, columns, emphasis)
         local track = columns[i]
         local next = columns[i + 1]
 
-        -- A *crossing* is an independent through-vertical + through-horizontal in
-        -- one cell (a `│` a wire passes across). It is left whole so a passing
-        -- cone wire never truncates it; only real junctions drop their dim arms.
-        local cross_v, cross_h
+        -- A *crossing* is a clean through-horizontal wire passing across a
+        -- vertically-continuous cell (a `│` the wire crosses). It is left whole
+        -- so a passing cone wire never truncates it; only real junctions — whose
+        -- arms all *turn* (no straight left↔right lane) — drop their dim arms and
+        -- draw `┼`. The vertical may be one through-lane or, at a merge handoff
+        -- (allow_merge_on_split), separate up/down turns sharing the column: the
+        -- horizontal still passes over, so the cell stays a crossing, not a `┼`.
+        local cross_h = false
         for _, s in ipairs(track.lanes or {}) do
-            if s.connectivity.up and s.connectivity.down then cross_v = s end
             if s.connectivity.left and s.connectivity.right then cross_h = true end
         end
-        local is_crossing = cross_v ~= nil and cross_h
+        local is_crossing = cross_h and track.connectivity.up and track.connectivity.down
         -- A kept junction (§10.4) is drawn node-less — its cell renders the fork/
         -- merge as box-drawing lanes, not a commit node — so the split topology
         -- shows without the commit's weight. Disabled by opts.junction_markers.
