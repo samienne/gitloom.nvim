@@ -1598,17 +1598,18 @@ local function display_item(opts, item, selection_state, cone)
     -- column regardless of label_mode. Always one row (dual_two_line excludes it).
     local head = item.commit
     if head and head.collapsed then
-        local tip = head.tip
         local graph_item = get_column_chars(opts, item.columns, emphasis)
-        local date_item = rh(format_date(tip and tip.date, opts) .. " ", palette.date)
-        local author_item = rh((tip and tip.author or "") .. " ", palette.author)
+        -- No date/author columns: a collapsed head stands for a whole region of
+        -- commits, so the tip's lone date/author would misrepresent it. It exists
+        -- only to show the region's existence and how it connects to the trunk —
+        -- uncollapse for detail.
         local parts = {}
         for _, it in ipairs(get_ref_items(head)) do
             parts[#parts + 1] = it
             parts[#parts + 1] = " "
         end
         parts[#parts + 1] = rh(("(%d)"):format(head.count or 0), "Comment")
-        return { line = { date_item, author_item, graph_item, compose(parts) } }
+        return { line = { "", "", graph_item, compose(parts) } }
     end
 
     -- A kept junction drawn as a marker (spec §10.4): the split/merge topology

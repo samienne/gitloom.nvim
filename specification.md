@@ -566,7 +566,10 @@ A **marker** is a messageless node: it shows topology, not content. There are
 two kinds:
 
 - a **collapsed head** (§10.3) — the `◍` node, the region's ref label(s), and a
-  compact collapsed indicator (a commit count), but no message/subject;
+  compact collapsed indicator (a commit count). It carries **no message, date, or
+  author**: a head stands for a whole region of commits, so any single value
+  would misrepresent it. It exists only to show that the region exists and how it
+  connects to the trunk — uncollapse for detail;
 - a **kept junction** (§10.3) — a fork/merge inside collapsed branches whose
   commit is just a split point. It renders **node-less**: the cell draws the
   fork/merge as box-drawing lanes (`├ ┬ ┼ …`) instead of a node, with no
