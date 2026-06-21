@@ -158,4 +158,20 @@ describe("refresh_columns", function()
         refresh_columns(nil, model, 3, 3) -- width 2 → sticky, stays 5
         assert.equals(5, model.columns[1])
     end)
+
+    -- col_sticky (no cap) just keeps a column from shrinking — for the graph
+    -- column under mirroring (spec §5.4). A function form is supported too.
+    it("a col_sticky column only grows, with no cap", function()
+        local model = {
+            flex = nil,
+            columns = {},
+            col_sticky = function() return { 1 } end,
+            items = { { data = "abcdefghij" }, { data = "ab" } },
+            display = function(d) return { line = { { text = d } } } end,
+        }
+        refresh_columns(nil, model, 1, 1) -- width 10 → grows to 10 (no cap)
+        assert.equals(10, model.columns[1])
+        refresh_columns(nil, model, 2, 2) -- width 2 → sticky, stays 10
+        assert.equals(10, model.columns[1])
+    end)
 end)

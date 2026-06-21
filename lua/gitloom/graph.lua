@@ -37,6 +37,9 @@ local FLEX_COL = 4
 -- The author column (index 2). It is given a sticky cap so it only grows up to
 -- a max width and doesn't bounce as different-length names scroll past.
 local AUTHOR_COL, AUTHOR_MAX = 2, 25
+-- The graph column (index 3). Under mirroring it is sticky (only grows) so the
+-- right-aligned graph + message don't shift as the lane width changes.
+local GRAPH_COL = 3
 
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
@@ -2584,6 +2587,9 @@ function M.open(folder, opts)
         overflow_hl = opts.palette.remote,
         -- Sticky cap on the author column so it only grows (no scroll bounce).
         col_max = { [AUTHOR_COL] = AUTHOR_MAX },
+        -- Under mirroring, make the graph column sticky too (only grow) so the
+        -- right-aligned graph + message don't bounce as the lane width changes.
+        col_sticky = function() return opts.mirror and { GRAPH_COL } or {} end,
         -- Real buffer lines per item: a dual-mode labelled commit is two rows
         -- (label row + message row), everything else one. Cheap — reads only the
         -- commit's refs + mode — so the listview's buffer-line map needs no layout.
