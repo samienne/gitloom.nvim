@@ -499,9 +499,10 @@ describe("view.owners — first-parent default (spec §10.7)", function()
         assert.equals("normal", by_id.head.mode)
         assert.is_true(by_id.head.fp_only)
         assert.equals("collapsed", by_id.feat.mode)
-        assert.falsy(by_id.feat.fp_only)
+        assert.is_true(by_id.feat.fp_only) -- every owner is first-parent-only under focus
         assert.is_not_nil(by_id["merge:m:2"]) -- f1 is m's second parent
         assert.equals("collapsed", by_id["merge:m:2"].mode)
+        assert.is_true(by_id["merge:m:2"].fp_only)
     end)
 
     it("an explicit mode overrides the default", function()

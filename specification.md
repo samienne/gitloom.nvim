@@ -494,9 +494,10 @@ Each **owner** has a mode. An owner is one of:
   by `(merge-hash, parent-index)`, so merged-in work that has no ref of its own
   can still be collapsed/expanded (and so the first-parent default, §10.7, has
   something to attach to);
-- the **trunk owner** — the current branch (HEAD), with *first-parent-only*
-  reachability (§10.2): it covers only HEAD's first-parent mainline, not the
-  branches merged into it.
+Under the first-parent focus (§10.7) **every** owner is *first-parent-only*
+(§10.2) — it covers only its tip's first-parent line. The **trunk owner** (the
+current branch, HEAD) is just the one that defaults to normal, so HEAD's mainline
+stays in full.
 
 Modes:
 
@@ -511,14 +512,18 @@ choices it offers; the model does not.
 ### 10.2 Attribution — the reachability signature
 
 For each commit `c`, its **signature** `sig(c)` is the set of owners that can
-reach `c`. A normal owner reaches `c` if `c` is an ancestor-or-self of its tip
-(any parent edge); a **first-parent-only** owner (the trunk, §10.1) reaches `c`
-only along *first-parent* edges — so it covers its tip's mainline but stops at
-every merge instead of descending the merged-in side. Signatures are monotone
-along the DAG: an ancestor's signature is a superset of its descendants'.
-Commits therefore partition into **regions** — maximal connected runs of equal
-signature — whose boundaries fall exactly at junctions where an owner joins or
-leaves.
+reach `c`. Reachability is **first-parent-only** under the first-parent focus
+(§10.7): an owner reaches `c` only along *first-parent* edges from its tip, so it
+covers its tip's mainline but stops at every merge instead of descending the
+merged-in side. This is what attributes a commit to the branch it is actually
+*on*, not to every branch whose history merged through it — so collapsing or
+expanding one branch never drags in the earlier branches it merged past. (With
+focus off there is no trunk and every owner is full-reach — any parent edge — but
+the projection is then the identity, so it does not matter.) Signatures are
+monotone along the DAG: an ancestor's signature is a superset of its
+descendants'. Commits therefore partition into **regions** — maximal connected
+runs of equal signature — whose boundaries fall exactly at junctions where an
+owner joins or leaves.
 
 A region's display mode is the **join** over the owners in its signature:
 
@@ -622,22 +627,27 @@ into it *and* divergent branches — is collapsed. This is a per-owner **default
 mode**, not a one-off seed: each reflow recomputes it, and `view state` holds
 only the user's explicit overrides on top.
 
-The defaults are:
+Under focus **every owner is first-parent-only** (§10.2) — each covers only its
+own tip's first-parent line. The defaults are:
 
-- the **trunk owner** (HEAD, first-parent-only, §10.1) → **normal**; it covers
-  the mainline and the history shared below merge-bases, keeping those visible;
+- the **trunk owner** (HEAD) → **normal**; its first-parent line is the mainline
+  (plus the history shared below merge-bases), so those stay visible;
 - **every other owner** (other refs, and the anonymous merge-parents) →
   **collapsed**.
 
-Because the trunk owner is first-parent-only, it does not reach a merged-in
-branch, so that branch's only owners are collapsed → it collapses, **even when a
-ref points at it** (the ref defaults collapsed too). A commit reachable only via
-collapsed owners collapses; the shared mainline, reached by the normal trunk
-owner, stays normal (the §10.2 join). The result is "current branch in full,
-every other branch a `◍` head."
+Because the trunk is first-parent-only, it does not reach a merged-in branch, so
+that branch's only owners are collapsed → it collapses, **even when a ref points
+at it** (the ref defaults collapsed too). And because *every* owner is
+first-parent-only, a branch is attributed to the commits on its own first-parent
+line — so a feature ref does not reach the earlier features its history merged
+through, and collapsing/expanding one branch (§10.4) affects only that branch
+(branches genuinely built on top of one another are the exception — they share a
+first-parent line and move together). A commit reachable only via collapsed
+owners collapses; the shared mainline stays normal (the §10.2 join). The result
+is "current branch in full, every other branch a `◍` head."
 
-The user's explicit toggles (§10, the `<CR>` cycle) override the default per
-owner, so any collapsed branch can be expanded and any mainline ref hidden.
+The user's explicit toggles (§10.4) override the default per owner, so any
+collapsed branch can be expanded and any branch hidden.
 
 This behavior is controlled by the **`collapse_merged`** option (default on) and
 can be toggled live; with it off, every owner defaults **normal** (the plain

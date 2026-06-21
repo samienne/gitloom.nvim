@@ -87,12 +87,15 @@ end
 --- the current branch's ref (HEAD), or nil if there is none.
 ---
 --- With `collapse_merged` off (or no trunk) every owner defaults **normal** and
---- no trunk/anonymous owners are added — the plain full graph. With it on: the
---- trunk owner becomes **first-parent-only + normal** (it covers only HEAD's
---- mainline), and every other ref **and** every non-first merge parent (an
---- anonymous owner, keyed `merge:<hash>:<i>`) defaults **collapsed** — so the
---- mainline shows in full and everything else collapses (§10.7). `modes`
---- overrides the default per owner id.
+--- no trunk/anonymous owners are added — the plain full graph. With it on:
+--- **every** owner is **first-parent-only** — each covers only its own tip's
+--- first-parent line, so a branch is attributed to the commits actually *on* it,
+--- not every branch its history merged through (this is what keeps collapsing or
+--- expanding one branch from dragging in the earlier branches it merged past).
+--- The trunk (HEAD) defaults **normal**; every other ref and every non-first
+--- merge parent (an anonymous owner, keyed `merge:<hash>:<i>`) defaults
+--- **collapsed** — so the mainline shows in full and everything else collapses
+--- (§10.7). `modes` overrides the default per owner id.
 ---@param items table[]
 ---@param ref_owners table[]  -- { {id, tip}, ... }
 ---@param trunk_id string|nil
@@ -104,17 +107,17 @@ function M.owners(items, ref_owners, trunk_id, modes, collapse_merged)
     local on = collapse_merged and trunk_id ~= nil
     local out = {}
     for _, o in ipairs(ref_owners) do
-        local default, fp = "normal", false
-        if on and o.id ~= trunk_id then default = "collapsed" end
-        if on and o.id == trunk_id then fp = true end
-        out[#out + 1] = { id = o.id, tip = o.tip, mode = modes[o.id] or default, fp_only = fp }
+        -- Under focus every owner is first-parent-only (see above); the trunk is
+        -- normal, every other ref collapsed by default.
+        local default = (on and o.id ~= trunk_id) and "collapsed" or "normal"
+        out[#out + 1] = { id = o.id, tip = o.tip, mode = modes[o.id] or default, fp_only = on }
     end
     if on then
         for _, it in ipairs(items) do
             local ps = it.commit.parents or {}
             for i = 2, #ps do
                 local id = "merge:" .. it.commit.hash .. ":" .. i
-                out[#out + 1] = { id = id, tip = ps[i], mode = modes[id] or "collapsed", fp_only = false }
+                out[#out + 1] = { id = id, tip = ps[i], mode = modes[id] or "collapsed", fp_only = true }
             end
         end
     end
