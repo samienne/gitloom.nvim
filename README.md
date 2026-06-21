@@ -94,7 +94,8 @@ Opens the graph for the repository at Neovim's current working directory.
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
-| `<CR>` | Selected ref: cycle its branch mode (normal → collapsed → hidden); collapsed head: expand it; otherwise open the commit view |
+| `<Tab>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Tab>` flips it in place) |
+| `<CR>` | Action menu for the row — examine commit, open diff, collapse / expand / hide the branch |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row |
@@ -105,12 +106,21 @@ Opens the graph for the repository at Neovim's current working directory.
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
 
-**Branch modes.** Select a ref with `h`/`l`, then `<CR>` cycles it through
-**normal → collapsed → hidden**. A *collapsed* branch contracts its commits to a
-single `◍` head row (showing a commit count, the tip's subject, and the ref);
-*hidden* removes them. A branch's local ref and its tracking remotes cycle
-together. `<CR>` on a collapsed head expands it again. See the design in
-[specification.md §10](specification.md).
+**Branch modes.** A branch can be **normal**, **collapsed** (contracted to a
+single `◍` marker row — a commit count and the ref), or **hidden**. The
+collapse interactions act on the **branch under the cursor**, found from the
+commit's history — no ref needed, so they work for ref-less regions too
+(first-parent-merged, squashed):
+
+- `<Tab>` toggles **collapse ⇄ expand** in place; the cursor follows the result,
+  so holding `<Tab>` flips a branch open and closed.
+- `<CR>` opens an **action menu** for the row — examine commit, open diff,
+  collapse, expand, **hide** — most-relevant first. On a packed line it lists
+  every marker by name, so any branch is reachable even when labels overflow.
+- `h`/`l` selects a ref (or a marker on a packed line) for the toggle/menu to
+  act on.
+
+See the design in [specification.md §10](specification.md).
 
 **First-parent focus (default).** By default the graph opens focused on the
 current branch: HEAD's first-parent mainline is shown in full and every other

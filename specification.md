@@ -36,10 +36,12 @@ exists primarily to exercise and validate the graph algorithm.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
-  placements can be compared at a glance. `<CR>` is context-dependent (§10): on a
-  **selected ref** it cycles that branch's mode (normal → collapsed → hidden) and
-  reflows; on a **collapsed head** with no ref selected it expands the region;
-  otherwise it opens the **commit view** for the commit on the current row (§11).
+  placements can be compared at a glance. `<Tab>` is the quick **collapse ⇄
+  expand toggle** for the branch under the cursor (§10.4): it collapses an
+  expanded branch or expands a marker, in place, and the cursor follows so
+  repeated `<Tab>` flips it open/closed. `<CR>` opens an **action menu** for the
+  row (§10.4) — examine the commit, open its diff, collapse / expand / hide the
+  branch — most-relevant action first.
   `D` opens that commit's diff in an external diff viewer via the configured
   provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
@@ -574,10 +576,25 @@ exception to "one commit per line" (§5.1). Message-bearing commit rows never pa
 Packing is **on by default**, toggled live with `p` and via a config option;
 with it off, every marker occupies its own line.
 
-**Interaction.** On a packed line, `h`/`l` selects among the markers by their
-labels and `<CR>` expands the selected one (§10, the mode cycle / expand).
-Reachability emphasis (§12) follows the selected marker, or is neutral when none
-is selected.
+**Interaction.** Collapse/expand acts on the **region under the cursor**, found
+through each commit's signature (§10.2) — not through a ref — so it works for any
+collapsed region, including ref-less ones (first-parent-merged, squashed). A
+commit the trunk reaches (the mainline) is not collapsible.
+
+- `<Tab>` — the quick **collapse ⇄ expand toggle**: collapse the expanded branch
+  under the cursor (set its non-trunk owners collapsed), or expand the marker
+  under the cursor (set its owners normal). Two-state — *hidden* is not in this
+  cycle, so the toggled thing never vanishes from under the cursor. After the
+  reflow the cursor is repositioned onto the resulting node (the new marker, or
+  the expanded region's tip), so repeated `<Tab>` flips it open/closed in place.
+- `<CR>` — an **action menu** for the row: every applicable action, most-relevant
+  first (examine commit, open diff, collapse, expand, **hide**). This is where
+  hidden and full mode control live, and it is the overflow-proof way to reach
+  any marker on a packed line even when not all labels fit.
+
+On a packed line, `h`/`l` selects among the markers (all of them, regardless of
+which labels fit); `<Tab>` and the menu act on the selected marker. Reachability
+emphasis (§12) follows the selection, or is neutral when none is selected.
 
 ### 10.5 Reflow
 

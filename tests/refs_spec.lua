@@ -7,6 +7,7 @@ local group_refs = internal.group_refs
 local owners_from_refs = internal.owners_from_refs
 local next_mode = internal.next_mode
 local selected_owner_ids = internal.selected_owner_ids
+local collapse_owners = internal.collapse_owners
 
 describe("classify_ref", function()
     it("classifies a local branch", function()
@@ -176,5 +177,20 @@ describe("branch-mode toggle helpers", function()
 
     it("selected_owner_ids is nil out of range", function()
         assert.is_nil(selected_owner_ids(commit({ { "local", "main" } }), 5))
+    end)
+
+    it("collapse_owners returns nil for a mainline commit (trunk reaches it)", function()
+        assert.is_nil(collapse_owners({ trunk = true, feat = true }, "trunk",
+            { trunk = "normal", feat = "normal" }))
+    end)
+
+    it("collapse_owners returns the non-trunk normal owners off the mainline", function()
+        -- feat is normal (keeps it visible); the merge owner is already collapsed
+        assert.same({ "feat" }, collapse_owners({ feat = true, ["merge:m:2"] = true }, "trunk",
+            { feat = "normal", ["merge:m:2"] = "collapsed" }))
+    end)
+
+    it("collapse_owners is nil when nothing normal keeps the commit visible", function()
+        assert.is_nil(collapse_owners({ feat = true }, "trunk", { feat = "collapsed" }))
     end)
 end)

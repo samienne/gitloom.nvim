@@ -132,7 +132,8 @@ Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display),
   `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), and the
-  branch-mode toggle helpers `next_mode` / `selected_owner_ids` (§10)
+  branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
+  (§10/§10.4)
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
   collapsed contraction to one head with junctions kept, **branch-topology
@@ -217,8 +218,9 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
 `owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
-helpers `next_mode` / `selected_owner_ids` (§10), and `pack_markers` (the
-marker-packing pass; §10.4). `columns.layout` is reached via
+helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
+marker-packing pass; §10.4), and `collapse_owners` (the region's collapsible
+owners under the cursor; §10.4). `columns.layout` is reached via
 `require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
 / `view.owners` via `require("gitloom.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
@@ -323,8 +325,15 @@ Details not covered by the spec or architecture:
   DisplayNodes + merged columns) — multiple `◍` on one line, the one exception to
   "one commit per line" (§5.1). Overlay-compatible = each column has ≤1 node and
   ≤1 lane id and no horizontal overlap; compaction makes only safe merges
-  compatible. On a packed line `h`/`l` selects a marker (`marker_units`) and
-  `<CR>` expands it; the listview stays 1-item-per-line (a group is one item).
+  compatible. On a packed line `h`/`l` selects a marker (`marker_units`); the
+  listview stays 1-item-per-line (a group is one item).
+- **Collapse interaction** (spec §10.4): acts on the *region under the cursor*,
+  not a ref — `branch_under_cursor(line)` resolves the selection (ref/marker) or
+  the commit's signature (`collapse_owners`) into `{state, owners, follow,
+  commit}`. `<Tab>` is the 2-state collapse⇄expand toggle (`set_branch` flips the
+  owners, reflows, then `goto_hash` repositions the cursor on the result so it is
+  repeatable). `<CR>` opens an action menu (`vim.ui.select`) — examine / diff /
+  collapse / expand / hide, listing every marker by name on a packed line.
 - **Junction markers** (`opts.junction_markers`, default on; spec §10.4): a kept
   fork/merge inside collapsed branches (a junction, flagged `junction=true` in
   `view.project`, `collapsed=false`) renders **node-less** — `get_column_chars`

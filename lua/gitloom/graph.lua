@@ -42,7 +42,8 @@ local KEYBINDS = {
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
-    { "<CR>", "Selected ref: cycle mode · head: expand · else commit view" },
+    { "<Tab>", "Collapse / expand the branch under the cursor (toggle)" },
+    { "<CR>", "Action menu for the row (examine · diff · collapse/expand/hide)" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref on the row" },
@@ -726,6 +727,7 @@ end
 ---@field junction? boolean   a collapsed-region fork/merge kept for topology (§10.4)
 ---@field tip? Commit         the region's newest member (for the date/author/subject)
 ---@field count? integer      number of commits the head contracts
+---@field region? string[]    member hashes a head contracts (for cursor-follow)
 ---@field signature? table<string, boolean>  owner ids reaching the region (for expand)
 
 ---@class Connectivity
@@ -906,6 +908,28 @@ local function pack_markers(items)
         end
     end
     return out
+end
+
+--- The owner ids whose collapse turns the region containing a shown commit into
+--- a marker (spec §10.4): every non-trunk owner currently keeping it visible.
+--- Returns nil when the commit is **mainline** (the trunk reaches it, so it
+--- can't be collapsed) or nothing normal keeps it visible. Used by the `<Tab>`
+--- collapse toggle and the `<CR>` menu to act on the region under the cursor
+--- without needing a ref.
+---@param sig table<string, boolean>?  -- the commit's signature (owner id set)
+---@param trunk_id string?
+---@param effective table<string, string>  -- owner id → effective mode
+---@return string[]|nil
+local function collapse_owners(sig, trunk_id, effective)
+    if not sig then return nil end
+    if trunk_id and sig[trunk_id] then return nil end -- mainline: not collapsible
+    local out = {}
+    for oid in pairs(sig) do
+        if oid ~= trunk_id and (effective[oid] or "normal") == "normal" then
+            out[#out + 1] = oid
+        end
+    end
+    return (#out > 0) and out or nil
 end
 
 --- Owners for the view builder (specification.md §10): one per ref, carrying
@@ -2415,6 +2439,10 @@ function M.open(folder, opts)
     -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
     -- forward-declared so the stream and key handlers can close over it.
     local reflow = function() end
+    -- Moves the cursor onto the display row representing a commit hash (after a
+    -- collapse/expand reflow, so the toggle stays under the cursor). Assigned in
+    -- the window block; forward-declared for the key handlers.
+    local goto_hash = function(_) end
 
     -- The listview instance. Forward-declared so the on_controller/stream
     -- callbacks below close over this local (not a stray global) and see it once
@@ -2469,6 +2497,58 @@ function M.open(folder, opts)
         if lv and lv.controller then lv.controller.refresh() end
     end
 
+    -- The "branch" the collapse interactions (§10.4) act on at a buffer line:
+    --   { state = "expanded"|"collapsed"|"mainline", owners = ids to flip,
+    --     follow = hash to put the cursor on after the flip, commit = a real
+    --     Commit for examine/diff }.
+    -- Resolved from the selection (a ref or a packed marker) or, failing that,
+    -- the region under the cursor via its signature — so it needs no ref.
+    local function branch_under_cursor(line)
+        local item = order_at(line)
+        if not item then return nil end
+        -- a selected marker on a packed line → expand that marker
+        if item.type == "markers" then
+            if selection_state.commit == item and selection_state.index then
+                local u = marker_units(item)[selection_state.index]
+                if u then
+                    local owners = {}
+                    for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
+                    return { state = "collapsed", owners = owners,
+                        follow = u.marker.tip and u.marker.tip.hash, commit = u.marker.tip }
+                end
+            end
+            return { state = "collapsed" } -- packed line, no selection
+        end
+        local c = item.commit
+        if not c then return nil end
+        -- a selected ref → that branch (toggle by its effective mode)
+        if selection_state.index and selection_state.commit == c then
+            local ids = selected_owner_ids(c, selection_state.index)
+            if ids then
+                local cur = view_state.effective[ids[1]] or "normal"
+                return { state = (cur == "collapsed") and "collapsed" or "expanded",
+                    owners = ids, follow = c.hash, commit = c }
+            end
+        end
+        -- a single collapsed marker (head) → expand its region
+        if c.collapsed then
+            local owners = {}
+            for oid in pairs(c.signature or {}) do
+                if (view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
+            end
+            return { state = "collapsed", owners = owners,
+                follow = c.tip and c.tip.hash, commit = c.tip }
+        end
+        -- a normal/junction commit → collapse the region containing it, if it is
+        -- not mainline (the trunk doesn't reach it).
+        local trunk_id = (repo.head and repo.refs[repo.head]) and repo.head or nil
+        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], trunk_id, view_state.effective)
+        if ids then
+            return { state = "expanded", owners = ids, follow = c.hash, commit = c }
+        end
+        return { state = "mainline", commit = c }
+    end
+
     -- Recompute the footer (active modes + the branch-mode summary, §10) and
     -- apply it to the floating window. Centralised so every state change updates
     -- it the same way.
@@ -2480,6 +2560,15 @@ function M.open(folder, opts)
                 footer_pos = "center",
             })
         end
+    end
+
+    -- Apply a mode to a branch's owners, reflow, and keep the cursor on it (§10.4).
+    local function set_branch(b, mode, follow)
+        for _, oid in ipairs(b.owners or {}) do view_state.modes[oid] = mode end
+        reflow()
+        update_footer()
+        if follow then goto_hash(follow) end
+        place_cursor()
     end
 
     ---@type ListViewOptions
@@ -2634,59 +2723,66 @@ function M.open(folder, opts)
         update_cone() -- buffer lines shifted; recompute the cone over the new map
         place_cursor()
     end
-    -- <CR>: context-dependent (§10). On a *selected* ref, cycle that branch's
-    -- mode (normal → collapsed → hidden) and reflow. On a collapsed head with no
-    -- ref selected, expand it (its collapsed owners → normal). Otherwise open the
-    -- commit view (§11). In dual mode either of a labelled commit's two rows
-    -- resolves to the same commit.
+    -- <Tab>: the quick collapse ⇄ expand toggle for the branch under the cursor
+    -- (§10.4). Collapse an expanded branch or expand a marker; the cursor follows
+    -- the result (set_branch → goto_hash) so repeated <Tab> flips it in place.
+    -- Two-state — hidden is the menu's job, so nothing vanishes under the cursor.
+    opts.win.keys["<Tab>"] = function(self)
+        local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
+        local b = branch_under_cursor(line)
+        if not b or not b.owners or #b.owners == 0 then return end
+        if b.state == "collapsed" then
+            set_branch(b, "normal", b.follow)
+        elseif b.state == "expanded" then
+            set_branch(b, "collapsed", b.follow)
+        end
+    end
+    -- <CR>: an action menu for the row (§10.4) — examine / diff / collapse /
+    -- expand / hide, most-relevant first. On a packed line it lists every marker
+    -- by name, so any branch is reachable even when not all labels fit.
     opts.win.keys["<CR>"] = function(self)
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = order_at(line)
         if not item then return end
-        -- A packed marker line: expand the selected marker (§10.4) — set its
-        -- collapsed owners normal so its branch comes back in full.
+        local actions = {}
+        local function add(label, run) actions[#actions + 1] = { label = label, run = run } end
+
         if item.type == "markers" then
-            local u = selection_state.index and marker_units(item)[selection_state.index]
-            if u then
-                for oid in pairs(u.marker.signature or {}) do
-                    view_state.modes[oid] = "normal"
+            -- list every marker by name (overflow-proof access)
+            for _, u in ipairs(marker_units(item)) do
+                local owners = {}
+                for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
+                local tip = u.marker.tip and u.marker.tip.hash
+                add("Expand " .. u.text, function() set_branch({ owners = owners }, "normal", tip) end)
+                add("Hide " .. u.text, function() set_branch({ owners = owners }, "hidden", nil) end)
+            end
+        else
+            local b = branch_under_cursor(line)
+            if b then
+                if b.state == "expanded" then
+                    add("Collapse branch", function() set_branch(b, "collapsed", b.follow) end)
+                    add("Hide branch", function() set_branch(b, "hidden", nil) end)
+                elseif b.state == "collapsed" then
+                    add("Expand branch", function() set_branch(b, "normal", b.follow) end)
+                    add("Hide branch", function() set_branch(b, "hidden", nil) end)
                 end
-                reflow()
-                update_footer()
-                place_cursor()
-            end
-            return
-        end
-        if not item.commit then
-            return
-        end
-        -- A selected ref → cycle its (group's) branch mode.
-        if selection_state.index and selection_state.commit == item.commit then
-            local ids = selected_owner_ids(item.commit, selection_state.index)
-            if ids then
-                -- Cycle from the *effective* current mode (which may be a
-                -- first-parent default, §10.7), and store the result explicitly so
-                -- it overrides the default.
-                local nxt = next_mode(view_state.effective[ids[1]])
-                for _, id in ipairs(ids) do view_state.modes[id] = nxt end
-                reflow()
-                update_footer()
-                place_cursor()
-                return
+                if b.commit then
+                    add(b.state == "collapsed" and "Examine tip commit" or "Examine commit",
+                        function() open_commit_view(opts, b.commit) end)
+                    if opts.diff and opts.diff.open then
+                        add("Open diff", function() open_diff(opts, b.commit) end)
+                    end
+                end
             end
         end
-        -- A collapsed head (no ref selected) → expand the region it stands for by
-        -- explicitly setting its owners normal (overriding any collapsed default).
-        if item.commit.collapsed then
-            for oid in pairs(item.commit.signature or {}) do
-                view_state.modes[oid] = "normal"
-            end
-            reflow()
-            update_footer()
-            place_cursor()
-            return
-        end
-        open_commit_view(opts, item.commit)
+
+        if #actions == 0 then return end
+        vim.ui.select(actions, {
+            prompt = "gitloom",
+            format_item = function(a) return a.label end,
+        }, function(choice)
+            if choice then choice.run() end
+        end)
     end
     -- D: open the commit's diff in the external diff viewer (§11.5).
     opts.win.keys.D = function(self)
@@ -2812,6 +2908,35 @@ function M.open(folder, opts)
     if lv and lv.win and lv.win.win then
         local win, buf = lv.win.win, lv.win.buf
         pcall(vim.api.nvim_set_option_value, "cursorline", true, { win = win })
+
+        -- Move the cursor onto the display row that now represents `hash` — a real
+        -- commit row, the marker (head/packed) whose region contains it, or a
+        -- junction. Used after a collapse/expand reflow so the toggle stays put.
+        goto_hash = function(hash)
+            if not hash then return end
+            for i, it in ipairs(repo.display or {}) do
+                local found = it.commit and it.commit.hash == hash
+                if not found and it.commit and it.commit.collapsed and it.commit.region then
+                    for _, h in ipairs(it.commit.region) do
+                        if h == hash then found = true; break end
+                    end
+                end
+                if not found and it.type == "markers" then
+                    for _, m in ipairs(it.markers or {}) do
+                        if m.hash == hash then found = true; break end
+                        for _, h in ipairs(m.region or {}) do
+                            if h == hash then found = true; break end
+                        end
+                        if found then break end
+                    end
+                end
+                if found then
+                    local lnum = (lv.controller.item_start and lv.controller.item_start(i)) or i
+                    pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
+                    return
+                end
+            end
+        end
 
         place_cursor = function()
             local line = vim.api.nvim_win_get_cursor(win)[1]
@@ -2992,6 +3117,7 @@ M._internal = {
     next_mode = next_mode,
     selected_owner_ids = selected_owner_ids,
     pack_markers = pack_markers,
+    collapse_owners = collapse_owners,
 }
 
 return M
