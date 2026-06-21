@@ -209,6 +209,15 @@ local function refresh_columns(win, model, first, last)
             end
         end
 
+        -- Capped columns (e.g. the author column) are **sticky**: they only grow,
+        -- up to their cap, never shrinking — so a column doesn't bounce as
+        -- different-length values scroll into view. `col_max` maps a column index
+        -- to its max display width.
+        for j, cap in pairs(model.col_max or {}) do
+            new_columns[j] = math.min(new_columns[j] or 0, cap)
+            new_columns[j] = math.max(new_columns[j], model.columns[j] or 0)
+        end
+
         model.columns = new_columns
     end
 
@@ -681,6 +690,7 @@ end
 ---@field flex? integer        index of the flex column in `line` (fills width)
 ---@field message_min? integer min width kept for the flex column
 ---@field overflow_hl? string  highlight for the "+N" overflow marker
+---@field col_max? table<integer, integer>  per-column cap; a capped column is sticky (only grows)
 
 ---@class ListViewOptions
 ---@field namespace? integer
@@ -691,6 +701,7 @@ end
 ---@field flex? integer
 ---@field message_min? integer
 ---@field overflow_hl? string
+---@field col_max? table<integer, integer>
 
 ---@param opts ListViewOptions
 function M.open(opts)
@@ -705,6 +716,7 @@ function M.open(opts)
         flex = opts.flex,
         message_min = opts.message_min,
         overflow_hl = opts.overflow_hl,
+        col_max = opts.col_max,
     }
 
     opts = opts or {}

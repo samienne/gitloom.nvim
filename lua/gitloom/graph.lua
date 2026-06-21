@@ -34,6 +34,9 @@ local show_lane_ids = false
 -- graph, message. The message fills the remaining width and refs are pinned to
 -- the right edge of the row (specification.md §6; see listview's build_line).
 local FLEX_COL = 4
+-- The author column (index 2). It is given a sticky cap so it only grows up to
+-- a max width and doesn't bounce as different-length names scroll past.
+local AUTHOR_COL, AUTHOR_MAX = 2, 25
 
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
@@ -2579,6 +2582,8 @@ function M.open(folder, opts)
         flex = FLEX_COL,
         message_min = opts.message_min,
         overflow_hl = opts.palette.remote,
+        -- Sticky cap on the author column so it only grows (no scroll bounce).
+        col_max = { [AUTHOR_COL] = AUTHOR_MAX },
         -- Real buffer lines per item: a dual-mode labelled commit is two rows
         -- (label row + message row), everything else one. Cheap — reads only the
         -- commit's refs + mode — so the listview's buffer-line map needs no layout.
