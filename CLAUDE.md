@@ -308,11 +308,15 @@ Details not covered by the spec or architecture:
   and streaming keeps its fast incremental path. `<CR>` cycles a selected ref's
   mode / expands a head; signatures are cached across mode toggles (§10.5).
 - **First-parent focus** (`opts.collapse_merged`, default on; spec §10.7, toggled
-  by `c`): `view.owners` builds the owner set so the trunk (HEAD's branch ref) is
-  **first-parent-only** + normal while every other ref and every non-first merge
-  parent (an anonymous `merge:<hash>:<i>` owner) defaults **collapsed** — so the
-  graph opens with HEAD's mainline in full and every other branch a `◍` head.
-  `view.signatures` honours `fp_only` (propagate only through `parents[1]`). It is
+  by `c`): `view.owners` builds the owner set so **every** owner is
+  **first-parent-only** (`fp_only`) — each covers only its tip's first-parent
+  line. The trunk (HEAD's branch ref) defaults normal; every other ref and every
+  non-first merge parent (an anonymous `merge:<hash>:<i>` owner) defaults
+  collapsed — so the graph opens with HEAD's mainline in full and every other
+  branch a `◍` head. `view.signatures` honours `fp_only` (propagate only through
+  `parents[1]`). **All owners** being fp-only (not just the trunk) is what makes
+  a branch attributed to *its own* commits, so collapsing/expanding one branch
+  doesn't drag in the earlier branches its history merged through (spec §10.2). It is
   a recomputed default, not a seed: `view_state.modes` holds only explicit user
   overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
