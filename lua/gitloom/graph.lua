@@ -1186,9 +1186,12 @@ local function get_column_chars(opts, columns, emphasis)
             char = "╵"
         elseif not c.left and not c.up and not c.right and c.down then
             char = "╷"
-        elseif c.up and c.down and c.left and c.right then
+        elseif c.up and c.down and c.left and c.right and not is_crossing then
             char = "┼" -- a node-less junction fanning both sides (§10.4)
         elseif c.up and c.down then
+            -- A real crossing (an independent through-horizontal over this
+            -- vertical) stays "│"; the horizontal passes across it (it is not a
+            -- junction). Only genuine 4-way junctions reach "┼" above.
             char = "│"
         elseif not c.left and not c.up and not c.right and not c.down then
             char = " " -- empty column (allowed; e.g. a gap awaiting compaction)

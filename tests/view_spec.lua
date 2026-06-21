@@ -353,6 +353,33 @@ describe("view.project — branch topology preservation", function()
     end)
 end)
 
+describe("get_column_chars — crossing vs node-less junction glyph", function()
+    local function cell(conn, lanes)
+        return { connectivity = conn, lanes = lanes, has_commit = false }
+    end
+
+    it("renders a real crossing as │ (not ┼)", function()
+        -- a through-vertical and an independent through-horizontal in one cell
+        local col = cell({ up = true, down = true, left = true, right = true }, {
+            { connectivity = { up = true, down = true }, id = 1, color = 1, edges = {} },
+            { connectivity = { left = true, right = true }, id = 2, color = 2, edges = {} },
+        })
+        local res = graph._internal.get_column_chars(helpers.big_opts(), { col })
+        assert.equals("│", vim.trim(res.text))
+    end)
+
+    it("renders a genuine four-way junction (fan both sides) as ┼", function()
+        -- a trunk vertical plus two fan *turns* — no straight horizontal segment
+        local col = cell({ up = true, down = true, left = true, right = true }, {
+            { connectivity = { up = true, down = true }, id = 1, color = 1, edges = {} },
+            { connectivity = { left = true, down = true }, id = 2, color = 2, edges = {} },
+            { connectivity = { right = true, down = true }, id = 3, color = 3, edges = {} },
+        })
+        local res = graph._internal.get_column_chars(helpers.big_opts(), { col })
+        assert.equals("┼", vim.trim(res.text))
+    end)
+end)
+
 describe("junction markers — node-less junctions (§10.4)", function()
     local function node_count(grid)
         local n = 0
