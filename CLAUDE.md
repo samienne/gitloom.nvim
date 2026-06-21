@@ -334,6 +334,15 @@ Details not covered by the spec or architecture:
   owners, reflows, then `goto_hash` repositions the cursor on the result so it is
   repeatable). `<CR>` opens an action menu (`vim.ui.select`) — examine / diff /
   collapse / expand / hide, listing every marker by name on a packed line.
+- **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
+  recompute from the visible range each scroll, so a varying column bounces. A
+  column can *only grow* (never shrink): `col_max` (a per-column cap, implies
+  sticky — the author column at 25) and `col_sticky` (no-cap sticky columns, a
+  list or a function — the graph column when `opts.mirror` is on, whose
+  right-aligned content would otherwise shift as the lane width changes).
+- **Node-less junctions render inline** (spec §10.4): `columns.layout` skips the
+  separate split/merge line for a node-less junction (it carries no message), so
+  a join is one row, not a fan line plus an empty lane row.
 - **Junction markers** (`opts.junction_markers`, default on; spec §10.4): a kept
   fork/merge inside collapsed branches (a junction, flagged `junction=true` in
   `view.project`, `collapsed=false`) renders **node-less** — `get_column_chars`

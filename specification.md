@@ -329,11 +329,15 @@ A commit row displays, left to right:
 5. ref decorations — placed by the **label mode** (§6.1); by default pinned to
    the **right edge** of the row
 
-The date, author, and graph are width-aligned across visible rows. The message
-and refs share the remaining width **per row** (not as a fixed aligned column,
-so navigation stays line-by-line): in the default mode the refs are right-aligned
-at the window edge and the message fills the gap, truncated with `…` when it does
-not fit.
+The date, author, and graph are width-aligned across visible rows. To avoid the
+aligned widths **bouncing** as different-length values scroll past, a column can
+be *sticky* — it only grows, never shrinks: the **author** column is sticky with
+a cap (max 25, longer names truncate), and under mirroring (§5.4) the **graph**
+column is sticky too (its right-aligned content would otherwise shift as the lane
+width changes). The message and refs share the remaining width **per row** (not as
+a fixed aligned column, so navigation stays line-by-line): in the default mode the
+refs are right-aligned at the window edge and the message fills the gap, truncated
+with `…` when it does not fit.
 
 **Ref decorations** — a `HEAD` marker on the current branch, then branch
 groups, then tags as `[name]`. Branch refs (local + remote) that share a
