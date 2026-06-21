@@ -353,6 +353,94 @@ describe("view.project — branch topology preservation", function()
     end)
 end)
 
+describe("get_column_chars — crossing vs node-less junction glyph", function()
+    local function cell(conn, lanes)
+        return { connectivity = conn, lanes = lanes, has_commit = false }
+    end
+
+    it("renders a real crossing as │ (not ┼)", function()
+        -- a through-vertical and an independent through-horizontal in one cell
+        local col = cell({ up = true, down = true, left = true, right = true }, {
+            { connectivity = { up = true, down = true }, id = 1, color = 1, edges = {} },
+            { connectivity = { left = true, right = true }, id = 2, color = 2, edges = {} },
+        })
+        local res = graph._internal.get_column_chars(helpers.big_opts(), { col })
+        assert.equals("│", vim.trim(res.text))
+    end)
+
+    it("renders a genuine four-way junction (fan both sides) as ┼", function()
+        -- a trunk vertical plus two fan *turns* — no straight horizontal segment
+        local col = cell({ up = true, down = true, left = true, right = true }, {
+            { connectivity = { up = true, down = true }, id = 1, color = 1, edges = {} },
+            { connectivity = { left = true, down = true }, id = 2, color = 2, edges = {} },
+            { connectivity = { right = true, down = true }, id = 3, color = 3, edges = {} },
+        })
+        local res = graph._internal.get_column_chars(helpers.big_opts(), { col })
+        assert.equals("┼", vim.trim(res.text))
+    end)
+end)
+
+describe("junction markers — node-less junctions (§10.4)", function()
+    local function node_count(grid)
+        local n = 0
+        for _, line in ipairs(grid) do
+            for _, cell in ipairs(line) do
+                if cell.ch == "○" or cell.ch == "◉" or cell.ch == "◎" or cell.ch == "◍" then
+                    n = n + 1
+                end
+            end
+        end
+        return n
+    end
+
+    -- a,b fork from x; x->y->root, all collapsed ⇒ x is a kept junction.
+    local function fixture()
+        local items, by_hash = dag({
+            { "a", { "x" } }, { "b", { "x" } }, { "x", { "y" } },
+            { "y", { "root" } }, { "root", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            A = { "a", "collapsed" }, B = { "b", "collapsed" },
+        }))
+        return proj
+    end
+
+    it("flags a kept junction and draws it node-less (default on)", function()
+        local proj = fixture()
+        assert.is_true(proj.node_of_hash.x.junction) -- x flagged
+        local opts = helpers.big_opts() -- junction_markers defaults on
+        local grid = helpers.render_grid(opts, graph._internal.build_graph(opts, proj.items))
+        assert.same({}, helpers.check_grid(grid, opts)) -- wires still connect
+        -- the 3 heads (head_a, head_b, head_{y,root}) render nodes; x does not
+        assert.equals(3, node_count(grid))
+    end)
+
+    it("lays a node-less junction out inline — no separate split line", function()
+        -- x forks (children a,b) so under split-on-its-own-line it would get a
+        -- split row; as a node-less junction it renders inline (one row).
+        local proj = fixture()
+        local opts = helpers.big_opts() -- split_on_separate_line = true
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local saw_junction = false
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.junction then
+                saw_junction = true
+                assert.is_nil(row.split, "a node-less junction should have no separate split line")
+            end
+        end
+        assert.is_true(saw_junction)
+    end)
+
+    it("junction_markers = false renders the junction with a node", function()
+        local proj = fixture()
+        local opts = helpers.big_opts()
+        opts.junction_markers = false
+        local grid = helpers.render_grid(opts, graph._internal.build_graph(opts, proj.items))
+        assert.same({}, helpers.check_grid(grid, opts))
+        assert.equals(4, node_count(grid)) -- x now shows a node too
+    end)
+end)
+
 describe("view.project — collapsed-head rendering", function()
     it("renders a collapsed head with the ◍ node glyph (once)", function()
         local items, by_hash = dag({

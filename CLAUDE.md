@@ -132,7 +132,8 @@ Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display),
   `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), and the
-  branch-mode toggle helpers `next_mode` / `selected_owner_ids` (§10)
+  branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
+  (§10/§10.4)
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
   collapsed contraction to one head with junctions kept, **branch-topology
@@ -145,8 +146,10 @@ Coverage:
   default (§10.7: trunk normal+fp, others collapsed, merge owners; mainline-full /
   merged-collapsed projection), `pack_markers` (§10.4: packing concurrent
   collapsed heads onto one line with the packed grid passing the wires-connect
-  checker; no-op when there are no markers), and a fuzz sweep feeding projections
-  through the real layout's wires-connect checks
+  checker; no-op when there are no markers), **node-less junction markers**
+  (§10.4: a kept junction renders no node glyph — node count drops — vs. a node
+  when `junction_markers` is off), and a fuzz sweep feeding projections through
+  the real layout's wires-connect checks
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), and `refresh_columns` width aggregation
@@ -215,8 +218,9 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
 `owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
-helpers `next_mode` / `selected_owner_ids` (§10), and `pack_markers` (the
-marker-packing pass; §10.4). `columns.layout` is reached via
+helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
+marker-packing pass; §10.4), and `collapse_owners` (the region's collapsible
+owners under the cursor; §10.4). `columns.layout` is reached via
 `require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
 / `view.owners` via `require("gitloom.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
@@ -321,8 +325,31 @@ Details not covered by the spec or architecture:
   DisplayNodes + merged columns) — multiple `◍` on one line, the one exception to
   "one commit per line" (§5.1). Overlay-compatible = each column has ≤1 node and
   ≤1 lane id and no horizontal overlap; compaction makes only safe merges
-  compatible. On a packed line `h`/`l` selects a marker (`marker_units`) and
-  `<CR>` expands it; the listview stays 1-item-per-line (a group is one item).
+  compatible. On a packed line `h`/`l` selects a marker (`marker_units`); the
+  listview stays 1-item-per-line (a group is one item).
+- **Collapse interaction** (spec §10.4): acts on the *region under the cursor*,
+  not a ref — `branch_under_cursor(line)` resolves the selection (ref/marker) or
+  the commit's signature (`collapse_owners`) into `{state, owners, follow,
+  commit}`. `<Tab>` is the 2-state collapse⇄expand toggle (`set_branch` flips the
+  owners, reflows, then `goto_hash` repositions the cursor on the result so it is
+  repeatable). `<CR>` opens an action menu (`vim.ui.select`) — examine / diff /
+  collapse / expand / hide, listing every marker by name on a packed line.
+- **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
+  recompute from the visible range each scroll, so a varying column bounces. A
+  column can *only grow* (never shrink): `col_max` (a per-column cap, implies
+  sticky — the author column at 25) and `col_sticky` (no-cap sticky columns, a
+  list or a function — the graph column when `opts.mirror` is on, whose
+  right-aligned content would otherwise shift as the lane width changes).
+- **Node-less junctions render inline** (spec §10.4): `columns.layout` skips the
+  separate split/merge line for a node-less junction (it carries no message), so
+  a join is one row, not a fan line plus an empty lane row.
+- **Junction markers** (`opts.junction_markers`, default on; spec §10.4): a kept
+  fork/merge inside collapsed branches (a junction, flagged `junction=true` in
+  `view.project`, `collapsed=false`) renders **node-less** — `get_column_chars`
+  draws its cell as box-drawing lanes (`├ ┬ ┼ …`, the new `is_node` gate) instead
+  of a commit node, and `display_item` blanks date/author/message (keeps refs +
+  the split/merge fan lines). So the split topology shows without the commit's
+  weight. Topology model/invariants are unchanged (it stays a real node).
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic

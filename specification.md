@@ -36,10 +36,12 @@ exists primarily to exercise and validate the graph algorithm.
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
-  placements can be compared at a glance. `<CR>` is context-dependent (§10): on a
-  **selected ref** it cycles that branch's mode (normal → collapsed → hidden) and
-  reflows; on a **collapsed head** with no ref selected it expands the region;
-  otherwise it opens the **commit view** for the commit on the current row (§11).
+  placements can be compared at a glance. `<Tab>` is the quick **collapse ⇄
+  expand toggle** for the branch under the cursor (§10.4): it collapses an
+  expanded branch or expands a marker, in place, and the cursor follows so
+  repeated `<Tab>` flips it open/closed. `<CR>` opens an **action menu** for the
+  row (§10.4) — examine the commit, open its diff, collapse / expand / hide the
+  branch — most-relevant action first.
   `D` opens that commit's diff in an external diff viewer via the configured
   provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
@@ -251,7 +253,8 @@ row itself.
 ### 5.3 Glyphs
 
 Lanes render as box-drawing characters derived from connectivity
-(`│ ├ ┤ ┬ ┴ ╭ ╮ ╯ ╰ ─` and the terminal half-segments). Commit markers:
+(`│ ├ ┤ ┬ ┴ ┼ ╭ ╮ ╯ ╰ ─` and the terminal half-segments; `┼` only as a
+node-less junction, §10.4). Commit markers:
 
 | Marker | Meaning |
 |--------|---------|
@@ -326,11 +329,15 @@ A commit row displays, left to right:
 5. ref decorations — placed by the **label mode** (§6.1); by default pinned to
    the **right edge** of the row
 
-The date, author, and graph are width-aligned across visible rows. The message
-and refs share the remaining width **per row** (not as a fixed aligned column,
-so navigation stays line-by-line): in the default mode the refs are right-aligned
-at the window edge and the message fills the gap, truncated with `…` when it does
-not fit.
+The date, author, and graph are width-aligned across visible rows. To avoid the
+aligned widths **bouncing** as different-length values scroll past, a column can
+be *sticky* — it only grows, never shrinks: the **author** column is sticky with
+a cap (max 25, longer names truncate), and under mirroring (§5.4) the **graph**
+column is sticky too (its right-aligned content would otherwise shift as the lane
+width changes). The message and refs share the remaining width **per row** (not as
+a fixed aligned column, so navigation stays line-by-line): in the default mode the
+refs are right-aligned at the window edge and the message fills the gap, truncated
+with `…` when it does not fit.
 
 **Ref decorations** — a `HEAD` marker on the current branch, then branch
 groups, then tags as `[name]`. Branch refs (local + remote) that share a
@@ -550,12 +557,17 @@ preserve shape. An edge from a hidden region into a retained commit is dropped
 
 ### 10.4 Markers and packing
 
-A **marker** is a messageless node: a node glyph plus optional labels, and no
-message. Today the only markers are **collapsed heads** (§10.3); later, split and
-merge junctions may also become markers (§10.8). A collapsed-head marker shows
-the `◍` node (§5.3), its region's ref label(s), and a compact collapsed indicator
-(a commit count) — but no message/subject. Markers exist to show topology, not
-content.
+A **marker** is a messageless node: it shows topology, not content. There are
+two kinds:
+
+- a **collapsed head** (§10.3) — the `◍` node, the region's ref label(s), and a
+  compact collapsed indicator (a commit count), but no message/subject;
+- a **kept junction** (§10.3) — a fork/merge inside collapsed branches whose
+  commit is just a split point. It renders **node-less**: the cell draws the
+  fork/merge as box-drawing lanes (`├ ┬ ┼ …`) instead of a node, with no
+  message — so the split topology shows without the commit's visual weight. Any
+  refs on it are still shown. Controlled by the `junction_markers` option
+  (default on); off renders those junctions as full commits.
 
 **Packing.** Because markers carry no message, several may share one physical
 line. A maximal run of consecutive markers that are **mutually concurrent** (none
@@ -568,10 +580,25 @@ exception to "one commit per line" (§5.1). Message-bearing commit rows never pa
 Packing is **on by default**, toggled live with `p` and via a config option;
 with it off, every marker occupies its own line.
 
-**Interaction.** On a packed line, `h`/`l` selects among the markers by their
-labels and `<CR>` expands the selected one (§10, the mode cycle / expand).
-Reachability emphasis (§12) follows the selected marker, or is neutral when none
-is selected.
+**Interaction.** Collapse/expand acts on the **region under the cursor**, found
+through each commit's signature (§10.2) — not through a ref — so it works for any
+collapsed region, including ref-less ones (first-parent-merged, squashed). A
+commit the trunk reaches (the mainline) is not collapsible.
+
+- `<Tab>` — the quick **collapse ⇄ expand toggle**: collapse the expanded branch
+  under the cursor (set its non-trunk owners collapsed), or expand the marker
+  under the cursor (set its owners normal). Two-state — *hidden* is not in this
+  cycle, so the toggled thing never vanishes from under the cursor. After the
+  reflow the cursor is repositioned onto the resulting node (the new marker, or
+  the expanded region's tip), so repeated `<Tab>` flips it open/closed in place.
+- `<CR>` — an **action menu** for the row: every applicable action, most-relevant
+  first (examine commit, open diff, collapse, expand, **hide**). This is where
+  hidden and full mode control live, and it is the overflow-proof way to reach
+  any marker on a packed line even when not all labels fit.
+
+On a packed line, `h`/`l` selects among the markers (all of them, regardless of
+which labels fit); `<Tab>` and the menu act on the selected marker. Reachability
+emphasis (§12) follows the selection, or is neutral when none is selected.
 
 ### 10.5 Reflow
 
@@ -625,9 +652,9 @@ all-normal.
   commits, not next to other heads) packing rarely fires. Making it effective
   needs **reordering**: cluster concurrent markers into a band within their valid
   topological range (a merged head's range is its merge … its fork), then pack.
-  Beyond that: packing *junctions* (splits/merges) as markers too, and letting
-  markers ride on message-bearing lines when they fit, toward a fully adaptive
-  density (greedy row packing). Deferred.
+  Beyond that: *packing* junction markers (they already render node-less, §10.4,
+  but don't yet share lines), and letting markers ride on message-bearing lines
+  when they fit, toward a fully adaptive density (greedy row packing). Deferred.
 - **Hidden connectivity** — phantom indicator vs. vanish.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow

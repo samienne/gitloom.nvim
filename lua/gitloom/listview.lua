@@ -209,6 +209,23 @@ local function refresh_columns(win, model, first, last)
             end
         end
 
+        -- **Sticky** columns only grow (never shrink), so a column doesn't bounce
+        -- as different-length values scroll into view. `col_max` (a per-column
+        -- cap) implies sticky and bounds the growth; `col_sticky` (a column list,
+        -- or a function returning one) names no-cap sticky columns — e.g. the
+        -- graph column under mirroring, whose right-aligned content would
+        -- otherwise shift as its width changes.
+        local sticky = {}
+        local cs = model.col_sticky
+        if type(cs) == "function" then cs = cs() end
+        for _, j in ipairs(cs or {}) do sticky[j] = true end
+        for j in pairs(model.col_max or {}) do sticky[j] = true end
+        for j in pairs(sticky) do
+            local cap = model.col_max and model.col_max[j]
+            if cap then new_columns[j] = math.min(new_columns[j] or 0, cap) end
+            new_columns[j] = math.max(new_columns[j] or 0, model.columns[j] or 0)
+        end
+
         model.columns = new_columns
     end
 
@@ -681,6 +698,8 @@ end
 ---@field flex? integer        index of the flex column in `line` (fills width)
 ---@field message_min? integer min width kept for the flex column
 ---@field overflow_hl? string  highlight for the "+N" overflow marker
+---@field col_max? table<integer, integer>  per-column cap; a capped column is sticky (only grows)
+---@field col_sticky? integer[]|fun(): integer[]  no-cap sticky columns (only grow)
 
 ---@class ListViewOptions
 ---@field namespace? integer
@@ -691,6 +710,8 @@ end
 ---@field flex? integer
 ---@field message_min? integer
 ---@field overflow_hl? string
+---@field col_max? table<integer, integer>
+---@field col_sticky? integer[]|fun(): integer[]
 
 ---@param opts ListViewOptions
 function M.open(opts)
@@ -705,6 +726,8 @@ function M.open(opts)
         flex = opts.flex,
         message_min = opts.message_min,
         overflow_hl = opts.overflow_hl,
+        col_max = opts.col_max,
+        col_sticky = opts.col_sticky,
     }
 
     opts = opts or {}

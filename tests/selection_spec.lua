@@ -140,4 +140,38 @@ describe("refresh_columns", function()
         refresh_columns(nil, model, 1, 1)
         assert.equals(#"wide split", model.columns[3]) -- the wider row wins
     end)
+
+    -- A `col_max` column is sticky: it grows up to its cap as wider values scroll
+    -- in, but never shrinks — so it doesn't bounce (the author column, spec §6).
+    it("caps a column and only grows it (sticky)", function()
+        local model = {
+            flex = nil,
+            columns = {},
+            col_max = { [1] = 5 },
+            items = { { data = "abc" }, { data = "abcdefghij" }, { data = "ab" } },
+            display = function(d) return { line = { { text = d } } } end,
+        }
+        refresh_columns(nil, model, 1, 1) -- width 3 → grows to 3
+        assert.equals(3, model.columns[1])
+        refresh_columns(nil, model, 2, 2) -- width 10 → capped at 5
+        assert.equals(5, model.columns[1])
+        refresh_columns(nil, model, 3, 3) -- width 2 → sticky, stays 5
+        assert.equals(5, model.columns[1])
+    end)
+
+    -- col_sticky (no cap) just keeps a column from shrinking — for the graph
+    -- column under mirroring (spec §5.4). A function form is supported too.
+    it("a col_sticky column only grows, with no cap", function()
+        local model = {
+            flex = nil,
+            columns = {},
+            col_sticky = function() return { 1 } end,
+            items = { { data = "abcdefghij" }, { data = "ab" } },
+            display = function(d) return { line = { { text = d } } } end,
+        }
+        refresh_columns(nil, model, 1, 1) -- width 10 → grows to 10 (no cap)
+        assert.equals(10, model.columns[1])
+        refresh_columns(nil, model, 2, 2) -- width 2 → sticky, stays 10
+        assert.equals(10, model.columns[1])
+    end)
 end)

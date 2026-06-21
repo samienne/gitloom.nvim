@@ -23,6 +23,7 @@ local M = {}
 ---@field parents DisplayNode[]       projected parent edges (first = trunk)
 ---@field children DisplayNode[]      projected child edges
 ---@field collapsed boolean           true for a collapsed head
+---@field junction? boolean           a collapsed-region fork/merge kept for topology (§10.4)
 ---@field commit? Commit              the underlying commit (nil for a head)
 ---@field refs Ref[]                  refs on this node (aggregated for a head)
 ---@field region? string[]            member hashes (head only)
@@ -239,10 +240,13 @@ function M.project(items, owners, sig)
             for _, r in ipairs(c.refs or {}) do head.refs[#head.refs + 1] = r end
             node_of_hash[h] = head
         else
-            -- A normal commit, or a collapsed junction kept visible: a real node
-            -- (rendered as the commit, the "one commit for the junction" of §10.3).
+            -- A normal commit, or a collapsed junction kept visible (§10.3). A
+            -- kept junction (collapsed mode but a fork/merge) is flagged so the
+            -- renderer can draw it as a messageless, node-less marker — the split
+            -- topology without the commit's visual weight (§10.4).
             local dn = setmetatable(
-                { commit = c, collapsed = false, parents = {}, children = {} },
+                { commit = c, collapsed = false, junction = (mode[h] == "collapsed"),
+                    parents = {}, children = {} },
                 { __index = c })
             nodes[#nodes + 1] = dn
             node_of_hash[h] = dn
