@@ -271,6 +271,20 @@ function M.layout(opts, items)
         local occ0 = {}
         for j in pairs(active) do occ0[j] = true end
 
+        -- Compact a *linear* commit (reached by a single child-lane) leftward into
+        -- a column free since row start: the incoming lane turns into the new
+        -- column and continues there. A branch born one column out — an inline
+        -- merge-on-split couldn't reuse the just-freed cell, so it fanned past it —
+        -- otherwise stays stranded next to an empty column for its whole length
+        -- (the gap that bounces a mirrored graph). Reserved before survivor
+        -- compaction so a survivor keeps any nearer gap; the lane's single jog is a
+        -- turn, not a straight run, so id-continuity is untouched.
+        if #incoming == 1 then
+            for c = 1, cc - 1 do
+                if not occ0[c] and not blocked[c] then cc = c; break end
+            end
+        end
+
         -- Gentle left compaction of survivors: each shifts to the leftmost
         -- row-start gap to its left (a horizontal turn), else stays. A gap freed
         -- this row is reclaimed on a later row (a ripple), so turns never collide.
@@ -286,27 +300,36 @@ function M.layout(opts, items)
             s.out = k
         end
 
-        -- Outgoing columns: the first parent continues at the commit column; the
-        -- rest fan to fresh columns on the right (on the merge line if separate).
-        -- Under allow_merge_on_split they instead reuse the columns just freed by
-        -- the merge (the non-trunk children's), so an ending child lane and a
-        -- starting parent lane share a cell — the sanctioned two-turn column.
+        -- Outgoing columns: the first parent continues at the commit column; each
+        -- extra parent takes the leftmost column free *since before this row* — an
+        -- interior gap an earlier branch vacated — so a staircase of sequential
+        -- merges stays narrow instead of growing a fresh rightmost column every
+        -- time. A gap is "free since before this row" = not occupied at row start
+        -- (`occ0`) and not taken by a survivor/earlier parent (`used`); skipping
+        -- `occ0` is what keeps a column a *terminating child* frees on THIS row out
+        -- of reach — reusing that is the same-row two-turn handoff, gated behind
+        -- allow_merge_on_split, which lists those columns in `freed` to take first.
+        -- A terminating child's column is reusable by an outgoing parent when the
+        -- reuse does not put two turns in one cell: under allow_merge_on_split (the
+        -- sanctioned inline two-turn cell), or whenever the fan-out lands on a
+        -- *separate* merge line below — there the child already ended on the commit
+        -- line above, so the column is genuinely free and the parent just starts
+        -- fresh in it (no same-cell handoff). Reusing it keeps the merge compact
+        -- instead of leaving the freed column an empty gap (the bounce under a
+        -- right-aligned mirror, where varying width shifts the whole graph).
         local freed = {}
-        if opts.merge_style.allow_merge_on_split then
+        if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #incoming do freed[#freed + 1] = incoming[i].col end
         end
-        local maxcol = cc
-        for _, s in ipairs(survivors) do if s.out > maxcol then maxcol = s.out end end
-        for j in pairs(occ0) do if j > maxcol then maxcol = j end end
         if outgoing[1] then outgoing[1].out = cc end
-        local fi, nextc = 1, maxcol + 1
+        local fi = 1
         for i = 2, #outgoing do
             local k
             if fi <= #freed then
                 k = freed[fi]; fi = fi + 1
             else
-                while used[nextc] or blocked[nextc] do nextc = nextc + 1 end
-                k = nextc; nextc = nextc + 1
+                k = 1
+                while occ0[k] or used[k] or blocked[k] do k = k + 1 end
             end
             outgoing[i].out = k
             used[k] = true

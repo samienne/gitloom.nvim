@@ -315,11 +315,17 @@ the current row. For each commit `C`:
 1. **Classify** `active`: lanes whose `parent == C` are **incoming** (its child
    edges, terminating here); the rest are **survivors** (pass-throughs).
 2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
-   column for a tip. A column a **root** (no-parent commit) occupied on the
-   previous row is **blocked** for this row — tip placement, compaction targets,
-   and fresh fan-out columns all skip it — so an independent history does not
-   stack directly under a root (the "root column break" invariant). The block
-   lasts one row, so consecutive stacked roots simply alternate columns.
+   column for a tip. A **linear** commit (a single incoming child-lane) then
+   **compacts** `cc` left into the leftmost column free since row start, its
+   incoming lane turning in — so a branch born one column out (an inline
+   merge-on-split that had to fan past a freed cell) ends up next to the trunk
+   after a single jog rather than stranded beside an empty column for its whole
+   length (`cc` is reserved before step 4, so a survivor keeps any nearer gap). A
+   column a **root** (no-parent commit) occupied on the previous row is **blocked**
+   for this row — tip placement, compaction targets, and fresh fan-out columns all
+   skip it — so an independent history does not stack directly under a root (the
+   "root column break" invariant). The block lasts one row, so consecutive stacked
+   roots simply alternate columns.
 3. **Outgoing** = one Lane per parent. The first parent **reuses the trunk
    child's id and colour** (so a straight chain keeps one colour); a fresh id and
    a free-list colour slot are taken only where a lane is born — a branch head (a
@@ -338,7 +344,13 @@ the current row. For each commit `C`:
 4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
    (drawn as a horizontal turn), never a column another lane vacates this same
    row — that is what keeps two turns out of one cell, so freed columns are
-   reclaimed over a ripple.
+   reclaimed over a ripple. An extra (non-first) parent likewise takes the
+   leftmost column free since before this row — an interior gap, not a fresh
+   rightmost one — so a staircase of sequential merges stays a bounded width. A
+   column a *terminating child* frees is reusable by a parent only when that does
+   not stack two turns in a cell: on a **separate merge line** (the child ended on
+   the commit line above) or under `allow_merge_on_split` (the sanctioned inline
+   two-turn cell); inline otherwise, the freed column waits for the next row.
 5. **Emit Segments** for the split line (children converge, when
    `split_on_separate_line`), the commit line (the marker + first-parent handoff
    + inline fans), and the merge line (parents fan out, when
