@@ -140,15 +140,23 @@ end
 --- active lanes actually participate in) and every one reaches a root, so no lane
 --- is ever left dangling. No non-active branch is introduced (a merge's
 --- second parent is never followed). `anchor_names` selects which refs are
---- markers. Returns `{ items, node_of_hash }` like `condense`.
+--- markers. `extra` is additional entry commits to walk too — the pinned-ref tips
+--- that sit below the cutoff but aren't on an active lane (a divergent pinned
+--- branch), so they appear as markers and descend to where they join. `order_of`
+--- (optional, commit → index, newest = smaller) sorts the result newest-first, so
+--- multiple independent entries still lay out in a valid topological order.
+--- Returns `{ items, node_of_hash }` like `condense`.
 ---@param boundary table<integer, table>  -- col → lane { parent = Commit, ... }
 ---@param anchor_names table<string, boolean>?
+---@param extra table[]?  -- extra entry Commits (pinned tips below the cutoff)
+---@param order_of (fun(node: table): integer|nil)?
 ---@return table
-function M.continue(boundary, anchor_names)
+function M.continue(boundary, anchor_names, extra, order_of)
     local inset, fp_child = {}, {} -- hash → Commit ; hash → in-set first-parent children
     local queue = {}
     local function push(c) if c and not inset[c.hash] then inset[c.hash] = c; queue[#queue + 1] = c end end
     for _, lane in pairs(boundary) do push(lane.parent) end
+    for _, c in ipairs(extra or {}) do push(c) end
     -- BFS down first-parents. A commit is discovered (queued) after the children
     -- that reach it, so `queue` is children-before-parents (newest-first) — the
     -- order columns.layout/condense expect.
@@ -178,6 +186,12 @@ function M.continue(boundary, anchor_names)
     end
     local nodes = {}
     for _, c in ipairs(queue) do nodes[#nodes + 1] = node[c.hash] end
+    -- With several independent entries the BFS order isn't globally
+    -- children-before-parents; sort newest-first so condense/columns.layout see a
+    -- valid topological order.
+    if order_of then
+        table.sort(nodes, function(a, b) return (order_of(a) or 0) < (order_of(b) or 0) end)
+    end
     return M.condense(nodes, anchor_names)
 end
 

@@ -3330,6 +3330,15 @@ function M.open(folder, opts)
             if not repo.display or #repo.display == 0 then return hide_footer("no display") end
 
             local pinned = effective_pinned()
+            -- repo.order index per commit hash, for "below the cutoff" tests.
+            local idx = {}
+            for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
+            local function item_order(item)
+                local c = item and item.commit
+                if c then return idx[(c.tip and c.tip.hash) or c.hash] end
+                local m = item and item.markers and item.markers[1]
+                if m then return idx[(m.tip and m.tip.hash) or m.hash] end
+            end
 
             -- The down-lanes of whichever RENDERED line sits at absolute screen row
             -- `target` — a commit's columns line, or its split (above) / merge
@@ -3345,11 +3354,11 @@ function M.open(folder, opts)
                         local item = order_at(l)
                         if item then
                             if r == target and item.columns then
-                                return pane.boundary_of(item.columns), l .. "c"
+                                return pane.boundary_of(item.columns), l .. "c", item_order(item)
                             elseif item.merge and r + 1 == target then
-                                return pane.boundary_of(item.merge), l .. "m"
+                                return pane.boundary_of(item.merge), l .. "m", item_order(item)
                             elseif item.split and r - 1 == target then
-                                return pane.boundary_of(item.split), l .. "s"
+                                return pane.boundary_of(item.split), l .. "s", item_order(item)
                             end
                         end
                     end
@@ -3372,9 +3381,20 @@ function M.open(folder, opts)
             -- reaches a root, no non-active branch introduced. Returns rows, tag on
             -- success; nil, reason on failure.
             local function build(target)
-                local boundary, tag = boundary_at(target)
+                local boundary, tag, seam_idx = boundary_at(target)
                 if not next(boundary) then return nil, "no lanes@" .. target end
-                local cond = pane.continue(boundary, pinned)
+                -- Pinned-ref tips below the cutoff that aren't on an active lane —
+                -- add them so a divergent pinned branch still shows as a marker.
+                local extra = {}
+                if seam_idx then
+                    for name in pairs(pinned) do
+                        local ref = repo.refs[name]
+                        if ref and ref.commit and (idx[ref.commit.hash] or 0) > seam_idx then
+                            extra[#extra + 1] = ref.commit
+                        end
+                    end
+                end
+                local cond = pane.continue(boundary, pinned, extra, function(n) return idx[n.hash] end)
                 if #cond.items == 0 then return nil, "empty graph@" .. target end
                 local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
                 return res.rows, tag
