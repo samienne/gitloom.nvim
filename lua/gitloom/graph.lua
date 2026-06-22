@@ -3372,7 +3372,9 @@ function M.open(folder, opts)
             local R, rows, seam_buf, reason = 0, nil, nil, nil
             for _ = 1, PANE_MAX do
                 local sb = seam_for(R + 1)
-                local r, _, why = build(sb)
+                -- build returns (rows, sdi) or (nil, reason) — the reason is the
+                -- SECOND value in both cases.
+                local r, why = build(sb)
                 if not r then rows = nil; reason = why; break end
                 rows, seam_buf = r, sb
                 local nr = math.min(#r, PANE_MAX)
