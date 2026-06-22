@@ -67,7 +67,10 @@ collapsed or hidden when commits are shared across the DAG — is resolved by th
 Owners are refs, plus anonymous non-first merge-parents, plus a *first-parent-
 only* trunk owner (HEAD) whose coverage stops at every merge — which is what lets
 the **first-parent focus** default (§10.7) show HEAD's mainline in full while
-collapsing every branch merged into or diverging from it.
+collapsing every branch merged into or diverging from it. The trunk is the
+single-anchor case of the **pin** axis (spec §10.6): pinning generalises it to a
+*set* of anchor owners — each defaults normal, everything else collapsed — which
+the planned context panes also fold off-screen topology onto.
 
 ### OrderItem graphs as derived projections
 
