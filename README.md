@@ -131,11 +131,12 @@ are kept across the switch. Disable the default with `collapse_merged = false`
 (§10.7).
 
 **Anchors (pinning).** Focus folds everything toward the *anchors* — by default
-just the current branch (HEAD). Press `P` on a branch to pin it as another
-anchor (or unpin it): pinned branches stay shown in full under focus, so you can
-keep `master`, `dev`, a release branch and a few of your own in view at once
-while everything else collapses. The footer notes the anchor count when more
-than one is pinned (§10.6).
+the current branch (HEAD) plus the common trunks `master` / `main` / `dev` when
+they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
+pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
+a release branch and a few of your own in view at once while everything else
+collapses. The footer notes the anchor count when more than one is pinned
+(§10.6).
 
 The footer shows the active merge mode, the ref label mode, a `N collapsed,
 M hidden` summary when any branch modes are set, and whether the graph is

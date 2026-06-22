@@ -2446,11 +2446,15 @@ function M.open(folder, opts)
     -- computed by `effective_pinned()`; it generalises the single trunk of §10.7.
     local view_state = { cone = nil, modes = {}, effective = {}, pinned = {} }
 
-    -- The effective anchor set (§10.6): HEAD pinned by default, with the user's
-    -- explicit pin/unpin overrides applied. Returns a set of ref-owner ids.
+    -- The effective anchor set (§10.6). Pinned by default: the current branch
+    -- (HEAD) and the common trunks `master`/`main`/`dev` when present. The user's
+    -- explicit pin/unpin overrides apply on top. Returns a set of ref-owner ids.
     local function effective_pinned()
         local p = {}
         if repo.head and repo.refs[repo.head] then p[repo.head] = true end
+        for _, name in ipairs({ "master", "main", "dev" }) do
+            if repo.refs[name] then p[name] = true end
+        end
         for id, v in pairs(view_state.pinned) do
             if v then p[id] = true else p[id] = nil end
         end
@@ -3157,7 +3161,7 @@ function M.open(folder, opts)
         -- (Header, sizing hysteresis, async, and arrow-caps are still to come.)
         local pane = require("gitloom.pane")
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
-        local PANE_MAX = 8
+        local PANE_MAX = 12
         local footer_win, footer_buf
 
         -- nvim_win_get_config may report row/col as a number or a {[1]=}/{[false]=}
@@ -3199,16 +3203,22 @@ function M.open(folder, opts)
 
         -- Render topology-only pane rows (graph glyphs + ref labels, no
         -- date/author/message; §6.2) into the pane buffer with lane colours.
-        -- `goff` left-pads every row by the main view's graph-column offset (the
-        -- date + author width) so the pane lanes line up under the main graph.
-        local function render_pane(buf, rows, goff)
-            local pad = string.rep(" ", goff or 0)
+        -- Align the lanes under the main graph: in normal mode the graph starts at
+        -- `goff` (the date+author width), so left-pad by it; under mirror the main
+        -- graph is right-aligned at the message edge (`foff`), so right-pad so the
+        -- glyphs end there.
+        local function render_pane(buf, rows, goff, foff)
             local lines, marks = {}, {}
             for li, row in ipairs(rows) do
                 local g = get_column_chars(opts, row.columns, false)
-                local text = pad .. (g.text or "")
+                local gtext = g.text or ""
+                local pad = goff or 0
+                if opts.mirror then
+                    pad = math.max(0, (foff or 0) - 1 - vim.api.nvim_strwidth(gtext))
+                end
+                local text = string.rep(" ", pad) .. gtext
                 for _, hl in ipairs(g.highlight or {}) do
-                    marks[#marks + 1] = { li - 1, (goff or 0) + hl.start_pos, (goff or 0) + hl.end_pos, hl.hl }
+                    marks[#marks + 1] = { li - 1, pad + hl.start_pos, pad + hl.end_pos, hl.hl }
                 end
                 local c = row.commit
                 local labels = c and decoration_texts(c) or {}
@@ -3243,23 +3253,33 @@ function M.open(folder, opts)
             local B = botHash and idxmap[botHash]
             if not B then return close_footer() end
 
-            -- The off-screen-older commits (the footer zone), newest-first.
-            local zone = {}
-            for i = B + 1, #repo.order do zone[#zone + 1] = repo.order[i] end
-            if #zone == 0 then return close_footer() end
-
-            -- Pane projection (§6.2): every anchor **collapsed** to a lane, every
-            -- other owner **hidden** — a compact topology of just the anchor lines
-            -- (lanes + junctions), not each commit. Signatures over the *full*
-            -- order (owners' tips can sit above the seam), then project only the
-            -- zone so its collapsed heads do not span the seam.
+            -- Pane projection (§6.2): owners are the **anchors only**, each
+            -- **collapsed** to a lane. Using only the anchors (no hidden non-anchor
+            -- owners, no anonymous merge owners) is what keeps a hidden branch's
+            -- reachability from fragmenting an anchor line into many heads — the
+            -- anchor's first-parent run stays one lane down to the root.
             local viewbuilder = require("gitloom.view")
             local pinned = effective_pinned()
-            local owners = viewbuilder.owners(repo.order, owners_from_refs(repo.refs, {}),
-                pinned, {}, true)
-            for _, o in ipairs(owners) do o.mode = pinned[o.id] and "collapsed" or "hidden" end
-            local sig = viewbuilder.signatures(repo.order, owners)
-            local aproj = viewbuilder.project(zone, owners, sig)
+            local anchor_owners = {}
+            for _, o in ipairs(owners_from_refs(repo.refs, {})) do
+                if pinned[o.id] then
+                    anchor_owners[#anchor_owners + 1] =
+                        { id = o.id, tip = o.tip, mode = "collapsed", fp_only = true }
+                end
+            end
+            if #anchor_owners == 0 then return close_footer() end
+            -- Signatures over the full order (anchor tips can sit above the seam).
+            local sig = viewbuilder.signatures(repo.order, anchor_owners)
+            -- The off-screen-older commits an anchor actually reaches (the rest —
+            -- merged-in / divergent branches — are dropped, not shown).
+            local zone = {}
+            for i = B + 1, #repo.order do
+                local it = repo.order[i]
+                if next(sig[it.commit.hash] or {}) ~= nil then zone[#zone + 1] = it end
+            end
+            if #zone == 0 then return close_footer() end
+            -- Project only the zone, so collapsed lanes do not span the seam.
+            local aproj = viewbuilder.project(zone, anchor_owners, sig)
             if #aproj.items == 0 then return close_footer() end
 
             local res = pane.footer(opts, aproj.items,
@@ -3270,14 +3290,16 @@ function M.open(folder, opts)
                 for i = 1, PANE_MAX do t[i] = rows[i] end -- seam-nearest rows
                 rows = t
             end
-            -- Left offset of the main graph column (date + author width) so the
-            -- pane's lanes line up under it (non-mirror; the common case).
-            local goff = 0
+            -- Offsets of the main graph column so the pane lanes line up: `goff`
+            -- = its left edge (date+author width), `foff` = the message edge (the
+            -- graph's right side under mirror).
+            local goff, foff = 0, 0
             if lv.controller.col_offset then
                 goff = lv.controller.col_offset(botbuf, "line", GRAPH_COL) or 0
+                foff = lv.controller.col_offset(botbuf, "line", FLEX_COL) or 0
             end
             ensure_footer_win(#rows)
-            render_pane(footer_buf, rows, goff)
+            render_pane(footer_buf, rows, goff, foff)
         end
 
         -- Tear the panes down with the main window.

@@ -725,8 +725,9 @@ collapsed or hidden.)
 The pinned set **generalises the trunk** of the first-parent focus (§10.7).
 Today HEAD is the single distinguished owner the rest of the graph folds
 toward; pinning lets the user name *several* anchors — e.g. `master`, `dev`, a
-release branch, a few personal branches. **HEAD is pinned by default**; the
-user may pin or unpin any ref.
+release branch, a few personal branches. **HEAD (the current branch) is pinned
+by default, along with the common trunks `master` / `main` / `dev` when they
+exist**; the user may pin or unpin any ref.
 
 Anchors drive two things:
 
