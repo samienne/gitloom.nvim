@@ -3330,7 +3330,6 @@ function M.open(folder, opts)
             if not repo.display or #repo.display == 0 then return hide_footer("no display") end
 
             local pinned = effective_pinned()
-            local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
 
             -- Build the footer for a given seam buffer line: continue ONLY the
             -- lanes crossing the seam down their first-parent chains to a root
@@ -3351,22 +3350,22 @@ function M.open(folder, opts)
                 return res.rows, sdi
             end
 
-            -- The buffer line just above the bottom `sh` SCREEN rows. Computed by
-            -- screen height (nvim_win_text_height), not buffer-line arithmetic, so
-            -- virtual lines (split/merge fans) don't skew the seam — this is the
-            -- fix for the stable off-by-a-few cutoff.
+            -- The buffer line whose commit is the last one ABOVE the bottom `sh`
+            -- screen rows (the overlay). Uses real screen positions (`screenpos`),
+            -- not summed text-heights: a line's split/merge virtual lines may run
+            -- past the window edge, which made height-summing land the seam a couple
+            -- lines too high exactly when those fans were near the bottom.
             local function seam_for(sh)
                 return vim.api.nvim_win_call(win, function()
-                    local w0 = vim.fn.line("w0")
-                    local acc, l = 0, botbuf
-                    while l > w0 do
-                        local ok, th = pcall(vim.api.nvim_win_text_height, win,
-                            { start_row = l - 1, end_row = l - 1 })
-                        local hh = (ok and th and th.all) or 1
-                        if acc + hh >= sh then break end
-                        acc = acc + hh; l = l - 1
+                    local wh = vim.api.nvim_win_get_height(win)
+                    local wrow = vim.fn.win_screenpos(win)[1]
+                    local target = wrow + wh - sh - 1 -- last screen row above the overlay
+                    local w0, last = vim.fn.line("w0"), vim.fn.line("w$")
+                    for l = last, w0, -1 do
+                        local r = vim.fn.screenpos(win, l, 1).row
+                        if r > 0 and r <= target then return l end
                     end
-                    return math.max(1, l - 1)
+                    return math.max(1, w0)
                 end)
             end
 
