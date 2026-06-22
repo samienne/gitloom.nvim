@@ -3096,9 +3096,11 @@ function M.open(folder, opts)
         -- short timer and only the last one — once the cursor settles — does the
         -- work. The walk stays synchronous (Lua is single-threaded and the editor
         -- API isn't usable off the main loop); we just run it far less often.
-        -- `applying` suppresses the WinScrolled the deferred refresh may emit.
+        -- `applying` suppresses the WinScrolled the deferred refresh may emit. A
+        -- real scroll that lands during that window is remembered in `pending` and
+        -- replayed, so the footer never goes stale on a dropped scroll.
         local CONE_DEBOUNCE_MS = 60
-        local cone_gen, applying = 0, false
+        local cone_gen, applying, pending = 0, false, false
         local function schedule_cone_update()
             cone_gen = cone_gen + 1
             local gen = cone_gen
@@ -3109,6 +3111,7 @@ function M.open(folder, opts)
                 if lv and lv.controller then lv.controller.refresh() end
                 applying = false
                 update_panes()
+                if pending then pending = false; schedule_cone_update() end
             end, CONE_DEBOUNCE_MS)
         end
 
@@ -3172,7 +3175,8 @@ function M.open(folder, opts)
             group = group,
             pattern = tostring(win),
             callback = function()
-                if applying or not vim.api.nvim_win_is_valid(win) then return end
+                if not vim.api.nvim_win_is_valid(win) then return end
+                if applying then pending = true; return end -- replayed after the refresh
                 schedule_cone_update()
             end,
         })
