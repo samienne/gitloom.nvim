@@ -55,6 +55,7 @@ local KEYBINDS = {
     { "h/l", "Select previous / next ref on the row" },
     { "H", "Toggle reachability highlighting (dimming)" },
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
+    { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
@@ -66,10 +67,14 @@ local KEYBINDS = {
 ---@param mirror boolean?
 ---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
 ---@param focus boolean?  -- the first-parent focus default is on (§10.7)
-local function footer_text(mirror, modes, focus)
+local function footer_text(mirror, modes, focus, nanchors)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
-    if focus then status = status .. " | focus" end
+    if focus then
+        status = status .. " | focus"
+        -- More than the single default anchor (HEAD) ⇒ note the anchor count.
+        if nanchors and nanchors > 1 then status = status .. (" (%d anchors)"):format(nanchors) end
+    end
     local nc, nh = 0, 0
     for _, m in pairs(modes or {}) do
         if m == "collapsed" then nc = nc + 1 elseif m == "hidden" then nh = nh + 1 end
@@ -917,21 +922,24 @@ local function pack_markers(items)
 end
 
 --- The owner ids whose collapse turns the region containing a shown commit into
---- a marker (spec §10.4): every non-trunk owner currently keeping it visible.
---- Returns nil when the commit is **mainline** (the trunk reaches it, so it
+--- a marker (spec §10.4): every non-anchor owner currently keeping it visible.
+--- Returns nil when the commit is **mainline** (a pinned anchor reaches it, so it
 --- can't be collapsed) or nothing normal keeps it visible. Used by the `<Tab>`
 --- collapse toggle and the `<CR>` menu to act on the region under the cursor
 --- without needing a ref.
 ---@param sig table<string, boolean>?  -- the commit's signature (owner id set)
----@param trunk_id string?
+---@param pinned table<string, boolean>?  -- the anchor owner ids (§10.6)
 ---@param effective table<string, string>  -- owner id → effective mode
 ---@return string[]|nil
-local function collapse_owners(sig, trunk_id, effective)
+local function collapse_owners(sig, pinned, effective)
     if not sig then return nil end
-    if trunk_id and sig[trunk_id] then return nil end -- mainline: not collapsible
+    pinned = pinned or {}
+    for pid in pairs(pinned) do
+        if sig[pid] then return nil end -- on an anchor's line: not collapsible
+    end
     local out = {}
     for oid in pairs(sig) do
-        if oid ~= trunk_id and (effective[oid] or "normal") == "normal" then
+        if not pinned[oid] and (effective[oid] or "normal") == "normal" then
             out[#out + 1] = oid
         end
     end
@@ -2432,7 +2440,21 @@ function M.open(folder, opts)
     -- `modes` is explicit per-owner overrides; `effective` is the resolved mode
     -- per owner id after the first-parent default (§10.7), kept for the footer
     -- and the `<CR>` cycle. Both filled by reflow.
-    local view_state = { cone = nil, modes = {}, effective = {} }
+    -- `pinned` is the explicit per-ref pin overrides (ref id → boolean), on top
+    -- of the HEAD-pinned-by-default rule (§10.6). The effective anchor set is
+    -- computed by `effective_pinned()`; it generalises the single trunk of §10.7.
+    local view_state = { cone = nil, modes = {}, effective = {}, pinned = {} }
+
+    -- The effective anchor set (§10.6): HEAD pinned by default, with the user's
+    -- explicit pin/unpin overrides applied. Returns a set of ref-owner ids.
+    local function effective_pinned()
+        local p = {}
+        if repo.head and repo.refs[repo.head] then p[repo.head] = true end
+        for id, v in pairs(view_state.pinned) do
+            if v then p[id] = true else p[id] = nil end
+        end
+        return p
+    end
     -- Cached per-commit signatures for the projection (spec §10.5). They depend
     -- only on the commit set, the owner tips/fp-flags and the focus policy, not on
     -- modes, so a mode toggle reuses them; invalidated when those change. Keyed by
@@ -2479,13 +2501,13 @@ function M.open(folder, opts)
     -- projection is no longer the identity). Recomputes the cone over the new map.
     reflow = function()
         local viewbuilder = require("gitloom.view")
-        -- Owners under the first-parent default (§10.7): the trunk (HEAD's
-        -- branch) is first-parent-only + normal, every other ref and merge parent
-        -- defaults collapsed; view_state.modes overrides. No trunk ⇒ all-normal.
+        -- Owners under the first-parent default (§10.7): the pinned anchors
+        -- (§10.6; HEAD by default) are first-parent-only + normal, every other ref
+        -- and merge parent defaults collapsed; view_state.modes overrides. No
+        -- anchor ⇒ all-normal.
         local cm = opts.collapse_merged ~= false
-        local trunk_id = (repo.head and repo.refs[repo.head]) and repo.head or nil
         local owners = viewbuilder.owners(
-            repo.order, owners_from_refs(repo.refs, {}), trunk_id, view_state.modes, cm)
+            repo.order, owners_from_refs(repo.refs, {}), effective_pinned(), view_state.modes, cm)
         view_state.effective = {}
         for _, o in ipairs(owners) do view_state.effective[o.id] = o.mode end
         -- Reuse cached signatures unless the commit/owner set or focus changed;
@@ -2550,9 +2572,8 @@ function M.open(folder, opts)
                 follow = c.tip and c.tip.hash, commit = c.tip }
         end
         -- a normal/junction commit → collapse the region containing it, if it is
-        -- not mainline (the trunk doesn't reach it).
-        local trunk_id = (repo.head and repo.refs[repo.head]) and repo.head or nil
-        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], trunk_id, view_state.effective)
+        -- not mainline (no pinned anchor reaches it).
+        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], effective_pinned(), view_state.effective)
         if ids then
             return { state = "expanded", owners = ids, follow = c.hash, commit = c }
         end
@@ -2564,7 +2585,10 @@ function M.open(folder, opts)
     -- it the same way.
     local function update_footer()
         if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes, opts.collapse_merged ~= false)
+            local nanchors = 0
+            for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
+            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes,
+                opts.collapse_merged ~= false, nanchors)
             pcall(vim.api.nvim_win_set_config, lv.win.win, {
                 footer = lv.win.opts.footer,
                 footer_pos = "center",
@@ -2855,6 +2879,29 @@ function M.open(folder, opts)
         opts.pack_markers = opts.pack_markers == false
         reflow()
         update_footer()
+        place_cursor()
+    end
+    -- P: pin / unpin the branch under the cursor as an **anchor** (§10.6).
+    -- Anchors stay normal under focus; everything else collapses. HEAD is pinned
+    -- by default. Acts on the selected ref (or the region under the cursor),
+    -- restricted to real refs; changes the focus default, so reflow.
+    opts.win.keys.P = function(self)
+        local w = self and self.win
+        if not w then return end
+        local line = vim.api.nvim_win_get_cursor(w)[1]
+        local b = branch_under_cursor(line)
+        if not b or not b.owners then return end
+        -- Only refs are pinnable (v1, §10.6) — drop anonymous merge-parent owners.
+        local targets = {}
+        for _, oid in ipairs(b.owners) do
+            if repo.refs[oid] then targets[#targets + 1] = oid end
+        end
+        if #targets == 0 then return end
+        local want = not effective_pinned()[targets[1]]
+        for _, oid in ipairs(targets) do view_state.pinned[oid] = want end
+        reflow()
+        update_footer()
+        if b.follow then goto_hash(b.follow) end
         place_cursor()
     end
     -- i: toggle the per-lane id column before the message.

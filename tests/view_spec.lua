@@ -483,7 +483,7 @@ describe("view.owners — first-parent default (spec §10.7)", function()
 
     it("collapse_merged off → every owner normal, no anonymous owners", function()
         local items, ref_owners = fixture()
-        local os = view.owners(items, ref_owners, "head", {}, false)
+        local os = view.owners(items, ref_owners, { head = true },{}, false)
         assert.equals(#ref_owners, #os) -- no anonymous merge owners added
         for _, o in ipairs(os) do
             assert.equals("normal", o.mode)
@@ -493,7 +493,7 @@ describe("view.owners — first-parent default (spec §10.7)", function()
 
     it("collapse_merged on → trunk normal+fp, others collapsed, merge owner added", function()
         local items, ref_owners = fixture()
-        local os = view.owners(items, ref_owners, "head", {}, true)
+        local os = view.owners(items, ref_owners, { head = true },{}, true)
         local by_id = {}
         for _, o in ipairs(os) do by_id[o.id] = o end
         assert.equals("normal", by_id.head.mode)
@@ -507,15 +507,38 @@ describe("view.owners — first-parent default (spec §10.7)", function()
 
     it("an explicit mode overrides the default", function()
         local items, ref_owners = fixture()
-        local os = view.owners(items, ref_owners, "head", { feat = "normal" }, true)
+        local os = view.owners(items, ref_owners, { head = true }, { feat = "normal" }, true)
         for _, o in ipairs(os) do
             if o.id == "feat" then assert.equals("normal", o.mode) end
         end
     end)
 
+    it("a second pinned anchor defaults normal too (multi-anchor, §10.6)", function()
+        local items, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, { head = true, feat = true }, {}, true)
+        local by_id = {}
+        for _, o in ipairs(os) do by_id[o.id] = o end
+        assert.equals("normal", by_id.head.mode)
+        assert.equals("normal", by_id.feat.mode) -- pinned anchor stays normal
+        assert.is_true(by_id.feat.fp_only)        -- still first-parent-only under focus
+        assert.equals("collapsed", by_id["merge:m:2"].mode) -- anonymous owners are never anchors
+    end)
+
+    it("no anchors ⇒ focus is inert, all normal (§10.6)", function()
+        local items, ref_owners = fixture()
+        -- collapse_merged on but an empty anchor set: nothing distinguishes a
+        -- trunk, so the projection is the plain full graph (on == false).
+        local os = view.owners(items, ref_owners, {}, {}, true)
+        assert.equals(#ref_owners, #os) -- no anonymous merge owners added
+        for _, o in ipairs(os) do
+            assert.equals("normal", o.mode)
+            assert.falsy(o.fp_only)
+        end
+    end)
+
     it("projects to mainline-full, merged-branch-collapsed", function()
         local items, ref_owners = fixture()
-        local os = view.owners(items, ref_owners, "head", {}, true)
+        local os = view.owners(items, ref_owners, { head = true }, {}, true)
         local proj = view.project(items, os)
         assert.equals("normal", proj.mode.h)
         assert.equals("normal", proj.mode.m)

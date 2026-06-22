@@ -83,33 +83,36 @@ function M.signatures(items, owners)
 end
 
 --- Build the full owner set for a projection under the first-parent default
---- (spec §10.7). `ref_owners` are `{id, tip}` per ref; `trunk_id` is the id of
---- the current branch's ref (HEAD), or nil if there is none.
+--- (spec §10.7). `ref_owners` are `{id, tip}` per ref; `pinned` is the set of
+--- **anchor** owner ids (spec §10.6) — the refs the view is organised around.
+--- The single-anchor `{ [HEAD] = true }` is the trunk default; an empty/nil set
+--- means no anchors.
 ---
---- With `collapse_merged` off (or no trunk) every owner defaults **normal** and
---- no trunk/anonymous owners are added — the plain full graph. With it on:
+--- With `collapse_merged` off (or no anchor) every owner defaults **normal** and
+--- no anonymous owners are added — the plain full graph. With it on:
 --- **every** owner is **first-parent-only** — each covers only its own tip's
 --- first-parent line, so a branch is attributed to the commits actually *on* it,
 --- not every branch its history merged through (this is what keeps collapsing or
 --- expanding one branch from dragging in the earlier branches it merged past).
---- The trunk (HEAD) defaults **normal**; every other ref and every non-first
---- merge parent (an anonymous owner, keyed `merge:<hash>:<i>`) defaults
---- **collapsed** — so the mainline shows in full and everything else collapses
---- (§10.7). `modes` overrides the default per owner id.
+--- The **pinned anchors** default **normal**; every other ref and every
+--- non-first merge parent (an anonymous owner, keyed `merge:<hash>:<i>`) defaults
+--- **collapsed** — so the anchors show in full and everything else collapses
+--- (§10.6/§10.7). `modes` overrides the default per owner id.
 ---@param items table[]
 ---@param ref_owners table[]  -- { {id, tip}, ... }
----@param trunk_id string|nil
+---@param pinned table<string, boolean>|nil  -- anchor owner ids (HEAD by default)
 ---@param modes table<string, string>?
 ---@param collapse_merged boolean
 ---@return table[]  -- { {id, tip, mode, fp_only}, ... }
-function M.owners(items, ref_owners, trunk_id, modes, collapse_merged)
+function M.owners(items, ref_owners, pinned, modes, collapse_merged)
     modes = modes or {}
-    local on = collapse_merged and trunk_id ~= nil
+    pinned = pinned or {}
+    local on = collapse_merged and next(pinned) ~= nil
     local out = {}
     for _, o in ipairs(ref_owners) do
-        -- Under focus every owner is first-parent-only (see above); the trunk is
-        -- normal, every other ref collapsed by default.
-        local default = (on and o.id ~= trunk_id) and "collapsed" or "normal"
+        -- Under focus every owner is first-parent-only (see above); a pinned
+        -- anchor is normal, every other ref collapsed by default.
+        local default = (on and not pinned[o.id]) and "collapsed" or "normal"
         out[#out + 1] = { id = o.id, tip = o.tip, mode = modes[o.id] or default, fp_only = on }
     end
     if on then

@@ -308,19 +308,30 @@ Details not covered by the spec or architecture:
   and streaming keeps its fast incremental path. `<CR>` cycles a selected ref's
   mode / expands a head; signatures are cached across mode toggles (§10.5).
 - **First-parent focus** (`opts.collapse_merged`, default on; spec §10.7, toggled
-  by `c`): `view.owners` builds the owner set so **every** owner is
-  **first-parent-only** (`fp_only`) — each covers only its tip's first-parent
-  line. The trunk (HEAD's branch ref) defaults normal; every other ref and every
-  non-first merge parent (an anonymous `merge:<hash>:<i>` owner) defaults
-  collapsed — so the graph opens with HEAD's mainline in full and every other
-  branch a `◍` head. `view.signatures` honours `fp_only` (propagate only through
-  `parents[1]`). **All owners** being fp-only (not just the trunk) is what makes
-  a branch attributed to *its own* commits, so collapsing/expanding one branch
-  doesn't drag in the earlier branches its history merged through (spec §10.2). It is
-  a recomputed default, not a seed: `view_state.modes` holds only explicit user
-  overrides, `view_state.effective` the resolved mode per owner (drives the
+  by `c`): `view.owners(items, ref_owners, pinned, modes, cm)` builds the owner
+  set so **every** owner is **first-parent-only** (`fp_only`) — each covers only
+  its tip's first-parent line. The **pinned anchors** (`pinned`, a set of ref
+  ids; §10.6) default normal; every other ref and every non-first merge parent
+  (an anonymous `merge:<hash>:<i>` owner) defaults collapsed — so the graph opens
+  with the anchors' mainline in full and every other branch a `◍` head.
+  `view.signatures` honours `fp_only` (propagate only through `parents[1]`).
+  **All owners** being fp-only (not just the anchors) is what makes a branch
+  attributed to *its own* commits, so collapsing/expanding one branch doesn't
+  drag in the earlier branches its history merged through (spec §10.2). It is a
+  recomputed default, not a seed: `view_state.modes` holds only explicit user
+  mode overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
+- **Pin axis** (spec §10.6, toggled by `P`): pin is the **anchor** set the focus
+  default folds toward — it *generalises the trunk* (one anchor → a set). HEAD is
+  pinned by default; `view_state.pinned` holds explicit per-ref pin/unpin
+  overrides and `effective_pinned()` resolves the live set ({HEAD} ∪ overrides),
+  passed to `view.owners`/`collapse_owners` in place of the old single `trunk_id`.
+  Pinning changes only the default *mode* (anchors normal, rest collapsed), not
+  `fp_only` or the owner tips, so it does **not** invalidate the signature cache
+  (like a mode toggle). `P` uses `branch_under_cursor`, pins only real refs (drops
+  anonymous merge owners), reflows, and repositions the cursor. Anchors are the
+  foundation for the planned context panes (spec §6.2).
 - **Marker packing** (`opts.pack_markers`, default on; spec §10.4, toggled by
   `p`): a **marker** is a messageless node (today a collapsed head — `◍` + ref
   labels + count, no subject). `pack_markers` is a post-Phase-1 pass run in
