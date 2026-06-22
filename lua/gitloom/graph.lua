@@ -2753,6 +2753,7 @@ function M.open(folder, opts)
             lv.controller.refresh()
         end
         update_footer()
+        update_panes() -- re-align/re-render the footer for the new orientation
         place_cursor()
     end
     -- B: cycle the ref label placement (right / inline / dual; §6.1). The layout
@@ -3325,18 +3326,19 @@ function M.open(folder, opts)
                 return res.rows, sdi
             end
 
-            -- The footer overlays the bottom `K` main rows, so the seam is `K`
-            -- rows above the bottom — but `K` is the footer's own height. Resolve
-            -- the fixed point (§6.2 sizing): the compact projection's row count is
-            -- stable, so a few iterations converge.
-            local K, rows, sdi = 0, nil, nil
-            for _ = 1, 4 do
-                local r, s = build(math.max(1, botbuf - K))
+            -- The footer overlays the bottom `H` main rows, so the seam is `H`
+            -- rows above the bottom — but `H` is the footer's own height. Grow `H`
+            -- to the row count it produces until it stabilises (§6.2 sizing):
+            -- start small, rebuild, and if it produced more rows than assumed, grow
+            -- and rerun; bounded by PANE_MAX so it never loops away.
+            local H, rows, sdi = 0, nil, nil
+            for _ = 1, PANE_MAX do
+                local r, s = build(math.max(1, botbuf - H))
                 if not r then return close_footer() end
                 rows, sdi = r, s
-                local nk = math.min(#r, PANE_MAX)
-                if nk == K then break end
-                K = nk
+                local nh = math.min(#r, PANE_MAX)
+                if nh == H then break end
+                H = nh
             end
             if not rows or #rows == 0 then return close_footer() end
             rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root

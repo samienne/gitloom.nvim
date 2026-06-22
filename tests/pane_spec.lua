@@ -241,6 +241,27 @@ describe("pane.condense (§6.2)", function()
         assert.equals("root", c.node_of_hash.T.hash) -- T folds toward the root
         assert.equals(1, #n.X.refs)                  -- only the anchor ref kept
     end)
+
+    it("splices a false junction (flagged junction but degree-1 projected)", function()
+        -- F is flagged a junction but its projected edges are 1-in-1-out (the
+        -- non-anchor side was dropped), so it must splice like a pass-through.
+        local X = { hash = "X", refs = { { name = "m" } }, collapsed = true, region = { "X" } }
+        local F = { hash = "F", refs = {}, junction = true, collapsed = false, region = { "F" } }
+        local R = { hash = "root", refs = {}, collapsed = true, region = { "root" } }
+        X.parents, X.children = { F }, {}
+        F.parents, F.children = { R }, { X } -- 1 parent, 1 child despite the flag
+        R.parents, R.children = {}, { F }
+        local c = pane.condense({ X, F, R }, { m = true })
+        local n = by_hash(c.items)
+        assert.is_nil(n.F)                         -- false junction spliced away
+        assert.equals("root", n.X.parents[1].hash) -- X -> (F) -> root
+    end)
+
+    it("renders the root as a real node (no collapsed count)", function()
+        local c = pane.condense(graph())
+        local n = by_hash(c.items)
+        assert.is_false(n.root.collapsed) -- root marker, not ◍ (N)
+    end)
 end)
 
 describe("pane.cap — root always visible (§6.2)", function()

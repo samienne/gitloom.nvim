@@ -42,8 +42,14 @@ function M.condense(nodes, anchor_names)
         end
         return out
     end
+    -- A node splices away when it is a pure pass-through with no anchor marker:
+    -- exactly one (projected) parent and child. This covers both collapsed heads
+    -- AND **false junctions** — a commit flagged a junction only because a
+    -- non-anchor branch forks off it, whose projected edges are still 1-in-1-out
+    -- (the non-anchor side was dropped). A real fork/merge keeps ≥2 edges, so it
+    -- stays.
     local function transparent(n)
-        return n.collapsed and not n.junction and #marker_refs(n) == 0
+        return (n.collapsed or n.junction) and #marker_refs(n) == 0
             and #n.parents == 1 and #n.children == 1
     end
     -- The next kept node along a chain of transparent nodes, via `field`
@@ -84,6 +90,13 @@ function M.condense(nodes, anchor_names)
                 end
             end
         end
+    end
+
+    -- A kept node with no parent is a root: render it as a real node (the normal
+    -- root marker), not a collapsed `◍` with a count.
+    for _, n in ipairs(nodes) do
+        local c = copy[n]
+        if c and #c.parents == 0 then c.collapsed = false end
     end
 
     -- node_of: kept nodes map their own hashes; a spliced node maps to the next
