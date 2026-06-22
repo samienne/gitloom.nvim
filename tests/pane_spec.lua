@@ -316,14 +316,15 @@ describe("pane.continue — active lanes reach a root (§6.2)", function()
         local map = dag()
         local cond = pane.continue(boundary(map))
         local n = by_hash(cond.items)
-        assert.is_not_nil(n.root)                 -- a root is present
-        assert.equals(0, #n.root.parents)         -- and it is a real root
-        -- B is the junction where the two lanes meet (>=2 children).
+        assert.is_not_nil(n.root)         -- a root is present
+        assert.equals(0, #n.root.parents) -- and it is a real root
+        assert.is_false(n.root.junction)  -- rendered as a real node, not a join
+        -- B is the junction where the two lanes meet; the bare entry tips A and X
+        -- splice away, so both lanes' seeds terminate AT B (converging there).
         assert.is_not_nil(n.B)
-        assert.is_true(#n.B.children >= 2)
-        -- node_of maps both seam parents into the graph (no lane dropped).
-        assert.is_not_nil(cond.node_of_hash.A)
-        assert.is_not_nil(cond.node_of_hash.X)
+        assert.is_true(n.B.junction)
+        assert.equals(n.B, cond.node_of_hash.A)
+        assert.equals(n.B, cond.node_of_hash.X)
     end)
 
     it("every node's first-parent chain reaches a root (never cut off)", function()

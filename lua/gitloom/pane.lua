@@ -42,13 +42,15 @@ function M.condense(nodes, anchor_names)
         end
         return out
     end
-    -- A node splices away when it is a **pure linear pass-through with no anchor
-    -- marker**: exactly one parent and one child. This is purely topological, so
-    -- it contracts the *whole* commit graph — every lane's linear stretch becomes
-    -- one edge, while every real fork/merge (≥2 edges, where a branch connects to
-    -- the trunk), root, tip, and anchor-ref head is kept.
+    -- A node splices away when it is a pass-through with no anchor marker: one
+    -- parent and **at most one** child. So a lane's linear stretch AND its bare
+    -- entry **tip** (one parent, no children — the lane just continuing from the
+    -- seam) both contract to an edge; only a **root** (no parent), a real
+    -- **fork/merge** (≥2 edges, where lanes meet), and an **anchor-ref** head are
+    -- kept. (Keeping tips would render them with the root glyph — the spurious
+    -- "second root".)
     local function transparent(n)
-        return #marker_refs(n) == 0 and #n.parents == 1 and #n.children == 1
+        return #marker_refs(n) == 0 and #n.parents == 1 and #n.children <= 1
     end
     -- The next kept node along a chain of transparent nodes, via `field`
     -- ("parents" toward the root, "children" toward the seam).
@@ -89,15 +91,17 @@ function M.condense(nodes, anchor_names)
         end
     end
 
-    -- Rendering role per kept node, from its anchor refs and its (projected)
-    -- degree: an anchor-ref head is a `◍` marker; a fork/merge is a node-less
-    -- junction (just the join glyph); a root or tip is a real node.
+    -- Rendering role per kept node, from its anchor refs and its **original**
+    -- degree (not the post-splice degree — a convergence keeps its junction role
+    -- even after a tip child splices away, so it never decays into a stray node):
+    -- an anchor-ref head is a `◍` marker; a fork/merge is a node-less junction
+    -- (just the join glyph); a root is a real node.
     for _, n in ipairs(nodes) do
         local c = copy[n]
         if c then
             if #c.refs > 0 then
                 c.collapsed, c.junction = true, false
-            elseif #c.parents >= 2 or #c.children >= 2 then
+            elseif #n.parents >= 2 or #n.children >= 2 then
                 c.collapsed, c.junction = false, true
             else
                 c.collapsed, c.junction = false, false

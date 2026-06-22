@@ -3174,6 +3174,12 @@ function M.open(folder, opts)
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         local PANE_MAX = 12
         local footer_win, footer_buf
+        -- A fixed scrolloff (this window only) keeps the cursor clear of the footer
+        -- overlay without the per-scroll jank of a varying value; <C-e>/<C-y> still
+        -- scroll the constant-size main window with the footer painted on top.
+        if opts.panes ~= false then
+            pcall(vim.api.nvim_set_option_value, "scrolloff", PANE_MAX, { scope = "local", win = win })
+        end
         -- Inline, node-less merge style for the pane: joins render on one row (no
         -- fan lines) and junctions draw node-less, so the pane stays compact.
         local pane_opts = vim.tbl_extend("force", {}, opts)
@@ -3189,9 +3195,6 @@ function M.open(folder, opts)
             end
             footer_win = nil
             footer_seam, footer_height = nil, nil
-            if vim.api.nvim_win_is_valid(win) then
-                pcall(vim.api.nvim_set_option_value, "scrolloff", 0, { scope = "local", win = win })
-            end
         end
 
         -- The footer is a borderless overlay covering the bottom `height` content
@@ -3235,7 +3238,7 @@ function M.open(folder, opts)
             local function glyph_line(columns, dash)
                 local g = get_column_chars(opts, columns, false)
                 local gtext = g.text or ""
-                if dash then gtext = gtext:gsub("│", "┆") end -- triple-dash seam
+                if dash then gtext = gtext:gsub("│", "┊") end -- quadruple-dash seam boundary
                 local pad = goff or 0
                 if opts.mirror then
                     -- Right-align so the glyphs end at the graph's right edge (where
@@ -3369,9 +3372,6 @@ function M.open(folder, opts)
             end
             ensure_footer_win(total)
             render_pane(footer_buf, rows, goff, foff)
-            -- Keep the cursor `total` screen rows from the bottom so it never sits
-            -- under the overlay (Neovim's own scrolloff, this window only).
-            pcall(vim.api.nvim_set_option_value, "scrolloff", total, { scope = "local", win = win })
         end
 
         -- (The cursor is kept above the overlay by `scrolloff`, set in
