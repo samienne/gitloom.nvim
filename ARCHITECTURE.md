@@ -110,6 +110,41 @@ Consequences for the build:
 What remains for the broader target is **ordering ownership** (move ordering
 out of `git log` into the builder), still future.
 
+### Context panes (header / footer) — in progress
+
+The header/footer context panes (spec §6.2) summarise off-screen topology folded
+onto the pinned anchors (§10.6). The implementation is **Arch B — isolated
+panes, seeded at the boundary**:
+
+- **Separate pane projection, shared by both panes.** The panes do *not* re-fold
+  `repo.display` (that would fold an already-folded, user-moded graph). They use
+  their own projection: the focus default with the anchor set but **no user mode
+  overrides** — `view.project(repo.order, view.owners(repo.order, ref_owners,
+  anchors, {}, true), sig_cache.sig)` — rendered topology-only. It reuses the
+  cached signatures (same tips/fp), so it is cheap. Header and footer are two
+  viewports onto this one anchors-only pane-graph; it is a *second* graph
+  alongside `repo.display`, coupled to the main view only at the seam.
+- **Boundary continuity by seeding.** `columns.layout(opts, items, seed)` takes
+  an optional `seed` — a `col → Lane` map of the lanes crossing in from above —
+  that pre-populates `active` and reserves the seed colours (drops them from the
+  free FIFO, bumps `in_use`) so the pane's own newborn lanes never reuse a colour
+  live at the seam. The **first row is the seam**: no compaction runs on it, so
+  its columns equal the seeded ones exactly and the pane meets the main view
+  without a jog. Non-anchor seam lanes are arrow-capped; anchors continue.
+- **Header asymmetry (open).** Seeding constrains the sweep *start*, which pins a
+  **footer's top seam** exactly (the footer sweeps newest→oldest from the seam
+  down to the roots). A **header's seam is at its sweep *end*** (it sweeps the
+  newer commits down *to* the seam), which seeding does not constrain. The
+  planned resolution is a header-specific **bottom-anchored placement** (carry
+  each seam anchor lane straight up its column, cap non-anchors, place rare new
+  anchor-forks in free columns) — feasible because the header is tiny and
+  anchor-sparse; fallback is folding the main view's own laid-out `[0,S)` grid.
+  Not yet built.
+
+Sizing (`clamp(G(S))` + hysteresis, footer fixed) and the async/debounced pane
+rebuild (off the main render path, reconciled to the boundary lanes the main view
+already drew) are spec'd in §6.2 and still to implement.
+
 ## Layers
 
 ```
