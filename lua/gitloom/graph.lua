@@ -3163,6 +3163,18 @@ function M.open(folder, opts)
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         local PANE_MAX = 12
         local footer_win, footer_buf
+        -- Cached condensed anchor graph (spec §6.2): rebuilt only when the anchor
+        -- set or the commit count changes, then re-sliced per scroll — so moving
+        -- the cursor never reprojects the whole DAG.
+        local pane_cache = { key = nil, items = nil, node_of = nil, pos = nil }
+        -- Inline, node-less merge style for the pane: joins render on one row (no
+        -- fan lines) and junctions draw node-less, so the pane stays compact.
+        local pane_opts = vim.tbl_extend("force", {}, opts)
+        pane_opts.merge_style = {
+            allow_merge_on_split = false,
+            merge_on_separate_line = false,
+            split_on_separate_line = false,
+        }
 
         local function close_footer()
             if footer_win and vim.api.nvim_win_is_valid(footer_win) then
@@ -3233,20 +3245,19 @@ function M.open(folder, opts)
             end
         end
 
-        update_panes = function()
-            if opts.panes == false then return end
-            if not vim.api.nvim_win_is_valid(win) then return end
-            -- Panes are a focus feature: need an anchor (HEAD) and a projection.
-            if not (repo.head and repo.refs[repo.head]) then return close_footer() end
-            if not repo.display or #repo.display == 0 then return close_footer() end
-
-            -- Pane projection inputs (independent of the seam): the **anchors
-            -- only**, each collapsed to a lane. Using only anchors (no hidden
-            -- non-anchor owners, no merge owners) keeps a hidden branch's
-            -- reachability from fragmenting an anchor line into many heads — the
-            -- anchor's first-parent run stays one lane down to the root.
-            local viewbuilder = require("gitloom.view")
+        -- Rebuild the cached condensed anchor graph (spec §6.2) if the anchor set
+        -- or commit count changed. The full anchor-only projection is contracted
+        -- to ref heads + junctions + roots once; `pane_cache` then serves every
+        -- scroll.
+        local function ensure_pane_cache()
             local pinned = effective_pinned()
+            local ids = {}
+            for id in pairs(pinned) do ids[#ids + 1] = id end
+            table.sort(ids)
+            local key = #repo.order .. "|" .. table.concat(ids, ",")
+            if pane_cache.key == key then return #pane_cache.items > 0 end
+
+            local viewbuilder = require("gitloom.view")
             local anchor_owners = {}
             for _, o in ipairs(owners_from_refs(repo.refs, {})) do
                 if pinned[o.id] then
@@ -3254,31 +3265,50 @@ function M.open(folder, opts)
                         { id = o.id, tip = o.tip, mode = "collapsed", fp_only = true }
                 end
             end
-            if #anchor_owners == 0 then return close_footer() end
+            pane_cache = { key = key, items = {}, node_of = {}, pos = {} }
+            if #anchor_owners == 0 then return false end
             local sig = viewbuilder.signatures(repo.order, anchor_owners)
+            local aproj = viewbuilder.project(repo.order, anchor_owners, sig)
+            local cond = pane.condense(aproj.nodes)
+            local idx = {}
+            for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
+            -- Each condensed node's repo.order position (its commit / tip) for
+            -- slicing by the seam.
+            for _, it in ipairs(cond.items) do
+                local c = it.commit
+                pane_cache.pos[c] = idx[(c.tip and c.tip.hash) or c.hash] or 0
+            end
+            pane_cache.items, pane_cache.node_of = cond.items, cond.node_of_hash
+            return #pane_cache.items > 0
+        end
+
+        update_panes = function()
+            if opts.panes == false then return end
+            if not vim.api.nvim_win_is_valid(win) then return end
+            -- Panes are a focus feature: need an anchor (HEAD) and a graph.
+            if not (repo.head and repo.refs[repo.head]) then return close_footer() end
+            if not repo.display or #repo.display == 0 then return close_footer() end
+            if not ensure_pane_cache() then return close_footer() end
+
             local idxmap = {}
             for i, it in ipairs(repo.order) do idxmap[it.commit.hash] = i end
-
             local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
 
-            -- Build the footer for a given seam buffer line: the off-screen-older
-            -- commits an anchor reaches, projected (collapsed) and seeded from the
-            -- seam's boundary. Returns the laid-out rows and the seam display index.
+            -- Build the footer for a given seam buffer line: the condensed nodes
+            -- below the seam (cheap slice of the cache), laid out compactly and
+            -- seeded from the seam's boundary. Returns the rows and seam index.
             local function build(seam_buf)
                 local it, sdi = order_at(seam_buf)
                 local c = it and it.commit
                 local B = c and idxmap[(c.tip and c.tip.hash) or c.hash]
                 if not (sdi and B) then return nil end
-                local zone = {}
-                for i = B + 1, #repo.order do
-                    local oi = repo.order[i]
-                    if next(sig[oi.commit.hash] or {}) ~= nil then zone[#zone + 1] = oi end
+                local items = {}
+                for _, ci in ipairs(pane_cache.items) do
+                    if (pane_cache.pos[ci.commit] or 0) > B then items[#items + 1] = ci end
                 end
-                if #zone == 0 then return nil end
-                local aproj = viewbuilder.project(zone, anchor_owners, sig)
-                if #aproj.items == 0 then return nil end
-                local res = pane.footer(opts, aproj.items,
-                    pane.boundary_below(repo.display, sdi), aproj.node_of_hash)
+                if #items == 0 then return nil end
+                local res = pane.footer(pane_opts, items,
+                    pane.boundary_below(repo.display, sdi), pane_cache.node_of)
                 return res.rows, sdi
             end
 

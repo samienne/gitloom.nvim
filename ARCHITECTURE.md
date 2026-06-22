@@ -147,13 +147,19 @@ panes, seeded at the boundary**:
   the boundary columns exactly.
 
 A **footer window** is wired in graph.lua (`update_panes`, gated by
-`opts.panes`): on reflow and on scroll-settle it projects the off-screen-older
-zone with the **anchors only, each collapsed** (so a hidden branch can't
-fragment an anchor line — the anchor stays one lane to the root), seeds
-`pane.footer` from `boundary_below(repo.display, seam)`, and renders the
-topology-only rows (graph glyphs + ref labels, lane-coloured, aligned under the
-main graph — left-pad by the graph offset, or right-pad to the message edge
-under mirror). The footer is a **borderless overlay** over the bottom `K`
+`opts.panes`). It works off a **cached condensed anchor graph**: the anchor-only
+projection (anchors collapsed) is contracted by `pane.condense` to just the **ref
+heads, junctions and roots** — every ref-less linear pass-through is spliced into
+a plain edge — and cached, rebuilt only when the anchor set or commit count
+changes (`pane_cache`). Each scroll just **re-slices** that small graph by the
+seam (no reprojection — so it stays fast on big repos), lays the slice out in
+**compact mode** (`pane_opts`: inline joins, node-less junctions → one row per
+kept node, linear runs cost zero rows), seeds `pane.footer` from
+`boundary_below(repo.display, seam)` (parents translated through the condensed
+`node_of_hash`), and renders the topology-only rows (graph glyphs + ref labels,
+lane-coloured, aligned under the main graph — left-pad by the graph offset, or
+right-pad to the message edge under mirror). The pane height is then just the
+number of sliced nodes. The footer is a **borderless overlay** over the bottom `K`
 content rows of the main window (relative="win"), so its lanes butt directly
 against the seam — the last main row above it — with no border between (the
 sticky-scroll pattern). The seam sits `K` rows above the bottom and `K` is the

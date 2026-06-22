@@ -168,3 +168,59 @@ describe("pane.header (§6.2)", function()
         assert_continuous(res.rows)
     end)
 end)
+
+describe("pane.condense (§6.2)", function()
+    -- Projection node graph (anchors collapsed): master tip A and dev tip D fork
+    -- at J; B and K are ref-less linear pass-throughs that should splice out.
+    local function graph()
+        local A = { hash = "A", refs = { {} }, collapsed = true, region = { "A" } }
+        local B = { hash = "B", refs = {}, collapsed = true, region = { "B" } }
+        local D = { hash = "D", refs = { {} }, collapsed = true, region = { "D" } }
+        local J = { hash = "J", refs = {}, junction = true, collapsed = false, region = {} }
+        local K = { hash = "K", refs = {}, collapsed = true, region = { "K" } }
+        local R = { hash = "root", refs = {}, collapsed = true, region = { "root" } }
+        A.parents, A.children = { B }, {}
+        B.parents, B.children = { J }, { A }
+        D.parents, D.children = { J }, {}
+        J.parents, J.children = { K }, { B, D }
+        K.parents, K.children = { R }, { J }
+        R.parents, R.children = {}, { K }
+        return { A, B, D, J, K, R } -- newest-first
+    end
+    local function by_hash(items)
+        local m = {}
+        for _, it in ipairs(items) do m[it.commit.hash] = it.commit end
+        return m
+    end
+
+    it("keeps ref heads, junctions and roots; splices linear pass-throughs", function()
+        local c = pane.condense(graph())
+        local n = by_hash(c.items)
+        assert.equals(4, #c.items) -- A, D, J, root (B, K spliced)
+        assert.is_not_nil(n.A)
+        assert.is_not_nil(n.D)
+        assert.is_not_nil(n.J)
+        assert.is_not_nil(n.root)
+        assert.is_nil(n.B)
+        assert.is_nil(n.K)
+    end)
+
+    it("re-points edges across the spliced runs", function()
+        local c = pane.condense(graph())
+        local n = by_hash(c.items)
+        assert.equals("J", n.A.parents[1].hash)     -- A -> (B) -> J
+        assert.equals("J", n.D.parents[1].hash)
+        assert.equals("root", n.J.parents[1].hash)  -- J -> (K) -> root
+        assert.equals("J", n.root.children[1].hash)
+        local jc = {}
+        for _, ch in ipairs(n.J.children) do jc[ch.hash] = true end
+        assert.is_true(jc.A and jc.D)
+    end)
+
+    it("maps spliced hashes to the next kept node toward the root", function()
+        local c = pane.condense(graph())
+        assert.equals("J", c.node_of_hash.B.hash)    -- B between A and J -> J
+        assert.equals("root", c.node_of_hash.K.hash) -- K between J and root -> root
+        assert.equals("A", c.node_of_hash.A.hash)
+    end)
+end)

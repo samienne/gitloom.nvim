@@ -12,6 +12,90 @@ local M = {}
 
 local columns = require("gitloom.columns")
 
+--- Contract an anchor-only projection (heads + junctions, from `view.project`
+--- with the anchors collapsed) into the **condensed graph** (spec §6.2): the only
+--- nodes kept are **ref heads, junctions (fork/merge), tips and roots**; every
+--- pure linear pass-through (a ref-less collapsed head with exactly one parent and
+--- one child) is **spliced out**, its lane becoming a direct edge. So the pane is
+--- a small "navigate between ref heads and junctions" graph that lays out compact
+--- (one row per kept node, linear runs cost zero rows) and can be cached and
+--- re-sliced per scroll instead of reprojected.
+---
+--- `node_of_hash` maps **every** original commit hash — including a spliced run's
+--- members — to the condensed node that represents it: a kept node maps its own
+--- hashes; a spliced node maps to the next kept node toward the **root** (so a
+--- seam lane descending through the run terminates at the right node).
+---@param nodes table[]  -- DisplayNodes (projection .nodes), newest-first
+---@return table  -- { items = OrderItem[], node_of_hash = table<string, table> }
+function M.condense(nodes)
+    local function transparent(n)
+        return n.collapsed and not n.junction and (not n.refs or #n.refs == 0)
+            and #n.parents == 1 and #n.children == 1
+    end
+    -- The next kept node along a chain of transparent nodes, via `field`
+    -- ("parents" toward the root, "children" toward the seam).
+    local function follow(start, field)
+        local cur = start
+        while cur and transparent(cur) do cur = cur[field][1] end
+        return cur
+    end
+
+    -- A copy per kept node (inherits the original's fields via metatable).
+    local copy = {}
+    for _, n in ipairs(nodes) do
+        if not transparent(n) then
+            copy[n] = setmetatable({
+                hash = n.hash, parents = {}, children = {},
+                refs = n.refs, junction = n.junction, collapsed = n.collapsed,
+                region = n.region, count = n.count, tip = n.tip,
+            }, { __index = n })
+        end
+    end
+
+    -- Re-point edges among kept nodes, jumping over spliced runs (dedup).
+    for _, n in ipairs(nodes) do
+        local c = copy[n]
+        if c then
+            local pseen, cseen = {}, {}
+            for _, p in ipairs(n.parents) do
+                local k = transparent(p) and follow(p, "parents") or p
+                if k and copy[k] and not pseen[k] then
+                    pseen[k] = true; c.parents[#c.parents + 1] = copy[k]
+                end
+            end
+            for _, ch in ipairs(n.children) do
+                local k = transparent(ch) and follow(ch, "children") or ch
+                if k and copy[k] and not cseen[k] then
+                    cseen[k] = true; c.children[#c.children + 1] = copy[k]
+                end
+            end
+        end
+    end
+
+    -- node_of: kept nodes map their own hashes; a spliced node maps to the next
+    -- kept node toward the root.
+    local node_of = {}
+    local function map_to(n, target)
+        if not target then return end
+        node_of[n.hash] = target
+        for _, h in ipairs(n.region or {}) do node_of[h] = target end
+    end
+    for _, n in ipairs(nodes) do
+        if copy[n] then
+            map_to(n, copy[n])
+        else
+            local k = follow(n.parents[1], "parents")
+            map_to(n, k and copy[k])
+        end
+    end
+
+    local items = {}
+    for _, n in ipairs(nodes) do
+        if copy[n] then items[#items + 1] = { type = "commit", commit = copy[n] } end
+    end
+    return { items = items, node_of_hash = node_of }
+end
+
 --- The seam map at the **bottom** edge of a laid-out row: every lane flowing
 --- *down* out of it, as `col → Lane`. This is what a **footer** below row `i`
 --- must seed with so its top seam matches the main view's edge.

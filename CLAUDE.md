@@ -202,12 +202,15 @@ Coverage:
   reserved so a pane-born lane never reuses it
 - `tests/pane_spec.lua` — the context-pane layout core (`gitloom.pane`, spec
   §6.2): `boundary_below`/`boundary_above` (the lanes crossing a row's edge, by
-  column), `split_boundary` (continue vs terminate by parent presence), `footer`
+  column), `split_boundary` (continue vs terminate via `node_of`), `footer`
   (the continuing lane seeds the layout so the footer's top seam matches the main
-  view exactly; the folded branch is reported as terminating), and `header` (the
-  transpose-and-flip: the seam is the bottom row matching the main view's top
-  edge, the tip is on top, the folded branch terminates) — both pane results
-  asserted vertically id-continuous
+  view exactly, with the seam parent translated through `node_of` into a
+  collapsed lane), `header` (the transpose-and-flip: the seam is the bottom row
+  matching the main view's top edge, the tip is on top) — both pane results
+  asserted vertically id-continuous — and `condense` (the condensed anchor graph:
+  ref heads / junctions / roots kept, ref-less linear pass-throughs spliced into
+  edges, edges re-pointed across them, spliced hashes mapped to the next kept
+  node toward the root)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
