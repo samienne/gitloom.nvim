@@ -129,6 +129,54 @@ function M.condense(nodes, anchor_names)
     return { items = items, node_of_hash = node_of }
 end
 
+--- Build the **active sub-DAG** for a footer (spec §6.2): starting from the lanes
+--- crossing the seam (`boundary`), follow each lane's **first-parent chain**
+--- downward to its root, and condense it. This shows *only* the existing lanes
+--- continuing — they converge at the commits where they meet (junctions that the
+--- active lanes actually participate in) and every one reaches a root, so no lane
+--- is ever left dangling. No non-active branch is introduced (a merge's
+--- second parent is never followed). `anchor_names` selects which refs are
+--- markers. Returns `{ items, node_of_hash }` like `condense`.
+---@param boundary table<integer, table>  -- col → lane { parent = Commit, ... }
+---@param anchor_names table<string, boolean>?
+---@return table
+function M.continue(boundary, anchor_names)
+    local inset, fp_child = {}, {} -- hash → Commit ; hash → in-set first-parent children
+    local queue = {}
+    local function push(c) if c and not inset[c.hash] then inset[c.hash] = c; queue[#queue + 1] = c end end
+    for _, lane in pairs(boundary) do push(lane.parent) end
+    -- BFS down first-parents. A commit is discovered (queued) after the children
+    -- that reach it, so `queue` is children-before-parents (newest-first) — the
+    -- order columns.layout/condense expect.
+    local qi = 1
+    while qi <= #queue do
+        local c = queue[qi]; qi = qi + 1
+        local p = c.parents and c.parents[1]
+        if p then
+            fp_child[p.hash] = fp_child[p.hash] or {}
+            fp_child[p.hash][#fp_child[p.hash] + 1] = c
+            push(p)
+        end
+    end
+
+    -- DisplayNode per in-set commit, edges = first-parent only (converging where
+    -- chains meet). Inherits commit fields via metatable.
+    local node = {}
+    for _, c in ipairs(queue) do
+        node[c.hash] = setmetatable({ hash = c.hash, refs = c.refs, parents = {}, children = {} },
+            { __index = c })
+    end
+    for _, c in ipairs(queue) do
+        local n = node[c.hash]
+        local p = c.parents and c.parents[1]
+        if p and inset[p.hash] then n.parents[1] = node[p.hash] end
+        for _, ch in ipairs(fp_child[c.hash] or {}) do n.children[#n.children + 1] = node[ch.hash] end
+    end
+    local nodes = {}
+    for _, c in ipairs(queue) do nodes[#nodes + 1] = node[c.hash] end
+    return M.condense(nodes, anchor_names)
+end
+
 --- Cap a footer's rows to `max` while **always keeping the root** (the last row).
 --- Rows are newest-first (seam at the top, root at the bottom): keep the
 --- seam-nearest `max-1` rows and the final root row. (When over the cap the

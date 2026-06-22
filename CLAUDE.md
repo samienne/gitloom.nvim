@@ -211,7 +211,10 @@ Coverage:
   graph: fork/merge junctions, roots, tips and anchor-ref heads kept, linear
   pass-throughs spliced into edges, edges re-pointed across them, spliced hashes
   mapped to the next kept node toward the root, the anchor-ref filter, false
-  junctions spliced, root rendered as a real node)
+  junctions spliced, root rendered as a real node), and `continue` (follow the
+  active seam lanes' first-parent chains to a root: both lanes converge at their
+  meeting junction and reach the root, every node's chain terminates at a root —
+  never cut off — and no non-active branch is introduced)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)

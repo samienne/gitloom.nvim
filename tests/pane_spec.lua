@@ -282,3 +282,78 @@ describe("pane.cap — root always visible (§6.2)", function()
         assert.equals(10, pane.cap({ { n = 10 } }, 1)[1].n) -- single row stays the root
     end)
 end)
+
+describe("pane.continue — active lanes reach a root (§6.2)", function()
+    -- A trunk A->B->C->root and a branch X->Y->B (its first parent rejoins the
+    -- trunk at B). h.dag wires .parents/.children; we build a boundary of the two
+    -- lanes (A and X) crossing the seam.
+    local function dag()
+        local items, by = h.dag({
+            { "A", { "B" } },
+            { "X", { "Y" } },
+            { "Y", { "B" } },
+            { "B", { "C" } },
+            { "C", { "root" } },
+            { "root", {} },
+        }), nil
+        local map = {}
+        for _, it in ipairs(items) do map[it.commit.hash] = it.commit end
+        return map
+    end
+    local function boundary(map)
+        return {
+            [1] = { id = 1, color = 1, parent = map.A, begin = map.A },
+            [2] = { id = 2, color = 2, parent = map.X, begin = map.X },
+        }
+    end
+    local function by_hash(items)
+        local m = {}
+        for _, it in ipairs(items) do m[it.commit.hash] = it.commit end
+        return m
+    end
+
+    it("continues both lanes; they converge at B and reach the root", function()
+        local map = dag()
+        local cond = pane.continue(boundary(map))
+        local n = by_hash(cond.items)
+        assert.is_not_nil(n.root)                 -- a root is present
+        assert.equals(0, #n.root.parents)         -- and it is a real root
+        -- B is the junction where the two lanes meet (>=2 children).
+        assert.is_not_nil(n.B)
+        assert.is_true(#n.B.children >= 2)
+        -- node_of maps both seam parents into the graph (no lane dropped).
+        assert.is_not_nil(cond.node_of_hash.A)
+        assert.is_not_nil(cond.node_of_hash.X)
+    end)
+
+    it("every node's first-parent chain reaches a root (never cut off)", function()
+        local map = dag()
+        local cond = pane.continue(boundary(map))
+        for _, it in ipairs(cond.items) do
+            local c, guard = it.commit, 0
+            while #c.parents > 0 do
+                c = c.parents[1]
+                guard = guard + 1
+                assert.is_true(guard < 100, "first-parent chain did not terminate")
+            end
+            assert.equals(0, #c.parents) -- ended at a real root
+        end
+    end)
+
+    it("introduces no non-active branch (the merged-in b1 is absent)", function()
+        -- Seam boundary has only the trunk lane (parent t2); b1 merged into t1
+        -- above the seam and must not appear in the footer.
+        local items = h.dag({
+            { "t1", { "t2", "b1" } },
+            { "t2", { "t3" } },
+            { "b1", { "t3" } },
+            { "t3", {} },
+        })
+        local map = {}
+        for _, it in ipairs(items) do map[it.commit.hash] = it.commit end
+        local cond = pane.continue({ [1] = { id = 1, color = 1, parent = map.t2 } })
+        local n = by_hash(cond.items)
+        assert.is_nil(n.b1)   -- the non-active branch is not introduced
+        assert.is_not_nil(n.t3) -- the trunk reaches its root
+    end)
+end)

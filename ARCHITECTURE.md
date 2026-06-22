@@ -147,23 +147,22 @@ panes, seeded at the boundary**:
   the boundary columns exactly.
 
 A **footer window** is wired in graph.lua (`update_panes`, gated by
-`opts.panes`). It works off a **cached condensed graph**: `pane.condense`
-contracts the **whole commit DAG** by topology — every linear pass-through (one
-parent, one child, no anchor ref) splices into a plain edge, while every
-**fork/merge (a branch connecting to the trunk), root, tip, and anchor-ref head**
-is kept. So *every* lane is preserved (not anchor-filtered), which is what lets a
-lane active at the seam continue and show its join. Kept nodes get a render role:
-anchor-ref → `◍` marker, fork/merge → node-less junction (just the join glyph),
-root/tip → real node. The graph is cached (rebuilt only when the anchor set or
-commit count changes); each scroll **re-slices** it by the seam (kept nodes are
-single commits, sliced by their own index — fast on big repos), lays the slice
-out in **compact mode** (`pane_opts`: inline joins, node-less junctions → one row
-per kept node, linear runs cost zero rows), seeds `pane.footer` from
-`boundary_below(repo.display, seam)` (each active lane's parent translated through
-`node_of_hash`; a lane whose target is outside the slice terminates at the seam),
-and renders the topology-only rows (lane-coloured, aligned under the main graph —
-left-pad by the graph offset, or right-pad to the message edge under mirror). The
-pane height is just the number of sliced nodes. The footer is a **borderless overlay** over the bottom `K`
+`opts.panes`). Per scroll it continues **only the lanes crossing the seam**:
+`pane.continue(boundary_below(repo.display, seam))` follows each active lane's
+**first-parent chain** downward to its root and condenses it (`pane.condense`).
+So the footer shows exactly the existing lanes continuing — they converge at the
+commits where they actually meet (junctions the active lanes participate in) and
+every one reaches a root, never dangling; a merge's second parent is never
+followed, so **no non-active branch is introduced**. Condensation contracts each
+linear stretch to an edge and assigns a render role per kept node: anchor-ref →
+`◍` marker, fork/merge → node-less junction (the join glyph), root/tip → real
+node. The slice is laid out in **compact mode** (`pane_opts`: inline joins,
+node-less junctions → one row per kept node), seeded from the boundary (a lane
+whose target falls outside the slice terminates at the seam), and rendered
+topology-only (lane-coloured, aligned under the main graph — left-pad by the
+graph offset, or right-pad to the message edge under mirror). The pane height is
+the row count, grown to a fixed point and capped (always keeping the root,
+`pane.cap`). The footer is a **borderless overlay** over the bottom `K`
 content rows of the main window (relative="win"), so its lanes butt directly
 against the seam — the last main row above it — with no border between (the
 sticky-scroll pattern). The seam sits `K` rows above the bottom and `K` is the
