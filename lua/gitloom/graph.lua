@@ -3163,6 +3163,7 @@ function M.open(folder, opts)
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         local PANE_MAX = 12
         local footer_win, footer_buf
+        local footer_seam -- last main buffer line above the overlay (cursor floor)
         -- Cached condensed anchor graph (spec §6.2): rebuilt only when the anchor
         -- set or the commit count changes, then re-sliced per scroll — so moving
         -- the cursor never reprojects the whole DAG.
@@ -3268,7 +3269,14 @@ function M.open(folder, opts)
             pane_cache = { key = key, items = {}, node_of = {}, pos = {} }
             if #anchor_owners == 0 then return false end
             local sig = viewbuilder.signatures(repo.order, anchor_owners)
-            local aproj = viewbuilder.project(repo.order, anchor_owners, sig)
+            -- Only the commits an anchor actually reaches; the rest (unpinned
+            -- branches) are dropped, not left "normal/visible". Without this they
+            -- would survive condensation as full commit rows.
+            local reachable = {}
+            for _, it in ipairs(repo.order) do
+                if next(sig[it.commit.hash] or {}) ~= nil then reachable[#reachable + 1] = it end
+            end
+            local aproj = viewbuilder.project(reachable, anchor_owners, sig)
             local cond = pane.condense(aproj.nodes)
             local idx = {}
             for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
@@ -3333,16 +3341,34 @@ function M.open(folder, opts)
             end
             -- Offsets of the main graph column so the pane lanes line up: `goff`
             -- = its left edge (date+author width), `foff` = the message edge (the
-            -- graph's right side under mirror). Read at the seam row.
+            -- graph's right side under mirror). col_offset is in BYTES; convert to
+            -- display columns via the seam line's text so multi-byte author names
+            -- don't skew the alignment.
             local goff, foff = 0, 0
             local seam_buf = math.max(1, botbuf - #rows)
+            footer_seam = seam_buf
             if lv.controller.col_offset then
-                goff = lv.controller.col_offset(seam_buf, "line", GRAPH_COL) or 0
-                foff = lv.controller.col_offset(seam_buf, "line", FLEX_COL) or 0
+                local ltext = vim.api.nvim_buf_get_lines(buf, seam_buf - 1, seam_buf, false)[1] or ""
+                goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", GRAPH_COL) or 0))
+                foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", FLEX_COL) or 0))
             end
             ensure_footer_win(#rows)
             render_pane(footer_buf, rows, goff, foff)
         end
+
+        -- Keep the cursor above the footer overlay: the bottom rows it covers are
+        -- a summary, not navigable commit rows, so snap the cursor up to the seam.
+        vim.api.nvim_create_autocmd("CursorMoved", {
+            group = group,
+            buffer = buf,
+            callback = function()
+                if not (footer_win and vim.api.nvim_win_is_valid(footer_win) and footer_seam) then return end
+                local pos = vim.api.nvim_win_get_cursor(win)
+                if pos[1] > footer_seam then
+                    pcall(vim.api.nvim_win_set_cursor, win, { footer_seam, pos[2] })
+                end
+            end,
+        })
 
         -- Tear the panes down with the main window.
         vim.api.nvim_create_autocmd("WinClosed", {
