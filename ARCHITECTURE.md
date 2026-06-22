@@ -131,15 +131,20 @@ panes, seeded at the boundary**:
   live at the seam. The **first row is the seam**: no compaction runs on it, so
   its columns equal the seeded ones exactly and the pane meets the main view
   without a jog. Non-anchor seam lanes are arrow-capped; anchors continue.
-- **Header asymmetry (open).** Seeding constrains the sweep *start*, which pins a
-  **footer's top seam** exactly (the footer sweeps newest→oldest from the seam
-  down to the roots). A **header's seam is at its sweep *end*** (it sweeps the
-  newer commits down *to* the seam), which seeding does not constrain. The
-  planned resolution is a header-specific **bottom-anchored placement** (carry
-  each seam anchor lane straight up its column, cap non-anchors, place rare new
-  anchor-forks in free columns) — feasible because the header is tiny and
-  anchor-sparse; fallback is folding the main view's own laid-out `[0,S)` grid.
-  Not yet built.
+- **Header asymmetry — transpose-and-flip.** Seeding constrains the sweep
+  *start*, which pins a **footer's top seam** exactly (`pane.footer` seeds
+  `columns.layout` directly; the footer sweeps newest→oldest from the seam down
+  to the roots). A **header's seam is at its sweep *end*** (it sweeps the newer
+  commits down *to* the seam), which a start-seed cannot pin. So `pane.header`
+  lays the header out **transposed and seam-first**: reverse to oldest-first,
+  swap every parent/child edge (so the seam becomes the sweep start), seed it,
+  run the same `columns.layout`, then **`flip`** the result vertically (reverse
+  the rows, swap up↔down and split↔merge per row) back into display order (tip at
+  top, seam at bottom). This reuses the one layout engine and inherits its
+  invariants rather than introducing a second one; a continuing lane terminates,
+  in transposed terms, at its **child** (the in-header commit it ascends to). The
+  seam-row no-compaction rule (2.1a) is what makes the flipped bottom row land on
+  the boundary columns exactly.
 
 Sizing (`clamp(G(S))` + hysteresis, footer fixed) and the async/debounced pane
 rebuild (off the main render path, reconciled to the boundary lanes the main view
