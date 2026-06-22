@@ -2286,6 +2286,7 @@ end
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
 ---@field collapse_merged? boolean  first-parent focus on/off (default true); §10.7
 ---@field pack_markers? boolean  marker packing on/off (default true); §10.4
+---@field panes? boolean  context panes (header/footer) on/off (default on); §6.2
 ---@field junction_markers? boolean  draw kept junctions node-less (default true); §10.4
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
@@ -2467,6 +2468,9 @@ function M.open(folder, opts)
     -- Recomputes the pivot's cone + re-marks track activeness (§12). Assigned
     -- after the listview opens; forward-declared for the key handlers.
     local update_cone = function() end
+    -- Rebuilds the context panes (§6.2) for the current viewport. Assigned after
+    -- the listview opens; forward-declared so reflow/scroll can trigger it.
+    local update_panes = function() end
     -- Rebuilds the projected OrderItem graph under the current view state and
     -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
     -- forward-declared so the stream and key handlers can close over it.
@@ -2527,6 +2531,7 @@ function M.open(folder, opts)
         end
         update_cone()
         if lv and lv.controller then lv.controller.refresh() end
+        update_panes()
     end
 
     -- The "branch" the collapse interactions (§10.4) act on at a buffer line:
@@ -3077,6 +3082,7 @@ function M.open(folder, opts)
                 applying = true
                 if lv and lv.controller then lv.controller.refresh() end
                 applying = false
+                update_panes()
             end, CONE_DEBOUNCE_MS)
         end
 
@@ -3143,6 +3149,127 @@ function M.open(folder, opts)
                 if applying or not vim.api.nvim_win_is_valid(win) then return end
                 schedule_cone_update()
             end,
+        })
+
+        -- Context panes (spec §6.2) — minimal first cut: a footer window below the
+        -- main graph showing the anchors-only topology of the off-screen-older
+        -- commits, seeded at the bottom seam so its lanes meet the main view.
+        -- (Header, sizing hysteresis, async, and arrow-caps are still to come.)
+        local pane = require("gitloom.pane")
+        local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
+        local PANE_MAX = 8
+        local footer_win, footer_buf
+
+        -- nvim_win_get_config may report row/col as a number or a {[1]=}/{[false]=}
+        -- pair depending on version; coerce to a number.
+        local function num(x)
+            if type(x) == "table" then return x[1] or x[false] or 0 end
+            return x or 0
+        end
+
+        local function close_footer()
+            if footer_win and vim.api.nvim_win_is_valid(footer_win) then
+                pcall(vim.api.nvim_win_close, footer_win, true)
+            end
+            footer_win = nil
+        end
+
+        local function ensure_footer_win(height)
+            local mc = vim.api.nvim_win_get_config(win)
+            local cfg = {
+                relative = "editor",
+                row = num(mc.row) + num(mc.height) + 2, -- below the main float + border
+                col = num(mc.col),
+                width = num(mc.width),
+                height = height,
+                style = "minimal",
+                focusable = false,
+                zindex = (mc.zindex or 50) + 1,
+            }
+            if footer_win and vim.api.nvim_win_is_valid(footer_win) then
+                pcall(vim.api.nvim_win_set_config, footer_win, cfg)
+                return
+            end
+            footer_buf = vim.api.nvim_create_buf(false, true)
+            cfg.border = "rounded"
+            cfg.title = " ↓ off-screen (anchors) "
+            footer_win = vim.api.nvim_open_win(footer_buf, false, cfg)
+            pcall(vim.api.nvim_set_option_value, "winhl", "Normal:NormalFloat", { win = footer_win })
+        end
+
+        -- Render topology-only pane rows (graph glyphs + ref labels, no
+        -- date/author/message; §6.2) into the pane buffer with lane colours.
+        local function render_pane(buf, rows)
+            local lines, marks = {}, {}
+            for li, row in ipairs(rows) do
+                local g = get_column_chars(opts, row.columns, false)
+                local text = g.text or ""
+                for _, hl in ipairs(g.highlight or {}) do
+                    marks[#marks + 1] = { li - 1, hl.start_pos, hl.end_pos, hl.hl }
+                end
+                local c = row.commit
+                local labels = c and decoration_texts(c) or {}
+                if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
+                if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
+                lines[li] = text
+            end
+            if #lines == 0 then lines = { "" } end
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+            vim.api.nvim_buf_clear_namespace(buf, pane_ns, 0, -1)
+            for _, m in ipairs(marks) do
+                pcall(vim.api.nvim_buf_set_extmark, buf, pane_ns, m[1], m[2],
+                    { end_col = m[3], hl_group = m[4] })
+            end
+        end
+
+        update_panes = function()
+            if opts.panes == false then return end
+            if not vim.api.nvim_win_is_valid(win) then return end
+            -- Panes are a focus feature: need an anchor (HEAD) and a projection.
+            if not (repo.head and repo.refs[repo.head]) then return close_footer() end
+            if not repo.display or #repo.display == 0 then return close_footer() end
+
+            -- The bottom visible commit, as a repo.order index.
+            local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+            local botItem, botDisplayIdx = order_at(botbuf)
+            if not (botItem and botItem.commit and botDisplayIdx) then return close_footer() end
+            local idxmap = {}
+            for i, it in ipairs(repo.order) do idxmap[it.commit.hash] = i end
+            local botC = botItem.commit
+            local botHash = botC and (botC.tip and botC.tip.hash or botC.hash)
+            local B = botHash and idxmap[botHash]
+            if not B then return close_footer() end
+
+            -- The anchors-only projection: the focus default with the current
+            -- anchor set and NO user mode overrides (§6.2). Fresh signatures (the
+            -- main cache may be from a focus-off projection with different fp).
+            local viewbuilder = require("gitloom.view")
+            local owners = viewbuilder.owners(repo.order, owners_from_refs(repo.refs, {}),
+                effective_pinned(), {}, true)
+            local aproj = viewbuilder.project(repo.order, owners)
+            local foot = {}
+            for _, it in ipairs(aproj.items) do
+                local h = (it.commit.tip and it.commit.tip.hash) or it.commit.hash
+                if (idxmap[h] or 0) > B then foot[#foot + 1] = it end
+            end
+            if #foot == 0 then return close_footer() end
+
+            local res = pane.footer(opts, foot, pane.boundary_below(repo.display, botDisplayIdx))
+            local rows = res.rows
+            if #rows > PANE_MAX then
+                local t = {}
+                for i = 1, PANE_MAX do t[i] = rows[i] end -- seam-nearest rows
+                rows = t
+            end
+            ensure_footer_win(#rows)
+            render_pane(footer_buf, rows)
+        end
+
+        -- Tear the panes down with the main window.
+        vim.api.nvim_create_autocmd("WinClosed", {
+            group = group,
+            pattern = tostring(win),
+            callback = close_footer,
         })
 
         -- No initial cone/refresh here: the fetch is async, so no commits are

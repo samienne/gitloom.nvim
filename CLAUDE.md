@@ -380,8 +380,9 @@ Details not covered by the spec or architecture:
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); pane.lua is the context-pane
   layout core (boundary extraction + footer/header builders, the header via
-  transpose-and-flip; §6.2, in progress — not yet wired to windows);
-  listview.lua is a git-agnostic reusable widget.
+  transpose-and-flip; §6.2, in progress — a minimal **footer window** is wired
+  via graph.lua `update_panes` (gated by `opts.panes`); header/sizing/async/caps
+  pending); listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua

@@ -146,9 +146,15 @@ panes, seeded at the boundary**:
   seam-row no-compaction rule (2.1a) is what makes the flipped bottom row land on
   the boundary columns exactly.
 
-Sizing (`clamp(G(S))` + hysteresis, footer fixed) and the async/debounced pane
-rebuild (off the main render path, reconciled to the boundary lanes the main view
-already drew) are spec'd in §6.2 and still to implement.
+A minimal **footer window** is wired in graph.lua (`update_panes`, gated by
+`opts.panes`): on reflow and on scroll-settle it builds the anchors-only
+projection (no user overrides), slices the off-screen-older commits by their
+`repo.order` index against the bottom visible commit, lays them out with
+`pane.footer` seeded from `boundary_below(repo.display, …)`, and renders the
+topology-only rows (graph glyphs + ref labels) into a float below the main
+window. The **header window**, **sizing** (`clamp(G(S))` + hysteresis, footer
+fixed), **arrow-caps** for terminators, and moving the rebuild **off the main
+render path** (it currently runs in the cone debounce) are still to implement.
 
 ## Layers
 
