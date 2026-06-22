@@ -101,7 +101,9 @@ Opens the graph for the repository at Neovim's current working directory.
 | `h` / `l` | Select the previous / next ref decoration on the current row |
 | `H` | Toggle reachability highlighting (dimming) off / on |
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
+| `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
+| `F` | Toggle the off-screen context footer (the summary band below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
@@ -128,6 +130,22 @@ branch — merged-in *and* divergent — is collapsed to a `◍` head. Press `c`
 toggle this off (the full graph) and on again; your explicit per-branch toggles
 are kept across the switch. Disable the default with `collapse_merged = false`
 (§10.7).
+
+**Anchors (pinning).** Focus folds everything toward the *anchors* — by default
+the current branch (HEAD) plus the common trunks `master` / `main` / `dev` when
+they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
+pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
+a release branch and a few of your own in view at once while everything else
+collapses. The footer notes the anchor count when more than one is pinned
+(§10.6).
+
+**Context footer.** Below the graph, a compact summary band continues the lanes
+that are active at the bottom of the view down to where they merge into the main
+branch and reach the root — so you keep sight of how off-screen-older history
+connects without scrolling. It is drawn topology-only (dashed lanes, solid
+junctions, no commit text), with a marker for any pinned ref that falls below the
+cutoff. Toggle it with `F` (§6.2). The **header** counterpart (off-screen-newer)
+is not built yet.
 
 The footer shows the active merge mode, the ref label mode, a `N collapsed,
 M hidden` summary when any branch modes are set, and whether the graph is

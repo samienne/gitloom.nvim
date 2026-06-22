@@ -196,7 +196,25 @@ Coverage:
   of stacked roots alternates columns; plus colour generation (spec §5.5): all
   curated slots are used before any generated one, a released colour is not
   reused within `buffer` allocations (breathing room), and surplus generated
-  slots are retired so a calmed graph returns to curated colours
+  slots are retired so a calmed graph returns to curated colours; plus the
+  **boundary seed** (spec §6.2): a seeded lane enters from above in its column
+  and stays continuous (the seam row runs no compaction), and the seed colour is
+  reserved so a pane-born lane never reuses it
+- `tests/pane_spec.lua` — the context-pane layout core (`gitloom.pane`, spec
+  §6.2): `boundary_below`/`boundary_above` (the lanes crossing a row's edge, by
+  column), `split_boundary` (continue vs terminate via `node_of`), `footer`
+  (the continuing lane seeds the layout so the footer's top seam matches the main
+  view exactly, with the seam parent translated through `node_of` into a
+  collapsed lane), `header` (the transpose-and-flip: the seam is the bottom row
+  matching the main view's top edge, the tip is on top) — both pane results
+  asserted vertically id-continuous — and `condense` (the topological condensed
+  graph: fork/merge junctions, roots, tips and anchor-ref heads kept, linear
+  pass-throughs spliced into edges, edges re-pointed across them, spliced hashes
+  mapped to the next kept node toward the root, the anchor-ref filter, false
+  junctions spliced, root rendered as a real node), and `continue` (follow the
+  active seam lanes' first-parent chains to a root: both lanes converge at their
+  meeting junction and reach the root, every node's chain terminates at a root —
+  never cut off — and no non-active branch is introduced)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -308,19 +326,30 @@ Details not covered by the spec or architecture:
   and streaming keeps its fast incremental path. `<CR>` cycles a selected ref's
   mode / expands a head; signatures are cached across mode toggles (§10.5).
 - **First-parent focus** (`opts.collapse_merged`, default on; spec §10.7, toggled
-  by `c`): `view.owners` builds the owner set so **every** owner is
-  **first-parent-only** (`fp_only`) — each covers only its tip's first-parent
-  line. The trunk (HEAD's branch ref) defaults normal; every other ref and every
-  non-first merge parent (an anonymous `merge:<hash>:<i>` owner) defaults
-  collapsed — so the graph opens with HEAD's mainline in full and every other
-  branch a `◍` head. `view.signatures` honours `fp_only` (propagate only through
-  `parents[1]`). **All owners** being fp-only (not just the trunk) is what makes
-  a branch attributed to *its own* commits, so collapsing/expanding one branch
-  doesn't drag in the earlier branches its history merged through (spec §10.2). It is
-  a recomputed default, not a seed: `view_state.modes` holds only explicit user
-  overrides, `view_state.effective` the resolved mode per owner (drives the
+  by `c`): `view.owners(items, ref_owners, pinned, modes, cm)` builds the owner
+  set so **every** owner is **first-parent-only** (`fp_only`) — each covers only
+  its tip's first-parent line. The **pinned anchors** (`pinned`, a set of ref
+  ids; §10.6) default normal; every other ref and every non-first merge parent
+  (an anonymous `merge:<hash>:<i>` owner) defaults collapsed — so the graph opens
+  with the anchors' mainline in full and every other branch a `◍` head.
+  `view.signatures` honours `fp_only` (propagate only through `parents[1]`).
+  **All owners** being fp-only (not just the anchors) is what makes a branch
+  attributed to *its own* commits, so collapsing/expanding one branch doesn't
+  drag in the earlier branches its history merged through (spec §10.2). It is a
+  recomputed default, not a seed: `view_state.modes` holds only explicit user
+  mode overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
+- **Pin axis** (spec §10.6, toggled by `P`): pin is the **anchor** set the focus
+  default folds toward — it *generalises the trunk* (one anchor → a set). HEAD is
+  pinned by default; `view_state.pinned` holds explicit per-ref pin/unpin
+  overrides and `effective_pinned()` resolves the live set ({HEAD} ∪ overrides),
+  passed to `view.owners`/`collapse_owners` in place of the old single `trunk_id`.
+  Pinning changes only the default *mode* (anchors normal, rest collapsed), not
+  `fp_only` or the owner tips, so it does **not** invalidate the signature cache
+  (like a mode toggle). `P` uses `branch_under_cursor`, pins only real refs (drops
+  anonymous merge owners), reflows, and repositions the cursor. Anchors are the
+  foundation for the planned context panes (spec §6.2).
 - **Marker packing** (`opts.pack_markers`, default on; spec §10.4, toggled by
   `p`): a **marker** is a messageless node (today a collapsed head — `◍` + ref
   labels + count, no subject). `pack_markers` is a post-Phase-1 pass run in
@@ -356,8 +385,15 @@ Details not covered by the spec or architecture:
   weight. Topology model/invariants are unchanged (it stays a real node).
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
-  view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic
-  reusable widget.
+  view.lua is the pre-Phase-1 projection (§10); pane.lua is the context-pane
+  layout core (boundary-line extraction, `continue` = walk active lanes' first-
+  parent chains, `condense`, `cap`; the header builder via transpose-and-flip;
+  §6.2). The **footer is wired and working** via graph.lua `update_panes` (gated
+  by `opts.panes`, toggled by `F`): a borderless overlay whose seam is read from
+  the rendered line at a screen row (`boundary_at`/`seam_for` via `screenpos`, so
+  split/merge virtual lines work), pinned refs below the cutoff included. The
+  **header** is unwired; arrow-caps and moving the rebuild off the cone-debounce
+  are pending. listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua

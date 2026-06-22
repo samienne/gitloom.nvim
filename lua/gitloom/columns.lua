@@ -42,10 +42,21 @@ end
 
 --- Build the per-row lines for the inline merge style (every fan on the commit
 --- line; no separate split/merge lines). Other styles are layered on later.
+---
+--- `seed` (optional) pre-populates the sweep's `active` map with lanes crossing
+--- in **from above** — the boundary lanes of a context pane (spec §6.2). Each
+--- seeded lane keeps its column and its colour (so the pane's seam matches the
+--- main view's edge), and its colour slot is reserved so the layout's own newly
+--- born lanes never reuse a live seam colour. A seeded lane is an ordinary Lane
+--- `{id, color, parent, begin?}`; it draws straight down until its `parent`
+--- commit appears in `items` (or off the bottom edge if it never does). Seeding
+--- only constrains the sweep **start**, so it pins a footer's top seam exactly;
+--- a header's bottom seam needs a different mechanism (see ARCHITECTURE.md).
 ---@param opts table
 ---@param items table[]  -- { type, commit } newest-first; commit.parents/children are Commits
+---@param seed table<integer, table>?  -- col -> Lane crossing in from above
 ---@return table[] rows
-function M.layout(opts, items)
+function M.layout(opts, items, seed)
     local next_id = 0
     local function new_id()
         next_id = next_id + 1
@@ -118,6 +129,27 @@ function M.layout(opts, items)
 
     local rows = {}
     local active = {} -- col -> Lane flowing down into the current row
+
+    -- Seed the boundary lanes of a context pane (spec §6.2): they flow in from
+    -- above in their given columns, keeping their colours. Reserve each seed
+    -- colour slot — drop it from the curated free FIFO and bump its in_use — so
+    -- the pane's own newly born lanes never reuse a colour live at the seam.
+    if seed then
+        local reserved = {}
+        for col, lane in pairs(seed) do
+            active[col] = lane
+            reserved[lane.color] = (reserved[lane.color] or 0) + 1
+        end
+        local kept = {}
+        for i = qhead, qtail do
+            if not reserved[free[i].slot] then kept[#kept + 1] = free[i] end
+        end
+        free, qhead, qtail = kept, 1, #kept
+        for slot, n in pairs(reserved) do
+            in_use[slot] = (in_use[slot] or 0) + n
+            if slot > nextgen then nextgen = slot end
+        end
+    end
     -- Columns a root occupied on the *previous* row. A root ends its lane with
     -- nothing below it, so reusing its column on the next row would stack an
     -- unrelated history under it and read as one continuous lane. We block the
@@ -125,6 +157,12 @@ function M.layout(opts, items)
     -- it), which offsets the next history and breaks the line; consecutive
     -- stacked roots then simply alternate columns (spec §5.1 "root column break").
     local blocked = {}
+
+    -- The first row is a context pane's **seam** when seeding (spec §6.2): its
+    -- columns must equal the seeded ones exactly so the pane meets the main view
+    -- without a jog, so no compaction runs on it. (Without a seed it is just the
+    -- newest row, compacted normally.)
+    local first_row = true
 
     -- A fresh line buffer: `add` appends a Segment, `draw` lays one lane across
     -- columns lo..hi with `up`/`down` at the given columns (the bus connects them).
@@ -279,7 +317,7 @@ function M.layout(opts, items)
         -- (the gap that bounces a mirrored graph). Reserved before survivor
         -- compaction so a survivor keeps any nearer gap; the lane's single jog is a
         -- turn, not a straight run, so id-continuity is untouched.
-        if #incoming == 1 then
+        if #incoming == 1 and not (first_row and seed) then
             for c = 1, cc - 1 do
                 if not occ0[c] and not blocked[c] then cc = c; break end
             end
@@ -291,9 +329,11 @@ function M.layout(opts, items)
         local used = { [cc] = true }
         for _, s in ipairs(survivors) do
             local k = s.col
-            for c = 1, s.col - 1 do
-                if not occ0[c] and not used[c] and not blocked[c] then
-                    k = c; break
+            if not (first_row and seed) then
+                for c = 1, s.col - 1 do
+                    if not occ0[c] and not used[c] and not blocked[c] then
+                        k = c; break
+                    end
                 end
             end
             used[k] = true
@@ -392,6 +432,7 @@ function M.layout(opts, items)
         blocked = {}
         if #outgoing == 0 then blocked[cc] = true end
 
+        first_row = false
         rows[#rows + 1] = row
     end
 

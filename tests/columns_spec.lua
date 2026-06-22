@@ -579,3 +579,50 @@ describe("columns.layout colour generation (spec §5.5)", function()
         end
     end)
 end)
+
+describe("columns.layout boundary seed (§6.2)", function()
+    local opts = h.big_opts()
+
+    -- A context pane's seam: a lane crossing in from above in a fixed column and
+    -- colour, terminating at a commit inside the pane. `a` is a merge so a fresh
+    -- lane is born under the seed (to exercise colour reservation).
+    local function laid()
+        local items = h.dag({
+            { "a", { "b", "d" } },
+            { "b", { "c" } },
+            { "d", { "c" } },
+            { "c", {} },
+            { "p", {} }, -- the seed lane's parent (keeps its column alive to the end)
+        })
+        local p
+        for _, it in ipairs(items) do if it.commit.hash == "p" then p = it.commit end end
+        local seed = { [3] = { id = 99, color = 1, begin = items[1].commit, parent = p, highlighted = false } }
+        return columns.layout(opts, items, seed)
+    end
+
+    it("a seeded lane enters from above in its column and stays continuous", function()
+        local rows = laid()
+        local cell = rows[1].columns[3]
+        assert.is_not_nil(cell)
+        assert.is_true(cell.connectivity.up)   -- crosses in from above the pane
+        assert.is_true(cell.connectivity.down) -- continues downward
+        assert.equals(99, cell.id)
+        assert.equals(1, cell.color)
+        assert.same({}, check(opts, rows)) -- well-formed + continuous
+    end)
+
+    it("reserves the seed colour so a pane-born lane never reuses it", function()
+        local rows = laid()
+        -- colour slot 1 belongs only to the seed lane (id 99); the merge-born
+        -- lanes must have taken other slots even though 1 is normally first out.
+        for _, row in ipairs(rows) do
+            for _, line in ipairs({ row.split or {}, row.columns, row.merge or {} }) do
+                for _, t in ipairs(line) do
+                    for _, s in ipairs(t.lanes or {}) do
+                        if s.color == 1 then assert.equals(99, s.id) end
+                    end
+                end
+            end
+        end
+    end)
+end)

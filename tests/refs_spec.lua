@@ -179,18 +179,28 @@ describe("branch-mode toggle helpers", function()
         assert.is_nil(selected_owner_ids(commit({ { "local", "main" } }), 5))
     end)
 
-    it("collapse_owners returns nil for a mainline commit (trunk reaches it)", function()
-        assert.is_nil(collapse_owners({ trunk = true, feat = true }, "trunk",
+    it("collapse_owners returns nil for a mainline commit (an anchor reaches it)", function()
+        assert.is_nil(collapse_owners({ trunk = true, feat = true }, { trunk = true },
             { trunk = "normal", feat = "normal" }))
     end)
 
-    it("collapse_owners returns the non-trunk normal owners off the mainline", function()
+    it("collapse_owners returns the non-anchor normal owners off the mainline", function()
         -- feat is normal (keeps it visible); the merge owner is already collapsed
-        assert.same({ "feat" }, collapse_owners({ feat = true, ["merge:m:2"] = true }, "trunk",
+        assert.same({ "feat" }, collapse_owners({ feat = true, ["merge:m:2"] = true }, { trunk = true },
             { feat = "normal", ["merge:m:2"] = "collapsed" }))
     end)
 
     it("collapse_owners is nil when nothing normal keeps the commit visible", function()
-        assert.is_nil(collapse_owners({ feat = true }, "trunk", { feat = "collapsed" }))
+        assert.is_nil(collapse_owners({ feat = true }, { trunk = true }, { feat = "collapsed" }))
+    end)
+
+    it("collapse_owners treats every pinned anchor as mainline (§10.6)", function()
+        -- two anchors; a commit reached by either is mainline (not collapsible),
+        -- even if a non-anchor ref also reaches it.
+        assert.is_nil(collapse_owners({ dev = true, feat = true }, { trunk = true, dev = true },
+            { dev = "normal", feat = "normal" }))
+        -- off both anchors: feat alone keeps it visible, so it is collapsible.
+        assert.same({ "feat" }, collapse_owners({ feat = true }, { trunk = true, dev = true },
+            { feat = "normal" }))
     end)
 end)

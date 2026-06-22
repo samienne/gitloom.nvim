@@ -55,7 +55,9 @@ local KEYBINDS = {
     { "h/l", "Select previous / next ref on the row" },
     { "H", "Toggle reachability highlighting (dimming)" },
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
+    { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
+    { "F", "Toggle the off-screen context footer" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },
@@ -66,10 +68,14 @@ local KEYBINDS = {
 ---@param mirror boolean?
 ---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
 ---@param focus boolean?  -- the first-parent focus default is on (§10.7)
-local function footer_text(mirror, modes, focus)
+local function footer_text(mirror, modes, focus, nanchors)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
-    if focus then status = status .. " | focus" end
+    if focus then
+        status = status .. " | focus"
+        -- More than the single default anchor (HEAD) ⇒ note the anchor count.
+        if nanchors and nanchors > 1 then status = status .. (" (%d anchors)"):format(nanchors) end
+    end
     local nc, nh = 0, 0
     for _, m in pairs(modes or {}) do
         if m == "collapsed" then nc = nc + 1 elseif m == "hidden" then nh = nh + 1 end
@@ -917,21 +923,24 @@ local function pack_markers(items)
 end
 
 --- The owner ids whose collapse turns the region containing a shown commit into
---- a marker (spec §10.4): every non-trunk owner currently keeping it visible.
---- Returns nil when the commit is **mainline** (the trunk reaches it, so it
+--- a marker (spec §10.4): every non-anchor owner currently keeping it visible.
+--- Returns nil when the commit is **mainline** (a pinned anchor reaches it, so it
 --- can't be collapsed) or nothing normal keeps it visible. Used by the `<Tab>`
 --- collapse toggle and the `<CR>` menu to act on the region under the cursor
 --- without needing a ref.
 ---@param sig table<string, boolean>?  -- the commit's signature (owner id set)
----@param trunk_id string?
+---@param pinned table<string, boolean>?  -- the anchor owner ids (§10.6)
 ---@param effective table<string, string>  -- owner id → effective mode
 ---@return string[]|nil
-local function collapse_owners(sig, trunk_id, effective)
+local function collapse_owners(sig, pinned, effective)
     if not sig then return nil end
-    if trunk_id and sig[trunk_id] then return nil end -- mainline: not collapsible
+    pinned = pinned or {}
+    for pid in pairs(pinned) do
+        if sig[pid] then return nil end -- on an anchor's line: not collapsible
+    end
     local out = {}
     for oid in pairs(sig) do
-        if oid ~= trunk_id and (effective[oid] or "normal") == "normal" then
+        if not pinned[oid] and (effective[oid] or "normal") == "normal" then
             out[#out + 1] = oid
         end
     end
@@ -2278,6 +2287,7 @@ end
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
 ---@field collapse_merged? boolean  first-parent focus on/off (default true); §10.7
 ---@field pack_markers? boolean  marker packing on/off (default true); §10.4
+---@field panes? boolean  context panes (header/footer) on/off (default on); §6.2
 ---@field junction_markers? boolean  draw kept junctions node-less (default true); §10.4
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
@@ -2432,7 +2442,25 @@ function M.open(folder, opts)
     -- `modes` is explicit per-owner overrides; `effective` is the resolved mode
     -- per owner id after the first-parent default (§10.7), kept for the footer
     -- and the `<CR>` cycle. Both filled by reflow.
-    local view_state = { cone = nil, modes = {}, effective = {} }
+    -- `pinned` is the explicit per-ref pin overrides (ref id → boolean), on top
+    -- of the HEAD-pinned-by-default rule (§10.6). The effective anchor set is
+    -- computed by `effective_pinned()`; it generalises the single trunk of §10.7.
+    local view_state = { cone = nil, modes = {}, effective = {}, pinned = {} }
+
+    -- The effective anchor set (§10.6). Pinned by default: the current branch
+    -- (HEAD) and the common trunks `master`/`main`/`dev` when present. The user's
+    -- explicit pin/unpin overrides apply on top. Returns a set of ref-owner ids.
+    local function effective_pinned()
+        local p = {}
+        if repo.head and repo.refs[repo.head] then p[repo.head] = true end
+        for _, name in ipairs({ "master", "main", "dev" }) do
+            if repo.refs[name] then p[name] = true end
+        end
+        for id, v in pairs(view_state.pinned) do
+            if v then p[id] = true else p[id] = nil end
+        end
+        return p
+    end
     -- Cached per-commit signatures for the projection (spec §10.5). They depend
     -- only on the commit set, the owner tips/fp-flags and the focus policy, not on
     -- modes, so a mode toggle reuses them; invalidated when those change. Keyed by
@@ -2445,6 +2473,13 @@ function M.open(folder, opts)
     -- Recomputes the pivot's cone + re-marks track activeness (§12). Assigned
     -- after the listview opens; forward-declared for the key handlers.
     local update_cone = function() end
+    -- Rebuilds the context panes (§6.2) for the current viewport. Assigned after
+    -- the listview opens; forward-declared so reflow/scroll can trigger it.
+    local update_panes = function() end
+    -- Footer-pane debug state (the seam buffer line + height; or, when nothing
+    -- showed, why), surfaced in the footer status when lane ids are on (`i`).
+    -- Set by update_panes.
+    local footer_seam, footer_height, footer_dbg
     -- Rebuilds the projected OrderItem graph under the current view state and
     -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
     -- forward-declared so the stream and key handlers can close over it.
@@ -2479,13 +2514,13 @@ function M.open(folder, opts)
     -- projection is no longer the identity). Recomputes the cone over the new map.
     reflow = function()
         local viewbuilder = require("gitloom.view")
-        -- Owners under the first-parent default (§10.7): the trunk (HEAD's
-        -- branch) is first-parent-only + normal, every other ref and merge parent
-        -- defaults collapsed; view_state.modes overrides. No trunk ⇒ all-normal.
+        -- Owners under the first-parent default (§10.7): the pinned anchors
+        -- (§10.6; HEAD by default) are first-parent-only + normal, every other ref
+        -- and merge parent defaults collapsed; view_state.modes overrides. No
+        -- anchor ⇒ all-normal.
         local cm = opts.collapse_merged ~= false
-        local trunk_id = (repo.head and repo.refs[repo.head]) and repo.head or nil
         local owners = viewbuilder.owners(
-            repo.order, owners_from_refs(repo.refs, {}), trunk_id, view_state.modes, cm)
+            repo.order, owners_from_refs(repo.refs, {}), effective_pinned(), view_state.modes, cm)
         view_state.effective = {}
         for _, o in ipairs(owners) do view_state.effective[o.id] = o.mode end
         -- Reuse cached signatures unless the commit/owner set or focus changed;
@@ -2505,6 +2540,7 @@ function M.open(folder, opts)
         end
         update_cone()
         if lv and lv.controller then lv.controller.refresh() end
+        update_panes()
     end
 
     -- The "branch" the collapse interactions (§10.4) act on at a buffer line:
@@ -2550,9 +2586,8 @@ function M.open(folder, opts)
                 follow = c.tip and c.tip.hash, commit = c.tip }
         end
         -- a normal/junction commit → collapse the region containing it, if it is
-        -- not mainline (the trunk doesn't reach it).
-        local trunk_id = (repo.head and repo.refs[repo.head]) and repo.head or nil
-        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], trunk_id, view_state.effective)
+        -- not mainline (no pinned anchor reaches it).
+        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], effective_pinned(), view_state.effective)
         if ids then
             return { state = "expanded", owners = ids, follow = c.hash, commit = c }
         end
@@ -2564,7 +2599,20 @@ function M.open(folder, opts)
     -- it the same way.
     local function update_footer()
         if lv and lv.win and lv.win.win then
-            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes, opts.collapse_merged ~= false)
+            local nanchors = 0
+            for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
+            local status = footer_text(opts.mirror, view_state.modes,
+                opts.collapse_merged ~= false, nanchors)
+            -- Debug (lane ids on, `i`): the footer-pane cutoff (seam buffer line)
+            -- and height when shown, or why it is hidden.
+            if show_lane_ids then
+                if footer_seam then
+                    status = status .. (" | pane cut@%s h=%d"):format(tostring(footer_seam), footer_height or 0)
+                elseif footer_dbg then
+                    status = status .. " | pane hidden: " .. footer_dbg
+                end
+            end
+            lv.win.opts.footer = status
             pcall(vim.api.nvim_win_set_config, lv.win.win, {
                 footer = lv.win.opts.footer,
                 footer_pos = "center",
@@ -2720,6 +2768,7 @@ function M.open(folder, opts)
             lv.controller.refresh()
         end
         update_footer()
+        update_panes() -- re-align/re-render the footer for the new orientation
         place_cursor()
     end
     -- B: cycle the ref label placement (right / inline / dual; §6.1). The layout
@@ -2857,12 +2906,42 @@ function M.open(folder, opts)
         update_footer()
         place_cursor()
     end
-    -- i: toggle the per-lane id column before the message.
+    -- P: pin / unpin the branch under the cursor as an **anchor** (§10.6).
+    -- Anchors stay normal under focus; everything else collapses. HEAD is pinned
+    -- by default. Acts on the selected ref (or the region under the cursor),
+    -- restricted to real refs; changes the focus default, so reflow.
+    opts.win.keys.P = function(self)
+        local w = self and self.win
+        if not w then return end
+        local line = vim.api.nvim_win_get_cursor(w)[1]
+        local b = branch_under_cursor(line)
+        if not b or not b.owners then return end
+        -- Only refs are pinnable (v1, §10.6) — drop anonymous merge-parent owners.
+        local targets = {}
+        for _, oid in ipairs(b.owners) do
+            if repo.refs[oid] then targets[#targets + 1] = oid end
+        end
+        if #targets == 0 then return end
+        local want = not effective_pinned()[targets[1]]
+        for _, oid in ipairs(targets) do view_state.pinned[oid] = want end
+        reflow()
+        update_footer()
+        if b.follow then goto_hash(b.follow) end
+        place_cursor()
+    end
+    -- i: toggle the per-lane id column before the message (main view + footer).
     opts.win.keys.i = function()
         show_lane_ids = not show_lane_ids
         if lv and lv.controller then
             lv.controller.refresh()
         end
+        update_panes() -- re-render the footer with/without its lane-id debug column
+        place_cursor()
+    end
+    -- F: toggle the context panes (footer) on/off.
+    opts.win.keys.F = function()
+        opts.panes = opts.panes == false
+        update_panes() -- builds it when on, closes it when off
         place_cursor()
     end
     -- ?: float listing all keybindings.
@@ -3018,9 +3097,11 @@ function M.open(folder, opts)
         -- short timer and only the last one — once the cursor settles — does the
         -- work. The walk stays synchronous (Lua is single-threaded and the editor
         -- API isn't usable off the main loop); we just run it far less often.
-        -- `applying` suppresses the WinScrolled the deferred refresh may emit.
+        -- `applying` suppresses the WinScrolled the deferred refresh may emit. A
+        -- real scroll that lands during that window is remembered in `pending` and
+        -- replayed, so the footer never goes stale on a dropped scroll.
         local CONE_DEBOUNCE_MS = 60
-        local cone_gen, applying = 0, false
+        local cone_gen, applying, pending = 0, false, false
         local function schedule_cone_update()
             cone_gen = cone_gen + 1
             local gen = cone_gen
@@ -3030,6 +3111,8 @@ function M.open(folder, opts)
                 applying = true
                 if lv and lv.controller then lv.controller.refresh() end
                 applying = false
+                update_panes()
+                if pending then pending = false; schedule_cone_update() end
             end, CONE_DEBOUNCE_MS)
         end
 
@@ -3093,9 +3176,286 @@ function M.open(folder, opts)
             group = group,
             pattern = tostring(win),
             callback = function()
-                if applying or not vim.api.nvim_win_is_valid(win) then return end
+                if not vim.api.nvim_win_is_valid(win) then return end
+                if applying then pending = true; return end -- replayed after the refresh
                 schedule_cone_update()
             end,
+        })
+
+        -- Context panes (spec §6.2) — minimal first cut: a footer window below the
+        -- main graph showing the anchors-only topology of the off-screen-older
+        -- commits, seeded at the bottom seam so its lanes meet the main view.
+        -- (Header, sizing hysteresis, async, and arrow-caps are still to come.)
+        local pane = require("gitloom.pane")
+        local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
+        local PANE_MAX = 12
+        local footer_win, footer_buf
+        local last_pane_err -- throttle repeated pane-error notifications
+        -- Force scrolloff off for this window (any inherited value interacts badly
+        -- with the overlay and scrolling); revisit once the stuck-scroll is solved.
+        pcall(vim.api.nvim_set_option_value, "scrolloff", 0, { scope = "local", win = win })
+        -- Inline, node-less merge style for the pane: joins render on one row (no
+        -- fan lines) and junctions draw node-less, so the pane stays compact.
+        local pane_opts = vim.tbl_extend("force", {}, opts)
+        pane_opts.merge_style = {
+            allow_merge_on_split = false,
+            merge_on_separate_line = false,
+            split_on_separate_line = false,
+        }
+
+        local function close_footer()
+            if footer_win and vim.api.nvim_win_is_valid(footer_win) then
+                pcall(vim.api.nvim_win_close, footer_win, true)
+            end
+            footer_win = nil
+            footer_seam, footer_height = nil, nil
+        end
+
+        -- The footer is a borderless overlay covering the bottom `height` content
+        -- rows of the main window (relative="win"), so its lanes butt directly
+        -- against the seam — the last main row above it — with no border or gap
+        -- between (the sticky-scroll pattern). The covered main rows are exactly
+        -- the off-screen-older topology the footer replaces with its summary.
+        local function ensure_footer_win(height)
+            local wh = vim.api.nvim_win_get_height(win)
+            local cfg = {
+                relative = "win", win = win,
+                row = math.max(0, wh - height), col = 0,
+                width = vim.api.nvim_win_get_width(win),
+                height = height,
+                style = "minimal",
+                focusable = false,
+                zindex = 200,
+            }
+            if footer_win and vim.api.nvim_win_is_valid(footer_win) then
+                pcall(vim.api.nvim_win_set_config, footer_win, cfg)
+                return
+            end
+            footer_buf = vim.api.nvim_create_buf(false, true)
+            footer_win = vim.api.nvim_open_win(footer_buf, false, cfg)
+            -- A faint background so the footer reads as a distinct band while its
+            -- lanes still line up with the main graph above.
+            pcall(vim.api.nvim_set_option_value, "winhl",
+                "Normal:NormalFloat,NormalFloat:NormalFloat", { win = footer_win })
+        end
+
+        -- Render topology-only pane rows (graph glyphs + ref labels, no
+        -- date/author/message; §6.2) into the pane buffer with lane colours.
+        -- Align the lanes under the main graph: in normal mode the graph starts at
+        -- `goff` (the date+author width), so left-pad by it; under mirror the main
+        -- graph is right-aligned at the message edge (`foff`), so right-pad so the
+        -- glyphs end there.
+        local function render_pane(buf, rows, goff, foff)
+            local lines, marks = {}, {}
+            -- Render one columns array (graph glyphs) into a padded, aligned line,
+            -- recording highlight extmarks; returns the line text for suffixing.
+            local function glyph_line(columns)
+                local g = get_column_chars(opts, columns, false)
+                -- Dash every straight run so the footer reads as a sketch/summary:
+                -- vertical │ → ┊ (quadruple), horizontal ─ → ╌ (double — lighter
+                -- horizontally). Both 3-byte, so highlight byte offsets are
+                -- unchanged. Corners/junctions have no dashed variant, so they
+                -- stay solid.
+                local gtext = (g.text or ""):gsub("│", "┊"):gsub("─", "╌")
+                local pad = goff or 0
+                if opts.mirror then
+                    -- Right-align so the glyphs end at the graph's right edge (where
+                    -- the message begins); columns are adjacent, no separator.
+                    pad = math.max(0, (foff or 0) - vim.api.nvim_strwidth(gtext))
+                end
+                local li = #lines + 1
+                for _, hl in ipairs(g.highlight or {}) do
+                    marks[#marks + 1] = { li - 1, pad + hl.start_pos, pad + hl.end_pos, hl.hl }
+                end
+                return string.rep(" ", pad) .. gtext
+            end
+
+            -- Separator row on top: a dashed vertical (┊) per lane entering from the
+            -- seam, so the eye sees each lane being continued.
+            if rows[1] then
+                local sep = {}
+                for j, cell in ipairs(rows[1].columns) do
+                    local up
+                    for _, s in ipairs(cell.lanes or {}) do
+                        if s.connectivity.up then up = s; break end
+                    end
+                    sep[j] = up
+                        and { connectivity = { up = true, down = true },
+                            lanes = { { connectivity = { up = true, down = true }, id = up.id, color = up.color } } }
+                        or { connectivity = {}, lanes = {} }
+                end
+                lines[#lines + 1] = glyph_line(sep)
+            end
+
+            for _, row in ipairs(rows) do
+                local text = glyph_line(row.columns)
+                local c = row.commit
+                local labels = c and decoration_texts(c) or {}
+                if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
+                if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
+                -- Debug (toggled by `i`): the distinct lane ids on this row.
+                if show_lane_ids then
+                    local ids, seen = {}, {}
+                    for _, col in ipairs(row.columns or {}) do
+                        for _, s in ipairs(col.lanes or {}) do
+                            if s.id and not seen[s.id] then seen[s.id] = true; ids[#ids + 1] = s.id end
+                        end
+                    end
+                    if #ids > 0 then text = text .. "  [" .. table.concat(ids, ",") .. "]" end
+                end
+                lines[#lines + 1] = text
+            end
+            if #lines == 0 then lines = { "" } end
+            vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+            vim.api.nvim_buf_clear_namespace(buf, pane_ns, 0, -1)
+            for _, m in ipairs(marks) do
+                pcall(vim.api.nvim_buf_set_extmark, buf, pane_ns, m[1], m[2],
+                    { end_col = m[3], hl_group = m[4] })
+            end
+        end
+
+        -- Hide the footer and record why (surfaced in the `i` status).
+        local function hide_footer(why)
+            footer_dbg = why
+            close_footer()
+            update_footer()
+        end
+
+        -- The pane build, wrapped so any error is fully contained — it runs inside
+        -- the scroll/cone path, and must never break the main view's scrolling.
+        local function build_panes()
+            if opts.panes == false then return hide_footer("off") end
+            if not vim.api.nvim_win_is_valid(win) then return end
+            -- Panes are a focus feature: need HEAD and a graph.
+            if not (repo.head and repo.refs[repo.head]) then return hide_footer("no HEAD") end
+            if not repo.display or #repo.display == 0 then return hide_footer("no display") end
+
+            local pinned = effective_pinned()
+            -- repo.order index per commit hash, for "below the cutoff" tests.
+            local idx = {}
+            for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
+            local function item_order(item)
+                local c = item and item.commit
+                if c then return idx[(c.tip and c.tip.hash) or c.hash] end
+                local m = item and item.markers and item.markers[1]
+                if m then return idx[(m.tip and m.tip.hash) or m.hash] end
+            end
+
+            -- The down-lanes of whichever RENDERED line sits at absolute screen row
+            -- `target` — a commit's columns line, or its split (above) / merge
+            -- (below) virtual line. This is the key fix: the cutoff can fall on a
+            -- split/merge virtual line, which has no buffer line, so reading the
+            -- nearest buffer line's lanes was wrong. Returns the lanes + a debug tag.
+            local function boundary_at(target)
+                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                local last = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+                for l = last, w0, -1 do
+                    local r = vim.fn.screenpos(win, l, 1).row
+                    if r > 0 then
+                        local item = order_at(l)
+                        if item then
+                            if r == target and item.columns then
+                                return pane.boundary_of(item.columns), l .. "c", item_order(item)
+                            elseif item.merge and r + 1 == target then
+                                return pane.boundary_of(item.merge), l .. "m", item_order(item)
+                            elseif item.split and r - 1 == target then
+                                return pane.boundary_of(item.split), l .. "s", item_order(item)
+                            end
+                        end
+                    end
+                end
+                return {}, "?"
+            end
+
+            -- The absolute screen row just above the overlay (which covers the
+            -- bottom `sh` SCREEN rows). Anchored on the window's own position so it
+            -- is independent of w0's virtual lines.
+            local function seam_for(sh)
+                return vim.api.nvim_win_call(win, function()
+                    return vim.fn.win_screenpos(win)[1] + vim.api.nvim_win_get_height(win) - sh
+                end)
+            end
+
+            -- Build the footer for a seam screen row: continue ONLY the lanes
+            -- crossing it down their first-parent chains to a root
+            -- (`pane.continue`), condensed, seeded and laid out — every active lane
+            -- reaches a root, no non-active branch introduced. Returns rows, tag on
+            -- success; nil, reason on failure.
+            local function build(target)
+                local boundary, tag, seam_idx = boundary_at(target)
+                if not next(boundary) then return nil, "no lanes@" .. target end
+                -- Pinned-ref tips below the cutoff that aren't on an active lane —
+                -- add them so a divergent pinned branch still shows as a marker.
+                local extra = {}
+                if seam_idx then
+                    for name in pairs(pinned) do
+                        local ref = repo.refs[name]
+                        if ref and ref.commit and (idx[ref.commit.hash] or 0) > seam_idx then
+                            extra[#extra + 1] = ref.commit
+                        end
+                    end
+                end
+                local cond = pane.continue(boundary, pinned, extra, function(n) return idx[n.hash] end)
+                if #cond.items == 0 then return nil, "empty graph@" .. target end
+                local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
+                return res.rows, tag
+            end
+
+            -- The overlay is the separator row + the footer rows, so its screen
+            -- height is `#rows + 1`. Grow the row count until it stabilises (§6.2
+            -- sizing), bounded by PANE_MAX. The final rows + seam come from the
+            -- SAME build so the overlay height and the boundary line up.
+            local R, rows, seam_tag, reason = 0, nil, nil, nil
+            for _ = 1, PANE_MAX do
+                local r, tag = build(seam_for(R + 1))
+                if not r then rows = nil; reason = tag; break end
+                rows, seam_tag = r, tag
+                local nr = math.min(#r, PANE_MAX)
+                if nr == R then break end -- converged
+                R = nr
+            end
+            if not rows or #rows == 0 then return hide_footer(reason or "no rows") end
+            rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
+            local total = #rows + 1         -- + the separator row
+            footer_seam, footer_height, footer_dbg = seam_tag, total, nil
+            update_footer() -- refresh the debug readout (cutoff line) if `i` is on
+            -- Offsets of the main graph column so the pane lanes line up: `goff`
+            -- = its left edge (date+author width), `foff` = the message edge (the
+            -- graph's right side under mirror). The columns are sticky-aligned, so
+            -- any visible commit row measures the same offset; use the first
+            -- visible line. col_offset is in BYTES; convert to display columns via
+            -- the line's text so multi-byte author names don't skew it.
+            local goff, foff = 0, 0
+            local refl = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            if lv.controller.col_offset then
+                local ltext = vim.api.nvim_buf_get_lines(buf, refl - 1, refl, false)[1] or ""
+                goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", GRAPH_COL) or 0))
+                foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", FLEX_COL) or 0))
+            end
+            ensure_footer_win(total)
+            render_pane(footer_buf, rows, goff, foff)
+        end
+
+        update_panes = function()
+            local ok, err = pcall(build_panes)
+            if not ok then
+                close_footer() -- on any pane error, hide rather than leave a bad state
+                err = tostring(err)
+                if err ~= last_pane_err then -- surface once per distinct error
+                    last_pane_err = err
+                    vim.notify("gitloom pane error: " .. err, vim.log.levels.WARN)
+                end
+            end
+        end
+
+        -- (The cursor is kept above the overlay by `scrolloff`, set in
+        -- update_panes — no manual clamping needed.)
+
+        -- Tear the panes down with the main window.
+        vim.api.nvim_create_autocmd("WinClosed", {
+            group = group,
+            pattern = tostring(win),
+            callback = close_footer,
         })
 
         -- No initial cone/refresh here: the fetch is async, so no commits are

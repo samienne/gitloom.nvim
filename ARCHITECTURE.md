@@ -67,7 +67,10 @@ collapsed or hidden when commits are shared across the DAG — is resolved by th
 Owners are refs, plus anonymous non-first merge-parents, plus a *first-parent-
 only* trunk owner (HEAD) whose coverage stops at every merge — which is what lets
 the **first-parent focus** default (§10.7) show HEAD's mainline in full while
-collapsing every branch merged into or diverging from it.
+collapsing every branch merged into or diverging from it. The trunk is the
+single-anchor case of the **pin** axis (spec §10.6): pinning generalises it to a
+*set* of anchor owners — each defaults normal, everything else collapsed — which
+the planned context panes also fold off-screen topology onto.
 
 ### OrderItem graphs as derived projections
 
@@ -107,6 +110,50 @@ Consequences for the build:
 What remains for the broader target is **ordering ownership** (move ordering
 out of `git log` into the builder), still future.
 
+### Context panes (header / footer) — in progress
+
+The header/footer context panes (spec §6.2) summarise off-screen topology by
+continuing the lanes active at the cutoff. The **footer is built**; the header is
+not yet wired. `pane.lua` is the pure, window-agnostic core; `update_panes` in
+graph.lua does the windowing.
+
+**The footer pipeline** (`update_panes`, gated by `opts.panes`), per scroll:
+
+1. **Seam by screen rows.** The footer is a **borderless overlay** over the
+   bottom rows of the main window (relative="win") — the sticky-scroll pattern,
+   so its lanes butt directly against the seam with no border between. The seam
+   is the screen row just above the overlay (`seam_for` = window position +
+   height − overlay height). `boundary_at(target)` then reads the **down-lanes of
+   whichever *rendered line*** sits at that screen row — a commit's columns line,
+   or its split/merge **virtual** line (found via `screenpos`, since a fan has no
+   buffer line of its own). This is what makes the cutoff correct across all
+   merge styles.
+2. **Continue only the active lanes.** `pane.continue(boundary, anchors, extra)`
+   walks each boundary lane's **first-parent chain** down to a root, plus any
+   pinned-ref tips below the cutoff (`extra`) so a divergent pinned branch still
+   shows. Lanes converge at the commits where they actually meet; every lane
+   reaches a root (never dangling); a merge's second parent is never followed, so
+   **no non-active branch is introduced**.
+3. **Condense + render.** `pane.condense` contracts each linear stretch to an
+   edge, keeping only ref heads (`◍` markers — anchor refs only), fork/merge
+   **junctions** (node-less join glyphs), and roots/tips (real nodes); `node_of`
+   maps every member hash to its node. `columns.layout` lays it out in compact
+   mode (`pane_opts`: inline joins), the lanes seeded from the boundary; it's
+   rendered topology-only, **dashed** (┊ / ╌, junctions solid), aligned under the
+   main graph, with a `┊` separator marking the seam. Height grows to a fixed
+   point and is capped (always keeping the root, `pane.cap`).
+
+`pane.continue` errors are contained (`update_panes` pcalls the build and hides
+the footer on failure); `scrolloff` is forced to 0 so `<C-e>`/`<C-y>` and the
+scroll-driven refresh work.
+
+**Header (`pane.header`, tested but unwired).** Its seam is at the sweep *end*
+(it sweeps newer commits *down to* the seam), so a start-seed can't pin it: it
+lays out **transposed and seam-first** (reverse to oldest-first, swap edges, seed
+the seam via `columns.layout`'s optional `seed` arg, then `flip` vertically back
+to display order). Wiring it (plus arrow-caps for terminators and moving the
+rebuild off the cone-debounce path) is the remaining work.
+
 ## Layers
 
 ```
@@ -115,6 +162,7 @@ lua/gitloom/
   graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
   view.lua       View builder: commit DAG + view state → OrderItem graph (spec §10)
   columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
+  pane.lua       Context-pane layout core: boundary extraction + footer builder (spec §6.2)
   color.lua      OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua   Reusable virtualized list widget (snacks.win)
 ```
