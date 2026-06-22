@@ -3235,10 +3235,13 @@ function M.open(folder, opts)
             local lines, marks = {}, {}
             -- Render one columns array (graph glyphs) into a padded, aligned line,
             -- recording highlight extmarks; returns the line text for suffixing.
-            local function glyph_line(columns, dash)
+            local function glyph_line(columns)
                 local g = get_column_chars(opts, columns, false)
-                local gtext = g.text or ""
-                if dash then gtext = gtext:gsub("│", "┊") end -- quadruple-dash seam boundary
+                -- Dash every straight run so the footer reads as a sketch/summary:
+                -- vertical │ → ┊, horizontal ─ → ┈ (both 3-byte, so highlight byte
+                -- offsets are unchanged). Corners/junctions have no dashed variant,
+                -- so they stay solid.
+                local gtext = (g.text or ""):gsub("│", "┊"):gsub("─", "┈")
                 local pad = goff or 0
                 if opts.mirror then
                     -- Right-align so the glyphs end at the graph's right edge (where
@@ -3252,7 +3255,7 @@ function M.open(folder, opts)
                 return string.rep(" ", pad) .. gtext
             end
 
-            -- Separator row on top: a dashed vertical (┆) per lane entering from the
+            -- Separator row on top: a dashed vertical (┊) per lane entering from the
             -- seam, so the eye sees each lane being continued.
             if rows[1] then
                 local sep = {}
@@ -3266,11 +3269,11 @@ function M.open(folder, opts)
                             lanes = { { connectivity = { up = true, down = true }, id = up.id, color = up.color } } }
                         or { connectivity = {}, lanes = {} }
                 end
-                lines[#lines + 1] = glyph_line(sep, true)
+                lines[#lines + 1] = glyph_line(sep)
             end
 
             for _, row in ipairs(rows) do
-                local text = glyph_line(row.columns, false)
+                local text = glyph_line(row.columns)
                 local c = row.commit
                 local labels = c and decoration_texts(c) or {}
                 if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
