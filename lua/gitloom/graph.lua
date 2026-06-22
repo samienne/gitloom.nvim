@@ -2932,6 +2932,12 @@ function M.open(folder, opts)
         update_panes() -- re-render the footer with/without its lane-id debug column
         place_cursor()
     end
+    -- F: toggle the context panes (footer) on/off.
+    opts.win.keys.F = function()
+        opts.panes = opts.panes == false
+        update_panes() -- builds it when on, closes it when off
+        place_cursor()
+    end
     -- ?: float listing all keybindings.
     opts.win.keys["?"] = function()
         vim.lsp.util.open_floating_preview(help_lines(), "", {
@@ -3303,8 +3309,10 @@ function M.open(folder, opts)
             end
         end
 
-        update_panes = function()
-            if opts.panes == false then return end
+        -- The pane build, wrapped so any error is fully contained — it runs inside
+        -- the scroll/cone path, and must never break the main view's scrolling.
+        local function build_panes()
+            if opts.panes == false then return close_footer() end
             if not vim.api.nvim_win_is_valid(win) then return end
             -- Panes are a focus feature: need HEAD and a graph.
             if not (repo.head and repo.refs[repo.head]) then return close_footer() end
@@ -3379,6 +3387,14 @@ function M.open(folder, opts)
             end
             ensure_footer_win(total)
             render_pane(footer_buf, rows, goff, foff)
+        end
+
+        update_panes = function()
+            local ok, err = pcall(build_panes)
+            if not ok then
+                close_footer() -- on any pane error, hide rather than leave a bad state
+                vim.notify("gitloom pane: " .. tostring(err), vim.log.levels.DEBUG)
+            end
         end
 
         -- (The cursor is kept above the overlay by `scrolloff`, set in
