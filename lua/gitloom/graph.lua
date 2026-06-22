@@ -2606,7 +2606,7 @@ function M.open(folder, opts)
             -- and height when shown, or why it is hidden.
             if show_lane_ids then
                 if footer_seam then
-                    status = status .. (" | pane cut@%d h=%d"):format(footer_seam, footer_height or 0)
+                    status = status .. (" | pane cut@%s h=%d"):format(tostring(footer_seam), footer_height or 0)
                 elseif footer_dbg then
                     status = status .. " | pane hidden: " .. footer_dbg
                 end
@@ -3331,77 +3331,85 @@ function M.open(folder, opts)
 
             local pinned = effective_pinned()
 
-            -- Build the footer for a given seam buffer line: continue ONLY the
-            -- lanes crossing the seam down their first-parent chains to a root
-            -- (`pane.continue`), condensed, then seed and lay out. Returns the rows
-            -- and seam index. So every active lane is continued and reaches a root;
-            -- no non-active branch is introduced.
-            -- Returns rows, seam-index on success; nil, reason on failure. The
-            -- seam may be a packed-markers line (no `.commit`), which is fine —
-            -- only its index is needed, to read its boundary lanes.
-            local function build(seam_buf)
-                local it, sdi = order_at(seam_buf)
-                if not (it and sdi) then return nil, "no item@" .. seam_buf end
-                local boundary = pane.boundary_below(repo.display, sdi)
-                if not next(boundary) then return nil, "no lanes@" .. sdi end
-                local cond = pane.continue(boundary, pinned)
-                if #cond.items == 0 then return nil, "empty graph@" .. sdi end
-                local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
-                return res.rows, sdi
+            -- The down-lanes of whichever RENDERED line sits at absolute screen row
+            -- `target` — a commit's columns line, or its split (above) / merge
+            -- (below) virtual line. This is the key fix: the cutoff can fall on a
+            -- split/merge virtual line, which has no buffer line, so reading the
+            -- nearest buffer line's lanes was wrong. Returns the lanes + a debug tag.
+            local function boundary_at(target)
+                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                local last = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+                for l = last, w0, -1 do
+                    local r = vim.fn.screenpos(win, l, 1).row
+                    if r > 0 then
+                        local item = order_at(l)
+                        if item then
+                            if r == target and item.columns then
+                                return pane.boundary_of(item.columns), l .. "c"
+                            elseif item.merge and r + 1 == target then
+                                return pane.boundary_of(item.merge), l .. "m"
+                            elseif item.split and r - 1 == target then
+                                return pane.boundary_of(item.split), l .. "s"
+                            end
+                        end
+                    end
+                end
+                return {}, "?"
             end
 
-            -- The buffer line displayed just above the overlay (which covers the
-            -- bottom `sh` SCREEN rows of the window). Anchored on the WINDOW's own
-            -- position (win_screenpos) — NOT on w0's screen row, which is pushed
-            -- down when the first visible line has a split above it (that was the
-            -- last off-by-one, splits-only). `target` is empirically the row above
-            -- the overlay; absolute screenpos counts the on-screen virtual lines.
+            -- The absolute screen row just above the overlay (which covers the
+            -- bottom `sh` SCREEN rows). Anchored on the window's own position so it
+            -- is independent of w0's virtual lines.
             local function seam_for(sh)
                 return vim.api.nvim_win_call(win, function()
-                    local wh = vim.api.nvim_win_get_height(win)
-                    local wrow = vim.fn.win_screenpos(win)[1]
-                    local target = wrow + wh - sh
-                    local w0, last = vim.fn.line("w0"), vim.fn.line("w$")
-                    for l = last, w0, -1 do
-                        local r = vim.fn.screenpos(win, l, 1).row
-                        if r > 0 and r <= target then return l end
-                    end
-                    return math.max(1, w0)
+                    return vim.fn.win_screenpos(win)[1] + vim.api.nvim_win_get_height(win) - sh
                 end)
             end
 
+            -- Build the footer for a seam screen row: continue ONLY the lanes
+            -- crossing it down their first-parent chains to a root
+            -- (`pane.continue`), condensed, seeded and laid out — every active lane
+            -- reaches a root, no non-active branch introduced. Returns rows, tag on
+            -- success; nil, reason on failure.
+            local function build(target)
+                local boundary, tag = boundary_at(target)
+                if not next(boundary) then return nil, "no lanes@" .. target end
+                local cond = pane.continue(boundary, pinned)
+                if #cond.items == 0 then return nil, "empty graph@" .. target end
+                local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
+                return res.rows, tag
+            end
+
             -- The overlay is the separator row + the footer rows, so its screen
-            -- height is `#rows + 1`; the seam is the buffer line above that. Grow
-            -- the row count until it stabilises (§6.2 sizing), bounded by PANE_MAX.
-            -- The final rows + seam must come from the SAME build (a consistent
-            -- pair), so the overlay height and the boundary line up.
-            local R, rows, seam_buf, reason = 0, nil, nil, nil
+            -- height is `#rows + 1`. Grow the row count until it stabilises (§6.2
+            -- sizing), bounded by PANE_MAX. The final rows + seam come from the
+            -- SAME build so the overlay height and the boundary line up.
+            local R, rows, seam_tag, reason = 0, nil, nil, nil
             for _ = 1, PANE_MAX do
-                local sb = seam_for(R + 1)
-                -- build returns (rows, sdi) or (nil, reason) — the reason is the
-                -- SECOND value in both cases.
-                local r, why = build(sb)
-                if not r then rows = nil; reason = why; break end
-                rows, seam_buf = r, sb
+                local r, tag = build(seam_for(R + 1))
+                if not r then rows = nil; reason = tag; break end
+                rows, seam_tag = r, tag
                 local nr = math.min(#r, PANE_MAX)
-                if nr == R then break end -- converged: rows and seam_buf are consistent
+                if nr == R then break end -- converged
                 R = nr
             end
             if not rows or #rows == 0 then return hide_footer(reason or "no rows") end
             rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
             local total = #rows + 1         -- + the separator row
-            footer_seam, footer_height, footer_dbg = seam_buf, total, nil
+            footer_seam, footer_height, footer_dbg = seam_tag, total, nil
             update_footer() -- refresh the debug readout (cutoff line) if `i` is on
             -- Offsets of the main graph column so the pane lanes line up: `goff`
             -- = its left edge (date+author width), `foff` = the message edge (the
-            -- graph's right side under mirror). col_offset is in BYTES; convert to
-            -- display columns via the seam line's text so multi-byte author names
-            -- don't skew the alignment.
+            -- graph's right side under mirror). The columns are sticky-aligned, so
+            -- any visible commit row measures the same offset; use the first
+            -- visible line. col_offset is in BYTES; convert to display columns via
+            -- the line's text so multi-byte author names don't skew it.
             local goff, foff = 0, 0
+            local refl = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
             if lv.controller.col_offset then
-                local ltext = vim.api.nvim_buf_get_lines(buf, seam_buf - 1, seam_buf, false)[1] or ""
-                goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", GRAPH_COL) or 0))
-                foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", FLEX_COL) or 0))
+                local ltext = vim.api.nvim_buf_get_lines(buf, refl - 1, refl, false)[1] or ""
+                goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", GRAPH_COL) or 0))
+                foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", FLEX_COL) or 0))
             end
             ensure_footer_win(total)
             render_pane(footer_buf, rows, goff, foff)

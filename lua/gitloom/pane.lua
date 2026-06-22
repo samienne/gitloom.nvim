@@ -196,18 +196,16 @@ function M.cap(rows, max)
     return out
 end
 
---- The seam map at the **bottom** edge of a laid-out row: every lane flowing
---- *down* out of it, as `col → Lane`. This is what a **footer** below row `i`
---- must seed with so its top seam matches the main view's edge.
----@param rows table[]  -- laid-out rows from columns.layout
----@param i integer     -- 1-based row index (the main view's last visible row)
+--- Every lane flowing *down* out of a single rendered line (a commit's columns
+--- line, or a split/merge fan line), as `col → Lane`. This is the seam primitive:
+--- the footer seeds with the down-lanes of whichever rendered line sits at the
+--- cutoff — including a split/merge virtual line, which has no buffer line of its
+--- own.
+---@param line table[]|nil  -- a rendered line (GraphColumn[])
 ---@return table<integer, table>  -- col → { id, color, parent, begin }
-function M.boundary_below(rows, i)
-    local row = rows[i]
-    if not row then return {} end
-    local line = row.merge or row.columns -- the last rendered line of the row
+function M.boundary_of(line)
     local out = {}
-    for col, cell in ipairs(line) do
+    for col, cell in ipairs(line or {}) do
         for _, s in ipairs(cell.lanes or {}) do
             if s.connectivity.down then
                 out[col] = { id = s.id, color = s.color, parent = s.parent,
@@ -216,6 +214,18 @@ function M.boundary_below(rows, i)
         end
     end
     return out
+end
+
+--- The seam map at the **bottom** edge of a laid-out row: every lane flowing
+--- *down* out of it. The last rendered line is its merge fan if any, else its
+--- columns line.
+---@param rows table[]  -- laid-out rows from columns.layout
+---@param i integer     -- 1-based row index (the main view's last visible row)
+---@return table<integer, table>  -- col → { id, color, parent, begin }
+function M.boundary_below(rows, i)
+    local row = rows[i]
+    if not row then return {} end
+    return M.boundary_of(row.merge or row.columns)
 end
 
 --- The seam map at the **top** edge of a laid-out row: every lane flowing *up*
