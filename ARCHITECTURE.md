@@ -112,65 +112,47 @@ out of `git log` into the builder), still future.
 
 ### Context panes (header / footer) — in progress
 
-The header/footer context panes (spec §6.2) summarise off-screen topology folded
-onto the pinned anchors (§10.6). The implementation is **Arch B — isolated
-panes, seeded at the boundary**:
+The header/footer context panes (spec §6.2) summarise off-screen topology by
+continuing the lanes active at the cutoff. The **footer is built**; the header is
+not yet wired. `pane.lua` is the pure, window-agnostic core; `update_panes` in
+graph.lua does the windowing.
 
-- **Separate pane projection, shared by both panes.** The panes do *not* re-fold
-  `repo.display` (that would fold an already-folded, user-moded graph). They use
-  their own projection: the focus default with the anchor set but **no user mode
-  overrides** — `view.project(repo.order, view.owners(repo.order, ref_owners,
-  anchors, {}, true), sig_cache.sig)` — rendered topology-only. It reuses the
-  cached signatures (same tips/fp), so it is cheap. Header and footer are two
-  viewports onto this one anchors-only pane-graph; it is a *second* graph
-  alongside `repo.display`, coupled to the main view only at the seam.
-- **Boundary continuity by seeding.** `columns.layout(opts, items, seed)` takes
-  an optional `seed` — a `col → Lane` map of the lanes crossing in from above —
-  that pre-populates `active` and reserves the seed colours (drops them from the
-  free FIFO, bumps `in_use`) so the pane's own newborn lanes never reuse a colour
-  live at the seam. The **first row is the seam**: no compaction runs on it, so
-  its columns equal the seeded ones exactly and the pane meets the main view
-  without a jog. Non-anchor seam lanes are arrow-capped; anchors continue.
-- **Header asymmetry — transpose-and-flip.** Seeding constrains the sweep
-  *start*, which pins a **footer's top seam** exactly (`pane.footer` seeds
-  `columns.layout` directly; the footer sweeps newest→oldest from the seam down
-  to the roots). A **header's seam is at its sweep *end*** (it sweeps the newer
-  commits down *to* the seam), which a start-seed cannot pin. So `pane.header`
-  lays the header out **transposed and seam-first**: reverse to oldest-first,
-  swap every parent/child edge (so the seam becomes the sweep start), seed it,
-  run the same `columns.layout`, then **`flip`** the result vertically (reverse
-  the rows, swap up↔down and split↔merge per row) back into display order (tip at
-  top, seam at bottom). This reuses the one layout engine and inherits its
-  invariants rather than introducing a second one; a continuing lane terminates,
-  in transposed terms, at its **child** (the in-header commit it ascends to). The
-  seam-row no-compaction rule (2.1a) is what makes the flipped bottom row land on
-  the boundary columns exactly.
+**The footer pipeline** (`update_panes`, gated by `opts.panes`), per scroll:
 
-A **footer window** is wired in graph.lua (`update_panes`, gated by
-`opts.panes`). Per scroll it continues **only the lanes crossing the seam**:
-`pane.continue(boundary_below(repo.display, seam))` follows each active lane's
-**first-parent chain** downward to its root and condenses it (`pane.condense`).
-So the footer shows exactly the existing lanes continuing — they converge at the
-commits where they actually meet (junctions the active lanes participate in) and
-every one reaches a root, never dangling; a merge's second parent is never
-followed, so **no non-active branch is introduced**. Condensation contracts each
-linear stretch to an edge and assigns a render role per kept node: anchor-ref →
-`◍` marker, fork/merge → node-less junction (the join glyph), root/tip → real
-node. The slice is laid out in **compact mode** (`pane_opts`: inline joins,
-node-less junctions → one row per kept node), seeded from the boundary (a lane
-whose target falls outside the slice terminates at the seam), and rendered
-topology-only (lane-coloured, aligned under the main graph — left-pad by the
-graph offset, or right-pad to the message edge under mirror). The pane height is
-the row count, grown to a fixed point and capped (always keeping the root,
-`pane.cap`). The footer is a **borderless overlay** over the bottom `K`
-content rows of the main window (relative="win"), so its lanes butt directly
-against the seam — the last main row above it — with no border between (the
-sticky-scroll pattern). The seam sits `K` rows above the bottom and `K` is the
-footer's own height, so `update_panes` resolves that **fixed point** by
-iterating (the compact projection's row count is stable, so it converges fast).
-The **header window**, **arrow-caps** for terminators, and moving the rebuild
-**off the main render path** (it currently runs in the cone debounce) are still
-to implement.
+1. **Seam by screen rows.** The footer is a **borderless overlay** over the
+   bottom rows of the main window (relative="win") — the sticky-scroll pattern,
+   so its lanes butt directly against the seam with no border between. The seam
+   is the screen row just above the overlay (`seam_for` = window position +
+   height − overlay height). `boundary_at(target)` then reads the **down-lanes of
+   whichever *rendered line*** sits at that screen row — a commit's columns line,
+   or its split/merge **virtual** line (found via `screenpos`, since a fan has no
+   buffer line of its own). This is what makes the cutoff correct across all
+   merge styles.
+2. **Continue only the active lanes.** `pane.continue(boundary, anchors, extra)`
+   walks each boundary lane's **first-parent chain** down to a root, plus any
+   pinned-ref tips below the cutoff (`extra`) so a divergent pinned branch still
+   shows. Lanes converge at the commits where they actually meet; every lane
+   reaches a root (never dangling); a merge's second parent is never followed, so
+   **no non-active branch is introduced**.
+3. **Condense + render.** `pane.condense` contracts each linear stretch to an
+   edge, keeping only ref heads (`◍` markers — anchor refs only), fork/merge
+   **junctions** (node-less join glyphs), and roots/tips (real nodes); `node_of`
+   maps every member hash to its node. `columns.layout` lays it out in compact
+   mode (`pane_opts`: inline joins), the lanes seeded from the boundary; it's
+   rendered topology-only, **dashed** (┊ / ╌, junctions solid), aligned under the
+   main graph, with a `┊` separator marking the seam. Height grows to a fixed
+   point and is capped (always keeping the root, `pane.cap`).
+
+`pane.continue` errors are contained (`update_panes` pcalls the build and hides
+the footer on failure); `scrolloff` is forced to 0 so `<C-e>`/`<C-y>` and the
+scroll-driven refresh work.
+
+**Header (`pane.header`, tested but unwired).** Its seam is at the sweep *end*
+(it sweeps newer commits *down to* the seam), so a start-seed can't pin it: it
+lays out **transposed and seam-first** (reverse to oldest-first, swap edges, seed
+the seam via `columns.layout`'s optional `seed` arg, then `flip` vertically back
+to display order). Wiring it (plus arrow-caps for terminators and moving the
+rebuild off the cone-debounce path) is the remaining work.
 
 ## Layers
 

@@ -57,6 +57,7 @@ local KEYBINDS = {
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
+    { "F", "Toggle the off-screen context footer" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
     { "?", "Show this help" },

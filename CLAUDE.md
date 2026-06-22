@@ -386,10 +386,14 @@ Details not covered by the spec or architecture:
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); pane.lua is the context-pane
-  layout core (boundary extraction + footer/header builders, the header via
-  transpose-and-flip; §6.2, in progress — a minimal **footer window** is wired
-  via graph.lua `update_panes` (gated by `opts.panes`); header/sizing/async/caps
-  pending); listview.lua is a git-agnostic reusable widget.
+  layout core (boundary-line extraction, `continue` = walk active lanes' first-
+  parent chains, `condense`, `cap`; the header builder via transpose-and-flip;
+  §6.2). The **footer is wired and working** via graph.lua `update_panes` (gated
+  by `opts.panes`, toggled by `F`): a borderless overlay whose seam is read from
+  the rendered line at a screen row (`boundary_at`/`seam_for` via `screenpos`, so
+  split/merge virtual lines work), pinned refs below the cutoff included. The
+  **header** is unwired; arrow-caps and moving the rebuild off the cone-debounce
+  are pending. listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua
