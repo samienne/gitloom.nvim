@@ -3180,15 +3180,10 @@ function M.open(folder, opts)
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         local PANE_MAX = 12
         local footer_win, footer_buf
-        -- A SMALL fixed scrolloff (this window only) nudges the cursor off the very
-        -- edge without freezing scrolling: Neovim refuses to scroll (<C-e>/<C-y>)
-        -- within `scrolloff` of an edge, so a large value would both block those
-        -- keys AND stop the scroll events that refresh the footer. The footer
-        -- overlay can therefore cover a few rows the cursor still reaches (hidden);
-        -- j/k stays smooth.
-        if opts.panes ~= false then
-            pcall(vim.api.nvim_set_option_value, "scrolloff", 3, { scope = "local", win = win })
-        end
+        local last_pane_err -- throttle repeated pane-error notifications
+        -- Force scrolloff off for this window (any inherited value interacts badly
+        -- with the overlay and scrolling); revisit once the stuck-scroll is solved.
+        pcall(vim.api.nvim_set_option_value, "scrolloff", 0, { scope = "local", win = win })
         -- Inline, node-less merge style for the pane: joins render on one row (no
         -- fan lines) and junctions draw node-less, so the pane stays compact.
         local pane_opts = vim.tbl_extend("force", {}, opts)
@@ -3393,7 +3388,11 @@ function M.open(folder, opts)
             local ok, err = pcall(build_panes)
             if not ok then
                 close_footer() -- on any pane error, hide rather than leave a bad state
-                vim.notify("gitloom pane: " .. tostring(err), vim.log.levels.DEBUG)
+                err = tostring(err)
+                if err ~= last_pane_err then -- surface once per distinct error
+                    last_pane_err = err
+                    vim.notify("gitloom pane error: " .. err, vim.log.levels.WARN)
+                end
             end
         end
 
