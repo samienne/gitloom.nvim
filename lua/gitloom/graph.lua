@@ -3360,16 +3360,16 @@ function M.open(folder, opts)
             -- The overlay is the separator row + the footer rows, so its screen
             -- height is `#rows + 1`; the seam is the buffer line above that. Grow
             -- the row count until it stabilises (§6.2 sizing), bounded by PANE_MAX.
-            -- Keep the LAST good result: a refinement iteration that fails must not
-            -- throw away a perfectly good footer from the previous step.
-            local R, rows, sdi, seam_buf, reason = 0, nil, nil, nil, nil
+            -- The final rows + seam must come from the SAME build (a consistent
+            -- pair), so the overlay height and the boundary line up.
+            local R, rows, seam_buf, reason = 0, nil, nil, nil
             for _ = 1, PANE_MAX do
                 local sb = seam_for(R + 1)
-                local r, s, why = build(sb)
-                if not r then reason = why; break end
-                rows, sdi, seam_buf = r, s, sb
+                local r, _, why = build(sb)
+                if not r then rows = nil; reason = why; break end
+                rows, seam_buf = r, sb
                 local nr = math.min(#r, PANE_MAX)
-                if nr == R then break end
+                if nr == R then break end -- converged: rows and seam_buf are consistent
                 R = nr
             end
             footer_dbg = reason -- for the `i` status when nothing showed
