@@ -2475,6 +2475,9 @@ function M.open(folder, opts)
     -- Rebuilds the context panes (§6.2) for the current viewport. Assigned after
     -- the listview opens; forward-declared so reflow/scroll can trigger it.
     local update_panes = function() end
+    -- Footer-pane debug state (the seam buffer line + height), shown in the footer
+    -- status when lane ids are on (`i`). Set by update_panes.
+    local footer_seam, footer_height
     -- Rebuilds the projected OrderItem graph under the current view state and
     -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
     -- forward-declared so the stream and key handlers can close over it.
@@ -2596,8 +2599,14 @@ function M.open(folder, opts)
         if lv and lv.win and lv.win.win then
             local nanchors = 0
             for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
-            lv.win.opts.footer = footer_text(opts.mirror, view_state.modes,
+            local status = footer_text(opts.mirror, view_state.modes,
                 opts.collapse_merged ~= false, nanchors)
+            -- Debug (lane ids on, `i`): the footer-pane cutoff (seam buffer line)
+            -- and height, so the off-screen boundary is visible.
+            if show_lane_ids and footer_seam then
+                status = status .. (" | pane cut@%d h=%d"):format(footer_seam, footer_height or 0)
+            end
+            lv.win.opts.footer = status
             pcall(vim.api.nvim_win_set_config, lv.win.win, {
                 footer = lv.win.opts.footer,
                 footer_pos = "center",
@@ -3165,7 +3174,6 @@ function M.open(folder, opts)
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         local PANE_MAX = 12
         local footer_win, footer_buf
-        local footer_seam -- last main buffer line above the overlay (cursor floor)
         -- Cached condensed anchor graph (spec §6.2): rebuilt only when the anchor
         -- set or the commit count changes, then re-sliced per scroll — so moving
         -- the cursor never reprojects the whole DAG.
@@ -3365,7 +3373,8 @@ function M.open(folder, opts)
             -- don't skew the alignment.
             local goff, foff = 0, 0
             local seam_buf = math.max(1, botbuf - #rows)
-            footer_seam = seam_buf
+            footer_seam, footer_height = seam_buf, #rows
+            update_footer() -- refresh the debug readout (cutoff line) if `i` is on
             if lv.controller.col_offset then
                 local ltext = vim.api.nvim_buf_get_lines(buf, seam_buf - 1, seam_buf, false)[1] or ""
                 goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", GRAPH_COL) or 0))
