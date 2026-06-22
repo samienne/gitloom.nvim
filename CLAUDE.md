@@ -207,10 +207,11 @@ Coverage:
   view exactly, with the seam parent translated through `node_of` into a
   collapsed lane), `header` (the transpose-and-flip: the seam is the bottom row
   matching the main view's top edge, the tip is on top) — both pane results
-  asserted vertically id-continuous — and `condense` (the condensed anchor graph:
-  ref heads / junctions / roots kept, ref-less linear pass-throughs spliced into
-  edges, edges re-pointed across them, spliced hashes mapped to the next kept
-  node toward the root)
+  asserted vertically id-continuous — and `condense` (the topological condensed
+  graph: fork/merge junctions, roots, tips and anchor-ref heads kept, linear
+  pass-throughs spliced into edges, edges re-pointed across them, spliced hashes
+  mapped to the next kept node toward the root, the anchor-ref filter, false
+  junctions spliced, root rendered as a real node)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)

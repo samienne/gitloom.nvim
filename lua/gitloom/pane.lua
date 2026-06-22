@@ -42,15 +42,13 @@ function M.condense(nodes, anchor_names)
         end
         return out
     end
-    -- A node splices away when it is a pure pass-through with no anchor marker:
-    -- exactly one (projected) parent and child. This covers both collapsed heads
-    -- AND **false junctions** — a commit flagged a junction only because a
-    -- non-anchor branch forks off it, whose projected edges are still 1-in-1-out
-    -- (the non-anchor side was dropped). A real fork/merge keeps ≥2 edges, so it
-    -- stays.
+    -- A node splices away when it is a **pure linear pass-through with no anchor
+    -- marker**: exactly one parent and one child. This is purely topological, so
+    -- it contracts the *whole* commit graph — every lane's linear stretch becomes
+    -- one edge, while every real fork/merge (≥2 edges, where a branch connects to
+    -- the trunk), root, tip, and anchor-ref head is kept.
     local function transparent(n)
-        return (n.collapsed or n.junction) and #marker_refs(n) == 0
-            and #n.parents == 1 and #n.children == 1
+        return #marker_refs(n) == 0 and #n.parents == 1 and #n.children == 1
     end
     -- The next kept node along a chain of transparent nodes, via `field`
     -- ("parents" toward the root, "children" toward the seam).
@@ -66,8 +64,7 @@ function M.condense(nodes, anchor_names)
         if not transparent(n) then
             copy[n] = setmetatable({
                 hash = n.hash, parents = {}, children = {},
-                refs = marker_refs(n), junction = n.junction, collapsed = n.collapsed,
-                region = n.region, count = n.count, tip = n.tip,
+                refs = marker_refs(n), region = n.region, tip = n.tip,
             }, { __index = n })
         end
     end
@@ -92,11 +89,20 @@ function M.condense(nodes, anchor_names)
         end
     end
 
-    -- A kept node with no parent is a root: render it as a real node (the normal
-    -- root marker), not a collapsed `◍` with a count.
+    -- Rendering role per kept node, from its anchor refs and its (projected)
+    -- degree: an anchor-ref head is a `◍` marker; a fork/merge is a node-less
+    -- junction (just the join glyph); a root or tip is a real node.
     for _, n in ipairs(nodes) do
         local c = copy[n]
-        if c and #c.parents == 0 then c.collapsed = false end
+        if c then
+            if #c.refs > 0 then
+                c.collapsed, c.junction = true, false
+            elseif #c.parents >= 2 or #c.children >= 2 then
+                c.collapsed, c.junction = false, true
+            else
+                c.collapsed, c.junction = false, false
+            end
+        end
     end
 
     -- node_of: kept nodes map their own hashes; a spliced node maps to the next

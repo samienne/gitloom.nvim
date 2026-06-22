@@ -3268,10 +3268,13 @@ function M.open(folder, opts)
             end
         end
 
-        -- Rebuild the cached condensed anchor graph (spec §6.2) if the anchor set
-        -- or commit count changed. The full anchor-only projection is contracted
-        -- to ref heads + junctions + roots once; `pane_cache` then serves every
-        -- scroll.
+        -- Rebuild the cached condensed graph (spec §6.2) if the anchor set or
+        -- commit count changed. The **whole** commit DAG is contracted by topology
+        -- (`pane.condense`) — every linear stretch becomes an edge; every fork/
+        -- merge (a branch connecting to the trunk), root, tip, and anchor-ref head
+        -- is kept — once; `pane_cache` then serves every scroll. Anchors are passed
+        -- only to pick which refs are markers, not to filter lanes: every lane is
+        -- kept so a lane active at the seam continues and shows its join.
         local function ensure_pane_cache()
             local pinned = effective_pinned()
             local ids = {}
@@ -3280,41 +3283,16 @@ function M.open(folder, opts)
             local key = #repo.order .. "|" .. table.concat(ids, ",")
             if pane_cache.key == key then return #pane_cache.items > 0 end
 
-            local viewbuilder = require("gitloom.view")
-            local anchor_owners = {}
-            for _, o in ipairs(owners_from_refs(repo.refs, {})) do
-                if pinned[o.id] then
-                    anchor_owners[#anchor_owners + 1] =
-                        { id = o.id, tip = o.tip, mode = "collapsed", fp_only = true }
-                end
-            end
             pane_cache = { key = key, items = {}, node_of = {}, pos = {} }
-            if #anchor_owners == 0 then return false end
-            local sig = viewbuilder.signatures(repo.order, anchor_owners)
-            -- Only the commits an anchor actually reaches; the rest (unpinned
-            -- branches) are dropped, not left "normal/visible". Without this they
-            -- would survive condensation as full commit rows.
-            local reachable = {}
-            for _, it in ipairs(repo.order) do
-                if next(sig[it.commit.hash] or {}) ~= nil then reachable[#reachable + 1] = it end
-            end
-            local aproj = viewbuilder.project(reachable, anchor_owners, sig)
-            -- Only anchor refs are markers; tags / unpinned branches on
-            -- intermediate commits must not keep a node (else the lane won't
-            -- contract).
-            local cond = pane.condense(aproj.nodes, pinned)
+            local commits = {}
+            for _, it in ipairs(repo.order) do commits[#commits + 1] = it.commit end
+            local cond = pane.condense(commits, pinned)
             local idx = {}
-            for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
-            -- Each condensed node's slice position = its OLDEST member's index (a
-            -- node's run can span the seam; using the oldest keeps a node that
-            -- reaches below the seam — e.g. the root — in the slice so a seeded
-            -- lane terminates at it instead of running off the bottom).
+            for i, c in ipairs(commits) do idx[c.hash] = i end
+            -- Kept nodes are single commits (junctions / roots / tips / ref heads),
+            -- so their slice position is just their own index.
             for _, it in ipairs(cond.items) do
-                local c = it.commit
-                local p = idx[c.hash] or 0
-                if c.tip then p = math.max(p, idx[c.tip.hash] or 0) end
-                for _, h in ipairs(c.region or {}) do p = math.max(p, idx[h] or 0) end
-                pane_cache.pos[c] = p
+                pane_cache.pos[it.commit] = idx[it.commit.hash] or 0
             end
             pane_cache.items, pane_cache.node_of = cond.items, cond.node_of_hash
             return #pane_cache.items > 0
