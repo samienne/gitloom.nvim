@@ -3351,18 +3351,17 @@ function M.open(folder, opts)
             end
 
             -- The buffer line displayed just above the overlay (which covers the
-            -- bottom `sh` SCREEN rows of the window). Anchored on the WINDOW — the
-            -- first visible line's screen row (screenpos, so no border off-by-one)
-            -- plus the window height — exactly as the overlay is positioned, so the
-            -- seam and the overlay always agree; absolute screenpos counts the
-            -- on-screen split/merge virtual lines.
+            -- bottom `sh` SCREEN rows of the window). Anchored on the WINDOW's own
+            -- position (win_screenpos) — NOT on w0's screen row, which is pushed
+            -- down when the first visible line has a split above it (that was the
+            -- last off-by-one, splits-only). `target` is empirically the row above
+            -- the overlay; absolute screenpos counts the on-screen virtual lines.
             local function seam_for(sh)
                 return vim.api.nvim_win_call(win, function()
                     local wh = vim.api.nvim_win_get_height(win)
+                    local wrow = vim.fn.win_screenpos(win)[1]
+                    local target = wrow + wh - sh
                     local w0, last = vim.fn.line("w0"), vim.fn.line("w$")
-                    local top = vim.fn.screenpos(win, w0, 1).row -- content row of the first visible line
-                    if top <= 0 then return math.max(1, w0) end
-                    local target = top + wh - sh - 1 -- last content row above the overlay
                     for l = last, w0, -1 do
                         local r = vim.fn.screenpos(win, l, 1).row
                         if r > 0 and r <= target then return l end
