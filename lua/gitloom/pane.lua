@@ -25,11 +25,25 @@ local columns = require("gitloom.columns")
 --- members — to the condensed node that represents it: a kept node maps its own
 --- hashes; a spliced node maps to the next kept node toward the **root** (so a
 --- seam lane descending through the run terminates at the right node).
+--- `anchor_names` (optional): only refs whose name is in this set count as
+--- markers — non-anchor refs (tags, unpinned branches) on intermediate commits
+--- are ignored, so a run carrying only those still splices away. When omitted,
+--- any ref keeps a node.
 ---@param nodes table[]  -- DisplayNodes (projection .nodes), newest-first
+---@param anchor_names table<string, boolean>?  -- ref names that count as markers
 ---@return table  -- { items = OrderItem[], node_of_hash = table<string, table> }
-function M.condense(nodes)
+function M.condense(nodes, anchor_names)
+    -- Refs on a node that count as markers (anchor refs, or all when unfiltered).
+    local function marker_refs(n)
+        if not anchor_names then return n.refs or {} end
+        local out = {}
+        for _, r in ipairs(n.refs or {}) do
+            if r.name and anchor_names[r.name] then out[#out + 1] = r end
+        end
+        return out
+    end
     local function transparent(n)
-        return n.collapsed and not n.junction and (not n.refs or #n.refs == 0)
+        return n.collapsed and not n.junction and #marker_refs(n) == 0
             and #n.parents == 1 and #n.children == 1
     end
     -- The next kept node along a chain of transparent nodes, via `field`
@@ -46,7 +60,7 @@ function M.condense(nodes)
         if not transparent(n) then
             copy[n] = setmetatable({
                 hash = n.hash, parents = {}, children = {},
-                refs = n.refs, junction = n.junction, collapsed = n.collapsed,
+                refs = marker_refs(n), junction = n.junction, collapsed = n.collapsed,
                 region = n.region, count = n.count, tip = n.tip,
             }, { __index = n })
         end
@@ -94,6 +108,21 @@ function M.condense(nodes)
         if copy[n] then items[#items + 1] = { type = "commit", commit = copy[n] } end
     end
     return { items = items, node_of_hash = node_of }
+end
+
+--- Cap a footer's rows to `max` while **always keeping the root** (the last row).
+--- Rows are newest-first (seam at the top, root at the bottom): keep the
+--- seam-nearest `max-1` rows and the final root row. (When over the cap the
+--- middle is elided — a deliberate gap — so the root stays visible, §6.2.)
+---@param rows table[]
+---@param max integer
+---@return table[]
+function M.cap(rows, max)
+    if #rows <= max then return rows end
+    local out = {}
+    for i = 1, max - 1 do out[i] = rows[i] end
+    out[max] = rows[#rows] -- the root, always
+    return out
 end
 
 --- The seam map at the **bottom** edge of a laid-out row: every lane flowing

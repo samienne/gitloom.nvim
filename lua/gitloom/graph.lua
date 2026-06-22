@@ -3225,7 +3225,9 @@ function M.open(folder, opts)
                 local gtext = g.text or ""
                 local pad = goff or 0
                 if opts.mirror then
-                    pad = math.max(0, (foff or 0) - 1 - vim.api.nvim_strwidth(gtext))
+                    -- Right-align so the glyphs end at the graph's right edge
+                    -- (where the message begins); columns are adjacent, no separator.
+                    pad = math.max(0, (foff or 0) - vim.api.nvim_strwidth(gtext))
                 end
                 local text = string.rep(" ", pad) .. gtext
                 for _, hl in ipairs(g.highlight or {}) do
@@ -3277,7 +3279,10 @@ function M.open(folder, opts)
                 if next(sig[it.commit.hash] or {}) ~= nil then reachable[#reachable + 1] = it end
             end
             local aproj = viewbuilder.project(reachable, anchor_owners, sig)
-            local cond = pane.condense(aproj.nodes)
+            -- Only anchor refs are markers; tags / unpinned branches on
+            -- intermediate commits must not keep a node (else the lane won't
+            -- contract).
+            local cond = pane.condense(aproj.nodes, pinned)
             local idx = {}
             for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
             -- Each condensed node's repo.order position (its commit / tip) for
@@ -3334,11 +3339,7 @@ function M.open(folder, opts)
                 K = nk
             end
             if not rows or #rows == 0 then return close_footer() end
-            if #rows > PANE_MAX then
-                local t = {}
-                for i = 1, PANE_MAX do t[i] = rows[i] end -- seam-nearest rows
-                rows = t
-            end
+            rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
             -- Offsets of the main graph column so the pane lanes line up: `goff`
             -- = its left edge (date+author width), `foff` = the message edge (the
             -- graph's right side under mirror). col_offset is in BYTES; convert to

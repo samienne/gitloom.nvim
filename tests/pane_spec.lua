@@ -223,4 +223,41 @@ describe("pane.condense (§6.2)", function()
         assert.equals("root", c.node_of_hash.K.hash) -- K between J and root -> root
         assert.equals("A", c.node_of_hash.A.hash)
     end)
+
+    it("with anchor_names, a non-anchor ref does not keep a node", function()
+        -- X (master tip) -> T (tag-only) -> root: T must splice away.
+        local X = { hash = "X", refs = { { name = "master" } }, collapsed = true, region = { "X" } }
+        local T = { hash = "T", refs = { { name = "v1" } }, collapsed = true, region = { "T" } }
+        local R = { hash = "root", refs = {}, collapsed = true, region = { "root" } }
+        X.parents, X.children = { T }, {}
+        T.parents, T.children = { R }, { X }
+        R.parents, R.children = {}, { T }
+        local c = pane.condense({ X, T, R }, { master = true })
+        local n = by_hash(c.items)
+        assert.is_not_nil(n.X)                       -- master tip kept
+        assert.is_not_nil(n.root)
+        assert.is_nil(n.T)                           -- tag-only node spliced
+        assert.equals("root", n.X.parents[1].hash)   -- X -> (T) -> root
+        assert.equals("root", c.node_of_hash.T.hash) -- T folds toward the root
+        assert.equals(1, #n.X.refs)                  -- only the anchor ref kept
+    end)
+end)
+
+describe("pane.cap — root always visible (§6.2)", function()
+    it("keeps the seam-nearest rows and always the root when over the cap", function()
+        local rows = {}
+        for i = 1, 10 do rows[i] = { columns = {}, n = i } end
+        local capped = pane.cap(rows, 4)
+        assert.equals(4, #capped)
+        assert.equals(1, capped[1].n)   -- seam-nearest kept
+        assert.equals(3, capped[3].n)
+        assert.equals(10, capped[4].n)  -- the root (last) always kept
+    end)
+
+    it("returns the rows unchanged when within the cap", function()
+        local rows = { { columns = {}, n = 1 }, { columns = {}, n = 2 } }
+        local capped = pane.cap(rows, 5)
+        assert.equals(2, #capped)
+        assert.equals(10, pane.cap({ { n = 10 } }, 1)[1].n) -- single row stays the root
+    end)
 end)
