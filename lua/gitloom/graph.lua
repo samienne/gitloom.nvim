@@ -3174,11 +3174,14 @@ function M.open(folder, opts)
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         local PANE_MAX = 12
         local footer_win, footer_buf
-        -- A fixed scrolloff (this window only) keeps the cursor clear of the footer
-        -- overlay without the per-scroll jank of a varying value; <C-e>/<C-y> still
-        -- scroll the constant-size main window with the footer painted on top.
+        -- A SMALL fixed scrolloff (this window only) nudges the cursor off the very
+        -- edge without freezing scrolling: Neovim refuses to scroll (<C-e>/<C-y>)
+        -- within `scrolloff` of an edge, so a large value would both block those
+        -- keys AND stop the scroll events that refresh the footer. The footer
+        -- overlay can therefore cover a few rows the cursor still reaches (hidden);
+        -- j/k stays smooth.
         if opts.panes ~= false then
-            pcall(vim.api.nvim_set_option_value, "scrolloff", PANE_MAX, { scope = "local", win = win })
+            pcall(vim.api.nvim_set_option_value, "scrolloff", 3, { scope = "local", win = win })
         end
         -- Inline, node-less merge style for the pane: joins render on one row (no
         -- fan lines) and junctions draw node-less, so the pane stays compact.
