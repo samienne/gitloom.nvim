@@ -3309,14 +3309,21 @@ function M.open(folder, opts)
             end
         end
 
+        -- Hide the footer and record why (surfaced in the `i` status).
+        local function hide_footer(why)
+            footer_dbg = why
+            close_footer()
+            update_footer()
+        end
+
         -- The pane build, wrapped so any error is fully contained — it runs inside
         -- the scroll/cone path, and must never break the main view's scrolling.
         local function build_panes()
-            if opts.panes == false then return close_footer() end
+            if opts.panes == false then return hide_footer("off") end
             if not vim.api.nvim_win_is_valid(win) then return end
             -- Panes are a focus feature: need HEAD and a graph.
-            if not (repo.head and repo.refs[repo.head]) then return close_footer() end
-            if not repo.display or #repo.display == 0 then return close_footer() end
+            if not (repo.head and repo.refs[repo.head]) then return hide_footer("no HEAD") end
+            if not repo.display or #repo.display == 0 then return hide_footer("no display") end
 
             local pinned = effective_pinned()
             local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
@@ -3372,15 +3379,10 @@ function M.open(folder, opts)
                 if nr == R then break end -- converged: rows and seam_buf are consistent
                 R = nr
             end
-            footer_dbg = reason -- for the `i` status when nothing showed
-            if not rows or #rows == 0 then
-                close_footer()
-                update_footer()
-                return
-            end
+            if not rows or #rows == 0 then return hide_footer(reason or "no rows") end
             rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
             local total = #rows + 1         -- + the separator row
-            footer_seam, footer_height = seam_buf, total
+            footer_seam, footer_height, footer_dbg = seam_buf, total, nil
             update_footer() -- refresh the debug readout (cutoff line) if `i` is on
             -- Offsets of the main graph column so the pane lanes line up: `goff`
             -- = its left edge (date+author width), `foff` = the message edge (the
