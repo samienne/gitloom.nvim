@@ -3238,10 +3238,11 @@ function M.open(folder, opts)
             local function glyph_line(columns)
                 local g = get_column_chars(opts, columns, false)
                 -- Dash every straight run so the footer reads as a sketch/summary:
-                -- vertical │ → ┊, horizontal ─ → ┈ (both 3-byte, so highlight byte
-                -- offsets are unchanged). Corners/junctions have no dashed variant,
-                -- so they stay solid.
-                local gtext = (g.text or ""):gsub("│", "┊"):gsub("─", "┈")
+                -- vertical │ → ┊ (quadruple), horizontal ─ → ┄ (triple — quadruple
+                -- is too busy horizontally). Both 3-byte, so highlight byte offsets
+                -- are unchanged. Corners/junctions have no dashed variant, so they
+                -- stay solid.
+                local gtext = (g.text or ""):gsub("│", "┊"):gsub("─", "┄")
                 local pad = goff or 0
                 if opts.mirror then
                     -- Right-align so the glyphs end at the graph's right edge (where
