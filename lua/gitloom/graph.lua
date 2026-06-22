@@ -2914,12 +2914,13 @@ function M.open(folder, opts)
         if b.follow then goto_hash(b.follow) end
         place_cursor()
     end
-    -- i: toggle the per-lane id column before the message.
+    -- i: toggle the per-lane id column before the message (main view + footer).
     opts.win.keys.i = function()
         show_lane_ids = not show_lane_ids
         if lv and lv.controller then
             lv.controller.refresh()
         end
+        update_panes() -- re-render the footer with/without its lane-id debug column
         place_cursor()
     end
     -- ?: float listing all keybindings.
@@ -3238,6 +3239,16 @@ function M.open(folder, opts)
                 local labels = c and decoration_texts(c) or {}
                 if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
+                -- Debug (toggled by `i`): the distinct lane ids on this row.
+                if show_lane_ids then
+                    local ids, seen = {}, {}
+                    for _, col in ipairs(row.columns or {}) do
+                        for _, s in ipairs(col.lanes or {}) do
+                            if s.id and not seen[s.id] then seen[s.id] = true; ids[#ids + 1] = s.id end
+                        end
+                    end
+                    if #ids > 0 then text = text .. "  [" .. table.concat(ids, ",") .. "]" end
+                end
                 lines[li] = text
             end
             if #lines == 0 then lines = { "" } end
