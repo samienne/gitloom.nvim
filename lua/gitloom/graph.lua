@@ -2475,9 +2475,10 @@ function M.open(folder, opts)
     -- Rebuilds the context panes (§6.2) for the current viewport. Assigned after
     -- the listview opens; forward-declared so reflow/scroll can trigger it.
     local update_panes = function() end
-    -- Footer-pane debug state (the seam buffer line + height), shown in the footer
-    -- status when lane ids are on (`i`). Set by update_panes.
-    local footer_seam, footer_height
+    -- Footer-pane debug state (the seam buffer line + height; or, when nothing
+    -- showed, why), surfaced in the footer status when lane ids are on (`i`).
+    -- Set by update_panes.
+    local footer_seam, footer_height, footer_dbg
     -- Rebuilds the projected OrderItem graph under the current view state and
     -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
     -- forward-declared so the stream and key handlers can close over it.
@@ -2602,9 +2603,13 @@ function M.open(folder, opts)
             local status = footer_text(opts.mirror, view_state.modes,
                 opts.collapse_merged ~= false, nanchors)
             -- Debug (lane ids on, `i`): the footer-pane cutoff (seam buffer line)
-            -- and height, so the off-screen boundary is visible.
-            if show_lane_ids and footer_seam then
-                status = status .. (" | pane cut@%d h=%d"):format(footer_seam, footer_height or 0)
+            -- and height when shown, or why it is hidden.
+            if show_lane_ids then
+                if footer_seam then
+                    status = status .. (" | pane cut@%d h=%d"):format(footer_seam, footer_height or 0)
+                elseif footer_dbg then
+                    status = status .. " | pane hidden: " .. footer_dbg
+                end
             end
             lv.win.opts.footer = status
             pcall(vim.api.nvim_win_set_config, lv.win.win, {
@@ -3321,13 +3326,14 @@ function M.open(folder, opts)
             -- (`pane.continue`), condensed, then seed and lay out. Returns the rows
             -- and seam index. So every active lane is continued and reaches a root;
             -- no non-active branch is introduced.
+            -- Returns rows, seam-index on success; nil, reason on failure.
             local function build(seam_buf)
                 local it, sdi = order_at(seam_buf)
-                if not (it and it.commit and sdi) then return nil end
+                if not (it and it.commit and sdi) then return nil, "no item@" .. seam_buf end
                 local boundary = pane.boundary_below(repo.display, sdi)
-                if not next(boundary) then return nil end
+                if not next(boundary) then return nil, "no lanes@" .. sdi end
                 local cond = pane.continue(boundary, pinned)
-                if #cond.items == 0 then return nil end
+                if #cond.items == 0 then return nil, "empty graph@" .. sdi end
                 local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
                 return res.rows, sdi
             end
@@ -3354,17 +3360,24 @@ function M.open(folder, opts)
             -- The overlay is the separator row + the footer rows, so its screen
             -- height is `#rows + 1`; the seam is the buffer line above that. Grow
             -- the row count until it stabilises (§6.2 sizing), bounded by PANE_MAX.
-            local R, rows, sdi, seam_buf = 0, nil, nil, nil
+            -- Keep the LAST good result: a refinement iteration that fails must not
+            -- throw away a perfectly good footer from the previous step.
+            local R, rows, sdi, seam_buf, reason = 0, nil, nil, nil, nil
             for _ = 1, PANE_MAX do
-                seam_buf = seam_for(R + 1)
-                local r, s = build(seam_buf)
-                if not r then return close_footer() end
-                rows, sdi = r, s
+                local sb = seam_for(R + 1)
+                local r, s, why = build(sb)
+                if not r then reason = why; break end
+                rows, sdi, seam_buf = r, s, sb
                 local nr = math.min(#r, PANE_MAX)
                 if nr == R then break end
                 R = nr
             end
-            if not rows or #rows == 0 then return close_footer() end
+            footer_dbg = reason -- for the `i` status when nothing showed
+            if not rows or #rows == 0 then
+                close_footer()
+                update_footer()
+                return
+            end
             rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
             local total = #rows + 1         -- + the separator row
             footer_seam, footer_height = seam_buf, total
