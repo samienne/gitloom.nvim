@@ -56,20 +56,19 @@ function M.boundary_above(rows, i)
     return out
 end
 
---- Partition a boundary map into the lanes that **continue** into the pane (their
---- parent commit is present among `pane_items`) and those that **terminate** at
---- the seam (the rest — non-anchor branches folded out of the pane). Identity is
---- by the parent's hash; an anchor lane's parent is a real commit present in the
---- anchors-only projection, so anchors continue and folded branches terminate.
+--- Partition a boundary map into the lanes that **continue** into the pane and
+--- those that **terminate** at the seam. A lane continues iff its parent commit
+--- maps to a pane node via `node_of` (the projection's `node_of_hash`, which maps
+--- every non-hidden commit hash — including a collapsed head's members — to the
+--- node that represents it). So an anchor lane (its parent is in the pane, real
+--- or inside a collapsed lane) continues; a hidden/folded branch terminates.
 ---@param boundary table<integer, table>
----@param pane_items table[]  -- { type, commit } of the pane's projection
+---@param node_of table<string, table>  -- commit hash → pane DisplayNode
 ---@return table<integer, table> continue, table<integer, table> terminate
-function M.split_boundary(boundary, pane_items)
-    local present = {}
-    for _, it in ipairs(pane_items) do present[it.commit.hash] = true end
+function M.split_boundary(boundary, node_of)
     local cont, term = {}, {}
     for col, lane in pairs(boundary) do
-        if lane.parent and present[lane.parent.hash] then
+        if lane.parent and node_of[lane.parent.hash] then
             cont[col] = lane
         else
             term[col] = lane
@@ -79,10 +78,13 @@ function M.split_boundary(boundary, pane_items)
 end
 
 --- Build the **footer** pane below the main view (spec §6.2). `pane_items` is the
---- anchors-only projection of the off-screen-older commits (newest-first, ending
---- at the roots); `boundary` is the main view's bottom seam (`boundary_below`).
---- The seam is the footer's **top** = its sweep start, so the continuing lanes
---- seed `columns.layout` directly and the seam matches exactly.
+--- pane projection of the off-screen-older commits (newest-first, ending at the
+--- roots); `boundary` is the main view's bottom seam (`boundary_below`);
+--- `node_of` is the projection's `node_of_hash`. The seam is the footer's **top**
+--- = its sweep start, so each continuing lane seeds `columns.layout` — its parent
+--- **translated** through `node_of` to the pane node that represents it (a real
+--- commit, or the collapsed lane it was folded into) so the seed terminates at
+--- the right place and the seam matches exactly.
 ---
 --- Returns `{ rows, terminate }`: the laid-out pane rows and the seam map of
 --- lanes that do not continue (to be rendered as arrow-caps — the terminator
@@ -90,10 +92,16 @@ end
 ---@param opts table
 ---@param pane_items table[]
 ---@param boundary table<integer, table>
+---@param node_of table<string, table>
 ---@return table  -- { rows = table[], terminate = table<integer, table> }
-function M.footer(opts, pane_items, boundary)
-    local cont, term = M.split_boundary(boundary, pane_items)
-    return { rows = columns.layout(opts, pane_items, cont), terminate = term }
+function M.footer(opts, pane_items, boundary, node_of)
+    local cont, term = M.split_boundary(boundary, node_of)
+    local seed = {}
+    for col, lane in pairs(cont) do
+        seed[col] = { id = lane.id, color = lane.color, begin = lane.begin,
+            parent = node_of[lane.parent.hash], highlighted = false }
+    end
+    return { rows = columns.layout(opts, pane_items, seed), terminate = term }
 end
 
 --- Transpose: shallow proxy items whose parent/child edges are **swapped** and

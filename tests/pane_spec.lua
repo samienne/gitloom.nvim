@@ -33,6 +33,18 @@ local function find_col_begin(boundary, begin_hash)
     end
 end
 
+-- A node_of map (hash → pane node) as view.project's node_of_hash builds it: each
+-- pane node under its own hash, plus every member hash of a collapsed head.
+local function node_of(pane_items)
+    local m = {}
+    for _, it in ipairs(pane_items) do
+        local c = it.commit
+        m[c.hash] = c
+        for _, h in ipairs(c.region or {}) do m[h] = c end
+    end
+    return m
+end
+
 -- Vertical id-continuity across a pane's rendered lines: a cell's up-lane id must
 -- equal the down-lane id directly above. Guards the seed and the header flip.
 local function assert_continuous(rows)
@@ -73,7 +85,7 @@ describe("pane.split_boundary (§6.2)", function()
         local main = columns.layout(opts, items)
         local b = pane.boundary_below(main, 2)
         local pane_items = { items[4], items[5] } -- t3, t4 (anchors-only)
-        local cont, term = pane.split_boundary(b, pane_items)
+        local cont, term = pane.split_boundary(b, node_of(pane_items))
         assert.is_not_nil(find_col(cont, "t3")) -- trunk continues
         assert.is_not_nil(find_col(term, "b1")) -- folded branch terminates
         assert.is_nil(find_col(cont, "b1"))
@@ -88,7 +100,7 @@ describe("pane.footer (§6.2)", function()
         local b = pane.boundary_below(main, 2)
         local tcol, tlane = find_col(b, "t3")
         local pane_items = { items[4], items[5] } -- t3, t4
-        local res = pane.footer(opts, pane_items, b)
+        local res = pane.footer(opts, pane_items, b, node_of(pane_items))
 
         -- The footer's top row is the seam: the trunk lane enters from above in
         -- the SAME column and colour the main view left it.
@@ -102,6 +114,24 @@ describe("pane.footer (§6.2)", function()
         -- The folded branch did not seed the pane; it is reported as terminating.
         assert.is_not_nil(find_col(res.terminate, "b1"))
         assert_continuous(res.rows)
+    end)
+
+    it("translates the seam parent through node_of into a collapsed lane", function()
+        local items, opts = fixture()
+        local main = columns.layout(opts, items)
+        local b = pane.boundary_below(main, 2)
+        local tcol, tlane = find_col(b, "t3")
+        -- a collapsed head standing for the trunk tail (t3..t4); node_of maps the
+        -- real seam parent t3 to it, so the seed must terminate at the head.
+        local head = { hash = "H", collapsed = true, region = { "t3", "t4" },
+            parents = {}, children = {}, refs = {} }
+        local res = pane.footer(opts, { { type = "commit", commit = head } }, b,
+            { t3 = head, t4 = head })
+        local seam = res.rows[1].columns[tcol]
+        assert.is_not_nil(seam)
+        assert.is_true(seam.connectivity.up)  -- enters from the seam
+        assert.equals(tlane.id, seam.id)
+        assert.is_true(seam.has_commit or false) -- the head node sits here (lane ends)
     end)
 end)
 

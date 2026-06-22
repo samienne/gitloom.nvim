@@ -3243,21 +3243,27 @@ function M.open(folder, opts)
             local B = botHash and idxmap[botHash]
             if not B then return close_footer() end
 
-            -- The anchors-only projection: the focus default with the current
-            -- anchor set and NO user mode overrides (§6.2). Fresh signatures (the
-            -- main cache may be from a focus-off projection with different fp).
-            local viewbuilder = require("gitloom.view")
-            local owners = viewbuilder.owners(repo.order, owners_from_refs(repo.refs, {}),
-                effective_pinned(), {}, true)
-            local aproj = viewbuilder.project(repo.order, owners)
-            local foot = {}
-            for _, it in ipairs(aproj.items) do
-                local h = (it.commit.tip and it.commit.tip.hash) or it.commit.hash
-                if (idxmap[h] or 0) > B then foot[#foot + 1] = it end
-            end
-            if #foot == 0 then return close_footer() end
+            -- The off-screen-older commits (the footer zone), newest-first.
+            local zone = {}
+            for i = B + 1, #repo.order do zone[#zone + 1] = repo.order[i] end
+            if #zone == 0 then return close_footer() end
 
-            local res = pane.footer(opts, foot, pane.boundary_below(repo.display, botDisplayIdx))
+            -- Pane projection (§6.2): every anchor **collapsed** to a lane, every
+            -- other owner **hidden** — a compact topology of just the anchor lines
+            -- (lanes + junctions), not each commit. Signatures over the *full*
+            -- order (owners' tips can sit above the seam), then project only the
+            -- zone so its collapsed heads do not span the seam.
+            local viewbuilder = require("gitloom.view")
+            local pinned = effective_pinned()
+            local owners = viewbuilder.owners(repo.order, owners_from_refs(repo.refs, {}),
+                pinned, {}, true)
+            for _, o in ipairs(owners) do o.mode = pinned[o.id] and "collapsed" or "hidden" end
+            local sig = viewbuilder.signatures(repo.order, owners)
+            local aproj = viewbuilder.project(zone, owners, sig)
+            if #aproj.items == 0 then return close_footer() end
+
+            local res = pane.footer(opts, aproj.items,
+                pane.boundary_below(repo.display, botDisplayIdx), aproj.node_of_hash)
             local rows = res.rows
             if #rows > PANE_MAX then
                 local t = {}
