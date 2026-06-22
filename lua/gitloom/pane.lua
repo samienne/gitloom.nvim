@@ -221,11 +221,20 @@ end
 ---@param node_of table<string, table>
 ---@return table  -- { rows = table[], terminate = table<integer, table> }
 function M.footer(opts, pane_items, boundary, node_of)
-    local cont, term = M.split_boundary(boundary, node_of)
-    local seed = {}
-    for col, lane in pairs(cont) do
-        seed[col] = { id = lane.id, color = lane.color, begin = lane.begin,
-            parent = node_of[lane.parent.hash], highlighted = false }
+    -- A lane only seeds if its target node is in THIS slice; one that maps to a
+    -- node outside the slice would never terminate and would run off the bottom,
+    -- so it terminates at the seam instead.
+    local present = {}
+    for _, it in ipairs(pane_items) do present[it.commit] = true end
+    local seed, term = {}, {}
+    for col, lane in pairs(boundary) do
+        local target = lane.parent and node_of[lane.parent.hash]
+        if target and present[target] then
+            seed[col] = { id = lane.id, color = lane.color, begin = lane.begin,
+                parent = target, highlighted = false }
+        else
+            term[col] = lane
+        end
     end
     return { rows = columns.layout(opts, pane_items, seed), terminate = term }
 end

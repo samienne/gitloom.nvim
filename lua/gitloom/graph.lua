@@ -3297,11 +3297,16 @@ function M.open(folder, opts)
             local cond = pane.condense(aproj.nodes, pinned)
             local idx = {}
             for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
-            -- Each condensed node's repo.order position (its commit / tip) for
-            -- slicing by the seam.
+            -- Each condensed node's slice position = its OLDEST member's index (a
+            -- node's run can span the seam; using the oldest keeps a node that
+            -- reaches below the seam — e.g. the root — in the slice so a seeded
+            -- lane terminates at it instead of running off the bottom).
             for _, it in ipairs(cond.items) do
                 local c = it.commit
-                pane_cache.pos[c] = idx[(c.tip and c.tip.hash) or c.hash] or 0
+                local p = idx[c.hash] or 0
+                if c.tip then p = math.max(p, idx[c.tip.hash] or 0) end
+                for _, h in ipairs(c.region or {}) do p = math.max(p, idx[h] or 0) end
+                pane_cache.pos[c] = p
             end
             pane_cache.items, pane_cache.node_of = cond.items, cond.node_of_hash
             return #pane_cache.items > 0
