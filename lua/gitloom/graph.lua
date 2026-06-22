@@ -3188,6 +3188,10 @@ function M.open(folder, opts)
                 pcall(vim.api.nvim_win_close, footer_win, true)
             end
             footer_win = nil
+            footer_seam, footer_height = nil, nil
+            if vim.api.nvim_win_is_valid(win) then
+                pcall(vim.api.nvim_set_option_value, "scrolloff", 0, { scope = "local", win = win })
+            end
         end
 
         -- The footer is a borderless overlay covering the bottom `height` content
@@ -3226,19 +3230,44 @@ function M.open(folder, opts)
         -- glyphs end there.
         local function render_pane(buf, rows, goff, foff)
             local lines, marks = {}, {}
-            for li, row in ipairs(rows) do
-                local g = get_column_chars(opts, row.columns, false)
+            -- Render one columns array (graph glyphs) into a padded, aligned line,
+            -- recording highlight extmarks; returns the line text for suffixing.
+            local function glyph_line(columns, dash)
+                local g = get_column_chars(opts, columns, false)
                 local gtext = g.text or ""
+                if dash then gtext = gtext:gsub("│", "┆") end -- triple-dash seam
                 local pad = goff or 0
                 if opts.mirror then
-                    -- Right-align so the glyphs end at the graph's right edge
-                    -- (where the message begins); columns are adjacent, no separator.
+                    -- Right-align so the glyphs end at the graph's right edge (where
+                    -- the message begins); columns are adjacent, no separator.
                     pad = math.max(0, (foff or 0) - vim.api.nvim_strwidth(gtext))
                 end
-                local text = string.rep(" ", pad) .. gtext
+                local li = #lines + 1
                 for _, hl in ipairs(g.highlight or {}) do
                     marks[#marks + 1] = { li - 1, pad + hl.start_pos, pad + hl.end_pos, hl.hl }
                 end
+                return string.rep(" ", pad) .. gtext
+            end
+
+            -- Separator row on top: a dashed vertical (┆) per lane entering from the
+            -- seam, so the eye sees each lane being continued.
+            if rows[1] then
+                local sep = {}
+                for j, cell in ipairs(rows[1].columns) do
+                    local up
+                    for _, s in ipairs(cell.lanes or {}) do
+                        if s.connectivity.up then up = s; break end
+                    end
+                    sep[j] = up
+                        and { connectivity = { up = true, down = true },
+                            lanes = { { connectivity = { up = true, down = true }, id = up.id, color = up.color } } }
+                        or { connectivity = {}, lanes = {} }
+                end
+                lines[#lines + 1] = glyph_line(sep, true)
+            end
+
+            for _, row in ipairs(rows) do
+                local text = glyph_line(row.columns, false)
                 local c = row.commit
                 local labels = c and decoration_texts(c) or {}
                 if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
@@ -3253,7 +3282,7 @@ function M.open(folder, opts)
                     end
                     if #ids > 0 then text = text .. "  [" .. table.concat(ids, ",") .. "]" end
                 end
-                lines[li] = text
+                lines[#lines + 1] = text
             end
             if #lines == 0 then lines = { "" } end
             vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -3290,53 +3319,63 @@ function M.open(folder, opts)
                 return res.rows, sdi
             end
 
-            -- The footer overlays the bottom `H` main rows, so the seam is `H`
-            -- rows above the bottom — but `H` is the footer's own height. Grow `H`
-            -- to the row count it produces until it stabilises (§6.2 sizing):
-            -- start small, rebuild, and if it produced more rows than assumed, grow
-            -- and rerun; bounded by PANE_MAX so it never loops away.
-            local H, rows, sdi = 0, nil, nil
+            -- The buffer line just above the bottom `sh` SCREEN rows. Computed by
+            -- screen height (nvim_win_text_height), not buffer-line arithmetic, so
+            -- virtual lines (split/merge fans) don't skew the seam — this is the
+            -- fix for the stable off-by-a-few cutoff.
+            local function seam_for(sh)
+                return vim.api.nvim_win_call(win, function()
+                    local w0 = vim.fn.line("w0")
+                    local acc, l = 0, botbuf
+                    while l > w0 do
+                        local ok, th = pcall(vim.api.nvim_win_text_height, win,
+                            { start_row = l - 1, end_row = l - 1 })
+                        local hh = (ok and th and th.all) or 1
+                        if acc + hh >= sh then break end
+                        acc = acc + hh; l = l - 1
+                    end
+                    return math.max(1, l - 1)
+                end)
+            end
+
+            -- The overlay is the separator row + the footer rows, so its screen
+            -- height is `#rows + 1`; the seam is the buffer line above that. Grow
+            -- the row count until it stabilises (§6.2 sizing), bounded by PANE_MAX.
+            local R, rows, sdi, seam_buf = 0, nil, nil, nil
             for _ = 1, PANE_MAX do
-                local r, s = build(math.max(1, botbuf - H))
+                seam_buf = seam_for(R + 1)
+                local r, s = build(seam_buf)
                 if not r then return close_footer() end
                 rows, sdi = r, s
-                local nh = math.min(#r, PANE_MAX)
-                if nh == H then break end
-                H = nh
+                local nr = math.min(#r, PANE_MAX)
+                if nr == R then break end
+                R = nr
             end
             if not rows or #rows == 0 then return close_footer() end
             rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
+            local total = #rows + 1         -- + the separator row
+            footer_seam, footer_height = seam_buf, total
+            update_footer() -- refresh the debug readout (cutoff line) if `i` is on
             -- Offsets of the main graph column so the pane lanes line up: `goff`
             -- = its left edge (date+author width), `foff` = the message edge (the
             -- graph's right side under mirror). col_offset is in BYTES; convert to
             -- display columns via the seam line's text so multi-byte author names
             -- don't skew the alignment.
             local goff, foff = 0, 0
-            local seam_buf = math.max(1, botbuf - #rows)
-            footer_seam, footer_height = seam_buf, #rows
-            update_footer() -- refresh the debug readout (cutoff line) if `i` is on
             if lv.controller.col_offset then
                 local ltext = vim.api.nvim_buf_get_lines(buf, seam_buf - 1, seam_buf, false)[1] or ""
                 goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", GRAPH_COL) or 0))
                 foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(seam_buf, "line", FLEX_COL) or 0))
             end
-            ensure_footer_win(#rows)
+            ensure_footer_win(total)
             render_pane(footer_buf, rows, goff, foff)
+            -- Keep the cursor `total` screen rows from the bottom so it never sits
+            -- under the overlay (Neovim's own scrolloff, this window only).
+            pcall(vim.api.nvim_set_option_value, "scrolloff", total, { scope = "local", win = win })
         end
 
-        -- Keep the cursor above the footer overlay: the bottom rows it covers are
-        -- a summary, not navigable commit rows, so snap the cursor up to the seam.
-        vim.api.nvim_create_autocmd("CursorMoved", {
-            group = group,
-            buffer = buf,
-            callback = function()
-                if not (footer_win and vim.api.nvim_win_is_valid(footer_win) and footer_seam) then return end
-                local pos = vim.api.nvim_win_get_cursor(win)
-                if pos[1] > footer_seam then
-                    pcall(vim.api.nvim_win_set_cursor, win, { footer_seam, pos[2] })
-                end
-            end,
-        })
+        -- (The cursor is kept above the overlay by `scrolloff`, set in
+        -- update_panes — no manual clamping needed.)
 
         -- Tear the panes down with the main window.
         vim.api.nvim_create_autocmd("WinClosed", {
