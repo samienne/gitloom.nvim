@@ -3350,21 +3350,24 @@ function M.open(folder, opts)
                 return res.rows, sdi
             end
 
-            -- The buffer line `sh` SCREEN rows above the last visible commit (the
-            -- overlay covers those bottom rows). Measured by `screenpos` deltas
-            -- from the last line — relative, so no window-border off-by-one, and it
-            -- counts only the split/merge virtual lines that are actually on screen
-            -- (the earlier text-height sum also counted ones past the window edge).
+            -- The buffer line displayed just above the overlay (which covers the
+            -- bottom `sh` SCREEN rows of the window). Anchored on the WINDOW — the
+            -- first visible line's screen row (screenpos, so no border off-by-one)
+            -- plus the window height — exactly as the overlay is positioned, so the
+            -- seam and the overlay always agree; absolute screenpos counts the
+            -- on-screen split/merge virtual lines.
             local function seam_for(sh)
                 return vim.api.nvim_win_call(win, function()
+                    local wh = vim.api.nvim_win_get_height(win)
                     local w0, last = vim.fn.line("w0"), vim.fn.line("w$")
-                    local bottom = vim.fn.screenpos(win, last, 1).row
-                    if bottom <= 0 then return math.max(1, last - 1) end
+                    local top = vim.fn.screenpos(win, w0, 1).row -- content row of the first visible line
+                    if top <= 0 then return math.max(1, w0) end
+                    local target = top + wh - sh - 1 -- last content row above the overlay
                     for l = last, w0, -1 do
                         local r = vim.fn.screenpos(win, l, 1).row
-                        if r > 0 and bottom - r >= sh then return l end
+                        if r > 0 and r <= target then return l end
                     end
-                    return math.max(1, w0 - 1)
+                    return math.max(1, w0)
                 end)
             end
 
