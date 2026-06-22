@@ -153,6 +153,7 @@ lua/gitloom/
   graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
   view.lua       View builder: commit DAG + view state → OrderItem graph (spec §10)
   columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
+  pane.lua       Context-pane layout core: boundary extraction + footer builder (spec §6.2)
   color.lua      OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua   Reusable virtualized list widget (snacks.win)
 ```

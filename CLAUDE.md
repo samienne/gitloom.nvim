@@ -196,7 +196,15 @@ Coverage:
   of stacked roots alternates columns; plus colour generation (spec §5.5): all
   curated slots are used before any generated one, a released colour is not
   reused within `buffer` allocations (breathing room), and surplus generated
-  slots are retired so a calmed graph returns to curated colours
+  slots are retired so a calmed graph returns to curated colours; plus the
+  **boundary seed** (spec §6.2): a seeded lane enters from above in its column
+  and stays continuous (the seam row runs no compaction), and the seed colour is
+  reserved so a pane-born lane never reuses it
+- `tests/pane_spec.lua` — the context-pane layout core (`gitloom.pane`, spec
+  §6.2): `boundary_below` (the down-lanes crossing a row, by column),
+  `split_boundary` (continue vs terminate by parent presence), and `footer`
+  (the continuing lane seeds the layout so the footer's top seam matches the
+  main view exactly; the folded branch is reported as terminating)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -367,8 +375,9 @@ Details not covered by the spec or architecture:
   weight. Topology model/invariants are unchanged (it stays a real node).
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
-  view.lua is the pre-Phase-1 projection (§10); listview.lua is a git-agnostic
-  reusable widget.
+  view.lua is the pre-Phase-1 projection (§10); pane.lua is the context-pane
+  layout core (boundary extraction + the footer builder; §6.2, in progress);
+  listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua
