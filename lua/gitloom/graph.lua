@@ -3164,13 +3164,6 @@ function M.open(folder, opts)
         local PANE_MAX = 12
         local footer_win, footer_buf
 
-        -- nvim_win_get_config may report row/col as a number or a {[1]=}/{[false]=}
-        -- pair depending on version; coerce to a number.
-        local function num(x)
-            if type(x) == "table" then return x[1] or x[false] or 0 end
-            return x or 0
-        end
-
         local function close_footer()
             if footer_win and vim.api.nvim_win_is_valid(footer_win) then
                 pcall(vim.api.nvim_win_close, footer_win, true)
@@ -3178,27 +3171,32 @@ function M.open(folder, opts)
             footer_win = nil
         end
 
+        -- The footer is a borderless overlay covering the bottom `height` content
+        -- rows of the main window (relative="win"), so its lanes butt directly
+        -- against the seam — the last main row above it — with no border or gap
+        -- between (the sticky-scroll pattern). The covered main rows are exactly
+        -- the off-screen-older topology the footer replaces with its summary.
         local function ensure_footer_win(height)
-            local mc = vim.api.nvim_win_get_config(win)
+            local wh = vim.api.nvim_win_get_height(win)
             local cfg = {
-                relative = "editor",
-                row = num(mc.row) + num(mc.height) + 2, -- below the main float + border
-                col = num(mc.col),
-                width = num(mc.width),
+                relative = "win", win = win,
+                row = math.max(0, wh - height), col = 0,
+                width = vim.api.nvim_win_get_width(win),
                 height = height,
                 style = "minimal",
                 focusable = false,
-                zindex = (mc.zindex or 50) + 1,
+                zindex = 200,
             }
             if footer_win and vim.api.nvim_win_is_valid(footer_win) then
                 pcall(vim.api.nvim_win_set_config, footer_win, cfg)
                 return
             end
             footer_buf = vim.api.nvim_create_buf(false, true)
-            cfg.border = "rounded"
-            cfg.title = " ↓ off-screen (anchors) "
             footer_win = vim.api.nvim_open_win(footer_buf, false, cfg)
-            pcall(vim.api.nvim_set_option_value, "winhl", "Normal:NormalFloat", { win = footer_win })
+            -- A faint background so the footer reads as a distinct band while its
+            -- lanes still line up with the main graph above.
+            pcall(vim.api.nvim_set_option_value, "winhl",
+                "Normal:NormalFloat,NormalFloat:NormalFloat", { win = footer_win })
         end
 
         -- Render topology-only pane rows (graph glyphs + ref labels, no
@@ -3242,20 +3240,9 @@ function M.open(folder, opts)
             if not (repo.head and repo.refs[repo.head]) then return close_footer() end
             if not repo.display or #repo.display == 0 then return close_footer() end
 
-            -- The bottom visible commit, as a repo.order index.
-            local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
-            local botItem, botDisplayIdx = order_at(botbuf)
-            if not (botItem and botItem.commit and botDisplayIdx) then return close_footer() end
-            local idxmap = {}
-            for i, it in ipairs(repo.order) do idxmap[it.commit.hash] = i end
-            local botC = botItem.commit
-            local botHash = botC and (botC.tip and botC.tip.hash or botC.hash)
-            local B = botHash and idxmap[botHash]
-            if not B then return close_footer() end
-
-            -- Pane projection (§6.2): owners are the **anchors only**, each
-            -- **collapsed** to a lane. Using only the anchors (no hidden non-anchor
-            -- owners, no anonymous merge owners) is what keeps a hidden branch's
+            -- Pane projection inputs (independent of the seam): the **anchors
+            -- only**, each collapsed to a lane. Using only anchors (no hidden
+            -- non-anchor owners, no merge owners) keeps a hidden branch's
             -- reachability from fragmenting an anchor line into many heads — the
             -- anchor's first-parent run stays one lane down to the root.
             local viewbuilder = require("gitloom.view")
@@ -3268,23 +3255,47 @@ function M.open(folder, opts)
                 end
             end
             if #anchor_owners == 0 then return close_footer() end
-            -- Signatures over the full order (anchor tips can sit above the seam).
             local sig = viewbuilder.signatures(repo.order, anchor_owners)
-            -- The off-screen-older commits an anchor actually reaches (the rest —
-            -- merged-in / divergent branches — are dropped, not shown).
-            local zone = {}
-            for i = B + 1, #repo.order do
-                local it = repo.order[i]
-                if next(sig[it.commit.hash] or {}) ~= nil then zone[#zone + 1] = it end
-            end
-            if #zone == 0 then return close_footer() end
-            -- Project only the zone, so collapsed lanes do not span the seam.
-            local aproj = viewbuilder.project(zone, anchor_owners, sig)
-            if #aproj.items == 0 then return close_footer() end
+            local idxmap = {}
+            for i, it in ipairs(repo.order) do idxmap[it.commit.hash] = i end
 
-            local res = pane.footer(opts, aproj.items,
-                pane.boundary_below(repo.display, botDisplayIdx), aproj.node_of_hash)
-            local rows = res.rows
+            local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+
+            -- Build the footer for a given seam buffer line: the off-screen-older
+            -- commits an anchor reaches, projected (collapsed) and seeded from the
+            -- seam's boundary. Returns the laid-out rows and the seam display index.
+            local function build(seam_buf)
+                local it, sdi = order_at(seam_buf)
+                local c = it and it.commit
+                local B = c and idxmap[(c.tip and c.tip.hash) or c.hash]
+                if not (sdi and B) then return nil end
+                local zone = {}
+                for i = B + 1, #repo.order do
+                    local oi = repo.order[i]
+                    if next(sig[oi.commit.hash] or {}) ~= nil then zone[#zone + 1] = oi end
+                end
+                if #zone == 0 then return nil end
+                local aproj = viewbuilder.project(zone, anchor_owners, sig)
+                if #aproj.items == 0 then return nil end
+                local res = pane.footer(opts, aproj.items,
+                    pane.boundary_below(repo.display, sdi), aproj.node_of_hash)
+                return res.rows, sdi
+            end
+
+            -- The footer overlays the bottom `K` main rows, so the seam is `K`
+            -- rows above the bottom — but `K` is the footer's own height. Resolve
+            -- the fixed point (§6.2 sizing): the compact projection's row count is
+            -- stable, so a few iterations converge.
+            local K, rows, sdi = 0, nil, nil
+            for _ = 1, 4 do
+                local r, s = build(math.max(1, botbuf - K))
+                if not r then return close_footer() end
+                rows, sdi = r, s
+                local nk = math.min(#r, PANE_MAX)
+                if nk == K then break end
+                K = nk
+            end
+            if not rows or #rows == 0 then return close_footer() end
             if #rows > PANE_MAX then
                 local t = {}
                 for i = 1, PANE_MAX do t[i] = rows[i] end -- seam-nearest rows
@@ -3292,11 +3303,12 @@ function M.open(folder, opts)
             end
             -- Offsets of the main graph column so the pane lanes line up: `goff`
             -- = its left edge (date+author width), `foff` = the message edge (the
-            -- graph's right side under mirror).
+            -- graph's right side under mirror). Read at the seam row.
             local goff, foff = 0, 0
+            local seam_buf = math.max(1, botbuf - #rows)
             if lv.controller.col_offset then
-                goff = lv.controller.col_offset(botbuf, "line", GRAPH_COL) or 0
-                foff = lv.controller.col_offset(botbuf, "line", FLEX_COL) or 0
+                goff = lv.controller.col_offset(seam_buf, "line", GRAPH_COL) or 0
+                foff = lv.controller.col_offset(seam_buf, "line", FLEX_COL) or 0
             end
             ensure_footer_win(#rows)
             render_pane(footer_buf, rows, goff, foff)

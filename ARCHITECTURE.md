@@ -146,15 +146,22 @@ panes, seeded at the boundary**:
   seam-row no-compaction rule (2.1a) is what makes the flipped bottom row land on
   the boundary columns exactly.
 
-A minimal **footer window** is wired in graph.lua (`update_panes`, gated by
-`opts.panes`): on reflow and on scroll-settle it builds the anchors-only
-projection (no user overrides), slices the off-screen-older commits by their
-`repo.order` index against the bottom visible commit, lays them out with
-`pane.footer` seeded from `boundary_below(repo.display, …)`, and renders the
-topology-only rows (graph glyphs + ref labels) into a float below the main
-window. The **header window**, **sizing** (`clamp(G(S))` + hysteresis, footer
-fixed), **arrow-caps** for terminators, and moving the rebuild **off the main
-render path** (it currently runs in the cone debounce) are still to implement.
+A **footer window** is wired in graph.lua (`update_panes`, gated by
+`opts.panes`): on reflow and on scroll-settle it projects the off-screen-older
+zone with the **anchors only, each collapsed** (so a hidden branch can't
+fragment an anchor line — the anchor stays one lane to the root), seeds
+`pane.footer` from `boundary_below(repo.display, seam)`, and renders the
+topology-only rows (graph glyphs + ref labels, lane-coloured, aligned under the
+main graph — left-pad by the graph offset, or right-pad to the message edge
+under mirror). The footer is a **borderless overlay** over the bottom `K`
+content rows of the main window (relative="win"), so its lanes butt directly
+against the seam — the last main row above it — with no border between (the
+sticky-scroll pattern). The seam sits `K` rows above the bottom and `K` is the
+footer's own height, so `update_panes` resolves that **fixed point** by
+iterating (the compact projection's row count is stable, so it converges fast).
+The **header window**, **arrow-caps** for terminators, and moving the rebuild
+**off the main render path** (it currently runs in the cone debounce) are still
+to implement.
 
 ## Layers
 
