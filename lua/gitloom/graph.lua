@@ -3350,22 +3350,21 @@ function M.open(folder, opts)
                 return res.rows, sdi
             end
 
-            -- The buffer line whose commit is the last one ABOVE the bottom `sh`
-            -- screen rows (the overlay). Uses real screen positions (`screenpos`),
-            -- not summed text-heights: a line's split/merge virtual lines may run
-            -- past the window edge, which made height-summing land the seam a couple
-            -- lines too high exactly when those fans were near the bottom.
+            -- The buffer line `sh` SCREEN rows above the last visible commit (the
+            -- overlay covers those bottom rows). Measured by `screenpos` deltas
+            -- from the last line — relative, so no window-border off-by-one, and it
+            -- counts only the split/merge virtual lines that are actually on screen
+            -- (the earlier text-height sum also counted ones past the window edge).
             local function seam_for(sh)
                 return vim.api.nvim_win_call(win, function()
-                    local wh = vim.api.nvim_win_get_height(win)
-                    local wrow = vim.fn.win_screenpos(win)[1]
-                    local target = wrow + wh - sh - 1 -- last screen row above the overlay
                     local w0, last = vim.fn.line("w0"), vim.fn.line("w$")
+                    local bottom = vim.fn.screenpos(win, last, 1).row
+                    if bottom <= 0 then return math.max(1, last - 1) end
                     for l = last, w0, -1 do
                         local r = vim.fn.screenpos(win, l, 1).row
-                        if r > 0 and r <= target then return l end
+                        if r > 0 and bottom - r >= sh then return l end
                     end
-                    return math.max(1, w0)
+                    return math.max(1, w0 - 1)
                 end)
             end
 
