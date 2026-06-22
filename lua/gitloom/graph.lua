@@ -3199,13 +3199,16 @@ function M.open(folder, opts)
 
         -- Render topology-only pane rows (graph glyphs + ref labels, no
         -- date/author/message; §6.2) into the pane buffer with lane colours.
-        local function render_pane(buf, rows)
+        -- `goff` left-pads every row by the main view's graph-column offset (the
+        -- date + author width) so the pane lanes line up under the main graph.
+        local function render_pane(buf, rows, goff)
+            local pad = string.rep(" ", goff or 0)
             local lines, marks = {}, {}
             for li, row in ipairs(rows) do
                 local g = get_column_chars(opts, row.columns, false)
-                local text = g.text or ""
+                local text = pad .. (g.text or "")
                 for _, hl in ipairs(g.highlight or {}) do
-                    marks[#marks + 1] = { li - 1, hl.start_pos, hl.end_pos, hl.hl }
+                    marks[#marks + 1] = { li - 1, (goff or 0) + hl.start_pos, (goff or 0) + hl.end_pos, hl.hl }
                 end
                 local c = row.commit
                 local labels = c and decoration_texts(c) or {}
@@ -3261,8 +3264,14 @@ function M.open(folder, opts)
                 for i = 1, PANE_MAX do t[i] = rows[i] end -- seam-nearest rows
                 rows = t
             end
+            -- Left offset of the main graph column (date + author width) so the
+            -- pane's lanes line up under it (non-mirror; the common case).
+            local goff = 0
+            if lv.controller.col_offset then
+                goff = lv.controller.col_offset(botbuf, "line", GRAPH_COL) or 0
+            end
             ensure_footer_win(#rows)
-            render_pane(footer_buf, rows)
+            render_pane(footer_buf, rows, goff)
         end
 
         -- Tear the panes down with the main window.
