@@ -3333,10 +3333,12 @@ function M.open(folder, opts)
             -- (`pane.continue`), condensed, then seed and lay out. Returns the rows
             -- and seam index. So every active lane is continued and reaches a root;
             -- no non-active branch is introduced.
-            -- Returns rows, seam-index on success; nil, reason on failure.
+            -- Returns rows, seam-index on success; nil, reason on failure. The
+            -- seam may be a packed-markers line (no `.commit`), which is fine —
+            -- only its index is needed, to read its boundary lanes.
             local function build(seam_buf)
                 local it, sdi = order_at(seam_buf)
-                if not (it and it.commit and sdi) then return nil, "no item@" .. seam_buf end
+                if not (it and sdi) then return nil, "no item@" .. seam_buf end
                 local boundary = pane.boundary_below(repo.display, sdi)
                 if not next(boundary) then return nil, "no lanes@" .. sdi end
                 local cond = pane.continue(boundary, pinned)
