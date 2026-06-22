@@ -411,7 +411,76 @@ mode — only the placement differs:
   line (fan-out).
 
 In every mode an out-of-cone row dims its refs with the rest of the row (§12),
-and a selected ref is drawn with `palette.selected`.
+and a selected ref is drawn with `palette.selected`. The **context panes** (§6.2)
+render every row topology-only, the same render style as markers (§10.4).
+
+### 6.2 Context panes (header / footer)
+
+The graph window may carry two **context panes** — a **header** above the main
+viewport and a **footer** below it — that summarise the topology *off-screen* in
+each direction so the main branches stay in view while scrolling. They are
+**read-only**: no cursor, no selection, no navigation; they are a map, not a
+surface to act on.
+
+**One projection, three viewports.** The header, main view, and footer are three
+windows onto a **single** laid-out projection (§10), not three independent
+layouts. The header renders the rows *above* the main viewport's top line, the
+footer the rows *below* its bottom line (down to and including the **root
+commit(s)**). Because it is one lane sweep, lanes are continuous across both
+boundaries by construction — the main view's top row *is* the header's bottom
+row.
+
+A pane has **height 0** (is hidden) whenever there is no off-screen topology in
+its direction: the header vanishes when scrolled to the top of the graph, the
+footer when scrolled to the bottom (the roots are then already on-screen). This
+falls out of the sizing rule below (`G = 0` at the extreme).
+
+**What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
+labels only — no date, author, or message. Off-screen topology is folded onto
+the **pinned anchors** (§10.6): an anchor's line is drawn; everything else is
+contracted.
+
+**Boundary lane-continuity (invariant).** Every lane crossing a viewport
+boundary **must** connect to something in the pane — no lane dangles at the edge.
+A region that *touches* the boundary is therefore never folded away; its crossing
+lane is preserved and terminated explicitly. This is the "wires must connect"
+grid invariant (§5.1) lifted to the window edge.
+
+**Non-anchor termination.** How a crossing non-anchor lane ends is the tunable
+part (expected to need iteration), but the choice is binary:
+
+- **merges into an anchor** — if its commits are reachable from a pinned owner
+  (their signature, §10.2, contains an anchor), the lane is drawn up to the
+  junction where it joins the anchor, then folded into the anchor's lane;
+- **terminated minimally** — otherwise it is **capped at the boundary row** (an
+  up/down arrow glyph with the branch name, e.g. `↑ feature/x`), costing no extra
+  pane rows.
+
+**Sizing.** Panes are **content-driven within a cap**, computed so the size is
+stable (no scroll-induced bounce, §6 sticky principle):
+
+- **Header.** Height is a pure function of the scroll offset `S` (the main view's
+  top line): `H = clamp(G(S), 0, header_max)`, where `G(S)` is the folded row
+  count of the prefix above `S`. There is no feedback loop (the top line is set
+  by scrolling, not by `H`). To avoid the main view's height twitching as `G(S)`
+  changes, `H` **grows immediately but shrinks only on settle** (debounced), the
+  same anti-bounce rule as sticky columns. When the fold exceeds `header_max`, the
+  surplus collapses into a trailing **`+N above`** overflow indicator.
+- **Footer.** The footer anchors to the main view's *bottom* line, which floats
+  with the main height, so its size is a mild fixed point; it is resolved by
+  reserving a **fixed** footer height (the footer is small — roots plus a few
+  anchor tails) or, if made dynamic, by monotone iteration to `footer_max`.
+
+**Asynchronous update.** Pane content is recomputed **off the main render path**:
+a scroll or view-state change schedules a debounced pane rebuild that must
+**never block or slow the main view**. The main view scrolls and renders
+immediately; the panes catch up (a brief stale pane is acceptable, a stalled main
+view is not). The boundary lanes the main view already drew are the source of
+truth a pane rebuild must match.
+
+Panes are configurable (on/off, `header_max`, `footer_max`); when off the graph
+is the single viewport as today. (Config wiring shares the §8 "known gap" — the
+options are specified here, not yet read by the command.)
 
 ## 7. Rendering behavior
 
