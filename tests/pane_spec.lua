@@ -235,10 +235,14 @@ local function header_of(items, opts, seam_pos, pinned)
     pinned = pinned or {}
     local main = columns.layout(opts, items)
     local idx, lane_main = {}, {}
+    local node_col = {}
     for i, it in ipairs(items) do
         idx[it.commit.hash] = i
         local pl = main[i].parent_lanes
         if pl and pl[1] then lane_main[it.commit.hash] = { id = pl[1].id, color = pl[1].color } end
+        for j, cell in ipairs(main[i].columns or {}) do
+            if cell.has_commit and cell.commit then node_col[cell.commit.hash] = j end
+        end
     end
     local seam_line = main[seam_pos].split or main[seam_pos].columns
     local boundary = pane.boundary_of(seam_line, true)
@@ -255,7 +259,8 @@ local function header_of(items, opts, seam_pos, pinned)
     -- main-view lane { id, color } per node's branch (its tip), so each branch keeps
     -- its own distinct colour (matching the graph) — mirrors graph.lua's lane_of.
     local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
-    return pane.header(cond.items, boundary, cond.node_of_hash, lane_of), boundary, cond, idx
+    local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
+    return pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of), boundary, cond, idx
 end
 
 -- The minimal-subgraph oracle (mirrors continue_up Pass 1): a **confluence** is a
@@ -502,6 +507,39 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert_seam_match(res.rows, boundary)
         assert_continuous(res.rows)
         assert.same({}, header_grid_errors(opts, res.rows))
+    end)
+
+    it("orders forked heads left-to-right to match the graph (no bottom-up swap)", function()
+        -- dev and HEAD fork from a shared lane s. In the graph dev sits in the LEFT
+        -- column (it forks first), HEAD in the right. The header — though it lays out
+        -- bottom-up — must place them in the SAME left-right order, by main-view column,
+        -- not by which head the sweep reached first.
+        local items = h.dag({
+            { "dev", { "s" } }, { "head", { "s" } }, { "s", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "dev" } }
+        items[2].commit.refs = { { name = "head" } }
+        local opts = h.big_opts()
+        local main = columns.layout(opts, items)
+        -- the graph's column for each head
+        local gcol = {}
+        for i, it in ipairs(items) do
+            for j, cell in ipairs(main[i].columns or {}) do
+                if cell.has_commit and cell.commit then gcol[cell.commit.hash] = j end
+            end
+        end
+        assert.is_true(gcol.dev < gcol.head) -- dev is left in the graph
+        local res = header_of(items, opts, 4, { head = true, dev = true })
+        local hcol = {}
+        for _, r in ipairs(res.rows) do
+            for ci, cell in ipairs(r.columns) do
+                if cell.has_commit and cell.commit.refs and cell.commit.refs[1] then
+                    hcol[cell.commit.refs[1].name] = ci
+                end
+            end
+        end
+        assert.is_true(hcol.dev ~= nil and hcol.head ~= nil)
+        assert.is_true(hcol.dev < hcol.head, "header must keep dev left of HEAD, as in the graph")
     end)
 
     it("keeps each pinned anchor's colour STABLE and DISTINCT across cutoffs", function()

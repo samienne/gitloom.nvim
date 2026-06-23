@@ -794,8 +794,9 @@ end
 ---@param boundary table<integer, table>  -- col → lane { id, color, begin }
 ---@param node_of table<string, table>?  -- hash → condensed node (continue_up's node_of_hash)
 ---@param lane_of (fun(node: table): table?)?  -- node → its branch's main-view { id, color }
+---@param col_of (fun(node: table): integer?)?  -- node → its main-view column (left-right order)
 ---@return table  -- { rows = table[] }
-function M.header(items, boundary, node_of, lane_of)
+function M.header(items, boundary, node_of, lane_of, col_of)
     node_of = node_of or {}
     -- The main-view lane id/colour for a node's branch, so each branch keeps its OWN
     -- distinct colour (matching the graph). Falls back to a given default.
@@ -840,10 +841,22 @@ function M.header(items, boundary, node_of, lane_of)
     for _, it in ipairs(items) do order[#order + 1] = it.commit end
     table.sort(order, function(a, b) return (pos[a] or 0) > (pos[b] or 0) end)
 
-    -- The highest column ever used; fork children take fresh columns beyond it so a
-    -- column is **never reused** (a vacated lane can't be confused with a live one).
+    -- Columns are **never reused** (a vacated lane can't be confused with a live one →
+    -- no vertical colour break). `used_cols` is every column that has EVER held a lane;
+    -- a fork child takes the nearest free column to its OWN main-view column, so the
+    -- header's left-right order matches the graph without reusing a column.
     local maxcol = 0
-    for c in pairs(active) do if c > maxcol then maxcol = c end end
+    local used_cols = {}
+    for c in pairs(active) do used_cols[c] = true; if c > maxcol then maxcol = c end end
+    local function free_col(want)
+        want = (type(want) == "number" and want >= 1) and want or (maxcol + 1)
+        if not used_cols[want] then return want end
+        for d = 1, 512 do
+            if want - d >= 1 and not used_cols[want - d] then return want - d end
+            if not used_cols[want + d] then return want + d end
+        end
+        return want
+    end
 
     local lines = {} -- { columns, commit }, bottom-up
 
@@ -858,28 +871,29 @@ function M.header(items, boundary, node_of, lane_of)
             local is_head = #upkids == 0
             local pinned = N.refs and #N.refs > 0
 
-            -- Up columns: pivot continues to upkids[1]; each extra fork child takes a
-            -- fresh column (monotonic, never reused) and a fresh UNIQUE id, so no two
-            -- lanes ever share an id (→ no lane terminates twice). Colour is its
-            -- branch's main-view colour for now; a global pass below de-collides any
-            -- concurrent clashes (the main view recycles colours).
+            local arr_set = {}
+            for _, c in ipairs(arriving) do arr_set[c] = true end
+
+            -- Up columns: the pivot continues straight (its surviving lane's id/colour,
+            -- so the column's vertical colour never breaks); each extra fork child is
+            -- placed at its OWN main-view column when free, so the header's left-right
+            -- order MATCHES THE GRAPH (no bottom-up swap) — never reusing a column. Each
+            -- gets a fresh UNIQUE id (→ no lane terminates twice); colour is its branch's
+            -- main-view colour, de-collided by the global pass below.
             local upcols, upid, upcolor = {}, {}, {}
             if not is_head then
                 upcols[1] = pivot
-                -- The pivot CONTINUES the surviving lane, so it keeps the pivot's
-                -- id/colour (else the column's vertical colour would break).
                 upid[1], upcolor[1] = plane.id, plane.color
                 for k = 2, #upkids do
-                    maxcol = maxcol + 1
-                    upcols[k] = maxcol
                     local _, pref = lane(upkids[k], plane)
+                    local col = free_col(col_of and col_of(upkids[k]))
+                    used_cols[col] = true
+                    if col > maxcol then maxcol = col end
+                    upcols[k] = col
                     upid[k] = fresh_id()
                     upcolor[k] = pref
                 end
             end
-
-            local arr_set = {}
-            for _, c in ipairs(arriving) do arr_set[c] = true end
 
             local width = pivot
             for c in pairs(active) do if c > width then width = c end end

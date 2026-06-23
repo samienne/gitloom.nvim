@@ -4058,17 +4058,32 @@ function M.open(folder, opts)
             -- each branch's main-view lane { id, color } (its first-parent lane), so
             -- the header can colour every branch the SAME as the graph (distinct per
             -- branch, not all the pivot's colour).
-            local dnode, lane_main = {}, {}
+            -- dnode (hash → node), lane_main (hash → its branch's main-view {id,color})
+            -- and node_col (hash → the COLUMN the node sits in, i.e. its left-right
+            -- position in the graph) so the header can order forks to match the graph.
+            local dnode, lane_main, node_col = {}, {}, {}
             for _, it in ipairs(repo.display) do
                 local pl = it.parent_lanes
                 local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color }
+                local hcol = {} -- this row's rendered nodes → their column
+                for j, cell in ipairs(it.columns or {}) do
+                    if cell.has_commit and cell.commit then hcol[cell.commit.hash] = j end
+                end
                 local function add(n)
                     if not n then return end
+                    local col = hcol[n.hash]
                     dnode[n.hash] = n
                     if main then lane_main[n.hash] = main end
-                    if n.tip then dnode[n.tip.hash] = n; if main then lane_main[n.tip.hash] = main end end
+                    if col then node_col[n.hash] = col end
+                    if n.tip then
+                        dnode[n.tip.hash] = n
+                        if main then lane_main[n.tip.hash] = main end
+                        if col then node_col[n.tip.hash] = col end
+                    end
                     for _, hh in ipairs(n.region or {}) do
-                        dnode[hh] = n; if main then lane_main[hh] = main end
+                        dnode[hh] = n
+                        if main then lane_main[hh] = main end
+                        if col then node_col[hh] = col end
                     end
                 end
                 add(it.commit)
@@ -4076,6 +4091,7 @@ function M.open(folder, opts)
             end
             local function order_of(n) return n and didx[(n.tip and n.tip.hash) or n.hash] end
             local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
+            local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
 
             -- The lanes crossing one edge of whichever RENDERED line sits at
             -- absolute screen row `target` — a commit's columns line, or its split
@@ -4193,7 +4209,7 @@ function M.open(folder, opts)
                 end
                 local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
-                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of)
+                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
                 return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover
             end
