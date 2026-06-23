@@ -8,6 +8,7 @@ local parse_show = internal.parse_show
 local format_commit_detail = internal.format_commit_detail
 local format_diff = internal.format_diff
 local diffstat_files = internal.diffstat_files
+local diff_contexts = internal.diff_contexts
 local format_diffstat = internal.format_diffstat
 local commit_range = internal.commit_range
 
@@ -230,6 +231,55 @@ describe("diffstat_files", function()
 
     it("is empty for an empty patch", function()
         assert.same({}, diffstat_files(""))
+    end)
+end)
+
+describe("diff_contexts", function()
+    local patch = table.concat({
+        "diff --git a/foo.lua b/foo.lua",   -- 1
+        "index 1111111..2222222 100644",    -- 2
+        "--- a/foo.lua",                    -- 3
+        "+++ b/foo.lua",                    -- 4
+        "@@ -1,3 +1,4 @@ function foo()",    -- 5
+        " context",                         -- 6
+        "+added",                           -- 7
+        "@@ -20,2 +21,3 @@ function bar()",  -- 8
+        " more",                            -- 9
+        "diff --git a/old.md b/new.md",     -- 10 (rename)
+        "rename from old.md",               -- 11
+        "rename to new.md",                 -- 12
+        "@@ -1 +1 @@",                      -- 13
+        "-x",                               -- 14
+    }, "\n")
+
+    it("tracks the governing file and hunk per line, with begin indices", function()
+        local ctx = diff_contexts(patch)
+        -- File-header region of foo.lua: file set from the `diff --git` line, no
+        -- hunk yet (before the first @@).
+        assert.same({ file = "foo.lua", file_line = 1 }, ctx[3])
+        -- Inside the first hunk's body: governing file + hunk, each with the
+        -- patch-line where it begins.
+        assert.same(
+            { file = "foo.lua", file_line = 1, hunk = "@@ -1,3 +1,4 @@ function foo()", hunk_line = 5 },
+            ctx[7])
+        -- The second hunk governs from its own @@ line onward.
+        assert.same(
+            { file = "foo.lua", file_line = 1, hunk = "@@ -20,2 +21,3 @@ function bar()", hunk_line = 8 },
+            ctx[9])
+    end)
+
+    it("resets the hunk at a new file and shows renames as old => new", function()
+        local ctx = diff_contexts(patch)
+        -- The new file's header region: file is the rename path, and the hunk is
+        -- cleared even though the previous file had hunks.
+        assert.same({ file = "old.md => new.md", file_line = 10 }, ctx[11])
+        assert.same(
+            { file = "old.md => new.md", file_line = 10, hunk = "@@ -1 +1 @@", hunk_line = 13 },
+            ctx[14])
+    end)
+
+    it("is empty for an empty patch", function()
+        assert.same({}, diff_contexts(""))
     end)
 end)
 

@@ -1925,6 +1925,36 @@ local function diffstat_files(patch)
     return files
 end
 
+--- Precompute the diff context-header data (specification.md §11.6): for each
+--- 1-based line of the rendered patch, the **governing** file and hunk header —
+--- the nearest `diff --git` and `@@ … @@` line at or above it — together with the
+--- patch-line index where each begins. The window glue (`update_ctx`) compares
+--- those begin-indices against the viewport's effective top to decide whether a
+--- header has scrolled off and should stick. The file is shown as its display
+--- path, with renames as "old => new" (matching the diffstat). A line before any
+--- `diff --git` (or a hunk before its file's first `@@`) yields a nil field, so
+--- the overlay simply omits it. Pure; exposed for testing.
+---@param patch string?
+---@return { file?: string, file_line?: integer, hunk?: string, hunk_line?: integer }[]
+local function diff_contexts(patch)
+    local ctx = {}
+    if not patch or patch == "" then return ctx end
+    local file, file_line, hunk, hunk_line = nil, nil, nil, nil
+    for i, line in ipairs(vim.split(patch or "", "\n")) do
+        local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
+        if a then
+            file = (a ~= b) and (a .. " => " .. b) or b
+            file_line = i
+            hunk, hunk_line = nil, nil
+        elseif line:sub(1, 2) == "@@" then
+            hunk = line
+            hunk_line = i
+        end
+        ctx[i] = { file = file, file_line = file_line, hunk = hunk, hunk_line = hunk_line }
+    end
+    return ctx
+end
+
 -- Max width of the +/- bar in a diffstat row; long files scale down to fit.
 local DIFFSTAT_BAR_MAX = 40
 
@@ -2115,6 +2145,11 @@ local function open_commit_view(opts, commit)
     -- external diff; the cursor parks here when the view opens.
     local action_line = nil
 
+    -- Diff context-header state (§11.6), set by render(): the per-patch-line
+    -- governing file/hunk (diff_contexts) and the buffer line where the patch
+    -- begins, so a buffer line L maps to patch index L - diff_start + 1.
+    local diff_ctx, diff_start = nil, nil
+
     local function set_lines(lines)
         if not vim.api.nvim_buf_is_valid(buf) then return end
         vim.bo[buf].modifiable = true
@@ -2162,6 +2197,117 @@ local function open_commit_view(opts, commit)
         end
     end, { buffer = buf, nowait = true, silent = true })
 
+    -- Diff context header (§11.6): a borderless overlay pinned to the top of the
+    -- view showing the governing file / hunk while the diff is scrolled past
+    -- their real header lines. It tracks the viewport top, not the cursor, and
+    -- materializes only when there is something to stick (else it is closed).
+    local diff_pal = (opts.palette or {}).diff or {}
+    local ctx_win, ctx_buf = nil, nil
+
+    local function close_ctx()
+        if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
+            pcall(vim.api.nvim_win_close, ctx_win, true)
+        end
+        ctx_win = nil
+    end
+
+    -- The context rows governing an effective viewport top (a buffer line): the
+    -- file line when its `diff --git` has scrolled strictly above it, then the
+    -- hunk line when its `@@` has — each omitted while its real header is still
+    -- visible below the overlay (§11.6).
+    local function ctx_rows_for(eff_top)
+        if not diff_ctx then return {} end
+        local c = diff_ctx[eff_top - diff_start + 1]
+        if not c then return {} end
+        local rows = {}
+        if c.file and c.file_line < eff_top then
+            rows[#rows + 1] = highlight_text(c.file, diff_pal.header)
+        end
+        if c.hunk and c.hunk_line < eff_top then
+            rows[#rows + 1] = highlight_text(c.hunk, diff_pal.hunk)
+        end
+        return rows
+    end
+
+    local function update_ctx()
+        if not (diff_ctx and vim.api.nvim_win_is_valid(w.win)) then
+            close_ctx()
+            return
+        end
+        -- The overlay covers the top `#rows` rows, so the first row the user
+        -- actually reads is the window top advanced past it (§11.6). That offset
+        -- depends on the count we are computing, so settle it with a short
+        -- fixpoint (the height is 0–2; this converges in a step or two).
+        local top = vim.fn.line("w0", w.win)
+        local rows = ctx_rows_for(top)
+        for _ = 1, 2 do
+            local next_rows = ctx_rows_for(top + #rows)
+            if #next_rows == #rows then
+                rows = next_rows
+                break
+            end
+            rows = next_rows
+        end
+
+        if #rows == 0 then
+            close_ctx()
+            return
+        end
+
+        if not (ctx_buf and vim.api.nvim_buf_is_valid(ctx_buf)) then
+            ctx_buf = vim.api.nvim_create_buf(false, true)
+        end
+        local cfg = {
+            relative = "win", win = w.win,
+            row = 0, col = 0,
+            width = vim.api.nvim_win_get_width(w.win),
+            height = #rows,
+            style = "minimal",
+            focusable = false,
+            zindex = 200,
+        }
+        if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
+            pcall(vim.api.nvim_win_set_config, ctx_win, cfg)
+        else
+            ctx_win = vim.api.nvim_open_win(ctx_buf, false, cfg)
+            pcall(vim.api.nvim_set_option_value, "winhl",
+                "Normal:NormalFloat,NormalFloat:NormalFloat", { win = ctx_win })
+        end
+
+        vim.bo[ctx_buf].modifiable = true
+        local lines = {}
+        for _, r in ipairs(rows) do
+            lines[#lines + 1] = r.text
+        end
+        vim.api.nvim_buf_set_lines(ctx_buf, 0, -1, false, lines)
+        vim.bo[ctx_buf].modifiable = false
+        vim.api.nvim_buf_clear_namespace(ctx_buf, commit_view_ns, 0, -1)
+        for i, r in ipairs(rows) do
+            for _, hl in ipairs(r.highlight or {}) do
+                if hl.hl then
+                    vim.api.nvim_buf_set_extmark(ctx_buf, commit_view_ns, i - 1, hl.start_pos, {
+                        end_col = hl.end_pos,
+                        hl_group = hl.hl,
+                    })
+                end
+            end
+        end
+    end
+
+    local ctx_group = vim.api.nvim_create_augroup("GitloomCommitCtx_" .. buf, { clear = true })
+    vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized" }, {
+        group = ctx_group,
+        callback = function()
+            if vim.api.nvim_win_is_valid(w.win) then update_ctx() end
+        end,
+    })
+    vim.api.nvim_create_autocmd("WinClosed", {
+        group = ctx_group,
+        callback = function(ev)
+            if tonumber(ev.match) == w.win then close_ctx() end
+        end,
+    })
+
     set_lines({ "Loading…" })
 
     -- Render the metadata (format_commit_detail), then the diffstat
@@ -2173,6 +2319,7 @@ local function open_commit_view(opts, commit)
         if not vim.api.nvim_buf_is_valid(buf) then return end
         file_jumps = {}
         action_line = nil
+        diff_ctx, diff_start = nil, nil
         local detail = parse_show(meta_output)
 
         local rows = {}
@@ -2199,7 +2346,7 @@ local function open_commit_view(opts, commit)
                 rows[#rows + 1] = r
             end
             rows[#rows + 1] = highlight_text("")
-            local diff_start = #rows + 1 -- buffer line of the first patch line
+            diff_start = #rows + 1 -- buffer line of the first patch line
             for _, r in ipairs(format_diff(patch, opts.palette)) do
                 rows[#rows + 1] = r
             end
@@ -2208,6 +2355,8 @@ local function open_commit_view(opts, commit)
             for j, f in ipairs(files) do
                 file_jumps[stat_start + j] = diff_start + f.start - 1
             end
+            -- Context-header lookup over the same patch (§11.6).
+            diff_ctx = diff_contexts(patch)
         end
 
         local lines = {}
@@ -2231,6 +2380,9 @@ local function open_commit_view(opts, commit)
         if action_line and vim.api.nvim_win_is_valid(w.win) then
             pcall(vim.api.nvim_win_set_cursor, w.win, { action_line, 0 })
         end
+
+        -- Seed the context header for the initial viewport (§11.6).
+        update_ctx()
     end
 
     -- Fetch metadata, then the diff; render once both arrive (§11.1).
@@ -3481,6 +3633,7 @@ M._internal = {
     format_commit_detail = format_commit_detail,
     format_diff = format_diff,
     diffstat_files = diffstat_files,
+    diff_contexts = diff_contexts,
     format_diffstat = format_diffstat,
     commit_range = commit_range,
     reachable_cone = reachable_cone,

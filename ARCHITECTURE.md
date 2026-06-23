@@ -302,6 +302,10 @@ them refs → head → commits.
   (`N files changed, …`) then one row per file (path, counts, colored `+`/`-`
   bar). Returns compose-style rows, summary first, files in `files` order, so
   the caller can map each file row back to its `diffstat_files` entry. Pure.
+- `diff_contexts(patch)` — for each 1-based patch line, the governing file and
+  hunk (the nearest `diff --git` / `@@` at or above it) with the patch-line
+  index where each begins, so the context-header glue can tell when a header has
+  scrolled off (specification.md §11.6). Renames show as `old => new`. Pure.
 - `commit_range(commit)` — builds the `DiffRange` for a single commit's own
   changes: `{ rev = "<hash>^!"` (or `<empty-tree>..<hash>` for a root, no
   parents)`, from = parents[1], to = commit }`. The first range constructor for
@@ -318,8 +322,9 @@ them refs → head → commits.
 
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
 `classify_ref`, `group_refs`, `parse_show`, `format_commit_detail`,
-`format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`, and
-`reachable_cone` are pure and exposed via `graph._internal` for testing.
+`format_diff`, `diffstat_files`, `diff_contexts`, `format_diffstat`,
+`commit_range`, and `reachable_cone` are pure and exposed via `graph._internal`
+for testing.
 
 ### DAG construction
 
@@ -626,6 +631,17 @@ out of the view entirely (§11.4).
 The action label's buffer line maps (like the diffstat file rows) to an action;
 `<CR>` on it calls the diff provider. So the commit view's `<CR>` dispatches by
 cursor line: action label → open diff, diffstat file row → jump, else nothing.
+
+The **context header** (§11.6) is a borderless overlay pinned to the top of the
+view (`relative="win"`, `zindex` above the content, `focusable=false`), modeled
+on the graph's footer glue rather than `pane.lua`. `render` builds `diff_contexts`
+over the same patch and records `diff_start`; a `WinScrolled`/`WinResized`
+autocmd calls `update_ctx`, which reads the viewport top (`line("w0")`, not the
+cursor), advances it past the overlay's own height with a short fixpoint (the
+height is 0–2), looks up the governing file/hunk, and shows each line only once
+its real header has scrolled above that effective top — closing the overlay when
+nothing sticks. It is decoration only; a `WinClosed` autocmd tears it down with
+the view.
 
 ### External diff
 
