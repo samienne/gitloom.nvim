@@ -167,8 +167,10 @@ Coverage:
   lines and that `relayout` grows the buffer when a mode switch makes a commit two
   rows, and that `set_items` swaps the whole list and re-lays the buffer (the
   reflow-swap primitive; §10.5)
-- `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, and the
-  date formatters (`format_absolute`, `format_relative`)
+- `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, the
+  date formatters (`format_absolute`, `format_relative`), and `make_line_buffer`
+  (the unbuffered-stdout de-chunker: whole lines vs. the held trailing partial,
+  cross-chunk stitching, byte-by-byte reassembly, blank lines; spec §3 streaming)
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
   `parse_show` (git-show field splitting, multi-line body, empty parents),
   `format_commit_detail` (committer-differs branch, refs line, body indent),
@@ -229,7 +231,8 @@ Coverage:
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
-`move_selection`, `ref_byte_col`, `parse_commit_line`, `parse_timestamp`,
+`move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`
+(the streaming-stdout line de-chunker; §3), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to

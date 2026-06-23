@@ -647,38 +647,150 @@ local function parse_commit_line(line)
     }
 end
 
+--- Stateful line de-chunker for an **unbuffered** `jobstart` stdout stream.
+--- Neovim delivers stdout as lists of strings split on "\n": the first element
+--- continues the previous chunk's trailing (partial) line, and the last element
+--- is itself partial — continued in the next chunk (`:help channel-lines`).
+--- `feed(data)` returns the complete lines contained in this chunk; `flush()`
+--- returns the final held line at EOF (git's last line has no trailing newline).
+--- Pure (no I/O) so it is unit-testable via `_internal`.
+---@class LineBuffer
+---@field feed fun(data: string[]): string[]
+---@field flush fun(): string
+
+---@return LineBuffer
+local function make_line_buffer()
+    local pending = ""
+    return {
+        feed = function(data)
+            local out = {}
+            if #data == 0 then
+                return out
+            end
+            -- Stitch the held partial onto this chunk's first element; hold the
+            -- new trailing partial back for the next chunk.
+            data[1] = pending .. data[1]
+            pending = data[#data]
+            for i = 1, #data - 1 do
+                out[#out + 1] = data[i]
+            end
+            return out
+        end,
+        flush = function()
+            local last = pending
+            pending = ""
+            return last
+        end,
+    }
+end
+
+-- Commits parsed per scheduled worker turn. The stdout handler only enqueues
+-- raw lines; a `vim.schedule`d worker drains the queue this many at a time and
+-- yields back to the event loop between batches, so the UI stays responsive and
+-- redraws as commits stream in (one `on_batch` => one layout + one insert).
+local COMMIT_BATCH = 256
+
+--- Stream `git log` and hand commits to `opts.on_batch` in batches as they
+--- arrive. The window is already open; this fills it incrementally rather than
+--- blocking until the whole log is read (so a large repo paints progressively).
+---
+--- The stdout handler stays light — it stitches partial lines and enqueues raw
+--- text only. A scheduled worker does the per-commit work (`parse_commit_line` +
+--- `on_batch`), `COMMIT_BATCH` at a time, rescheduling itself until drained so a
+--- big log never stalls the event loop in one callback. The returned future
+--- resolves once the stream has closed *and* the queue is fully drained.
+---@param opts { branch?: string|string[], count?: integer, on_batch?: fun(commits: Commit[]) }
 local function fetch_commits(opts)
     opts = opts or {}
 
     local future, promise = make_future()
 
     if opts.branch and type(opts.branch) ~= "table" then
-        opts.branch = { opts.branch }
+        opts.branch = { opts.branch --[[@as string]] }
     end
+    local branch = opts.branch --[[@as string[] ]] or {}
 
     -- Refs come from fetch_refs (§3.2), so no --decorate here. %at (epoch) +
     -- %ai (carries the tz offset) feed the structured Timestamp (§4).
-    local command = { "git", "log", "--topo-order", "--parents", unpack(opts.branch),
+    local command = { "git", "log", "--topo-order", "--parents", unpack(branch),
         "--pretty=format:%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%s" }
     if opts.count then
         table.insert(command, "-n")
         table.insert(command, tostring(opts.count))
     end
 
+    local linebuf = make_line_buffer()
+    -- Raw-line queue drained by the worker. An explicit head/tail avoids the
+    -- O(n) `table.remove(_, 1)` and the `#queue` ambiguity that niled holes
+    -- would create.
+    local queue = {}
+    local qhead, qtail = 1, 0
+    local scheduled = false
+    local stream_done = false
+
+    local function process_batch()
+        scheduled = false
+        local commits = {}
+        local stop = math.min(qhead + COMMIT_BATCH - 1, qtail)
+        for i = qhead, stop do
+            local commit = parse_commit_line(queue[i])
+            if commit then
+                commits[#commits + 1] = commit
+            end
+            queue[i] = nil
+        end
+        qhead = stop + 1
+
+        if #commits > 0 and opts.on_batch then
+            opts.on_batch(commits)
+        end
+
+        if qhead <= qtail then
+            -- More queued (incl. lines that arrived while we worked): yield to
+            -- the loop, then continue.
+            scheduled = true
+            vim.schedule(process_batch)
+        elseif stream_done then
+            promise.resolve()
+        end
+    end
+
+    local function schedule_drain()
+        if not scheduled then
+            scheduled = true
+            vim.schedule(process_batch)
+        end
+    end
+
+    local function enqueue(lines)
+        for _, line in ipairs(lines) do
+            qtail = qtail + 1
+            queue[qtail] = line
+        end
+    end
+
     vim.fn.jobstart(
         command,
         {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                for _, line in ipairs(lines) do
-                    local commit = parse_commit_line(line)
-                    if commit and opts.on_item then
-                        opts.on_item(commit)
-                    end
+            on_stdout = function(_, data)
+                enqueue(linebuf.feed(data))
+                if qhead <= qtail then
+                    schedule_drain()
                 end
             end,
             on_exit = function()
-                promise.resolve()
+                local last = linebuf.flush()
+                if last ~= "" then
+                    enqueue({ last })
+                end
+                stream_done = true
+                if qhead > qtail then
+                    -- Nothing left to process — resolve now; otherwise the
+                    -- worker resolves once it drains.
+                    promise.resolve()
+                else
+                    schedule_drain()
+                end
             end,
         })
 
@@ -2660,82 +2772,63 @@ function M.open(folder, opts)
             end).next(function()
                 return fetch_commits({
                     branch = opts.branches or { "--all" },
-                    ---@param item Commit
-                    on_item = function(item)
-                        local existing = repo.commits[item.hash]
-                        if existing then
-                            -- Fill the placeholder; keep its already-resolved refs.
-                            existing.author = item.author
-                            existing.date = item.date
-                            existing.parents = item.parents
-                            existing.message = item.message
-                            existing.loaded = true
+                    -- One batch of streamed commits (spec §3): link each into the
+                    -- model, then lay out and insert the whole batch with a single
+                    -- relayout + insert (cheaper than per-commit, and the work is
+                    -- off the stdout handler — see fetch_commits).
+                    ---@param commits Commit[]
+                    on_batch = function(commits)
+                        local new_items = {}
+                        for _, item in ipairs(commits) do
+                            local existing = repo.commits[item.hash]
+                            if existing then
+                                -- Fill the placeholder; keep its resolved refs.
+                                existing.author = item.author
+                                existing.date = item.date
+                                existing.parents = item.parents
+                                existing.message = item.message
+                                existing.loaded = true
 
-                            item = existing
-                        else
-                            repo.commits[item.hash] = item
-                            item.children = {}
-                        end
+                                item = existing
+                            else
+                                repo.commits[item.hash] = item
+                                item.children = {}
+                            end
 
-                        -- Convert parent hashes to references
-                        local newParents = {}
-                        for _, p in ipairs(item.parents) do
-                            -- At this point parents are still the hash strings
-                            -- parsed from `git log`, being resolved to Commits.
-                            local parent = get_or_create_commit(repo, p --[[@as string]])
-                            table.insert(parent.children, item)
-                            table.insert(newParents, parent)
-                        end
+                            -- Convert parent hashes to references
+                            local newParents = {}
+                            for _, p in ipairs(item.parents) do
+                                -- At this point parents are still the hash
+                                -- strings parsed from `git log`, being resolved
+                                -- to Commits.
+                                local parent = get_or_create_commit(repo, p --[[@as string]])
+                                table.insert(parent.children, item)
+                                table.insert(newParents, parent)
+                            end
 
-                        item.parents = newParents
+                            item.parents = newParents
 
-                        --[[
-                        if opts.merge_style.split_on_separate_line and #item.children > 1 then
                             ---@type OrderItem
-                            local split_item = {
-                                type = "split",
+                            local order_item = {
+                                type = "commit",
                                 commit = item,
                                 columns = {},
                             }
-
-                            table.insert(repo.order, split_item)
-                            refresh_columns(opts, repo.order, #repo.order)
-                            controller.insert({ split_item }, #repo.order)
+                            table.insert(repo.order, order_item)
+                            new_items[#new_items + 1] = order_item
                         end
-                        --]]
 
-                        ---@type OrderItem
-                        local order_item = {
-                            type = "commit",
-                            commit = item,
-                            columns = {},
-                        }
-                        table.insert(repo.order, order_item)
                         -- Fast path while the projection is the identity (the
-                        -- common all-normal case): lay out and append one row.
+                        -- common all-normal case): lay out and append the batch.
                         -- Once a branch mode makes the display a separate
-                        -- projection, a streamed commit needs a full reflow (§10).
+                        -- projection, a streamed batch needs a full reflow (§10).
                         if repo.display == repo.order then
-                            refresh_columns(opts, repo.order, #repo.order)
-                            controller.insert({ order_item }, #repo.order)
+                            local from = #repo.order - #new_items + 1
+                            refresh_columns(opts, repo.order, from)
+                            controller.insert(new_items, from)
                         else
                             reflow()
                         end
-
-                        --[[
-                        if opts.merge_style.merge_on_separate_line and #item.parents > 1 and #item.children > 0 then
-                            ---@type OrderItem
-                            local merge_item = {
-                                type = "merge",
-                                commit = item,
-                                columns = {},
-                            }
-
-                            table.insert(repo.order, merge_item)
-                            refresh_columns(opts, repo.order, #repo.order)
-                            controller.insert({ merge_item }, #repo.order)
-                        end
-                        --]]
                     end,
                 })
             end).next(function()
@@ -3474,6 +3567,7 @@ M._internal = {
     move_selection = move_selection,
     ref_byte_col = ref_byte_col,
     parse_commit_line = parse_commit_line,
+    make_line_buffer = make_line_buffer,
     parse_timestamp = parse_timestamp,
     format_absolute = format_absolute,
     format_relative = format_relative,

@@ -100,3 +100,54 @@ describe("format_relative", function()
         assert.equals("just now", format_relative({ epoch = 2000000, offset = 0 }, 1000000))
     end)
 end)
+
+-- The de-chunker that turns an unbuffered jobstart stdout stream (lists of
+-- strings split on "\n", with partial lines at the chunk seams) into whole
+-- lines. This is the new logic behind streaming the git log in batches.
+describe("make_line_buffer", function()
+    local make_line_buffer = internal.make_line_buffer
+
+    it("returns complete lines and holds the trailing partial", function()
+        local lb = make_line_buffer()
+        -- "a\nb\nc" — "a" and "b" are complete; "c" is partial (no newline yet).
+        assert.same({ "a", "b" }, lb.feed({ "a", "b", "c" }))
+        assert.equals("c", lb.flush())
+    end)
+
+    it("stitches a line split across two chunks", function()
+        local lb = make_line_buffer()
+        -- First chunk ends mid-line ("hel"); next chunk continues it ("lo").
+        assert.same({}, lb.feed({ "hel" }))
+        assert.same({ "hello" }, lb.feed({ "lo", "" }))
+        assert.equals("", lb.flush())
+    end)
+
+    it("reassembles a stream chunked at arbitrary byte boundaries", function()
+        local lb = make_line_buffer()
+        local source = "one\ntwo\nthree\nfour"
+        -- Feed one byte at a time, splitting on "\n" the way Neovim does.
+        local got = {}
+        for i = 1, #source do
+            local ch = source:sub(i, i)
+            local data = ch == "\n" and { "", "" } or { ch }
+            for _, l in ipairs(lb.feed(data)) do
+                got[#got + 1] = l
+            end
+        end
+        got[#got + 1] = lb.flush()
+        assert.same({ "one", "two", "three", "four" }, got)
+    end)
+
+    it("handles an empty chunk without emitting a line", function()
+        local lb = make_line_buffer()
+        assert.same({}, lb.feed({}))
+        assert.equals("", lb.flush())
+    end)
+
+    it("emits a blank line between consecutive newlines", function()
+        local lb = make_line_buffer()
+        -- "a\n\nb" -> "a", "" (blank), then "b" partial.
+        assert.same({ "a", "" }, lb.feed({ "a", "", "b" }))
+        assert.equals("b", lb.flush())
+    end)
+end)

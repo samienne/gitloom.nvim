@@ -208,13 +208,16 @@ on_controller(controller)
    │      │ (Future)
    │      ▼
    └─ fetch_commits()            git log --all --topo-order --parents
-          │  per commit line:
+          │  stdout handler (light): stitch partial lines, enqueue raw text,
+          │    schedule a drain — no per-commit work here (see Git I/O).
+          │  scheduled worker, COMMIT_BATCH at a time (yields between batches):
           │    parse_commit_line → Commit
           │    merge into repo.commits (fills ref placeholders, keeps their refs)
           │    resolve parent hashes → Commit refs (+ child links, placeholders)
           │    append OrderItem to repo.order
+          │  then once per batch:
           │    refresh_columns(order)          ← Phase 1 relayout (columns.layout)
-          │    controller.insert(order_item)   ← inserts a blank buffer line
+          │    controller.insert(new_items)    ← inserts the batch's blank lines
           ▼
    (rendering is deferred)
 ```
@@ -244,7 +247,15 @@ on_redraw(top, bottom)
 - `fetch_commits(opts)` — `git log --topo-order --parents` with a
   `%x1f`-delimited pretty-format (`%H %P %an %at %ai %s`). `%at` (epoch) + `%ai`
   (offset) feed the parsed timestamp. No `--decorate`; refs are a separate query
-  (specification.md §3).
+  (specification.md §3). **Streamed unbuffered** so the view fills progressively
+  (spec §3, §10.5): the `on_stdout` handler is kept light — `make_line_buffer`
+  stitches the partial line at each chunk seam, the complete lines are enqueued,
+  and the heavy per-commit work (`parse_commit_line` + `on_batch`) runs in a
+  `vim.schedule`d worker that drains `COMMIT_BATCH` lines per turn and reschedules
+  until the queue is empty, so a large log never blocks the event loop in one
+  callback. `on_batch` does one `refresh_columns` + one `controller.insert` for
+  the whole batch. The returned future resolves only once the stream has closed
+  *and* the queue is fully drained.
 - `fetch_commit_detail(hash)` — `git show -s --date=iso` with a `%x1f`-delimited
   format (`%H %an %ae %ad %cn %ce %cd %P %B`), buffered and resolved as one raw
   string. The on-demand source for the **commit view** (specification.md §11);
