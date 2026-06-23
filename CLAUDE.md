@@ -207,16 +207,35 @@ Coverage:
   column), `split_boundary` (continue vs terminate via `node_of`), `footer`
   (the continuing lane seeds the layout so the footer's top seam matches the main
   view exactly, with the seam parent translated through `node_of` into a
-  collapsed lane), `header` (the transpose-and-flip: the seam is the bottom row
-  matching the main view's top edge, the tip is on top) — both pane results
-  asserted vertically id-continuous — and `condense` (the topological condensed
-  graph: fork/merge junctions, roots, tips and anchor-ref heads kept, linear
-  pass-throughs spliced into edges, edges re-pointed across them, spliced hashes
-  mapped to the next kept node toward the root, the anchor-ref filter, false
-  junctions spliced, root rendered as a real node), and `continue` (follow the
-  active seam lanes' first-parent chains to a root: both lanes converge at their
-  meeting junction and reach the root, every node's chain terminates at a root —
-  never cut off — and no non-active branch is introduced)
+  collapsed lane), `continue_up` + `header` (the **minimal-connecting-subgraph**
+  header: only how the pinned anchors relate to each other + the lanes crossing the
+  cutoff — an isolated crossing lane terminates at a **seam head**, two crossing lanes
+  meeting at a **confluence** render a junction (incl. a confluence dead-end head and
+  nested confluences), an unpinned branch forking off the trunk/an anchor that
+  reconnects to nothing is **pruned** (the gpu regression), a bubble on a pinned spine
+  → node-less junction but an unrelated bubble is pruned, a pinned anchor a labelled
+  `◍` even when isolated, isolated seam heads packed onto a shared row — laid out by the
+  direct seam-up grid with the seam as the bottom row matching the main view's top
+  edge. Each lane keeps its own colour (`lane_of`, the main-view colour so the
+  header matches the graph and forks are distinct — the pivot continuation keeps the
+  pivot's colour, only an extra fork child takes a new one). Asserted vertically
+  id-continuous, **distinct-coloured** (concurrent lanes never share a colour),
+  through the wires-connect checker, with `assert_seam_match` (every crossing lane
+  present at the seam) and a **minimal-subgraph oracle** (`confluences_of` +
+  `assert_no_irrelevant_heads`: every ◍ is a pinned anchor, a crossing-lane begin, or a
+  confluence — never an unrelated head) over a **fuzz sweep** of LARGE random DAGs ×
+  cutoffs (8–20 commits, uncapped so tall headers are stressed), and replayed against
+  the **real lumets2 topology** (all 637 cutoffs, 0 problems) during verification, the
+  header `cap`
+  (`keep_first`: keep the tip + seam-nearest rows, report the elided `+N above`
+  count), `condense` (the topological condensed graph, both down and `up` modes:
+  fork/merge junctions, roots/tips and anchor-ref heads kept, linear pass-throughs
+  spliced into edges, edges re-pointed across them, spliced hashes mapped to the
+  next kept node toward the root/tip, the anchor-ref filter, false junctions
+  spliced, root rendered as a real node), and `continue` (follow the active seam
+  lanes' first-parent chains to a root: both lanes converge at their meeting
+  junction and reach the root, every node's chain terminates at a root — never cut
+  off — and no non-active branch is introduced)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -389,14 +408,43 @@ Details not covered by the spec or architecture:
 - **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
   glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
   view.lua is the pre-Phase-1 projection (§10); pane.lua is the context-pane
-  layout core (boundary-line extraction, `continue` = walk active lanes' first-
-  parent chains, `condense`, `cap`; the header builder via transpose-and-flip;
-  §6.2). The **footer is wired and working** via graph.lua `update_panes` (gated
-  by `opts.panes`, toggled by `F`): a borderless overlay whose seam is read from
-  the rendered line at a screen row (`boundary_at`/`seam_for` via `screenpos`, so
-  split/merge virtual lines work), pinned refs below the cutoff included. The
-  **header** is unwired; arrow-caps and moving the rebuild off the cone-debounce
-  are pending. listview.lua is a git-agnostic reusable widget.
+  layout core (boundary-line extraction; `continue`/`condense`/`footer` = the
+  footer's down-rebuild; `continue_up` = the header's **minimal connecting subgraph**
+  (only how the pinned anchors relate to each other + the lanes crossing the cutoff —
+  the "seeds"): a three-pass reachability over the **display** DAG, up-only —
+  **Pass 1** `seed_reach` (each boundary column + each pinned tip is a seed; walk up via
+  `children`; a node reached by ≥2 distinct seeds is a **confluence**), **Pass 2**
+  `useful` (walk down from confluences + pinned tips, marking ancestors that lead up to
+  one), **Pass 3** induce (walk up from useful seeds keeping only useful children; a
+  non-useful seed → a **seam head** that terminates at the seam). So an unpinned branch
+  forking off the trunk that reconnects to nothing is **pruned** (no stray feature
+  heads — the gpu regression); a branch that only merges back condenses to a node-less
+  junction; ≥2 useful children → junction, 1 → collapse, 0 → head (a dead-ending
+  confluence caps). Invariant: every above-seam boundary `begin` is in the node set
+  (useful node or seam head) so no seam lane drops; `condense(up)`; the **direct seam-up
+  grid** `header` — a bottom-up sweep seeded from the boundary so the seam is the
+  bottom row, columns never reused, each lane drawn in **its own colour**
+  (`lane_of`, the main-view colour; the pivot continuation keeps the pivot's colour,
+  an extra fork child takes its own) and unpinned heads packed onto as few rows as
+  possible (`pack_heads`/`overlay_rows` — pinned anchors and junctions keep their own
+  line); `cap`; §6.2). `boundary_at(.., up=true)` reads a
+  fork seam item's **split** (virtual) line so the fork's divergence is captured. **Both panes are wired** via
+  graph.lua `update_panes` (gated by `opts.panes`, toggled by `F`): borderless
+  overlays (footer at the bottom, header at the top) whose seam is read from the
+  rendered line at a screen row (`boundary_at`/`seam_for` via `screenpos`, so
+  split/merge virtual lines work; `up=true` selects the header's edge). The footer
+  continues the seam lanes down to the roots (pinned refs below the cutoff
+  included); the header rebuilds the focused up-sub-DAG (`dnode`/`order_of` resolve
+  the projected nodes; `lane_main[hash]` from each item's `parent_lanes[1]` gives
+  `lane_of` the main-view colour so the header matches the graph) and lays it out
+  seam-up with distinct colours and packed unpinned heads — `converge_header`
+  min-fit-sizes from the `(#pinned tips above)+1` guess up to `HEADER_MAX` (8),
+  capping over-tall headers with `+N above`, and **hides the header at the top**
+  (`w0` display index ≤ 1). HEAD plus `master`/`main`/`dev` are pinned by default
+  (`effective_pinned`, so they get their own labelled lines); `P` toggles others.
+  Full cross-level head packing (all unpinned heads on ONE row, vs. today's
+  consecutive packing) and moving the rebuild off the cone-debounce are pending.
+  listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua

@@ -457,26 +457,76 @@ A region that *touches* the boundary is therefore never folded away; its crossin
 lane is preserved and terminated explicitly. This is the "wires must connect"
 grid invariant (§5.1) lifted to the window edge.
 
-**Non-anchor termination.** How a crossing non-anchor lane ends is the tunable
-part (expected to need iteration), but the choice is binary:
+**The minimal connecting subgraph.** A pane is a **focused rebuild**, not a
+reduction of the whole off-screen graph. The header shows **only how the pinned
+anchors relate to each other and to the lanes crossing the cutoff** (the "seeds") —
+the smallest graph that connects those endpoints. The build is a reachability over
+the **display** DAG (the projected nodes the main view shows), **up-only** (toward
+children/newer):
 
-- **merges into an anchor** — if its commits are reachable from a pinned owner
-  (their signature, §10.2, contains an anchor), the lane is drawn up to the
-  junction where it joins the anchor, then folded into the anchor's lane;
-- **terminated minimally** — otherwise it is **capped at the boundary row** (an
-  up/down arrow glyph with the branch name, e.g. `↑ feature/x`), costing no extra
-  pane rows.
+- **Seeds** are the lanes crossing the cutoff (each boundary column is its own seed)
+  plus the pinned anchor tips.
+- A **confluence** is a commit reached, going up, by **≥2 distinct seeds** — the place
+  two crossing lanes (or a crossing lane and an anchor) actually converge. A commit is
+  **useful** if going up it leads to a confluence or a pinned anchor.
+- A seed whose up-cone contains **no** confluence and reaches no anchor is unrelated to
+  everything else, so it **terminates immediately at the seam with a head** — it is not
+  walked up. Otherwise it is drawn up to its first confluence; at a fork only the
+  children that lead somewhere useful continue (≥2 → junction, 1 → silent collapse,
+  0 → head). A confluence whose merged lane then dead-ends also caps with a head.
+
+So an unpinned branch that forks off the trunk and reconnects to nothing — a stray
+feature head — **never appears**; only the connective tissue between anchors and
+crossing lanes is drawn. (A branch that only **merges back** into another above the
+cutoff condenses to a node-less junction rather than a stray head. When many lanes
+genuinely interconnect off-screen the header can still grow; it is capped with a
+`+N above` overflow.)
+
+**Lane termination.** Every crossing lane is *continued* until it ends at real
+topology — never arrow-capped:
+
+- it ends at a **head** — drawn as a `◍` collapsed marker — either at its own tip (an
+  isolated crossing lane, drawn continuously up from the seam to where it terminates)
+  or where a dead-ending confluence caps;
+- or at a **junction** — the merge/fork where it joins another lane, drawn as a
+  **node-less 3-way crossing** (box-drawing only, no commit glyph).
+
+Pinned **anchors** keep a labelled row (the anchor's spine, tip → seam); every
+other head is a **bare `◍`** (no label). A fully-disconnected pinned anchor
+(multi-root, with no seed reaching it) shows as a lone labelled head (its spine is not
+drawn — the up-only walk does not descend to its separate root). A **linear run** (a
+lane stretch with no head, junction, or anchor on it) costs **zero** rows — it is pure
+vertical continuation. This is the same "wires must connect" grid invariant (§5.1)
+lifted to the window edge: no lane dangles, none stops in mid-air.
+
+**Colour.** Each lane is drawn in **its own colour — the same colour the main view
+gives that lane** (§5.5), so a branch reads identically in the pane and the graph
+and forking branches are visually distinct. A fork's mainline continuation keeps the
+incoming lane's colour; each *extra* fork child takes its own. (A pane that drew
+every branch one colour would read as a single discontinuous tangle.)
+
+**Packing.** Bare-`◍` heads (the unpinned tips) are **packed** onto as few rows as
+possible — multiple `◍` share a row wherever their columns don't collide (the §10.4
+marker-overlay rule), so a busy common-ancestor fork is a handful of marker rows, not
+one row per head. **Pinned anchors and junction rows are never packed** — each keeps
+its own line so the anchors stay legible.
 
 **Sizing.** Panes are **content-driven within a cap**, computed so the size is
 stable (no scroll-induced bounce, §6 sticky principle):
 
-- **Header.** Height is a pure function of the scroll offset `S` (the main view's
-  top line): `H = clamp(G(S), 0, header_max)`, where `G(S)` is the folded row
-  count of the prefix above `S`. There is no feedback loop (the top line is set
-  by scrolling, not by `H`). To avoid the main view's height twitching as `G(S)`
-  changes, `H` **grows immediately but shrinks only on settle** (debounced), the
-  same anti-bounce rule as sticky columns. When the fold exceeds `header_max`, the
-  surplus collapses into a trailing **`+N above`** overflow indicator.
+- **Header.** From the seeds the header rebuilds the **minimal connecting subgraph**
+  (above) by the two reachability passes, then condenses linear runs and lays the
+  result out by a **direct seam-up grid**: the bottom row is seeded *from* the
+  boundary (so its lanes line up with the main view's top row *by construction*), and
+  rows are built upward from there. Height is found by a **min-fit search**: guess
+  `H = (#pinned tips above the cutoff) + 1`, build, and grow `H` by one — re-deriving
+  the cutoff at the new height each round — until the rows fit. To avoid the main
+  view's height twitching, `H` **grows immediately but shrinks only on settle**
+  (debounced), the same anti-bounce rule as sticky columns; the tip is pinned at the
+  top so growth happens at the bottom. When the fold
+  exceeds `header_max`, the surplus collapses into a trailing **`+N above`**
+  indicator (the tip + the seam-nearest rows are kept). The header **vanishes**
+  entirely when the view is already scrolled to the top (nothing off-screen above).
 - **Footer.** The footer anchors to the main view's *bottom* line, which floats
   with the main height, so its size is a mild fixed point; it is resolved by
   reserving a **fixed** footer height (the footer is small — roots plus a few
