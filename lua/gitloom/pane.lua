@@ -671,8 +671,11 @@ local function assemble(cells, width, node_col, node_commit)
     local out = {}
     for j = 1, width do
         local segs = cells[j] or {}
-        -- A node cell is coloured by the lane it sits on; a plain cell by its bar.
-        local prim = (node_col == j) and node_seg(segs) or segs[1]
+        -- A cell is coloured by the lane running THROUGH it vertically, not by a
+        -- horizontal arm that merely turns into it — so a lane keeps its own colour
+        -- across corners and crossings (the fork arm into dev's column was colouring
+        -- dev's corner in the parent's colour).
+        local prim = node_seg(segs)
         out[j] = {
             connectivity = union(segs),
             lanes = segs,
@@ -1013,9 +1016,9 @@ function M.header(items, boundary, node_of, lane_of)
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.id ~= nil and final[s.id] then s.color = final[s.id] end
                 end
-                -- Re-pick the cell's primary colour after recolouring: a node by the
-                -- lane it sits on, a plain cell by its first bar.
-                local prim = cell.has_commit and node_seg(cell.lanes or {}) or (cell.lanes or {})[1]
+                -- Re-pick the cell's primary colour after recolouring: the lane running
+                -- through it vertically, so a turn keeps its own lane's colour.
+                local prim = node_seg(cell.lanes or {})
                 if prim then cell.color = prim.color; cell.id = prim.id end
             end
         end
