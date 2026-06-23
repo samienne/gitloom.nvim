@@ -558,15 +558,28 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     end
     while #stack3 > 0 do
         local c = stack3[#stack3]; stack3[#stack3] = nil
-        -- Above a CONFLUENCE the seeds have already met, so the shared future history is
-        -- one merged lane — follow only its **first-parent** continuation up to the tip,
-        -- not every branch that history later spawned. (Without this, everything above
-        -- the meeting point is reachable from both seeds, so all of it is a confluence
-        -- and the header balloons to dozens of unrelated heads — the line-122 blowup.)
-        local conf = is_confluence(c.hash)
-        for _, ch in ipairs(c.children or {}) do
-            if useful[ch.hash] and above(ch) and ((not conf) or (ch.parents and ch.parents[1] == c)) then
-                induct(ch)
+        -- Follow each lane's OWN continuation, not the whole shared future.
+        --   * Below a confluence, a lane goes up via its **first-parent child** (its
+        --     identity); the only other child worth taking is a **confluence** — a
+        --     commit where this lane MEETS another (a real merge of two tracked lanes).
+        --     Everything else (forks off to unrelated tips) is left out.
+        --   * AT/above a confluence the lanes have already merged into one, so follow a
+        --     SINGLE continuation (its first-parent child) up to the tip — the shared
+        --     future may itself fork into dozens of branches, but none of them relate to
+        --     the crossing lanes, so they are dropped. (This is the line-122 blowup:
+        --     every branch of the shared future was being pulled in as its own head.)
+        if is_confluence(c.hash) then
+            for _, ch in ipairs(c.children or {}) do
+                if useful[ch.hash] and above(ch) and ch.parents and ch.parents[1] == c then
+                    induct(ch); break -- one merged lane, not every fork above it
+                end
+            end
+        else
+            for _, ch in ipairs(c.children or {}) do
+                if useful[ch.hash] and above(ch)
+                    and ((ch.parents and ch.parents[1] == c) or is_confluence(ch.hash)) then
+                    induct(ch)
+                end
             end
         end
     end
@@ -621,6 +634,20 @@ local function conn(t)
     return { up = t.up or false, down = t.down or false, left = t.left or false, right = t.right or false }
 end
 
+--- The segment a NODE (◍/junction) sits on — its own **vertical** lane, preferred
+--- over a passing horizontal arm (a merge arm crossing the column), so the node is
+--- coloured by its branch, not by a lane that merely turns through it. Falls back to
+--- the first segment.
+local function node_seg(segs)
+    local best
+    for _, s in ipairs(segs) do
+        local c = s.connectivity
+        if (c.up or c.down) and not (c.left or c.right) then return s end
+        best = best or s
+    end
+    return best
+end
+
 --- The union of a cell's segments' connectivity (the flat glyph connectivity).
 local function union(segs)
     local u = { up = false, down = false, left = false, right = false }
@@ -644,13 +671,15 @@ local function assemble(cells, width, node_col, node_commit)
     local out = {}
     for j = 1, width do
         local segs = cells[j] or {}
+        -- A node cell is coloured by the lane it sits on; a plain cell by its bar.
+        local prim = (node_col == j) and node_seg(segs) or segs[1]
         out[j] = {
             connectivity = union(segs),
             lanes = segs,
             has_commit = node_col == j,
             commit = (node_col == j) and node_commit or nil,
-            id = segs[1] and segs[1].id or nil,
-            color = segs[1] and segs[1].color or nil,
+            id = prim and prim.id or nil,
+            color = prim and prim.color or nil,
         }
     end
     return out
@@ -949,10 +978,15 @@ function M.header(items, boundary, node_of, lane_of)
                 end
             end
         end
+        local head_id = {} -- ids that terminate at a ◍ head (down, no up, in a node cell)
         for ri, r in ipairs(rows) do
             for _, cell in ipairs(r.columns or {}) do
                 for _, s in ipairs(cell.lanes or {}) do
-                    if s.id ~= nil then id_rows[s.id][ri] = true end
+                    if s.id ~= nil then
+                        id_rows[s.id][ri] = true
+                        local cc = s.connectivity or {}
+                        if cell.has_commit and cc.down and not cc.up then head_id[s.id] = true end
+                    end
                 end
             end
         end
@@ -968,7 +1002,9 @@ function M.header(items, boundary, node_of, lane_of)
             for oid, c in pairs(final) do
                 local overlap = false
                 for ri in pairs(id_rows[id]) do if id_rows[oid][ri] then overlap = true; break end end
-                if overlap then used[c] = true end
+                -- Two HEADS must differ even when not concurrent: each is a distinct
+                -- branch tip, so it must read as a distinct colour (no HEAD/dev clash).
+                if overlap or (head_id[id] and head_id[oid]) then used[c] = true end
             end
             final[id] = free_color(used, pref[id])
         end
@@ -977,7 +1013,10 @@ function M.header(items, boundary, node_of, lane_of)
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.id ~= nil and final[s.id] then s.color = final[s.id] end
                 end
-                if cell.lanes and cell.lanes[1] then cell.color = cell.lanes[1].color end
+                -- Re-pick the cell's primary colour after recolouring: a node by the
+                -- lane it sits on, a plain cell by its first bar.
+                local prim = cell.has_commit and node_seg(cell.lanes or {}) or (cell.lanes or {})[1]
+                if prim then cell.color = prim.color; cell.id = prim.id end
             end
         end
     end

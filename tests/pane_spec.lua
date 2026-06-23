@@ -190,6 +190,44 @@ local function assert_no_regular_commits(rows)
     end
 end
 
+-- No two ◍ heads may share a colour. Each head is a distinct branch tip, so it must
+-- read as a distinct colour — the regression: HEAD and dev both drawn the same colour
+-- with one lane between them. (Stronger than the per-row distinct-colour check: heads
+-- on different rows must still differ.)
+local function assert_distinct_head_colours(rows, ctx)
+    local by_colour = {}
+    for ri, r in ipairs(rows) do
+        for _, cell in ipairs(r.columns or {}) do
+            if cell.has_commit and cell.color ~= nil then
+                assert.is_nil(by_colour[cell.color],
+                    (ctx or "") .. (" two heads share colour %s (rows %s, %d)"):format(
+                        tostring(cell.color), tostring(by_colour[cell.color]), ri))
+                by_colour[cell.color] = ri
+            end
+        end
+    end
+end
+
+-- The header must never invent heads: the number of ◍ heads cannot exceed the number
+-- of SEEDS — the lanes crossing the cutoff plus any pinned anchor whose tip sits above
+-- the cutoff without crossing it (a disconnected anchor still gets one labelled head).
+-- Each seed terminates at most once; merges only REDUCE the head count. A blowup — 27
+-- heads from 2 crossing lanes — fails here. `extra` = the non-crossing pinned tips.
+local function assert_heads_le_crossing(rows, boundary, extra, ctx)
+    local crossing = 0
+    for _ in pairs(boundary) do crossing = crossing + 1 end
+    local heads = 0
+    for _, r in ipairs(rows) do
+        for _, cell in ipairs(r.columns or {}) do
+            if cell.has_commit then heads = heads + 1 end
+        end
+    end
+    assert.is_true(heads <= crossing + (extra or 0),
+        (ctx or "") .. (" %d heads but only %d crossing lanes (+%d pinned)"):format(
+            heads, crossing, extra or 0))
+end
+
+
 -- Run the full header pipeline on a laid-out DAG: read the up-boundary at the seam
 -- line, rebuild the focused sub-DAG (continue_up), and lay it out (header).
 -- `seam_pos` is the order index of the cutoff line. Returns res, boundary, cond.
@@ -440,6 +478,30 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
             assert.is_nil(seen[c], "two branch heads share colour " .. tostring(c))
             seen[c] = true
         end
+    end)
+
+    it("collapses the shared future above a meeting point (no head blowup)", function()
+        -- Two crossing lanes a, b meet at the confluence M; ABOVE M their shared future
+        -- forks into many branches (t1..t5). Those forks don't relate to a or b, so the
+        -- minimal header must collapse them — the merged lane shows ONE continuation, not
+        -- five heads. heads must not exceed the crossing lanes (the line-122 blowup).
+        local items = h.dag({
+            { "t1", { "u" } }, { "t2", { "u" } }, { "t3", { "u" } },
+            { "u", { "M" } }, { "t4", { "M" } }, { "t5", { "M" } },
+            { "M", { "a", "b" } },
+            { "a", { "base" } }, { "b", { "base" } }, { "base", {} },
+        })
+        local opts = h.big_opts()
+        local res, boundary, cond, idx = header_of(items, opts, 10) -- seam at base; a,b cross
+        local nb = 0; for _ in pairs(boundary) do nb = nb + 1 end
+        assert.equals(2, nb)
+        assert.is_true(cond.items ~= nil)
+        assert.is_true(confluences_of(items, idx, boundary, 10).M == true)
+        assert_heads_le_crossing(res.rows, boundary, 0)
+        assert_distinct_head_colours(res.rows)
+        assert_seam_match(res.rows, boundary)
+        assert_continuous(res.rows)
+        assert.same({}, header_grid_errors(opts, res.rows))
     end)
 
     it("keeps each pinned anchor's colour STABLE and DISTINCT across cutoffs", function()
@@ -1000,7 +1062,21 @@ describe("pane.header — fuzz invariants (§6.2)", function()
                         assert_continuous(res.rows)
                         assert_no_regular_commits(res.rows)
                         assert_distinct_colours(res.rows)
+                        assert_distinct_head_colours(res.rows, ctx)
                         assert_unique_terminations(res.rows, ctx)
+                        -- non-crossing pinned tips above the cutoff (each a lone head)
+                        local begins = {}
+                        for _, l in pairs(boundary) do if l.begin then begins[l.begin.hash] = true end end
+                        local extra = 0
+                        for _, it in ipairs(items) do
+                            local c = it.commit
+                            if idx[c.hash] and idx[c.hash] < si and not begins[c.hash] then
+                                for _, rf in ipairs(c.refs or {}) do
+                                    if pinned[rf.name] then extra = extra + 1; break end
+                                end
+                            end
+                        end
+                        assert_heads_le_crossing(res.rows, boundary, extra, ctx)
                         assert_no_idle_rows(res.rows, ctx)
                         local errs = header_grid_errors(opts2, res.rows)
                         assert.same({}, errs, ctx .. " grid: " .. table.concat(errs, "; "))
