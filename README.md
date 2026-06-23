@@ -168,7 +168,10 @@ parents, the full message, a diffstat, and the diff), fetched on demand. The
 diff is colored line-by-line (added / removed / hunk / file headers). The
 diffstat lists the changed files; pressing `<CR>` on a file line jumps to that
 file's section in the diff below (`<C-o>` / `<C-i>` jump back and forth, and
-`<C-o>` closes the view once it would step back out). `q` closes it.
+`<C-o>` closes the view once it would step back out). `q` closes it. As you
+scroll the diff, a small **context header** sticks to the top of the view,
+showing the current file and `@@ … @@` hunk once their real headers have
+scrolled off — so you never lose track of where you are.
 
 The first line of the commit view is an **action label** (`▶ Open diff
 (diffview)`) and the cursor parks on it when the view opens, so `<CR>` then

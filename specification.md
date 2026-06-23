@@ -861,7 +861,8 @@ are uncolored. The highlight groups come from `palette.diff` (§8), using
 always-defined UI groups by default, applied as extmarks — the view does **not**
 switch the buffer to `filetype=diff`, so the custom metadata header above stays
 unaffected. Language-aware (intra-line) syntax highlighting of the diff content
-is a possible future enhancement.
+is a possible future enhancement. While the diff is scrolled, a **context
+header** keeps the current file and hunk visible at the top of the view (§11.6).
 
 ### 11.4 Changed-files list (diffstat)
 
@@ -916,6 +917,34 @@ is unset) the label is omitted and `D` is a no-op.
 
 Planned: graph-side range selection (building on the §2 selection substrate and
 §10 view work) to pick two commits and feed the same provider.
+
+### 11.6 Diff context header
+
+While scrolling the diff (§11.3), the commit view shows a **context header**: a
+small borderless overlay pinned to the top of the view naming the location the
+top of the **viewport** currently sits inside — independent of the cursor. It
+carries up to **two lines**:
+
+1. the **file** — the path from the governing `diff --git` / `+++` header;
+2. the **hunk** — the governing `@@ … @@ <section>` line.
+
+The **effective top** is the first diff row that remains visible *below* the
+overlay — i.e. the window's top line advanced past the overlay's own height, so
+the header never merely repeats a line it is covering. "Governing" means the
+nearest file / hunk header at or above that effective top.
+
+Each line appears **only when its real header has scrolled above** the effective
+top; while a file's `diff --git` line or a hunk's `@@` line is still on screen
+below the overlay, that line is omitted. So between a file header and its first
+`@@`, only the file line shows; with neither scrolled off, the overlay is empty
+(zero height) and invisible. The header is likewise absent while the viewport
+top is still in the metadata / diffstat region (§11.2/§11.4) — it exists only
+over the diff proper.
+
+The two lines reuse the §11.3 diff highlight groups — the file line as a
+`header`, the hunk line as a `hunk` (`palette.diff`, §8). The overlay never
+takes focus and never mutates the buffer; like the graph context panes (§6.2)
+it is pure decoration recomputed as the window scrolls.
 
 ## 12. Reachability emphasis
 
