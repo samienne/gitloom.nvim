@@ -442,6 +442,55 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         end
     end)
 
+    it("keeps each pinned anchor's colour STABLE and DISTINCT across cutoffs", function()
+        -- Two long-lived pinned branches, head (h1..h4) and dev (d1..d4), both off a
+        -- shared base. As the cutoff scrolls, each anchor's header colour must stay the
+        -- SAME (its main-view colour, which is fixed) and the two must stay DISTINCT —
+        -- the regression was the anchors swapping ids/colours between cutoffs (HEAD 1→2,
+        -- dev 3→1) because the recolour grabbed whichever lane it saw first.
+        local items = h.dag({
+            { "h1", { "h2" } }, { "h2", { "h3" } }, { "h3", { "h4" } }, { "h4", { "base" } },
+            { "d1", { "d2" } }, { "d2", { "d3" } }, { "d3", { "d4" } }, { "d4", { "base" } },
+            { "base", {} },
+        })
+        items[1].commit.refs = { { name = "head" } } -- h1
+        items[5].commit.refs = { { name = "dev" } }  -- d1
+        local opts = h.big_opts()
+        local main = columns.layout(opts, items)
+        local idx, lane_main = {}, {}
+        for i, it in ipairs(items) do
+            idx[it.commit.hash] = i
+            local pl = main[i].parent_lanes
+            if pl and pl[1] then lane_main[it.commit.hash] = { id = pl[1].id, color = pl[1].color } end
+        end
+        local want_head = lane_main.h1 and lane_main.h1.color
+        local want_dev = lane_main.d1 and lane_main.d1.color
+        assert.is_true(want_head ~= want_dev) -- distinct in the main view to begin with
+
+        -- The colour of a named anchor's head in the header, at a given cutoff.
+        local function anchor_colour(res, name)
+            for _, r in ipairs(res.rows) do
+                for _, cell in ipairs(r.columns) do
+                    if cell.has_commit and cell.commit.refs then
+                        for _, rf in ipairs(cell.commit.refs) do
+                            if rf.name == name then return cell.color end
+                        end
+                    end
+                end
+            end
+        end
+        -- Every cutoff that leaves both anchors above it.
+        for si = 2, 9 do
+            local res = header_of(items, opts, si, { head = true, dev = true })
+            local hc, dc = anchor_colour(res, "head"), anchor_colour(res, "dev")
+            if hc and dc then
+                assert.equals(want_head, hc, ("si=%d head colour drifted"):format(si))
+                assert.equals(want_dev, dc, ("si=%d dev colour drifted"):format(si))
+                assert.is_true(hc ~= dc, ("si=%d head and dev share a colour"):format(si))
+            end
+        end
+    end)
+
     it("packs isolated seam heads onto a shared row; a pinned anchor keeps its own", function()
         -- A fork at the seam `X` diverges into three unpinned tips and one pinned. Each
         -- unpinned tip is an isolated crossing lane → a bare ◍ on the seam row, packed

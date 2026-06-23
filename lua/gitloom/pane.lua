@@ -526,9 +526,6 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     local function mark_useful(n)
         if n and not useful[n.hash] then useful[n.hash] = true; stack2[#stack2 + 1] = n end
     end
-    -- (A confluence node is one we visited in Pass 1, so it is reachable as some `c`
-    -- below; we re-discover the node object while walking, so key Pass 2 off the seeds
-    -- and the confluence flag set during the walk.)
     local function walk_useful()
         while #stack2 > 0 do
             local c = stack2[#stack2]; stack2[#stack2] = nil
@@ -537,7 +534,6 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
             end
         end
     end
-    -- Seed Pass 2 from confluences (found by re-walking up from each seed) and pins.
     for _, s in ipairs(seeds) do
         if s.pinned then mark_useful(s.node) end
         local seen, stack = { [s.node.hash] = true }, { s.node }
@@ -562,8 +558,16 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     end
     while #stack3 > 0 do
         local c = stack3[#stack3]; stack3[#stack3] = nil
+        -- Above a CONFLUENCE the seeds have already met, so the shared future history is
+        -- one merged lane — follow only its **first-parent** continuation up to the tip,
+        -- not every branch that history later spawned. (Without this, everything above
+        -- the meeting point is reachable from both seeds, so all of it is a confluence
+        -- and the header balloons to dozens of unrelated heads — the line-122 blowup.)
+        local conf = is_confluence(c.hash)
         for _, ch in ipairs(c.children or {}) do
-            if useful[ch.hash] and above(ch) then induct(ch) end
+            if useful[ch.hash] and above(ch) and ((not conf) or (ch.parents and ch.parents[1] == c)) then
+                induct(ch)
+            end
         end
     end
 
@@ -952,6 +956,12 @@ function M.header(items, boundary, node_of, lane_of)
                 end
             end
         end
+        -- Assign ASCENDING by id so boundary lanes (low, main-view ids — the pinned
+        -- anchors and other crossing lanes) claim their preferred colour FIRST and keep
+        -- it; fork children (high, fresh ids) de-collide around them. This keeps each
+        -- anchor's colour STABLE as the cutoff moves (its main-view colour is fixed) and
+        -- matching the graph, instead of being bumped by whichever lane was seen first.
+        table.sort(order_ids)
         local final = {}
         for _, id in ipairs(order_ids) do
             local used = {}
