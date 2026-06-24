@@ -65,6 +65,31 @@ function M.make_future()
     return future, promise
 end
 
+--- Build a single `{ text, highlight }` fragment: `text` optionally wrapped in
+--- one highlight span covering its whole width. An empty string carries no span.
+--- The single-fragment primitive that `compose` concatenates. Left untyped (like
+--- the original local) so callers may pass a possibly-nil cell char/group
+--- without a lint warning.
+function M.highlight_text(text, hl)
+    if text == "" then
+        return {
+            text = text,
+            highlight = {},
+        }
+    end
+
+    return {
+        text = text,
+        highlight = hl and {
+            {
+                start_pos = 0,
+                end_pos = string.len(text),
+                hl = hl,
+            },
+        } or nil,
+    }
+end
+
 --- Concatenate a list of text/highlight fragments into a single
 --- `{ text, highlight }` record, offsetting each fragment's highlight spans by
 --- the running text length. List items may be `{ text, highlight }` tables or
