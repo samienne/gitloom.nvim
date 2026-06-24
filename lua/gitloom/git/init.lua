@@ -17,5 +17,6 @@ local function reexport(mod)
 end
 
 reexport(require("gitloom.git.order"))
+reexport(require("gitloom.git.date"))
 
 return M
