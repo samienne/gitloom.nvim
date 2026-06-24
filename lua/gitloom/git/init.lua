@@ -16,6 +16,7 @@ local function reexport(mod)
     end
 end
 
+reexport(require("gitloom.git.model"))
 reexport(require("gitloom.git.order"))
 reexport(require("gitloom.git.date"))
 reexport(require("gitloom.git.parse"))
