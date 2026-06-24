@@ -178,6 +178,12 @@ Coverage:
   `diffstat_files` (per-file counts, `start` offsets, rename, binary),
   `format_diffstat` (summary totals, per-file rows), and `commit_range`
   (single-commit `DiffRange`: `^!`, empty-tree for roots, `from` = first parent)
+- `tests/commit_selection_spec.lua` — the commit-selection (range) pure helpers
+  (spec §13): `range_endpoints` (single-commit `^!`, span `<older>^..<newer>`,
+  empty-tree when the older end is a root), `sel_ascend_children` (first-parent
+  children first), `sel_step` (extend/contract along the branch, flip at the
+  anchor, clamp at tip/root) and `sel_switch` (rotate the parent at a merge /
+  child at a split, no-op on a linear path; §13.2/§13.3)
 - `tests/reachability_spec.lua` — `reachable_cone` (spec §12.1: pivot/ancestors/
   descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
   attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and
@@ -235,6 +241,8 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 (the streaming-stdout line de-chunker; §3), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
+`range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` (the
+commit-selection range + path-walking pure helpers; §13),
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
@@ -444,6 +452,26 @@ Details not covered by the spec or architecture:
   The default `open` runs diffview guarded; diffview is the only optional
   dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
   `commit_range` is.
+- **Commit selection (range)** (specification.md §13; toggled by `V`): a modal
+  selection that is a **path along one branch** over the visible projection
+  (`repo.display`), not a contiguous row block. State lives in `sel` (in `M.open`):
+  `path` (DisplayNodes newest-first), `anchor`/`cursor` (the two ends — always
+  endpoints, so the path is exactly `anchor..cursor`), and `dparent`/`dchild` (the
+  branch chosen at each junction for `h`/`l`). The walk is pure
+  (`sel_step`/`sel_switch`/`sel_ascend_children`) over the DisplayNode graph
+  (`.parents` first = trunk, `.children`); the window glue resolves rows
+  (`goto_hash`), lane/marker emphasis (`mark_path`, reusing the §12 dimming via
+  `view_state.cone`), the cursor-on-lane parking, and the range (`selection_range`
+  → `range_endpoints` → the **literal** `<older>^..<newer>` `DiffRange`). `j`/`k`
+  and `<C-d>`/`<C-u>` are bound to walk while active and **fall through to the
+  builtin motions** (fed without remap) when inactive; `h`/`l` switch branch while
+  active (else the §2 ref selection); `<CR>`/`D` open the range in the diff
+  provider (**phase 1** — the in-view range mode of §13.5 is the planned phase-2
+  follow-up). A `reflow()` recreates DisplayNodes, so it drops any live selection
+  (stale references). Selection isn't started on a packed-marker line, and the
+  walk clamps where a node has no own row (a head packed into a marker group); see
+  §13.6. The pure helpers are tested; the window glue is not (like the other
+  window glue).
 - **Reachability dimming = Lane model + walk** (specification.md §5, §12):
   Phase 1 (`columns.layout`) makes one **Lane** (edge `{id, begin, parent,
   highlighted}`) per parent/child edge, wires `OrderItem.parent_lanes`/

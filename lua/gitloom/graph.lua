@@ -64,7 +64,8 @@ local KEYBINDS = {
     { "<CR>", "Action menu for the row (examine · diff · collapse/expand/hide)" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
-    { "h/l", "Select previous / next ref on the row" },
+    { "h/l", "Select previous / next ref (switch branch while selecting)" },
+    { "V", "Commit selection: range along a branch (j/k walk · h/l switch · o swap · <CR>/D diff · Esc exit)" },
     { "H", "Toggle reachability highlighting (dimming)" },
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
@@ -610,6 +611,145 @@ local function move_selection(pos, count, dir)
         if pos == nil or pos <= 1 then return nil end
         return pos - 1
     end
+end
+
+-- ── Commit selection (range) — pure path walking (spec §13) ──────────────────
+-- A selection is a **path** along one branch over the **visible projection**: an
+-- ordered list of DisplayNodes from the newest (top, index 1) to the oldest
+-- (bottom). `anchor` is the fixed end, `cursor` the moving one; both are always
+-- endpoints, so the path is exactly `anchor..cursor`. These helpers operate only
+-- on the DisplayNode graph (`.parents` first = trunk, `.children`, `.hash`), so
+-- they are pure and unit-testable; the window glue resolves rows/lanes/ranges.
+---@class SelectionPath
+---@field path table[]                 DisplayNodes, newest-first (index 1 = top)
+---@field anchor table                 the fixed endpoint
+---@field cursor table                 the moving endpoint
+---@field dparent table<string,integer>  per-merge chosen parent index (h/l, down)
+---@field dchild table<string,integer>   per-split chosen child index (h/l, up)
+
+--- The children of `node` to ascend into, first-parent continuation(s) first
+--- (a child `ch` is on the same branch when `ch.parents[1] == node`), then the
+--- rest in edge order. The default ascent (index 1) keeps the mainline; `h`/`l`
+--- rotate among the others at a split (§13.3).
+---@param node table
+---@return table[]
+local function sel_ascend_children(node)
+    local fp, other = {}, {}
+    for _, ch in ipairs(node.children or {}) do
+        if (ch.parents or {})[1] == node then
+            fp[#fp + 1] = ch
+        else
+            other[#other + 1] = ch
+        end
+    end
+    for _, ch in ipairs(other) do fp[#fp + 1] = ch end
+    return fp
+end
+
+--- 1-based cyclic rotation of index `k` within `n` by `delta` (±1).
+local function sel_rotate(k, n, delta)
+    return ((k - 1 + delta) % n) + 1
+end
+
+--- Step the moving end one commit along the branch (§13.2). `dir` is "down"
+--- (toward parents / older) or "up" (toward children / newer). Extends when the
+--- cursor is the growing end, contracts when it is the other end (moving back
+--- toward the anchor). Mutates `st`; a no-op at a tip/root (nothing to extend).
+---@param st SelectionPath
+---@param dir "down"|"up"
+local function sel_step(st, dir)
+    local path = st.path
+    local n = #path
+    local at_top = path[1] == st.cursor
+    local at_bottom = path[n] == st.cursor
+    if dir == "down" then
+        if n == 1 or at_bottom then
+            local node = st.cursor
+            local nxt = (node.parents or {})[st.dparent[node.hash] or 1]
+            if not nxt then return end
+            path[#path + 1] = nxt
+            st.cursor = nxt
+        else -- cursor at the top end: contract from the top
+            table.remove(path, 1)
+            st.cursor = path[1]
+        end
+    else -- "up"
+        if n == 1 or at_top then
+            local node = st.cursor
+            local kids = sel_ascend_children(node)
+            if #kids == 0 then return end
+            local nxt = kids[math.min(st.dchild[node.hash] or 1, #kids)]
+            table.insert(path, 1, nxt)
+            st.cursor = nxt
+        else -- cursor at the bottom end: contract from the bottom
+            table.remove(path)
+            st.cursor = path[#path]
+        end
+    end
+end
+
+--- Switch which branch the path follows at the nearest junction between the
+--- cursor and the anchor, on the side the path is growing (§13.3): a **merge**
+--- when growing down (rotate the parent), a **split** when growing up (rotate the
+--- child). `delta` is +1 (`l`) / -1 (`h`). The path is re-derived from the
+--- junction onward, preserving its length where the new branch is long enough.
+--- A no-op on a linear path (no junction between the ends). Returns true when a
+--- switch happened. Mutates `st`.
+---@param st SelectionPath
+---@param delta integer
+---@return boolean
+local function sel_switch(st, delta)
+    local path = st.path
+    local n = #path
+    if n < 2 then return false end
+    local growing_down = path[n] == st.cursor and path[1] == st.anchor
+    local growing_up = path[1] == st.cursor and path[n] == st.anchor
+    if growing_down then
+        for i = n - 1, 1, -1 do -- nearest merge above the cursor
+            local node = path[i]
+            local parents = node.parents or {}
+            if #parents > 1 then
+                local cur = 1
+                for k, p in ipairs(parents) do if p == path[i + 1] then cur = k break end end
+                local nk = sel_rotate(cur, #parents, delta)
+                if nk == cur then return false end
+                st.dparent[node.hash] = nk
+                local removed = n - i
+                for _ = 1, removed do table.remove(path) end
+                for _ = 1, removed do -- re-extend down, default continuation
+                    local tail = path[#path]
+                    local nxt = (tail.parents or {})[st.dparent[tail.hash] or 1]
+                    if not nxt then break end
+                    path[#path + 1] = nxt
+                end
+                st.cursor = path[#path]
+                return true
+            end
+        end
+    elseif growing_up then
+        for i = 2, n do -- nearest split below the cursor
+            local node = path[i]
+            local kids = sel_ascend_children(node)
+            if #kids > 1 then
+                local cur = 1
+                for k, ch in ipairs(kids) do if ch == path[i - 1] then cur = k break end end
+                local nk = sel_rotate(cur, #kids, delta)
+                if nk == cur then return false end
+                st.dchild[node.hash] = nk
+                local removed = i - 1
+                for _ = 1, removed do table.remove(path, 1) end
+                for _ = 1, removed do -- re-extend up, default continuation
+                    local head = path[1]
+                    local ks = sel_ascend_children(head)
+                    if #ks == 0 then break end
+                    table.insert(path, 1, ks[math.min(st.dchild[head.hash] or 1, #ks)])
+                end
+                st.cursor = path[1]
+                return true
+            end
+        end
+    end
+    return false
 end
 
 --- Byte column (0-based) of `deco`'s first occurrence in a rendered row, or nil
@@ -2155,6 +2295,28 @@ local function commit_range(commit)
     return { rev = commit.hash .. "^!", from = parents[1], to = commit }
 end
 
+--- A `DiffRange` (§11.5) for a commit selection (§13.5): the **literal** combined
+--- patch between the selection's older and newer ends. `newer`/`older` are the
+--- real endpoint commits (newest and oldest selected, resolved from the display
+--- nodes by the caller). A single-commit selection (`newer == older`) is exactly
+--- `commit_range`. Otherwise the base is the older commit's first parent, so the
+--- range is `<older>^..<newer>` — an empty-tree range when the older end is a
+--- root. The merged-in side of any merge on the path is included (the open
+--- first-parent-restricted variant is §13.6).
+---@param newer Commit
+---@param older Commit
+---@return DiffRange
+local function range_endpoints(newer, older)
+    if newer == older or newer.hash == older.hash then
+        return commit_range(newer)
+    end
+    local base = (older.parents or {})[1]
+    if not base then
+        return { rev = EMPTY_TREE .. ".." .. newer.hash, from = nil, to = newer }
+    end
+    return { rev = base.hash .. ".." .. newer.hash, from = base, to = newer }
+end
+
 --- Default diff provider: open diffview for the range (specification.md §11.5).
 --- Guarded — reports rather than errors when diffview is not installed. Override
 --- opts.diff.open to use another plugin.
@@ -3008,6 +3170,21 @@ function M.open(folder, opts)
         index = nil,
     }
 
+    -- Commit selection (range) mode (§13). `active` gates the modal keymaps;
+    -- `path`/`anchor`/`cursor` are the selected path over the visible projection
+    -- (DisplayNodes, newest-first); `dparent`/`dchild` remember the branch chosen
+    -- at each junction for h/l. `display_index` maps a node hash → its index in
+    -- `repo.display`, rebuilt on reflow and on entering selection.
+    ---@type { active: boolean, path?: table[], anchor?: table, cursor?: table, dparent: table<string,integer>, dchild: table<string,integer> }
+    local sel = { active = false, path = nil, anchor = nil, cursor = nil, dparent = {}, dchild = {} }
+    local display_index = {}
+    local function build_display_index()
+        display_index = {}
+        for i, it in ipairs(repo.display or {}) do
+            if it.commit then display_index[it.commit.hash] = i end
+        end
+    end
+
     -- Reachability cone for the dimming pass (§12); nil until a pivot exists.
     -- `modes` is the branch-mode view state (ref name → mode); empty = all normal
     -- (the projection is then the identity). The reflow below reads it (§10).
@@ -3119,9 +3296,14 @@ function M.open(folder, opts)
         -- Pack concurrent collapsed heads onto shared lines (spec §10.4) unless
         -- packing is off. The unpacked, laid-out list stays the projection input.
         repo.display = (opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
+        -- A reflow recreates the DisplayNodes, so any in-flight commit selection
+        -- (§13) holds stale node references — drop it. (Pure selection movement
+        -- never reflows; this guards m/<Tab>/c/p/P etc. taken mid-selection.)
+        sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
         if lv and lv.controller and lv.controller.set_items then
             lv.controller.set_items(repo.display)
         end
+        build_display_index()
         update_cone()
         if lv and lv.controller then lv.controller.refresh() end
         update_panes()
@@ -3187,6 +3369,10 @@ function M.open(folder, opts)
             for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
             local status = footer_text(opts.mirror, view_state.modes,
                 opts.collapse_merged ~= false, nanchors)
+            -- Commit selection (§13): show the mode + the selected row count.
+            if sel.active then
+                status = status .. (" | SELECT %d"):format(#(sel.path or {}))
+            end
             -- Debug (lane ids on, `i`): the footer-pane cutoff (seam buffer line)
             -- and height when shown, or why it is hidden.
             if show_lane_ids then
@@ -3211,6 +3397,150 @@ function M.open(folder, opts)
         update_footer()
         if follow then goto_hash(follow) end
         place_cursor()
+    end
+
+    -- ── Commit selection (range) — window glue (spec §13) ───────────────────
+    -- The OrderItem for a DisplayNode (by hash), or nil when it has no own row
+    -- (a head packed into a marker group, §10.4 — selection clamps there in v1).
+    local function node_item(node)
+        if not node then return nil end
+        local i = display_index[node.hash]
+        return i and repo.display[i] or nil
+    end
+    -- Resolve a path endpoint DisplayNode to its real newest / oldest Commit: a
+    -- collapsed head (§10.3) stands for its whole region, so its newest is the tip
+    -- and its oldest is the last region member (§13.1).
+    local function real_newest(node) return node.collapsed and node.tip or node.commit end
+    local function real_oldest(node)
+        if node.collapsed then
+            local region = node.region or {}
+            local h = region[#region]
+            return (h and repo.commits[h]) or node.tip
+        end
+        return node.commit
+    end
+    -- The selection's DiffRange (§13.5): newest .. oldest real endpoints.
+    local function selection_range()
+        local p = sel.path
+        if not (p and #p > 0) then return nil end
+        local newer, older = real_newest(p[1]), real_oldest(p[#p])
+        if not (newer and older) then return nil end
+        return range_endpoints(newer, older)
+    end
+    -- Phase 1 consumer: hand the selection range to the external diff provider
+    -- (§13.5). (The in-view range mode is the phase-2 follow-up.)
+    local function open_selection_diff()
+        local open = opts.diff and opts.diff.open
+        if not open then
+            vim.notify("gitloom: no diff provider configured (set diff.open)", vim.log.levels.WARN)
+            return
+        end
+        local r = selection_range()
+        if r then open(r) end
+    end
+
+    -- Emphasis for the selected path (§13.4): light the path's commit markers and
+    -- the lane between each consecutive pair, dim the rest. Mirrors mark_reachable
+    -- — reset the highlight on every lane/marker drawn in the visible range, then
+    -- light the path. Returns the cone set (keyed by DisplayNode) for row dimming.
+    local function mark_path(top, bottom)
+        for i = top, bottom do
+            local it = repo.display[i]
+            if it then
+                for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
+                for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
+                for _, line in ipairs(item_lines(it)) do
+                    for _, t in ipairs(line) do
+                        for _, s in ipairs(t.lanes or {}) do
+                            for _, e in ipairs(s.edges or {}) do e.highlighted = false end
+                        end
+                        if t.has_commit then t.active = false end
+                    end
+                end
+            end
+        end
+        local cone = {}
+        local p = sel.path or {}
+        for _, node in ipairs(p) do cone[node] = true end
+        for i = 1, #p - 1 do -- light the lane each pair shares (newer p[i] → older p[i+1])
+            local it = node_item(p[i])
+            if it then
+                for _, lane in ipairs(it.parent_lanes or {}) do
+                    if lane.parent == p[i + 1] then lane.highlighted = true end
+                end
+            end
+        end
+        for _, node in ipairs(p) do -- light the path commits' markers
+            local it = node_item(node)
+            if it then
+                for _, line in ipairs(item_lines(it)) do
+                    for _, t in ipairs(line) do
+                        if t.has_commit and t.commit == node then t.active = true end
+                    end
+                end
+            end
+        end
+        return cone
+    end
+
+    -- Recompute the path emphasis, move the cursor onto the moving end, and
+    -- redraw (§13). update_cone branches to mark_path while selection is active.
+    local function selection_redraw()
+        if sel.cursor then goto_hash(sel.cursor.hash) end
+        update_cone()
+        if lv and lv.controller then lv.controller.refresh() end
+        place_cursor()
+        update_footer()
+        update_panes()
+    end
+    -- V: start selection on the row's commit (a normal commit or a collapsed head;
+    -- a packed marker line is not a start point in v1). anchor = cursor = it.
+    local function enter_selection(line)
+        local item = order_at(line)
+        if not item or not item.commit or item.type == "markers" then return end
+        build_display_index()
+        selection_state.index = nil -- drop the ref selection (§13.3)
+        sel.active, sel.anchor, sel.cursor = true, item.commit, item.commit
+        sel.path, sel.dparent, sel.dchild = { item.commit }, {}, {}
+        selection_redraw()
+    end
+    local function exit_selection()
+        sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
+        update_cone() -- restore the cursor-pivot cone (§12)
+        if lv and lv.controller then lv.controller.refresh() end
+        place_cursor()
+        update_footer()
+        update_panes()
+    end
+    -- j/k along the branch (§13.2): step the moving end one commit; redraw.
+    local function selection_move(dir)
+        if not sel.active then return end
+        sel_step(sel, dir)
+        selection_redraw()
+    end
+    -- <C-d>/<C-u>: a half-viewport of branch commits, stopping at a tip/root
+    -- (§13.2; the exact count is a tuning point, §13.6).
+    local function selection_page(dir)
+        if not (sel.active and lv and lv.win and lv.win.win) then return end
+        local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(lv.win.win) / 2))
+        for _ = 1, steps do
+            local before = sel.cursor
+            sel_step(sel, dir)
+            if sel.cursor == before then break end
+        end
+        selection_redraw()
+        center_view()
+    end
+    -- h/l: switch branch at the nearest junction (§13.3).
+    local function selection_switch(delta)
+        if not sel.active then return end
+        if sel_switch(sel, delta) then selection_redraw() end
+    end
+    -- o: swap the anchor and the moving end (§13.2).
+    local function selection_swap()
+        if not sel.active then return end
+        sel.anchor, sel.cursor = sel.cursor, sel.anchor
+        selection_redraw()
     end
 
     ---@type ListViewOptions
@@ -3387,6 +3717,9 @@ function M.open(folder, opts)
     -- expand / hide, most-relevant first. On a packed line it lists every marker
     -- by name, so any branch is reachable even when not all labels fit.
     opts.win.keys["<CR>"] = function(self)
+        -- In commit selection (§13.5) <CR> opens the selected range in the diff
+        -- viewer (phase 1; the in-view range mode is the phase-2 follow-up).
+        if sel.active then open_selection_diff(); return end
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = order_at(line)
         if not item then return end
@@ -3430,8 +3763,10 @@ function M.open(folder, opts)
             if choice then choice.run() end
         end)
     end
-    -- D: open the commit's diff in the external diff viewer (§11.5).
+    -- D: open the commit's diff in the external diff viewer (§11.5), or — while
+    -- selecting (§13.5) — the selected range.
     opts.win.keys.D = function(self)
+        if sel.active then open_selection_diff(); return end
         local w = self and self.win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
@@ -3540,6 +3875,9 @@ function M.open(folder, opts)
     local selection_visible = false -- a decoration (not the message) is selected
     local function move_ref(dir)
         return function(self)
+            -- While selecting (§13.3) h/l switch the followed branch instead of
+            -- cycling ref decorations.
+            if sel.active then selection_switch(dir); return end
             local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
             local item, _, sub = order_at(line)
             -- On a packed marker line, selection moves among the markers (§10.4).
@@ -3575,6 +3913,38 @@ function M.open(folder, opts)
     end
     opts.win.keys.h = move_ref(-1)
     opts.win.keys.l = move_ref(1)
+
+    -- Commit selection (range) mode (§13). V enters/exits; while active, j/k walk
+    -- the followed branch, h/l switch branch at a junction, <C-d>/<C-u> jump a
+    -- half-viewport of branch commits, o swaps ends, <CR>/D open the range. When
+    -- inactive, j/k and <C-d>/<C-u> fall through to the builtin motions (fed
+    -- without remap so they don't re-trigger these maps); o is a no-op.
+    local function feed(keys)
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "n", false)
+    end
+    opts.win.keys.V = function(self)
+        local w = self and self.win
+        if not w then return end
+        if sel.active then exit_selection() else enter_selection(vim.api.nvim_win_get_cursor(w)[1]) end
+    end
+    opts.win.keys["<Esc>"] = function()
+        if sel.active then exit_selection() end
+    end
+    opts.win.keys.j = function()
+        if sel.active then selection_move("down") else feed(vim.v.count1 .. "j") end
+    end
+    opts.win.keys.k = function()
+        if sel.active then selection_move("up") else feed(vim.v.count1 .. "k") end
+    end
+    opts.win.keys["<C-d>"] = function()
+        if sel.active then selection_page("down") else feed("<C-d>") end
+    end
+    opts.win.keys["<C-u>"] = function()
+        if sel.active then selection_page("up") else feed("<C-u>") end
+    end
+    opts.win.keys.o = function()
+        if sel.active then selection_swap() end
+    end
 
     lv = listview.open(listview_options)
 
@@ -3619,6 +3989,14 @@ function M.open(folder, opts)
 
         place_cursor = function()
             local line = vim.api.nvim_win_get_cursor(win)[1]
+            -- Commit selection (§13.2): park on the graph lane column so the lit
+            -- lane marks the followed branch (cursor row is set by selection_redraw).
+            if sel.active then
+                local col = lv and lv.controller and lv.controller.col_offset
+                    and lv.controller.col_offset(line, "line", GRAPH_COL) or 0
+                pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
+                return
+            end
             local item = order_at(line)
             -- A packed marker line: park on the selected marker's label (§10.4).
             if item and item.type == "markers" then
@@ -3691,6 +4069,12 @@ function M.open(folder, opts)
             local item, cur = order_at(curbuf)
             local top = select(2, order_at(topbuf))
             local bottom = select(2, order_at(botbuf))
+            -- Commit selection (§13.4): the selected path is the emphasised set,
+            -- replacing the cursor-pivot cone for the duration.
+            if sel.active then
+                view_state.cone = mark_path(top, bottom)
+                return
+            end
             -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
             -- refresh_columns); walk them from the pivot to mark highlights (§12).
             if not (item and item.commit) then
@@ -3749,6 +4133,9 @@ function M.open(folder, opts)
                 local line = vim.api.nvim_win_get_cursor(win)[1]
                 if line == last_line then return end
                 last_line = line
+                -- Commit selection (§13) drives the cursor and emphasis from its
+                -- own handlers; skip the ref pre-select / pivot-cone path entirely.
+                if sel.active then return end
                 -- Remember the commit under the cursor for this repo so reopening
                 -- the graph restores the position (§2). Skip rows with no commit so
                 -- a marker-less line never clobbers a good remembered position.
@@ -4098,6 +4485,10 @@ M._internal = {
     diff_contexts = diff_contexts,
     format_diffstat = format_diffstat,
     commit_range = commit_range,
+    range_endpoints = range_endpoints,
+    sel_ascend_children = sel_ascend_children,
+    sel_step = sel_step,
+    sel_switch = sel_switch,
     reachable_cone = reachable_cone,
     mark_reachable = mark_reachable,
     build_graph = build_graph,
