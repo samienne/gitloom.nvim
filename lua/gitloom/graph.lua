@@ -2,6 +2,7 @@ local M = {}
 
 local color = require("gitloom.color")
 local submodule = require("gitloom.submodule")
+local util = require("gitloom.util")
 
 -- Max commits drawn in a submodule change graph before capping (spec §11.7.3);
 -- the rest collapse into a "+K more" note.
@@ -124,56 +125,9 @@ local function help_lines()
     return lines
 end
 
----@class Future
----@field next fun(fn: fun(value: any): any): Future
-local function make_future()
-    local state = {
-        callback = nil,
-        value = nil,
-    }
-
-    local future = {
-        next = function(fn)
-            local future, promise = make_future()
-
-            if state.value then
-                -- Already resolved: still run `fn` (it was being dropped — the bug
-                -- behind the open-time reflow never firing after a synchronously
-                -- resolved future, e.g. the gitloom sort mode's apply_sort).
-                vim.schedule(function()
-                    promise.resolve(fn(unpack(state.value)))
-                end)
-            else
-                state.callback = function(value)
-                    promise.resolve(fn(value))
-                end
-            end
-
-            return future
-        end,
-    }
-
-    local promise = {
-        resolve = function(value)
-            state.value = { value }
-            -- A future is always a table; probing `.next` on a non-table (e.g. a
-            -- number) would throw "attempt to index a number value".
-            if type(value) == "table" and value.next then
-                value.next(function(next_value)
-                    if state.callback then
-                        state.callback(next_value)
-                    end
-                end)
-            else
-                if state.callback then
-                    state.callback(value)
-                end
-            end
-        end,
-    }
-
-    return future, promise
-end
+-- gitloom's own minimal promise (vendored in util.lua; see CLAUDE.md
+-- "Relationship to loomworks"). Future type is declared there.
+local make_future = util.make_future
 
 local function highlight_text(text, hl)
     if text == "" then
@@ -1661,30 +1615,9 @@ local function owners_from_refs(refs, modes)
     return out
 end
 
-local function compose(list)
-    local text = ""
-    local highlight = {}
-    for _, item in ipairs(list) do
-        if type(item) == "table" then
-            local offset = string.len(text)
-            for _, hl in ipairs(item.highlight or {}) do
-                table.insert(highlight, {
-                    start_pos = offset + hl.start_pos,
-                    end_pos = offset + hl.end_pos,
-                    hl = hl.hl
-                })
-            end
-            text = text .. (item.text or "")
-        elseif type(item) == "string" then
-            text = text .. item
-        end
-    end
-
-    return {
-        text = text,
-        highlight = highlight,
-    }
-end
+-- Vendored highlight-composition helper (util.lua). listview.lua keeps its own
+-- private copy so it stays standalone — do not dedupe across that boundary.
+local compose = util.compose
 
 --- Whether a Segment draws any highlighted edge (specification.md §12).
 ---@param seg Segment
@@ -3136,9 +3069,7 @@ local function fetch_range_diff(range)
 end
 
 -- Trim leading/trailing whitespace (git command output is line-wrapped).
-local function trim_ws(s)
-    return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
-end
+local trim_ws = util.trim_ws
 
 --- Run a git command and resolve `{ code, out }` (stdout joined with newlines).
 --- A thin future over `jobstart` for the submodule change view (§11.7). The
