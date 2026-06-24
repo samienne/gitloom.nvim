@@ -377,9 +377,19 @@ them refs → head → commits.
   scrolled off (specification.md §11.6). Renames show as `old => new`. Pure.
 - `commit_range(commit)` — builds the `DiffRange` for a single commit's own
   changes: `{ rev = "<hash>^!"` (or `<empty-tree>..<hash>` for a root, no
-  parents)`, from = parents[1], to = commit }`. The first range constructor for
-  the external-diff provider (specification.md §11.5); graph range-selection will
-  add more. Pure.
+  parents)`, from = parents[1], to = commit }`. A range constructor for the
+  external-diff provider (specification.md §11.5). Pure.
+- `range_endpoints(newer, older)` — the `DiffRange` for a **commit selection**
+  span (specification.md §13.5): `<older>^..<newer>` (empty-tree base for a root,
+  and exactly `commit_range` when the ends coincide). The graph range-selection
+  constructor that feeds the same provider and the commit view's range mode. Pure.
+- `format_range_detail(commits, palette)` — the range commit view's metadata rows
+  (specification.md §13.5): an `N commits (oldest..newest)` summary then one
+  newest-first `<abbrev> <subject>` row per selected commit. Pure.
+- `sel_ascend_children` / `sel_step` / `sel_switch` — the commit-selection path
+  walking over the DisplayNode graph (specification.md §13.2/§13.3): the children
+  to ascend into, a one-commit step along the branch (extend/contract), and the
+  branch switch at the nearest junction. Pure.
 
 - `reachable_cone(order, pivot_index, top, bottom)` — the pivot's causal cone
   (specification.md §12.1): two monotonic sweeps from `order[pivot_index].commit`
@@ -392,8 +402,9 @@ them refs → head → commits.
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
 `classify_ref`, `group_refs`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `diff_contexts`, `format_diffstat`,
-`commit_range`, and `reachable_cone` are pure and exposed via `graph._internal`
-for testing.
+`commit_range`, `range_endpoints`, `format_range_detail`, `sel_ascend_children`,
+`sel_step`, `sel_switch`, and `reachable_cone` are pure and exposed via
+`graph._internal` for testing.
 
 ### DAG construction
 
@@ -661,8 +672,21 @@ fixed); otherwise it parks at the message via `controller.col_offset(line,
 and re-parks on row change; the `m`/`M`/`d`/`i` toggles re-park after their
 refresh since column widths shift. Selection counts all decorations, so one
 hidden in the `+N` overflow can be selected but parks at the message until
-visible. This is the selection substrate for the §10 per-branch actions;
-nothing acts on it yet.
+visible. This is the selection substrate the §10 per-branch actions and the §13
+commit selection build on.
+
+**Commit selection (range)** (specification.md §13) is a separate modal layer
+over the same window. A `sel` state (active flag, `path` of DisplayNodes
+newest-first, `anchor`/`cursor` endpoints, per-junction `dparent`/`dchild`
+choices) drives it; `V` toggles it. The path walk is pure (`sel_step` /
+`sel_switch` / `sel_ascend_children`) over the DisplayNode edges, so it passes
+through collapsed heads; a `node_loc` index (hash → {item, col}, built with
+`display_index`) lets `mark_path` light a head's lane/marker even when packed.
+While active, `j`/`k`/`<C-d>`/`<C-u>` walk the branch (else they fall through to
+the builtin motions), `h`/`l` switch branch (else the ref selection above, flipped
+under mirroring), `<Tab>` folds/unfolds the cursor's head in place (re-resolving
+the selection by hash), `<CR>` opens the range commit view and `D` the range in
+the external provider. Emphasis reuses the §12 dimming via a path-derived cone.
 
 **Initial focus and position retention** (specification.md §2). When the stream
 completes, after the final `reflow` the window focuses a target commit via
@@ -694,6 +718,15 @@ and `format_diffstat` — are unit-tested; only the window/IO glue is not. The
 refs in the view come from the row's commit (`decoration_texts`), not a
 re-query. The diff highlights are applied as extmarks rather than
 `filetype=diff`, so the metadata header stays unaffected (§11.3).
+
+`open_commit_view` takes an optional `range` argument (the commit-selection
+**range mode**, §13.5): when present `commit` is nil, the metadata is the
+selected-commit list (`format_range_detail`) instead of `format_commit_detail`,
+and the diff is the combined range patch from `fetch_range_diff` (`git diff
+<base> <to>`, base = the range's first parent or the empty tree) rather than
+`git show`. Everything below the metadata — the diffstat, the diff, the file
+jumps, the §11.6 context header — is the shared pipeline, so range mode reuses it
+unchanged.
 
 While assembling the rows it records, for each changed file, the buffer line of
 its diffstat row and the buffer line where its diff section begins

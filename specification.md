@@ -50,7 +50,21 @@ debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on. `c`
 toggles the first-parent focus (§10.7) — collapse every non-mainline branch, or
 show the full graph. `p` toggles **marker packing** (§10.4) — merge concurrent
-collapsed heads onto shared lines, or one per line.
+collapsed heads onto shared lines, or one per line. `V` enters **commit
+selection** (§13) — a modal range selection along one branch, fed to the diff
+provider and the commit view's range mode.
+  `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
+  remote-tracking branch, and tag, plus **HEAD**; selecting one moves the cursor
+  to that ref's commit and **centers** the view on it (like the initial HEAD
+  focus below). Refs **recently jumped to in this session** are surfaced at the
+  top of the list (per-repository, in-memory for the Neovim session — the same
+  scope as the remembered cursor position). The jump resolves the ref's commit to
+  its visible row, so a collapsed branch lands on its collapsed head (§10.3); a
+  ref whose commit is currently hidden (§10.1) is a no-op with a notice. Landing
+  also **pre-selects that ref's label** on the row (as if `h`/`l` had moved onto
+  it; §6), so `<CR>` / the action menu act on that branch with no further
+  navigation. Picking HEAD — which has no own label — just centers, cursor at the
+  message.
   `?` opens a float listing all keybindings. The footer shows live status
   (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
   when any branch modes are set, and `(mirrored)` when mirroring is on).
@@ -384,15 +398,24 @@ commit) from repeating the name per remote.
 everything the message does not need — its natural width, but never reserving
 more than `message_min` (§8). So refs fill empty space when the message is
 short, while a long message still keeps at least `message_min` columns
-(truncated with `…`). Ref labels are shown in order (leftmost first) until the
-budget is reached; labels that do not fit collapse into a trailing `+N` overflow
-marker. Each field is colored by its `palette` highlight group; lanes are
-colored by a palette slot allocated from a recycling free list (§5.5).
+(truncated with `…`). Each field is colored by its `palette` highlight group;
+lanes are colored by a palette slot allocated from a recycling free list (§5.5).
 
-The `h`/`l` selection (§2) cycles all of a row's ref decorations. One collapsed
-into the `+N` overflow can still be selected, but until it is visible it is not
-highlighted and the cursor falls back to the message (revisited with the §10
-actions).
+**Overflow is windowed around the selection.** With **no ref selected**, labels
+are shown in order (leftmost first) until the budget is reached and the rest
+collapse into a trailing `+N` overflow marker. When a ref **is** selected (via
+`h`/`l`, §2, or the picker, §2), the visible labels form a **window around the
+selection** sized to the budget, so the selected label is **always visible** and
+highlighted; labels hidden before and after the window collapse into **separate
+`+N` markers on the left and right** (e.g. `+2 (feat) (master) +3`). Moving the
+selection scrolls this window to keep the selected label in view. Labels are
+always shown **whole** — a label that does not fit is hidden into a `+N` marker,
+never partially drawn. The one exception is the **selected** label when it alone
+is wider than the line: it is brought into view and **truncated with `…`** (since
+it must stay visible), the only case a ref is truncated. This windowing applies to
+the right-pinned (`right`) mode and to **packed marker rows** (§10.4), where the
+labels are left-aligned after the graph but window the same way around the selected
+marker; `inline` and `dual` (§6.1) keep their flex-column `…` truncation.
 
 ### 6.1 Ref label modes
 
@@ -980,8 +1003,9 @@ The action label text is `diff.label` (default `▶ Open diff (diffview)`),
 highlighted with `palette.action`. When no provider is configured (`diff.open`
 is unset) the label is omitted and `D` is a no-op.
 
-Planned: graph-side range selection (building on the §2 selection substrate and
-§10 view work) to pick two commits and feed the same provider.
+Graph-side range selection is realized by **commit selection** (§13): selecting a
+range of commits along a branch constructs a `DiffRange` (`range_of`) and feeds it
+to this same provider.
 
 ### 11.6 Diff context header
 
@@ -1185,7 +1209,135 @@ configures the initial state, §8) — when off, the whole graph renders at full
 colour, **identical regardless of the cursor row** (highlight state never affects
 colour while it is off).
 
-Planned: lane-anchored navigation — selecting a Lane (`h`/`l`) and stepping
-along it commit-to-commit (`j`/`k`) via its `begin`/`end`, with splits and
-merges stepping in visual order — building on this Lane model and the §2
+Lane-anchored navigation is realized as the single-commit case of **commit
+selection** (§13): stepping along a branch's lanes commit-to-commit, with splits
+and merges chosen explicitly, builds directly on this Lane model and the §2
 selection substrate.
+
+## 13. Commit selection (range)
+
+A modal selection that picks a **range of commits along one branch** and feeds it
+to the range-aware diff provider (§11.5) and a range mode of the commit view
+(§11). It is read-only (§9) — it selects and inspects, never mutates. It builds on
+the §2 ref-selection substrate (the cursor moves onto the thing selected), the
+Lane model (§5), and the §12 reachability walk (reused for both traversal and
+emphasis).
+
+### 13.1 The selection model
+
+`V` enters **selection mode** on the row under the cursor; `V` again or `<Esc>`
+exits (the footer shows it is active). On entry the row's commit becomes both the
+**anchor** (the fixed end, where `V` was pressed) and the **cursor** (the moving
+end).
+
+The selection is a **path along one branch**, not a contiguous range of buffer
+rows: the commits on the first-parent chain between the anchor and the cursor,
+walked over the **Lane graph** (§5). Rows between them that belong to *other*
+branches are skipped — the selection covers only the followed branch's own
+commits.
+
+- It traverses the **visible projection** (`repo.display`, §10): a **collapsed
+  head** (§10.3) is one selectable unit standing for its whole region — including
+  it in the path includes all of that region's commits in the range.
+- The path is always an ancestry chain (anchor and cursor are joined by
+  first-parent edges), so it has a well-defined **older** end and **newer** end
+  regardless of which is the anchor.
+
+### 13.2 Movement
+
+- `j` / `k` step the cursor to the next / previous commit **on the followed
+  branch**, skipping intervening other-branch rows; the view scrolls to keep it
+  visible. The cursor parks **on the graph lane column** of the followed branch
+  (the §2 cursor-on-decoration behavior), so the lit lane shows which branch is
+  selected — or, when the moving end is a collapsed head packed onto a shared
+  line (§10.4), on that head's label (§13.4).
+- `<C-d>` / `<C-u>` move by roughly a half-viewport's worth of **branch** commits
+  (not buffer lines), so the jump stays on the branch even when its next commit is
+  off the current page.
+- `o` swaps the anchor and the cursor (as visual-mode `o`): the moving end becomes
+  the other end; the path itself is unchanged.
+- Movement clamps at the branch tip / root and at the fetched-range boundary.
+
+### 13.3 Branch switching at junctions
+
+When the path is **not linear**, `h` / `l` rotate which branch it follows at the
+**nearest junction between the cursor and the anchor**, on the side the path is
+growing:
+
+- anchor **above** the cursor (the selection grew **downward**, toward parents):
+  walk **up** from the cursor to the nearest **merge** in the path; `h` / `l`
+  rotate which **parent** the tail descends (in lane order — `l` the next, `h` the
+  previous);
+- cursor **above** the anchor (the selection grew **upward**, toward children):
+  walk **down** from the cursor to the nearest **split**; `h` / `l` rotate which
+  **child** the path ascends;
+- a strictly linear path (no junction between the two ends) → `h` / `l` is a
+  **no-op** (there is no branch to switch to).
+
+The rotation follows the **rendered** lane order: under mirroring (§5.4, lane 1
+at the right) it is reversed, so `l` always moves toward the branch drawn to the
+right and `h` toward the left, matching how the graph reads.
+
+After a switch the cursor **stays on its current row** when the newly-chosen
+branch has a lane there, snapping to the nearest commit on the new branch
+otherwise; `j` / `k` then walks the new branch. The path is re-derived from the
+rotated junction onward; the portion between the anchor and the junction is
+unchanged.
+
+Outside selection mode `h` / `l` keep their §2 meaning (cycling the row's ref
+decorations). The two never coexist: entering selection mode resets the ref
+selection, and exiting restores the default message position.
+
+### 13.4 Emphasis
+
+While selection is active, the **selected path** is the emphasised set: its
+commits and lanes stay full-colour and everything else dims, reusing the §12
+machinery. This **replaces** the cursor-pivot cone for the duration; the pivot
+cone returns when selection mode exits. `H` (§12) still toggles dimming off and
+on.
+
+A **collapsed head** (§10.3) on the path is emphasised like any other path
+member — its marker and the lane joining it to the path light. On a **packed
+marker line** (§10.4), which carries several concurrent heads, only the path's
+head is lit and it is drawn with `palette.selected` (and the cursor parks on its
+label); the other heads on that line dim. So the right head on a shared line is
+unambiguous even though the line holds many.
+
+`<Tab>` while selecting **folds / unfolds the head under the cursor in place**
+(the §10.4 collapse⇄expand toggle, scoped to the selection): it expands the
+collapsed head the cursor sits on (or collapses the cursor's region) **without
+changing what is selected**. An unfolded head expands into its **whole region**,
+so the revealed branch stays selected and lit (not just its tip); a collapsed run
+maps back to its head. The **diff range is therefore unchanged** by fold/unfold.
+The anchor keeps its end and the cursor lands on the toggled (opposite) end, and
+the saved scroll position is restored so the rows above the toggle stay put. It
+is a no-op on a mainline commit (nothing there is collapsible).
+
+### 13.5 Range and the commit view
+
+The selection defines a **`DiffRange`** (§11.5): `to` is the **newer** end's
+commit, `from` is the **parent of the older** end's commit (the empty tree when
+the older end is a root), and `rev` is `<older>^..<newer>` (an empty-tree range
+when rooted). This is the **literal** range — the combined patch between the two
+ends, **including any side merged in** along the path when it crosses a merge
+(restricting it to the followed branch's own first-parent changes is an open
+refinement, §13.6). `range_endpoints(newer, older)` constructs it beside the
+single-commit `commit_range` (§11.5).
+
+`<CR>` in selection mode opens the **commit view** (§11) in **range mode**: the
+metadata region lists the selected commits (newest first — abbreviated hash +
+subject) in place of the single-commit fields, followed by the **diffstat** and
+the **combined diff** (§11.3 / §11.4) for the range. Its diff **action label**
+(§11.5) opens the same range in the external diff viewer; `D` likewise opens the
+range while selection is active.
+
+### 13.6 Open / deferred
+
+- **First-parent-restricted range** — the literal `from..to` pulls in a merged-in
+  side when the path crosses a merge; restricting the diff to the followed
+  branch's own commits needs a synthesized range the provider understands (§13.5).
+- **Selection across hidden regions** — a path that would cross a §10 *hidden*
+  region (whose boundary edge is dropped, §10.3) follows the §10.8
+  hidden-connectivity open question.
+- **`<C-d>` / `<C-u>` step count** — the exact "half-viewport of branch commits"
+  count is a tuning point, expected to need iteration.
