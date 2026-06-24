@@ -98,7 +98,8 @@ Opens the graph for the repository at Neovim's current working directory.
 | `<CR>` | Action menu for the row — examine commit, open diff, collapse / expand / hide the branch |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
-| `h` / `l` | Select the previous / next ref decoration on the current row |
+| `h` / `l` | Select the previous / next ref decoration on the current row (switch the followed branch while selecting) |
+| `V` | Start / end **commit selection** — pick a range of commits along one branch |
 | `H` | Toggle reachability highlighting (dimming) off / on |
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
@@ -139,6 +140,27 @@ pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
 a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
 (§10.6).
+
+**Commit selection (range).** Press `V` to start a modal selection that picks a
+range of commits **along one branch**. It is not a contiguous block of rows — it
+follows the branch, skipping rows that belong to other branches:
+
+- `j` / `k` extend or contract the selection along the followed branch (the
+  cursor parks on the lit lane so you can see which branch you are on);
+- `h` / `l` switch which branch the selection follows at the nearest fork / merge
+  inside it;
+- `<Tab>` folds / unfolds the head under the cursor in place — peek into a
+  collapsed branch without losing the selection or moving the view;
+- `<C-d>` / `<C-u>` jump roughly half a screen of branch commits;
+- `o` swaps the fixed and moving ends;
+- `<CR>` opens the **range view** — the selected commit list with the combined
+  diff and diffstat — and `D` opens the range straight in the external diff
+  viewer;
+- `V` again or `<Esc>` ends selection.
+
+The selected path is highlighted and everything else dims (reusing the
+reachability emphasis). The footer shows a `SELECT N` indicator. See
+[specification.md §13](specification.md).
 
 **Context footer.** Below the graph, a compact summary band continues the lanes
 that are active at the bottom of the view down to where they merge into the main
