@@ -132,15 +132,20 @@ records the commit set, decides *when* to (re)order, and reflows — but a given
 hard invariant that a parent is never at an earlier row than a child (the layout
 and reachability invariant of §5/§12). The modes:
 
-- **`gitloom`** (default) — gitloom's own **topological sort**: among the commits
-  whose children are all already placed, it prefers to **continue the current
-  line of history** (keeping each branch's commits contiguous rather than
-  interleaving branches by date), breaking ties by **author date, newest first**.
-  A clustering *approximation* of `--topo-order` — close but not byte-identical to
-  git, and the mode under active layout development.
+- **`gitloom`** (default) — gitloom's own **topological sort**, computed in Lua to
+  **reproduce git's `--topo-order`**: a depth-first walk over a LIFO stack
+  (mirroring git's `sort_in_topological_order`) that groups history by lineage —
+  it descends a commit's parents the instant they become ready, so a merge's
+  merged-in lineage is emitted right after the merge instead of scattered by date,
+  which is what keeps the graph's lanes tight. The independent tips seed the stack
+  **newest author-date first** (hash breaks ties); once a lineage starts it is
+  followed by topology, not recency. In practice this matches `git rev-list
+  --topo-order` commit-for-commit (it can differ only where author and committer
+  date disagree on the relative order of two independent tips, since git seeds by
+  committer date).
 - **`git`** — git's exact `--topo-order`, used verbatim (the streamed order, or
-  re-queried via `git rev-list --topo-order` after an in-place reorder). The
-  faithful git reference to compare against.
+  re-queried via `git rev-list --topo-order` after an in-place reorder). A
+  ground-truth reference for the `gitloom` mode (which reproduces it).
 - **`date`** / **`author`** — git's `--date-order` / `--author-date-order`
   (`git rev-list`): topological, otherwise newest-first by committer / author
   date, so branches interleave by date.

@@ -122,14 +122,17 @@ describe("order_commits — topological validity (§3.1)", function()
     end)
 end)
 
-describe("order_commits — clustering (§3.1 'continue the line of history')", function()
-    it("keeps a merged-in side branch contiguous (first-parent chains cluster)", function()
+describe("order_commits — lineage grouping (§3.1, git's --topo-order DFS)", function()
+    it("emits a merged-in lineage contiguously, right after the merge", function()
         -- mainline m -> p1 -> base; feature f1 -> f2 -> base, merged at m.
         --   m   (merge, first parent p1, second parent f1)
         --   p1  (mainline)
         --   f1  (feature tip)
         --   f2  (feature)
         --   base (root)
+        -- git descends the LAST parent first (DFS), so the merged-in feature
+        -- (f1, f2) is emitted right after m, then the mainline p1, then base:
+        --   m, f1, f2, p1, base
         local commits = build({
             { "m", { "p1", "f1" }, 100 },
             { "p1", { "base" }, 90 },
@@ -139,13 +142,13 @@ describe("order_commits — clustering (§3.1 'continue the line of history')", 
         })
         local ordered = order_commits(commits)
         assert_topological(commits, ordered)
+        assert.same({ "m", "f1", "f2", "p1", "base" }, hashes(ordered))
         local at = index_of(ordered)
-        -- The mainline (m, p1) descends first as a block.
-        assert.equals(1, at["m"])
-        assert.equals(2, at["p1"])
-        -- The feature commits stay adjacent (contiguous block, not interleaved).
-        assert.equals(1, math.abs(at["f1"] - at["f2"]))
-        -- base (shared root) comes after both branches.
+        -- The merged-in lineage is contiguous and sits right after the merge —
+        -- never scattered by date the way a global heap would (the spaghetti fix).
+        assert.equals(2, at["f1"])
+        assert.equals(3, at["f2"])
+        -- base (the shared root) comes after both lineages.
         assert.equals(#ordered, at["base"])
     end)
 end)

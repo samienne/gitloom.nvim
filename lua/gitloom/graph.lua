@@ -1023,19 +1023,26 @@ local function make_line_buffer()
     }
 end
 
---- Topologically sort the row commits, child-first, mimicking `git log
---- --topo-order` (spec §3.1): a parent is always emitted after **all** of its
---- children (so it lands at a later row), and the order prefers to **continue
---- the current line of history** — it descends a first-parent chain as far as it
---- can before jumping to the next-newest ready tip — so each branch's commits
---- stay contiguous rather than interleaving by date. Among independent ready
---- commits, ties break by **author date, newest first**, then hash (stable).
+--- Topologically sort the row commits, child-first, reproducing **git's
+--- `--topo-order`** (spec §3.1): a parent is always emitted after **all** of its
+--- children (so it lands at a later row), and history is grouped by lineage
+--- rather than interleaved by date — what keeps the graph's lanes tight.
+---
+--- The algorithm mirrors git's `sort_in_topological_order`: it is a **depth-first
+--- walk over a LIFO stack**, not a date-priority sort. The ready tips (commits
+--- whose in-set children are all placed) seed the stack newest-first; popping one
+--- emits it and pushes each parent the instant it becomes ready, so the next pop
+--- descends straight into that parent — a merge's merged-in lineage is emitted
+--- right after the merge instead of being deferred. Parents are pushed in order,
+--- so under the LIFO the **last parent is descended first** (git's discipline),
+--- and the descent goes deep before the next tip is touched. Date (newest first,
+--- hash to break ties) only orders the **independent tips** on the stack — once a
+--- lineage starts it is followed by topology, not recency.
 ---
 --- Pure (no I/O) and operates only on the given set: relationships to commits
 --- *outside* `commits` (e.g. unloaded parent placeholders) are ignored, so it
 --- orders the loaded rows without needing the full history. This is gitloom
---- owning the row order rather than delegating it to `git log` (§1.1, §3.1).
---- Unit-testable via `_internal`.
+--- owning the row order itself (§1.1, §3.1). Unit-testable via `_internal`.
 ---@param commits Commit[]  the row commits to order (each with resolved .parents/.children)
 ---@return Commit[]         the same commits, child-first topological order
 local function order_commits(commits)
@@ -1053,76 +1060,41 @@ local function order_commits(commits)
         pending[c.hash] = n
     end
 
-    -- Priority among independent ready tips: newest author date first, hash as a
-    -- stable tiebreak. True when `a` should be emitted before `b`.
-    local function before(a, b)
+    -- The stack is a plain array (push = append, pop = remove last = LIFO). Seed
+    -- the ready tips **oldest author-date first** so the newest lands on top and
+    -- is popped first (git seeds newest-first then reverses the LIFO). Hash breaks
+    -- ties for determinism: the smaller hash ends nearer the top, so among
+    -- equal-date tips the smaller hash is emitted first.
+    local stack = {}
+    for _, c in ipairs(commits) do
+        if pending[c.hash] == 0 then stack[#stack + 1] = c end
+    end
+    table.sort(stack, function(a, b)
         local ea = a.date and a.date.epoch or 0
         local eb = b.date and b.date.epoch or 0
-        if ea ~= eb then return ea > eb end
-        return a.hash < b.hash
-    end
-
-    -- A binary max-heap of ready commits keyed by `before`, so the global "next
-    -- newest ready tip" stays cheap when the first-parent descent stalls.
-    local heap = {}
-    local function hswap(i, j) heap[i], heap[j] = heap[j], heap[i] end
-    local function hpush(c)
-        heap[#heap + 1] = c
-        local i = #heap
-        while i > 1 do
-            local p = math.floor(i / 2)
-            if before(heap[i], heap[p]) then hswap(i, p); i = p else break end
-        end
-    end
-    local function hpop()
-        local top = heap[1]
-        local n = #heap
-        -- Move the last element to the root, then shrink. Sequential (not a
-        -- multi-assign) so the n == 1 case — where both indices are heap[1] —
-        -- deterministically clears the slot instead of aliasing it.
-        heap[1] = heap[n]
-        heap[n] = nil
-        n = n - 1
-        local i = 1
-        while true do
-            local l, r, best = i * 2, i * 2 + 1, i
-            if l <= n and before(heap[l], heap[best]) then best = l end
-            if r <= n and before(heap[r], heap[best]) then best = r end
-            if best == i then break end
-            hswap(i, best); i = best
-        end
-        return top
-    end
-
-    for _, c in ipairs(commits) do
-        if pending[c.hash] == 0 then hpush(c) end
-    end
+        if ea ~= eb then return ea < eb end -- ascending: oldest first (top = newest)
+        return a.hash > b.hash
+    end)
 
     local out, emitted = {}, {}
-
-    -- Emit `c`, decrement its in-set parents, and return its first parent when
-    -- that parent just became ready (so the caller continues the line); any
-    -- *other* newly-ready parent goes to the heap for date-ordered selection.
-    local function emit(c)
-        out[#out + 1] = c
-        emitted[c.hash] = true
-        local first, follow = (c.parents or {})[1], nil
-        for _, p in ipairs(c.parents or {}) do
-            if in_set[p.hash] and not emitted[p.hash] and pending[p.hash] > 0 then
-                pending[p.hash] = pending[p.hash] - 1
-                if pending[p.hash] == 0 then
-                    if p == first then follow = p else hpush(p) end
+    while #stack > 0 do
+        local c = stack[#stack]
+        stack[#stack] = nil
+        if not emitted[c.hash] then
+            out[#out + 1] = c
+            emitted[c.hash] = true
+            -- Push parents that just became ready, in parent order — the last
+            -- parent ends on top and is descended first (DFS), so a merged-in
+            -- lineage stays contiguous with its merge.
+            for _, p in ipairs(c.parents or {}) do
+                if in_set[p.hash] and not emitted[p.hash] and pending[p.hash] > 0 then
+                    pending[p.hash] = pending[p.hash] - 1
+                    if pending[p.hash] == 0 then
+                        stack[#stack + 1] = p
+                    end
                 end
             end
         end
-        return follow
-    end
-
-    while #heap > 0 do
-        -- Start a run at the newest ready tip, then descend its first-parent
-        -- chain as long as each parent is ready (the clustering bias).
-        local c = hpop()
-        while c do c = emit(c) end
     end
 
     -- Defensive: a consistent DAG emits everything, but never drop rows if the
@@ -1132,7 +1104,12 @@ local function order_commits(commits)
         for _, c in ipairs(commits) do
             if not emitted[c.hash] then rest[#rest + 1] = c end
         end
-        table.sort(rest, before)
+        table.sort(rest, function(a, b)
+            local ea = a.date and a.date.epoch or 0
+            local eb = b.date and b.date.epoch or 0
+            if ea ~= eb then return ea > eb end
+            return a.hash < b.hash
+        end)
         for _, c in ipairs(rest) do out[#out + 1] = c end
     end
 
