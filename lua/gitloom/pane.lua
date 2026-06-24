@@ -1060,6 +1060,24 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             for k, col in ipairs(upcols) do
                 active[col] = { id = upid[k], color = upcolor[k], node = upkids[k] }
             end
+        elseif N.refs and #N.refs > 0 then
+            -- A DISCONNECTED pinned anchor: its lane does not reach the cutoff (the lanes
+            -- crossing the seam lead elsewhere — e.g. up into a collapsed branch — so none
+            -- arrives at this node). A pinned anchor is ALWAYS visible (§6.2), so draw it as
+            -- a lone labelled ◍ head in its own free column, with no wires (it connects to
+            -- nothing in this view).
+            local col = free_col(col_of and col_of(N))
+            used_cols[col] = true
+            if col > maxcol then maxcol = col end
+            local mvid, color = lane(N)
+            local cells = { [col] = { { id = pick_id(mvid), color = color or 1, connectivity = conn({}) } } }
+            local node_commit = { hash = N.hash, collapsed = true,
+                parents = N.parents, children = N.children, refs = N.refs }
+            lines[#lines + 1] = {
+                columns = assemble(cells, col, col, node_commit),
+                commit = node_commit,
+                pinned = true,
+            }
         end
     end
 
@@ -1086,14 +1104,16 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                 end
             end
         end
-        local head_id = {} -- ids that terminate at a ◍ head (down, no up, in a node cell)
+        local head_id = {} -- ids that terminate at a ◍ head (a node cell that does not
+                           -- continue up: a down-head, or a lone disconnected anchor with
+                           -- no wires at all)
         for ri, r in ipairs(rows) do
             for _, cell in ipairs(r.columns or {}) do
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.id ~= nil then
                         id_rows[s.id][ri] = true
                         local cc = s.connectivity or {}
-                        if cell.has_commit and cc.down and not cc.up then
+                        if cell.has_commit and not cc.up and not cc.left and not cc.right then
                             head_id[s.id] = true
                             -- A head reads as ITS OWN branch (the tip) colour — but ONLY
                             -- for above-seam lanes (fork children and merge continuations).

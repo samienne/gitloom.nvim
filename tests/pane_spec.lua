@@ -159,7 +159,9 @@ end
 local function header_grid_errors(opts, rows)
     local full = vim.list_extend({}, rows)
     full[#full + 1] = seam_sep(rows[#rows])
-    return h.check_grid(h.render_grid(opts, full), opts)
+    -- A disconnected pinned anchor renders as a lone, wireless ◍ head (§6.2), so floating
+    -- ◍ heads are allowed in the header grid.
+    return h.check_grid(h.render_grid(opts, full), opts, false, true)
 end
 
 -- Every boundary lane must appear as a down-lane in the header's bottom row, in
@@ -284,11 +286,17 @@ local function assert_head_colour_matches_graph(rows, lane_of, boundary, ctx)
         for _, cell in ipairs(r.columns or {}) do
             if cell.has_commit and cell.commit then
                 local exempt = boundary_ids[cell.id] or false
+                local wired = false
                 for _, s in ipairs(cell.lanes or {}) do
                     local c = s.connectivity or {}
                     if c.left or c.right then exempt = true end -- convergence
                     if boundary_ids[s.id] and c.down then exempt = true end -- crossing lane
+                    if c.up or c.down or c.left or c.right then wired = true end
                 end
+                -- A lone DISCONNECTED anchor renders wireless (no up/down/left/right); its
+                -- colour can legitimately de-collide (it has no continuity to preserve), so
+                -- it is exempt from the graph-colour match.
+                if not wired then exempt = true end
                 if not exempt then
                     local l = lane_of(cell.commit)
                     heads[#heads + 1] = { cell = cell, mc = l and l.color }
@@ -809,6 +817,37 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         for _, c in ipairs(seq) do distinct[c] = true end
         local n = 0; for _ in pairs(distinct) do n = n + 1 end
         assert.is_true(n >= 2, "the arm must differ from the trunk (branch colour), not be all id 1")
+    end)
+
+    it("shows a DISCONNECTED pinned anchor as a lone labelled head (§6.2)", function()
+        -- The live line-119 bug: at a deep cutoff the lanes crossing the seam lead UP into a
+        -- collapsed branch (B), not to the pinned anchor; HEAD is seeded but disconnected
+        -- from the boundary, so the boundary-driven sweep never reaches it. A pinned anchor
+        -- must ALWAYS be visible, so it renders as a lone labelled ◍ head even with nothing
+        -- connecting it to the seam.
+        local opts = h.big_opts()
+        local B = { hash = "B", refs = {}, parents = {}, children = {}, collapsed = true }
+        local H = { hash = "H", refs = { { name = "HEAD" } }, parents = {}, children = {}, collapsed = true }
+        local items = { { commit = H }, { commit = B } } -- newest-first: anchor on top, B at seam
+        local boundary = { [1] = { id = 1, color = 1, begin = B } }
+        local node_of = { B = B, H = H }
+        local lm = { B = { id = 1, color = 1 }, H = { id = 2, color = 2 } }
+        local nc = { B = 1, H = 2 }
+        local function lane_of(n) return n and lm[n.hash] end
+        local function col_of(n) return n and nc[n.hash] end
+        local res = pane.header(items, boundary, node_of, lane_of, col_of)
+        local found
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                if cell.has_commit and cell.commit and cell.commit.refs then
+                    for _, rf in ipairs(cell.commit.refs) do if rf.name == "HEAD" then found = true end end
+                end
+            end
+        end
+        assert.is_true(found, "the disconnected pinned anchor (HEAD) must render as a lone head")
+        assert_seam_match(res.rows, boundary) -- the boundary lane still terminates at the seam
+        assert_continuous(res.rows)
+        assert.same({}, header_grid_errors(opts, res.rows))
     end)
 
     it("packs isolated seam heads onto a shared row; a pinned anchor keeps its own", function()
