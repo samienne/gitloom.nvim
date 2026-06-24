@@ -105,19 +105,39 @@ describe("pane_labels (header/footer §6.2)", function()
     local pane_labels = internal.pane_labels
     local function ref(kind, name) return { kind = kind, name = name } end
 
-    it("shows HEAD FIRST when HEAD shares a commit with a branch", function()
-        -- The line-277/-14 report: HEAD points at `enne/backport-cmake-fixes`, both on the
-        -- same commit. The pane must read as HEAD, not just the branch — HEAD leads.
+    it("shows ONLY HEAD, dropping the branch HEAD points at on the same commit", function()
+        -- The report: HEAD points at `enne/backport-cmake-fixes`, both on the same commit.
+        -- HEAD already represents that branch, so the pane shows just HEAD — not the branch
+        -- (passed as head_branch = repo.head) that merely co-locates with it.
         local labels = pane_labels({ refs = {
             ref("local", "enne/backport-cmake-fixes"),
             ref("head", "HEAD"),
-        } })
-        assert.equals("HEAD", labels[1])
-        assert.equals("(enne/backport-cmake-fixes)", labels[2])
+        } }, "enne/backport-cmake-fixes")
+        assert.same({ "HEAD" }, labels)
+    end)
+
+    it("also drops the HEAD branch's remote-tracking ref", function()
+        local labels = pane_labels({ refs = {
+            ref("local", "feat"),
+            ref("remote", "origin/feat"),
+            ref("head", "HEAD"),
+        } }, "feat")
+        assert.same({ "HEAD" }, labels)
+    end)
+
+    it("keeps ANOTHER pinned anchor on HEAD's commit, dropping only the HEAD branch", function()
+        -- HEAD is on `feat`, but pinned `release` also lands here — show both HEAD and the
+        -- other anchor; only the HEAD branch itself is suppressed.
+        local labels = pane_labels({ refs = {
+            ref("local", "feat"),
+            ref("local", "release"),
+            ref("head", "HEAD"),
+        } }, "feat")
+        assert.same({ "HEAD", "(release)" }, labels)
     end)
 
     it("shows a detached HEAD as HEAD even with no branch on the commit", function()
-        local labels = pane_labels({ refs = { ref("head", "HEAD") } })
+        local labels = pane_labels({ refs = { ref("head", "HEAD") } }, nil)
         assert.same({ "HEAD" }, labels)
     end)
 

@@ -542,18 +542,31 @@ local function decoration_texts(commit)
     return out
 end
 
---- The labels to draw for a commit in a topology PANE (header/footer): the same
---- branch/tag decorations as the main view, but with a leading "HEAD" marker when the
---- commit carries one. `decoration_texts` omits HEAD (the main view draws it as a
---- separate pinned marker, and it must stay out of the cursor-target list), so a pinned
---- anchor that is HEAD would otherwise read as just the branch sharing its commit.
+--- The labels to draw for a commit in a topology PANE (header/footer): the pinned
+--- anchors, with a leading "HEAD" marker when the commit carries one. `decoration_texts`
+--- omits HEAD (the main view draws it as a separate pinned marker, kept out of the
+--- cursor-target list), so a pinned anchor that is HEAD would otherwise read as just the
+--- branch sharing its commit. When HEAD is present, the branch it points at
+--- (`head_branch`, = repo.head) is DROPPED — HEAD already represents it, so the pane
+--- shows only the pinned heads (HEAD, plus any OTHER pinned anchor on the same commit),
+--- not the branch that merely co-locates with HEAD.
 ---@param commit { refs: Ref[] }?
+---@param head_branch string?  -- the branch HEAD points at (suppressed in favour of HEAD)
 ---@return string[]
-local function pane_labels(commit)
-    local labels = decoration_texts(commit)
-    if commit and group_refs(commit.refs or {}).head then
-        table.insert(labels, 1, "HEAD")
+local function pane_labels(commit, head_branch)
+    local refs = (commit and commit.refs) or {}
+    local has_head = group_refs(refs).head
+    if has_head and head_branch then
+        local kept = {}
+        for _, r in ipairs(refs) do
+            local short = r.name
+            if r.kind == "remote" then short = r.name:match("^[^/]+/(.+)$") or r.name end
+            if r.kind == "head" or short ~= head_branch then kept[#kept + 1] = r end
+        end
+        refs = kept
     end
+    local labels = decoration_texts({ refs = refs })
+    if has_head then table.insert(labels, 1, "HEAD") end
     return labels
 end
 
@@ -3993,7 +4006,7 @@ function M.open(folder, opts)
             local function body_line(row)
                 local text = glyph_line(row.columns)
                 local c = row.commit
-                local labels = c and pane_labels(c) or {}
+                local labels = c and pane_labels(c, repo.head) or {}
                 if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.
