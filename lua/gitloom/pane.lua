@@ -1011,18 +1011,26 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                     arm(c, pivot, a.id, a.color, c, nil)
                 end
             end
-            -- 3. The fork fan. The horizontal bus is drawn in the pivot's colour and
-            --    kept **uniform** (so it passes the across-crossing colour check), then
-            --    each up-child's own UP segment is added in ITS branch colour — so the
-            --    bars above the fork are distinctly coloured per branch.
+            -- 3. The fork fan. Each FORK CHILD's arm is drawn in the CHILD's OWN colour
+            --    (from the pivot to its column), so a diverging branch line reads as THAT
+            --    branch — its colour runs unbroken from the seam-side arm up its bar, not
+            --    the trunk's colour. Arms are drawn FARTHEST-FIRST so a shared inner
+            --    segment takes the NEARER child's colour (each segment reads as the child
+            --    at its outer end). The pivot's own vertical (the trunk continuing down to
+            --    the seam and up to its child) keeps the pivot colour.
             if not is_head then
-                local lo, hi = pivot, pivot
-                for _, c in ipairs(upcols) do lo = math.min(lo, c); hi = math.max(hi, c) end
-                for m = lo, hi do
-                    add(m, {
-                        left = m > lo or nil, right = m < hi or nil,
-                        down = (m == pivot and arr_set[pivot]) or nil,
-                    }, plane.id, plane.color)
+                if arr_set[pivot] then add(pivot, { down = true }, plane.id, plane.color) end
+                local forks = {}
+                for k = 2, #upcols do forks[#forks + 1] = k end
+                table.sort(forks, function(a, b)
+                    return math.abs(upcols[a] - pivot) > math.abs(upcols[b] - pivot)
+                end)
+                for _, k in ipairs(forks) do
+                    local c = upcols[k]
+                    local lo, hi = math.min(pivot, c), math.max(pivot, c)
+                    for m = lo, hi do
+                        add(m, { left = m > lo or nil, right = m < hi or nil }, upid[k], upcolor[k])
+                    end
                 end
                 for k, col in ipairs(upcols) do add(col, { up = true }, upid[k], upcolor[k]) end
             elseif arr_set[pivot] then

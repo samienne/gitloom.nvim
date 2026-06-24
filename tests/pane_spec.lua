@@ -751,49 +751,64 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         end
     end)
 
-    it("renders a fork bus in ONE colour through the real renderer (dev-branch regression)", function()
-        -- The live bug: in the header the dev branch's horizontal line alternated between
-        -- the bus colour (id 1) and the branch colour. One lane crosses the seam; above it
-        -- F forks into HEAD-line, dev-line and extra branches (pushing dev to a
-        -- non-adjacent column). The fork BUS — the horizontal fan to the children — must
-        -- render in a SINGLE colour end-to-end (through get_column_chars, the real
-        -- renderer), not alternate at each child's column. Earlier tests missed it because
-        -- they checked the cell glyphs (top_lane) but not the inter-column CONNECTOR scan.
+    it("renders a fork arm in the BRANCH's colour without alternation (dev-branch regression)", function()
+        -- The live bug: in the header the dev branch's horizontal arm alternated between the
+        -- trunk colour (id 1) and the branch colour (id 3). One lane crosses the seam; above
+        -- it F forks into HEAD-line, dev-line and extra branches that push dev to a
+        -- NON-ADJACENT column (so the arm spans a passthrough — the 2-connector case the
+        -- alternation needs). The diverging arm must read as the BRANCH (dev), end-to-end
+        -- through the real renderer, with NO colour reappearing (no alternation); the
+        -- pivot's own vertical stays the trunk colour. Earlier tests missed it because they
+        -- checked the cell glyphs (top_lane), not the inter-column CONNECTOR scan.
         local items = h.dag({
             { "h1", { "h2" } }, { "h2", { "F" } },
+            { "x", { "F" } }, -- a branch BEFORE dev so dev lands on main-view lane 3
             { "d1", { "d2" } }, { "d2", { "F" } },
-            { "x", { "F" } }, { "yy", { "F" } },
+            { "yy", { "F" } },
             { "F", { "trunk1" } }, { "trunk1", { "base" } }, { "base", {} },
         })
-        items[1].commit.refs = { { name = "HEAD", kind = "head" } }
-        items[3].commit.refs = { { name = "dev", kind = "local" } }
+        items[1].commit.refs = { { name = "HEAD", kind = "head" } } -- h1
+        items[4].commit.refs = { { name = "dev", kind = "local" } } -- d1
         local opts = h.big_opts()
         opts.palette = opts.palette or {}
         opts.palette.tracks = {}
         for i = 1, 32 do opts.palette.tracks[i] = "Track" .. i end
-        local res, boundary = header_of(items, opts, 8, { HEAD = true, dev = true })
-        -- The fork-bus row is the one with a horizontal run (a cell with left/right).
+        local res, _, _, _, lane_of = header_of(items, opts, 8, { HEAD = true, dev = true })
+        -- The fork-fan row: a node-less row with a horizontal run (a cell with left/right).
         local bus
         for _, r in ipairs(res.rows) do
             for _, cell in ipairs(r.columns or {}) do
-                if cell.connectivity and (cell.connectivity.left or cell.connectivity.right) then bus = r; break end
+                if cell.connectivity and (cell.connectivity.left or cell.connectivity.right)
+                    and not cell.has_commit then bus = r; break end
             end
             if bus then break end
         end
-        assert.is_not_nil(bus, "expected a fork-bus row with a horizontal run")
-        -- Render it through the REAL renderer and read each glyph's highlight group: the
-        -- whole bus (glyphs AND the connectors between them) must be one colour.
+        assert.is_not_nil(bus, "expected a fork-fan row with a horizontal run")
         local g = get_column_chars(opts, bus.columns, false)
-        local hls = {}
-        for _, hl in ipairs(g.highlight or {}) do hls[#hls + 1] = hl.hl end
-        assert.is_true(#hls > 1, "expected several coloured glyphs on the bus row")
-        for i = 2, #hls do
-            assert.equals(hls[1], hls[i],
-                ("fork bus colour alternates (%s vs %s) in [%s]"):format(hls[1], hls[i], g.text or ""))
+        local seq = {}
+        for _, hl in ipairs(g.highlight or {}) do seq[#seq + 1] = hl.hl end
+        assert.is_true(#seq >= 3, "expected a multi-segment arm (a passthrough between pivot and dev)")
+        -- (1) NO ALTERNATION: each colour forms a single contiguous run (the regression was
+        --     the arm flipping trunk/branch/trunk/branch at each column).
+        local started = {}
+        for i, c in ipairs(seq) do
+            if c ~= seq[i - 1] then
+                assert.is_nil(started[c],
+                    ("colour %s reappears (alternation) in [%s]"):format(c, g.text or ""))
+                started[c] = true
+            end
         end
-        -- And it is the crossing lane's colour (the fork source), not a branch colour.
-        local bid = boundary[1] and boundary[1].color
-        if bid then assert.equals(opts.palette.tracks[bid], hls[1]) end
+        -- (2) The diverging arm is the BRANCH's (dev's) colour, not the trunk's: the arm
+        --     glyphs (everything past the pivot's vertical, which is the first run) are dev's.
+        local dev = lane_of({ hash = "d1" })
+        assert.is_not_nil(dev)
+        local dev_hl = opts.palette.tracks[dev.color]
+        assert.equals(dev_hl, seq[#seq], ("arm tip is not dev's colour in [%s]"):format(g.text or ""))
+        -- the arm is NOT the trunk colour (id 1) end-to-end — i.e. >1 colour on the row
+        local distinct = {}
+        for _, c in ipairs(seq) do distinct[c] = true end
+        local n = 0; for _ in pairs(distinct) do n = n + 1 end
+        assert.is_true(n >= 2, "the arm must differ from the trunk (branch colour), not be all id 1")
     end)
 
     it("packs isolated seam heads onto a shared row; a pinned anchor keeps its own", function()
