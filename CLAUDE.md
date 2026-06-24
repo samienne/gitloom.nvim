@@ -568,18 +568,33 @@ Details not covered by the spec or architecture:
   turns (the per-column cap is 1 otherwise).
 - **git runs in Neovim's cwd** — `jobstart` is called without an explicit
   `cwd`, so the graph reflects the current working directory's repo.
-- **Owned ordering + resync** (specification.md §3.1/§3.4): gitloom no longer
-  passes an ordering flag to `git log` — git's emission is only the *arrival*
-  order for progressive streaming, and `order_commits` (a pure, child-first
-  topological sort with first-parent clustering + author-date tiebreak) produces
-  the authoritative `repo.order` at stream completion (via `reorder_repo`, which
-  reuses the existing OrderItem objects). `resync` (the `R` key) is the in-place
+- **Sort modes** (specification.md §3.1, cycled by `S`): gitloom owns the
+  row-order *pipeline* (records, decides when to order, reflows), but each
+  **sort mode** sources its sequence differently. `SORT_MODES`: `gitloom`
+  (default) = `order_commits` (the pure, child-first clustered topo sort with
+  author-date tiebreak); `git` = git's exact `--topo-order` (verbatim); `date` /
+  `author` = `git rev-list --date-order` / `--author-date-order`. The `rev` modes
+  fetch their hash sequence via `fetch_rev_order` and `reorder_by_hashes` reorders
+  `repo.order` to match (in place, no re-stream); the `gitloom` mode runs
+  `reorder_repo`. `apply_sort()` dispatches (returns a Future — the `rev` modes
+  are async) and is the single seam used at stream completion, on `S`, and in
+  `resync`. The stream itself fetches `git log --topo-order` (a valid topo base
+  for progressive paint + the `git` mode's verbatim order). `opts.sort_mode`
+  picks the initial mode (default `gitloom`). `order_commits` is the only sort
+  mode actively exercising the layout under development (it differs from git, so
+  it surfaces layout issues git's order hides).
+- **Owned ordering + resync** (specification.md §3.1/§3.4): `order_commits` (a
+  pure, child-first topological sort with first-parent clustering + author-date
+  tiebreak) produces the authoritative `repo.order` for the default `gitloom`
+  sort mode (via `reorder_repo`, which reuses the existing OrderItem objects).
+  `resync` (the `R` key) is the in-place
   history refresh: snapshot the old ref tips → `fetch_ref_entries` (non-mutating)
   → `reconcile_refs` (`diff_ref_tips`-driven add/move/remove) → `fetch_new_commits`
   (`git log <new tips> --not <old tips>`, only the newly-reachable) →
   `integrate_commit` (the shared stream/resync per-commit linker, extracted from
   `on_batch`) → `prune_to_reachable` (`reachable_hashes` orphan prune) →
-  `reorder_repo` → `refresh_worktree` + `reflow`, restoring the hash-keyed
+  `apply_sort` (re-establish the active sort mode) → `refresh_worktree` +
+  `reflow`, restoring the hash-keyed
   cursor/scroll. The pure pieces (`order_commits`, `diff_ref_tips`,
   `reachable_hashes`) are tested; the window glue is not (like the other glue).
   NB: the `order_commits` heap uses sequential `hpop` assignment — a multi-assign

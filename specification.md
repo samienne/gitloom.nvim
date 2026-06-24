@@ -53,7 +53,10 @@ show the full graph. `p` toggles **marker packing** (§10.4) — merge concurren
 collapsed heads onto shared lines, or one per line. `R` **resyncs** the view with
 the repository (§3.4) — re-reads refs, pulls newly-reachable commits, prunes
 unreachable ones, re-sorts, and rebuilds the working-tree virtual commits (§4.2),
-preserving cursor/scroll/selection. `V` enters **commit selection** (§13) — a modal range
+preserving cursor/scroll/selection. `S` cycles the **row sort mode** (§3.1) —
+gitloom's clustered topo sort, git's exact `--topo-order`, or git's date /
+author-date order — reordering in place and keeping the cursor on its commit.
+`V` enters **commit selection** (§13) — a modal range
 selection along one branch, fed to the diff provider and the commit view's range
 mode.
   `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
@@ -111,36 +114,46 @@ Two independent queries, joined by commit hash.
 
 Commits are read via `git log` with:
 
+- `--topo-order` — git's topological order: a valid topological base (children
+  before parents) for progressive painting, the verbatim order of the `git` sort
+  mode, and the input the `gitloom` sort mode re-clusters on top of.
 - `--parents` — full parent hash list per commit.
 - a refspec, default `--all`.
-
-No commit-ordering flag is passed. Git emits commits in its default
-(committer-date) order, which gitloom treats only as a convenient *arrival*
-order for progressive streaming (below), **not** as the authoritative row
-order — per §1.1, gitloom owns the row ordering itself.
 
 Each commit carries: hash, parent hashes, author, author date, subject. The
 author date is read as a Unix epoch (`%at`) plus its tz offset (from `%ai`) and
 parsed into a structured `Timestamp` (§4), not kept as text. Refs are **not**
 taken from `--decorate`; they come from §3.2.
 
-**Row ordering.** After the commits are recorded into the DAG, gitloom computes
-the row order itself with a **topological sort** — children are always emitted
-before their parents, so a parent is never at an earlier row than a child (the
-layout and reachability invariant of §5/§12). The sort **mimics git's
-`--topo-order`**: among the commits whose children are all already placed, it
-prefers to **continue the current line of history** (keeping each branch's
-commits contiguous rather than interleaving branches by date), breaking ties by
-**author date, newest first**. This is the only ordering mode today; date-order
-/ author-date-order / a `--reverse`-style oldest-first flip are possible future
-modes now that ordering is owned (§8).
+**Row ordering — sort modes.** gitloom **owns the row-order pipeline** (§1.1): it
+records the commit set, decides *when* to (re)order, and reflows — but a given
+**sort mode** sources its *sequence* either from git or from its own algorithm.
+`S` cycles the mode; the active mode determines `repo.order`. All modes keep the
+hard invariant that a parent is never at an earlier row than a child (the layout
+and reachability invariant of §5/§12). The modes:
 
-**Streaming.** While commits stream in they are appended in arrival order so the
-view paints progressively; git's default order is already topological except
-under committer-date clock skew. When the stream completes, the owned sort runs
-once and produces the authoritative row order (`repo.order`), after which the
-§10 projection / reflow proceeds. So a clock-skewed repository may show a
-transiently imperfect order mid-stream that settles when loading finishes.
+- **`gitloom`** (default) — gitloom's own **topological sort**: among the commits
+  whose children are all already placed, it prefers to **continue the current
+  line of history** (keeping each branch's commits contiguous rather than
+  interleaving branches by date), breaking ties by **author date, newest first**.
+  A clustering *approximation* of `--topo-order` — close but not byte-identical to
+  git, and the mode under active layout development.
+- **`git`** — git's exact `--topo-order`, used verbatim (the streamed order, or
+  re-queried via `git rev-list --topo-order` after an in-place reorder). The
+  faithful git reference to compare against.
+- **`date`** / **`author`** — git's `--date-order` / `--author-date-order`
+  (`git rev-list`): topological, otherwise newest-first by committer / author
+  date, so branches interleave by date.
+
+The `rev`-based modes (`git` / `date` / `author`) obtain their sequence from
+`git rev-list <flag>`; the `gitloom` mode computes it in Lua. Cycling re-orders
+`repo.order` **in place** (no re-stream) and reflows, keeping the cursor on its
+commit. The default mode is configurable (`sort_mode`, §8).
+
+**Streaming.** While commits stream in they are appended in git's `--topo-order`
+arrival order so the view paints progressively. When the stream completes the
+active sort mode is applied once to produce the authoritative `repo.order`, after
+which the §10 projection / reflow proceeds.
 
 ### 3.2 Refs
 
@@ -699,8 +712,8 @@ options are specified here, not yet read by the command.)
 `GraphOptions` (see [README.md](README.md) for the full default table):
 
 ```
-GraphOptions = { win, palette, merge_style, icons, branches, mirror, highlight,
-                 date_format, date_mode, message_min, label_mode, diff,
+GraphOptions = { win, palette, merge_style, icons, branches, sort_mode, mirror,
+                 highlight, date_format, date_mode, message_min, label_mode, diff,
                  working_tree }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -729,6 +742,9 @@ Endpoint     = Commit | "index" | "worktree"
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
+- `sort_mode` — the initial **row sort mode** (§3.1): `"gitloom"` (default,
+  the clustered topo sort), `"git"` (git's exact `--topo-order`), `"date"`, or
+  `"author"`. Cycle live with `S`.
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
   conventional left-to-right layout. Purely a rendering transform; ordering and

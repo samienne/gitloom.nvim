@@ -109,6 +109,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
+| `S` | Cycle the row **sort mode** — gitloom's clustered topo sort, git's exact `--topo-order`, or git's date / author-date order; reorders in place |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
@@ -314,6 +315,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`merge_style`** — controls whether merges/splits get their own virtual
   line above/below the commit, or are folded onto the commit line.
 - **`branches`** — the ref arguments passed to `git log` (default `--all`).
+- **`sort_mode`** — the initial row sort mode (default `"gitloom"`): `"gitloom"`
+  (gitloom's clustered topological sort), `"git"` (git's exact `--topo-order`),
+  `"date"`, or `"author"` (git's date / author-date order). Cycle live with `S`.
 - **`mirror`** — render the graph mirrored, with lane 1 at the right edge of the
   graph column (nearest the message). On by default; set `false` for the
   conventional left-to-right layout. A render-only transform; toggle live with

@@ -18,6 +18,9 @@ local MERGE_STYLES = {
     { name = "inline (merge on split)", style = { allow_merge_on_split = true,  merge_on_separate_line = false, split_on_separate_line = false } },
 }
 local merge_style_index = 1
+-- Active row sort mode (index into SORT_MODES, defined below; spec §3.1), cycled
+-- by `S`. 1 = the gitloom clustered sort (default).
+local sort_mode_index = 1
 
 -- Ref label placements the viewer cycles through with `B` (spec §6.1). `right`
 -- pins refs to the right edge (default); `inline` draws them left-aligned before
@@ -75,6 +78,8 @@ local KEYBINDS = {
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
+    { "R", "Resync with the repository (refs + new commits + working tree)" },
+    { "S", "Cycle the row sort mode (gitloom / git topo / date / author)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
@@ -87,9 +92,13 @@ local KEYBINDS = {
 ---@param mirror boolean?
 ---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
 ---@param focus boolean?  -- the first-parent focus default is on (§10.7)
-local function footer_text(mirror, modes, focus, nanchors)
+---@param sort_label string?  -- the active sort mode's label (§3.1)
+local function footer_text(mirror, modes, focus, nanchors, sort_label)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
+    if sort_label then
+        status = status .. " | Sort: " .. sort_label
+    end
     if focus then
         status = status .. " | focus"
         -- More than the single default anchor (HEAD) ⇒ note the anchor count.
@@ -1211,10 +1220,11 @@ local function fetch_commits(opts)
 
     -- Refs come from fetch_refs (§3.2), so no --decorate here. %at (epoch) +
     -- %ai (carries the tz offset) feed the structured Timestamp (§4).
-    -- No ordering flag: git emits its default (committer-date) order, which is
-    -- only the *arrival* order for progressive streaming — gitloom owns the row
-    -- order via order_commits at completion (spec §3.1).
-    local command = { "git", "log", "--parents", unpack(branch),
+    -- Stream in git's `--topo-order` (spec §3.1): a valid topological base for
+    -- progressive painting, the verbatim order of the `git` sort mode, and the
+    -- input the `gitloom` sort mode re-clusters on top of. The active sort mode
+    -- (applied at completion) decides the final row order.
+    local command = { "git", "log", "--topo-order", "--parents", unpack(branch),
         "--pretty=format:" .. COMMIT_LOG_FMT }
     if opts.count then
         table.insert(command, "-n")
@@ -1340,6 +1350,43 @@ local function fetch_new_commits(new_tips, old_tips)
         end,
     })
 
+    return future
+end
+
+--- The row sort modes (spec §3.1), cycled by `S`. The order gitloom renders is
+--- owned, but each mode sources its *sequence* differently: a mode with `fn`
+--- sorts the in-memory DAG in Lua; a mode with `rev` asks git for the exact
+--- sequence (`git rev-list <rev>`), so the `git` mode reproduces git's
+--- `--topo-order` byte-for-byte. `gitloom` (the clustered `order_commits`) is the
+--- default; `git` is the raw git order; `date` / `author` are git's other orders.
+local SORT_MODES = {
+    { id = "gitloom", label = "gitloom topo", fn = true },
+    { id = "git", label = "git topo", rev = "--topo-order" },
+    { id = "date", label = "git date", rev = "--date-order" },
+    { id = "author", label = "git author-date", rev = "--author-date-order" },
+}
+
+--- Ask git for an exact commit order — the `rev`-based sort modes (spec §3.1).
+--- `git rev-list <flag> <refspec>` lists hashes newest-first in git's chosen
+--- order (same convention as the row order). Buffered; resolves to the hash list.
+---@param branch string[]  the refspec (e.g. { "--all" } or branch names)
+---@param flag string      the order flag (`--topo-order` / `--date-order` / …)
+---@return Future
+local function fetch_rev_order(branch, flag)
+    local future, promise = make_future()
+    local command = { "git", "rev-list", flag, unpack(branch) }
+    local hashes = {}
+    vim.fn.jobstart(command, {
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, line in ipairs(lines) do
+                if line ~= "" then hashes[#hashes + 1] = line end
+            end
+        end,
+        on_exit = function()
+            promise.resolve(hashes)
+        end,
+    })
     return future
 end
 
@@ -3786,6 +3833,7 @@ end
 -----@field merge_style "compact"|"normal"|"merge"
 ---@field merge_style MergeStyle
 ---@field branches? string|string[]
+---@field sort_mode? string  initial row sort mode id (§3.1): "gitloom" | "git" | "date" | "author"
 ---@field icons Icons
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
@@ -3936,6 +3984,14 @@ function M.open(folder, opts)
     -- no non-normal branch modes it is the identity, so it shares the same list
     -- (streaming appends to both) until a reflow swaps in a projected one (§10).
     repo.display = repo.order
+
+    -- Resolve the initial sort mode (§3.1) from opts.sort_mode (an id string),
+    -- defaulting to the gitloom clustered sort. `S` cycles from here.
+    if opts.sort_mode then
+        for i, m in ipairs(SORT_MODES) do
+            if m.id == opts.sort_mode then sort_mode_index = i; break end
+        end
+    end
 
     local palette = opts.palette
 
@@ -4102,6 +4158,56 @@ function M.open(folder, opts)
             new_order[#new_order + 1] = item_of[c.hash]
         end
         repo.order = new_order
+    end
+
+    -- Reorder repo.order to match an external hash sequence (a `rev`-based sort
+    -- mode's `git rev-list` output; §3.1). Rows git lists but we lack are skipped;
+    -- in-memory rows git didn't list (refspec drift) are appended, so no row is
+    -- dropped. Reuses the existing OrderItem objects. Virtual worktree commits are
+    -- spliced separately, so they are excluded here.
+    ---@param hashlist string[]
+    local function reorder_by_hashes(hashlist)
+        local item_of = {}
+        for _, it in ipairs(repo.order) do
+            if it.type == "commit" and it.commit and not it.commit.virtual then
+                item_of[it.commit.hash] = it
+            end
+        end
+        local new_order, placed = {}, {}
+        for _, h in ipairs(hashlist) do
+            local it = item_of[h]
+            if it and not placed[h] then
+                new_order[#new_order + 1] = it
+                placed[h] = true
+            end
+        end
+        for _, it in ipairs(repo.order) do
+            if it.type == "commit" and it.commit and not it.commit.virtual
+                and not placed[it.commit.hash] then
+                new_order[#new_order + 1] = it
+                placed[it.commit.hash] = true
+            end
+        end
+        repo.order = new_order
+    end
+
+    -- Apply the active sort mode (§3.1) to repo.order, returning a Future (the
+    -- `rev` modes query git asynchronously). The `gitloom` mode sorts the
+    -- in-memory DAG (order_commits); the `rev` modes take git's exact sequence.
+    -- The caller reflows.
+    ---@return Future
+    local function apply_sort()
+        local mode = SORT_MODES[sort_mode_index]
+        if mode.rev then
+            local branch = opts.branches or { "--all" }
+            if type(branch) ~= "table" then branch = { branch } end
+            return fetch_rev_order(branch, mode.rev)
+                .next(function(hashes) reorder_by_hashes(hashes) end)
+        end
+        reorder_repo()
+        local future, promise = make_future()
+        promise.resolve()
+        return future
     end
 
     -- Merge a freshly-parsed Commit into the model (§3): fill its placeholder (or
@@ -4411,7 +4517,7 @@ function M.open(folder, opts)
             local nanchors = 0
             for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
             local status = footer_text(opts.mirror, view_state.modes,
-                opts.collapse_merged ~= false, nanchors)
+                opts.collapse_merged ~= false, nanchors, SORT_MODES[sort_mode_index].label)
             -- Commit selection (§13): show the mode + the selected row count.
             if sel.active then
                 status = status .. (" | SELECT %d"):format(#(sel.path or {}))
@@ -4887,10 +4993,11 @@ function M.open(folder, opts)
                     end,
                 })
             end).next(function()
-                -- Stream closed: the rows were appended in git's arrival order, so
-                -- now establish gitloom's owned topological row order (§3.1) before
-                -- anything is projected or anchored.
-                reorder_repo()
+                -- Stream closed: apply the active sort mode (§3.1) to establish the
+                -- authoritative row order before anything is projected or anchored.
+                -- (The stream appended git's --topo-order arrival order.)
+                return apply_sort()
+            end).next(function()
                 -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
                 -- model, read the dirty state and splice the staged/unstaged nodes
                 -- above HEAD before the projection. Gated by working_tree; a clean
@@ -5082,6 +5189,24 @@ function M.open(folder, opts)
     -- working-tree refresh is folded into it.
     opts.win.keys.R = function()
         resync(false)
+    end
+    -- S: cycle the row sort mode (§3.1) — gitloom's clustered topo sort, git's
+    -- exact --topo-order, or git's date / author-date order. Reorders repo.order
+    -- in place (no re-stream) and reflows, keeping the cursor on its commit.
+    opts.win.keys.S = function()
+        local keep
+        local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv and lv.win and lv.win.win)
+        if ok then keep = cursor_hash(pos[1]) end
+        sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
+        apply_sort().next(function()
+            reflow()
+            update_footer() -- footer shows the active sort mode
+            if keep then goto_hash(keep) end
+            place_cursor()
+            update_cone()
+            if lv and lv.controller then lv.controller.refresh() end
+            update_panes()
+        end)
     end
     -- c: toggle the first-parent focus (§10.7) — collapse every non-mainline
     -- branch vs. show the full graph. Changes per-item line counts, so reflow.
@@ -5588,7 +5713,8 @@ function M.open(folder, opts)
             end).next(function(commits)
                 for _, c in ipairs(commits) do integrate_commit(c) end
                 prune_to_reachable()
-                reorder_repo()
+                return apply_sort() -- re-establish the active sort mode (§3.1)
+            end).next(function()
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
             end).next(function(state)
