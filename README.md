@@ -152,13 +152,14 @@ follows the branch, skipping rows that belong to other branches:
   collapsed branch without losing the selection or moving the view;
 - `<C-d>` / `<C-u>` jump roughly half a screen of branch commits;
 - `o` swaps the fixed and moving ends;
-- `<CR>` or `D` open the selected range in the external diff viewer;
+- `<CR>` opens the **range view** — the selected commit list with the combined
+  diff and diffstat — and `D` opens the range straight in the external diff
+  viewer;
 - `V` again or `<Esc>` ends selection.
 
 The selected path is highlighted and everything else dims (reusing the
 reachability emphasis). The footer shows a `SELECT N` indicator. See
-[specification.md §13](specification.md). (An in-commit-view range mode — the
-diffstat and combined diff rendered inside gitloom — is a planned follow-up.)
+[specification.md §13](specification.md).
 
 **Context footer.** Below the graph, a compact summary band continues the lanes
 that are active at the bottom of the view down to where they merge into the main

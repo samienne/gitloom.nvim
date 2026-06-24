@@ -2121,6 +2121,33 @@ local function format_commit_detail(detail, opts)
     return lines
 end
 
+--- Metadata rows for the **range** commit view (spec §13.5): a summary line
+--- (`N commits  (oldest..newest)`) then one row per selected commit, newest
+--- first — abbreviated hash + subject. Replaces the single-commit detail block
+--- when the commit view is opened on a selection. Pure.
+---@param commits { hash: string, message?: string }[]   selected commits, newest first
+---@param palette table
+---@return table[]
+local function format_range_detail(commits, palette)
+    palette = palette or {}
+    local rows = {}
+    local n = #commits
+    local summary = (n == 1) and "1 commit" or (("%d commits"):format(n))
+    if n >= 2 then
+        summary = summary .. ("  (%s..%s)"):format(commits[n].hash:sub(1, 7), commits[1].hash:sub(1, 7))
+    end
+    rows[#rows + 1] = highlight_text(summary, palette.author)
+    rows[#rows + 1] = highlight_text("")
+    for _, c in ipairs(commits) do
+        rows[#rows + 1] = compose({
+            highlight_text(c.hash:sub(1, 7), palette.date),
+            highlight_text("  "),
+            highlight_text(c.message or "", palette.message),
+        })
+    end
+    return rows
+end
+
 -- Line prefixes that mark a diff's file-header lines (checked before +/- so the
 -- "+++"/"---" file markers don't read as added/removed content).
 local DIFF_HEADER_PREFIXES = {
@@ -2408,6 +2435,33 @@ local function fetch_commit_diff(hash)
     return future
 end
 
+--- Fetch the **combined** patch for a `DiffRange` (spec §13.5): `git diff
+--- <base> <to>`, where `base` is the range's `from` (its older end's first
+--- parent) or the empty tree for a root. Buffered; resolves the patch as a
+--- single string. Used by the range commit view; mirrors fetch_commit_diff.
+---@param range DiffRange
+local function fetch_range_diff(range)
+    local future, promise = make_future()
+    local out = {}
+    local base = (range.from and range.from.hash) or EMPTY_TREE
+
+    vim.fn.jobstart(
+        { "git", "diff", base, range.to.hash },
+        {
+            stdout_buffered = true,
+            on_stdout = function(_, lines)
+                for _, l in ipairs(lines) do
+                    out[#out + 1] = l
+                end
+            end,
+            on_exit = function()
+                promise.resolve(table.concat(out, "\n"))
+            end,
+        })
+
+    return future
+end
+
 -- Trim leading/trailing whitespace (git command output is line-wrapped).
 local function trim_ws(s)
     return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
@@ -2647,13 +2701,26 @@ local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 --- on a diffstat file line jumps to that file's diff section (§11.4). The pure
 --- pieces (parse_show / format_commit_detail / format_diff / diffstat_files /
 --- format_diffstat) do the work; this is just window + IO glue.
+--- When `range` is given (the commit-selection range mode, spec §13.5) the view
+--- shows the selected commit list + the combined range diff instead of a single
+--- commit's detail; `commit` is then nil. `range` is
+--- `{ range = DiffRange, commits = Commit[], title = string }`.
 ---@param opts GraphOptions
----@param commit Commit
-local function open_commit_view(opts, commit)
+---@param commit Commit?
+---@param range? { range: DiffRange, commits: Commit[], title: string }
+local function open_commit_view(opts, commit, range)
     local ok, snacks = pcall(require, "snacks.win")
     if not ok then
         vim.notify("snacks.win not found. Install snacks.nvim", vim.log.levels.ERROR)
         return
+    end
+
+    local title
+    if range then
+        title = range.title
+    else
+        ---@cast commit Commit
+        title = "Commit " .. commit.hash:sub(1, 7)
     end
 
     -- Match the graph window's geometry so the commit view is the same size.
@@ -2661,7 +2728,7 @@ local function open_commit_view(opts, commit)
         border = opts.win.border or "rounded",
         width = opts.win.width,
         height = opts.win.height,
-        title = "Commit " .. commit.hash:sub(1, 7),
+        title = title,
         footer = "q: close",
         keys = { q = "close" },
     })
@@ -2707,7 +2774,12 @@ local function open_commit_view(opts, commit)
         if not vim.api.nvim_win_is_valid(w.win) then return end
         local line = vim.api.nvim_win_get_cursor(w.win)[1]
         if action_line and line == action_line then
-            open_diff(opts, commit)
+            if range then
+                if opts.diff and opts.diff.open then opts.diff.open(range.range) end
+            else
+                ---@cast commit Commit
+                open_diff(opts, commit)
+            end
             return
         end
         local target = file_jumps[line]
@@ -2867,7 +2939,6 @@ local function open_commit_view(opts, commit)
         action_line = nil
         diff_ctx, diff_start = nil, nil
         diff_buf_to_patch = nil
-        local detail = parse_show(meta_output)
 
         local rows = {}
         -- Diff action label as the first line (§11.5), when a provider is set.
@@ -2876,10 +2947,19 @@ local function open_commit_view(opts, commit)
             action_line = #rows
             rows[#rows + 1] = highlight_text("")
         end
-        for _, r in ipairs(format_commit_detail(detail, {
-            decorations = decoration_texts(commit),
-            palette = opts.palette,
-        })) do
+        -- Metadata: the selected-commit list in range mode (§13.5), else the
+        -- single commit's detail.
+        local meta_rows
+        if range then
+            meta_rows = format_range_detail(range.commits, opts.palette)
+        else
+            ---@cast commit Commit
+            meta_rows = format_commit_detail(parse_show(meta_output), {
+                decorations = decoration_texts(commit),
+                palette = opts.palette,
+            })
+        end
+        for _, r in ipairs(meta_rows) do
             rows[#rows + 1] = r
         end
 
@@ -2968,12 +3048,23 @@ local function open_commit_view(opts, commit)
         update_ctx()
     end
 
-    -- Fetch metadata, then the diff; render once both arrive (§11.1).
-    fetch_commit_detail(commit.hash).next(function(meta_output)
-        return fetch_commit_diff(commit.hash).next(function(diff_output)
-            return { meta = meta_output, diff = diff_output }
+    -- Fetch the diff (plus metadata in single-commit mode); render once it
+    -- arrives (§11.1). Range mode (§13.5) needs no metadata fetch — the commit
+    -- list is supplied — so it fetches only the combined range diff.
+    local fetched
+    if range then
+        fetched = fetch_range_diff(range.range).next(function(diff_output)
+            return { meta = nil, diff = diff_output }
         end)
-    end).next(function(res)
+    else
+        ---@cast commit Commit
+        fetched = fetch_commit_detail(commit.hash).next(function(meta_output)
+            return fetch_commit_diff(commit.hash).next(function(diff_output)
+                return { meta = meta_output, diff = diff_output }
+            end)
+        end)
+    end
+    fetched.next(function(res)
         render(res.meta, res.diff)
         -- Submodule change graphs (§11.7): fetch each asynchronously (gated,
         -- never fetching) and re-render in place as they resolve, so a slow or
@@ -3457,8 +3548,8 @@ function M.open(folder, opts)
         if not (newer and older) then return nil end
         return range_endpoints(newer, older)
     end
-    -- Phase 1 consumer: hand the selection range to the external diff provider
-    -- (§13.5). (The in-view range mode is the phase-2 follow-up.)
+    -- Hand the selection range to the external diff provider (§13.5; the `D`
+    -- key, and the range view's action label).
     local function open_selection_diff()
         local open = opts.diff and opts.diff.open
         if not open then
@@ -3467,6 +3558,34 @@ function M.open(folder, opts)
         end
         local r = selection_range()
         if r then open(r) end
+    end
+    -- The selected commits, newest first (§13.5): each path node's real commit,
+    -- a collapsed head expanded to its region members (resolved via repo.commits).
+    local function selection_commits()
+        local out, seen = {}, {}
+        local function push(c)
+            if c and not seen[c.hash] then seen[c.hash] = true; out[#out + 1] = c end
+        end
+        for _, node in ipairs(sel.path or {}) do
+            if node.collapsed then
+                for _, h in ipairs(node.region or {}) do push(repo.commits[h]) end
+            else
+                push(node.commit)
+            end
+        end
+        return out
+    end
+    -- <CR> while selecting (§13.5): open the commit view in **range mode** — the
+    -- selected-commit list + the combined range diff/diffstat, its action label
+    -- opening the same range in the external viewer.
+    local function open_selection_view()
+        local r = selection_range()
+        if not r then return end
+        local commits = selection_commits()
+        local n = #commits
+        local title = (n == 1) and ("Commit " .. (commits[1] and commits[1].hash:sub(1, 7) or ""))
+            or (("Selection: %d commits"):format(n))
+        open_commit_view(opts, nil, { range = r, commits = commits, title = title })
     end
 
     -- Emphasis for the selected path (§13.4): light the path's commit markers and
@@ -3862,9 +3981,10 @@ function M.open(folder, opts)
     -- expand / hide, most-relevant first. On a packed line it lists every marker
     -- by name, so any branch is reachable even when not all labels fit.
     opts.win.keys["<CR>"] = function(self)
-        -- In commit selection (§13.5) <CR> opens the selected range in the diff
-        -- viewer (phase 1; the in-view range mode is the phase-2 follow-up).
-        if sel.active then open_selection_diff(); return end
+        -- In commit selection (§13.5) <CR> opens the commit view in range mode
+        -- (the selected-commit list + combined range diff); D opens the range in
+        -- the external viewer.
+        if sel.active then open_selection_view(); return end
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = order_at(line)
         if not item then return end
@@ -4647,6 +4767,7 @@ M._internal = {
     format_diffstat = format_diffstat,
     commit_range = commit_range,
     range_endpoints = range_endpoints,
+    format_range_detail = format_range_detail,
     sel_ascend_children = sel_ascend_children,
     sel_step = sel_step,
     sel_switch = sel_switch,

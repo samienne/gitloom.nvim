@@ -9,6 +9,7 @@ local range_endpoints = internal.range_endpoints
 local sel_ascend_children = internal.sel_ascend_children
 local sel_step = internal.sel_step
 local sel_switch = internal.sel_switch
+local format_range_detail = internal.format_range_detail
 
 local EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
@@ -73,6 +74,34 @@ describe("range_endpoints (§13.5)", function()
         assert.equals(EMPTY_TREE .. "..NEW", r.rev)
         assert.is_nil(r.from)
         assert.equals(newer, r.to)
+    end)
+end)
+
+describe("format_range_detail (§13.5)", function()
+    local function texts(rows)
+        local out = {}
+        for _, r in ipairs(rows) do out[#out + 1] = r.text end
+        return out
+    end
+
+    it("lists a single commit with a count and no range", function()
+        local rows = format_range_detail({ { hash = "abcdef123", message = "Only commit" } }, {})
+        assert.same({ "1 commit", "", "abcdef1  Only commit" }, texts(rows))
+    end)
+
+    it("summarises a span as oldest..newest and lists newest-first", function()
+        local rows = format_range_detail({
+            { hash = "1111111aaa", message = "newest" },
+            { hash = "2222222bbb", message = "middle" },
+            { hash = "3333333ccc", message = "oldest" },
+        }, {})
+        assert.same({
+            "3 commits  (3333333..1111111)",
+            "",
+            "1111111  newest",
+            "2222222  middle",
+            "3333333  oldest",
+        }, texts(rows))
     end)
 end)
 

@@ -1250,7 +1250,7 @@ the older end is a root), and `rev` is `<older>^..<newer>` (an empty-tree range
 when rooted). This is the **literal** range — the combined patch between the two
 ends, **including any side merged in** along the path when it crosses a merge
 (restricting it to the followed branch's own first-parent changes is an open
-refinement, §13.6). `range_of(anchor, cursor)` constructs it beside the
+refinement, §13.6). `range_endpoints(newer, older)` constructs it beside the
 single-commit `commit_range` (§11.5).
 
 `<CR>` in selection mode opens the **commit view** (§11) in **range mode**: the

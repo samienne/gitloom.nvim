@@ -183,7 +183,9 @@ Coverage:
   empty-tree when the older end is a root), `sel_ascend_children` (first-parent
   children first), `sel_step` (extend/contract along the branch, flip at the
   anchor, clamp at tip/root) and `sel_switch` (rotate the parent at a merge /
-  child at a split, no-op on a linear path; §13.2/§13.3)
+  child at a split, no-op on a linear path; §13.2/§13.3), and `format_range_detail`
+  (the range view's metadata: `N commits  (oldest..newest)` then newest-first
+  hash + subject rows; §13.5)
 - `tests/reachability_spec.lua` — `reachable_cone` (spec §12.1: pivot/ancestors/
   descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
   attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and
@@ -241,8 +243,9 @@ only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
 (the streaming-stdout line de-chunker; §3), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
-`range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` (the
-commit-selection range + path-walking pure helpers; §13),
+`range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` /
+`format_range_detail` (the commit-selection range + path-walking + range-view
+metadata pure helpers; §13),
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
@@ -447,8 +450,9 @@ Details not covered by the spec or architecture:
   `cwd`, so the graph reflects the current working directory's repo.
 - **External diff is a pluggable provider** (specification.md §11.5): the
   `diff.open` callback takes a **`DiffRange`** (`{ rev, from, to }`), not a
-  commit, so future graph range-selection reuses it. `commit_range(commit)` is
-  the only constructor today (single commit → `<hash>^!`, empty-tree for roots).
+  commit, so graph range-selection reuses it. `commit_range(commit)` builds a
+  single-commit range (`<hash>^!`, empty-tree for roots); `range_endpoints(newer,
+  older)` builds a commit-selection span (`<older>^..<newer>`; §13.5).
   The default `open` runs diffview guarded; diffview is the only optional
   dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
   `commit_range` is.
@@ -465,9 +469,13 @@ Details not covered by the spec or architecture:
   → `range_endpoints` → the **literal** `<older>^..<newer>` `DiffRange`). `j`/`k`
   and `<C-d>`/`<C-u>` are bound to walk while active and **fall through to the
   builtin motions** (fed without remap) when inactive; `h`/`l` switch branch while
-  active (else the §2 ref selection); `<CR>`/`D` open the range in the diff
-  provider (**phase 1** — the in-view range mode of §13.5 is the planned phase-2
-  follow-up). A `reflow()` recreates DisplayNodes, so it drops any live selection
+  active (else the §2 ref selection). `<CR>` opens the **range commit view**
+  (§13.5): `open_commit_view(opts, nil, { range, commits, title })` — the same
+  view generalised with a `range` arg, listing the selected commits
+  (`selection_commits` → `format_range_detail`) and rendering the combined range
+  diff (`fetch_range_diff` = `git diff <base> <to>`) through the existing
+  diffstat/diff/context-header pipeline; its action label and `D` open the range
+  in the external provider. A `reflow()` recreates DisplayNodes, so it drops any live selection
   (stale references). Navigation walks the DisplayNode edges directly, so it
   passes *through* collapsed heads (including packed ones); a `node_loc` index
   (hash → {item, col}, built with `display_index`) lets `mark_path` light a head's
