@@ -206,6 +206,13 @@ Coverage:
   child at a split, no-op on a linear path; §13.2/§13.3), and `format_range_detail`
   (the range view's metadata: `N commits  (oldest..newest)` then newest-first
   hash + subject rows; §13.5)
+- `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers
+  (spec §3.3/§4.2/§11.8): `parse_status` (the `git status --porcelain` staged/
+  unstaged/untracked counter — X vs Y, `??`, renames/adds, mixed, clean),
+  `commit_range` for a virtual commit (staged → `--cached`/`to=index`, unstaged →
+  `HEAD`/`to=worktree`, real commits unchanged; §11.5), `worktree_label` (the
+  graph-row subject + pluralized counts + untracked) and `format_worktree_detail`
+  (the commit-view state header + the untracked-additions note)
 - `tests/reachability_spec.lua` — `reachable_cone` (spec §12.1: pivot/ancestors/
   descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
   attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and
@@ -270,6 +277,8 @@ test), `decoration_texts`,
 `range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` /
 `format_range_detail` (the commit-selection range + path-walking + range-view
 metadata pure helpers; §13),
+`parse_status` / `worktree_label` / `format_worktree_detail` (the working-tree
+virtual-commit pure helpers; §3.3/§4.2/§11.8),
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),

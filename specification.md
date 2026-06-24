@@ -50,9 +50,11 @@ debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on. `c`
 toggles the first-parent focus (§10.7) — collapse every non-mainline branch, or
 show the full graph. `p` toggles **marker packing** (§10.4) — merge concurrent
-collapsed heads onto shared lines, or one per line. `V` enters **commit
-selection** (§13) — a modal range selection along one branch, fed to the diff
-provider and the commit view's range mode.
+collapsed heads onto shared lines, or one per line. `R` refreshes the
+**working-tree state** (§3.4) — re-reads the uncommitted changes and rebuilds the
+virtual commits (§4.2). `V` enters **commit selection** (§13) — a modal range
+selection along one branch, fed to the diff provider and the commit view's range
+mode.
   `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
   remote-tracking branch, and tag, plus **HEAD**; selecting one moves the cursor
   to that ref's commit and **centers** the view on it (like the initial HEAD
@@ -129,6 +131,55 @@ Using a dedicated, structured query rather than parsing `git log --decorate`
 makes ref discovery robust and makes remote branches and annotated tags
 first-class (the decorate field conflated them and dropped remotes).
 
+### 3.3 Working-tree state
+
+When the working tree is dirty, gitloom shows the uncommitted changes as up to
+two **virtual commits** (§4.2) stacked on top of HEAD — the live state the user
+is building. This is read-only: gitloom **displays** the index and working tree,
+it never stages, unstages, or commits (§9).
+
+The state is read with porcelain queries that run **after** the commit stream
+(§3.1) has its HEAD anchor:
+
+- the **staged** node — the index versus HEAD — from `git diff --cached`;
+- the **unstaged** node — the working tree versus the index — from `git diff`,
+  plus the **untracked** files (`git ls-files --others --exclude-standard`,
+  respecting `.gitignore`), each rendered as a whole-file addition (via
+  `git diff --no-index` against the empty device) so untracked content appears as
+  added lines.
+
+A node is materialised **only when it has content**: a clean index produces no
+staged node, a clean working tree with no untracked files produces no unstaged
+node, so the count of virtual commits is 0, 1, or 2. Untracked files belong to
+the unstaged node (they are in the working tree, not the index).
+
+The reads are gated by the `working_tree` option (§8, default on) and are skipped
+entirely when it is off or when HEAD is unborn (no commits yet). They never block
+the graph: the main view streams and renders first; the virtual commits are added
+when their queries resolve.
+
+### 3.4 Liveness and refresh
+
+The graph is otherwise a **snapshot taken at open** — it does not yet re-read the
+repository as it changes underneath. Two refresh concerns are distinguished, and
+they are independent:
+
+- **Working-tree refresh** — re-reading only the dirty state (§3.3) when the
+  index or working tree changes (the user edits, stages, or unstages). The set of
+  real commits is unchanged. This **is** supported: a debounced refresh re-runs
+  the §3.3 queries and rebuilds the virtual commits on the current HEAD anchor.
+  It is triggered manually (the `R` key, §2), on buffer writes, and on focus
+  regained, and it first re-reads HEAD's hash so it can detect when history has
+  moved out from under it.
+- **History refresh** — re-reading the commit DAG and refs because real history
+  changed (`commit`, `fetch`, `rebase`, a `checkout` that moves HEAD). This is
+  **deferred** (§10.8): today such a change is reflected only on reopen. The
+  working-tree refresh degrades gracefully across it — when HEAD has moved off the
+  snapshot's known commits, the virtual commits are not re-anchored onto stale
+  history; the view notes that history changed rather than drawing a wrong
+  picture. The working-tree refresh is deliberately structured as the first case
+  of the general refresh, so history refresh extends it rather than replacing it.
+
 ## 4. Data model
 
 ```
@@ -169,6 +220,40 @@ Each ref is classified by its refname and resolved to its target commit:
 `refs/remotes/<remote>/HEAD` (the remote's default-branch symref) is skipped.
 The target hash is looked up in the commit table; a missing target yields a
 sparse `Commit` placeholder (as above).
+
+### 4.2 Virtual commits (working tree)
+
+The working-tree state (§3.3) enters the model as **virtual commits** — synthetic
+`Commit` nodes that are not part of the real DAG:
+
+```
+Commit.virtual = "staged" | "unstaged" | nil   -- nil for a real commit
+```
+
+A virtual commit:
+
+- carries a reserved **sentinel hash** (a value git never produces for a real
+  object), so every hash-keyed path (the commit table, cursor memory, navigation)
+  keeps working unchanged. The staged and unstaged nodes use distinct sentinels;
+- has **one parent** and **no children**, so it is a tip (§5.3). The unstaged
+  node's parent is the staged node when one exists, otherwise the HEAD commit; the
+  staged node's parent is the HEAD commit. So the stack reads, newest first,
+  unstaged → staged → HEAD;
+- carries **no refs** and is **placed directly above** the HEAD commit in the row
+  order;
+- carries **no `author`/`date`/`message` from the model** — its detail is read on
+  demand in the commit view (§11.8), not from the graph stream.
+
+Because a virtual commit sits *above* HEAD, no owner's first-parent reach (§10.2,
+which descends toward ancestors) touches it: its reachability signature is
+**empty**, so by the §10.2 join it is always **normal** and, having no owner, is
+**never collapsible or hideable**. This is exactly the desired "the live state is
+always shown" behaviour, and it falls out of the existing view model with no new
+owner kind.
+
+Virtual commits are present only while the working tree is dirty and the
+`working_tree` option is on; the working-tree refresh (§3.4) adds, updates, and
+removes them as the index and working tree change.
 
 ## 5. Graph layout
 
@@ -307,6 +392,7 @@ node-less junction, §10.4). Commit markers:
 | `◎`    | root commit (no parents) |
 | `◉`    | tip commit (no children) |
 | `○`    | ordinary commit |
+| `◌`    | working-tree commit (a virtual staged/unstaged node, §4.2) |
 | `◍`    | collapsed head (a contracted region, §10.3) |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
 
@@ -535,10 +621,12 @@ options are specified here, not yet read by the command.)
 
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, mirror, highlight,
-                 date_format, date_mode, message_min, label_mode, diff }
+                 date_format, date_mode, message_min, label_mode, diff,
+                 working_tree }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
-DiffRange    = { rev: string, from: Commit?, to: Commit }
+DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
+Endpoint     = Commit | "index" | "worktree"
 ```
 
 - `win` — floating-window geometry (snacks.win).
@@ -580,6 +668,10 @@ DiffRange    = { rev: string, from: Commit?, to: Commit }
   commit view's action-label text (default `▶ Open diff (diffview)`). Override
   `open`/`label` to use a different diff plugin; set `open` to `nil`/`false` to
   disable the integration (no action label, `D` is a no-op).
+- `working_tree` — show uncommitted changes as virtual commits on top of HEAD
+  (§3.3, §4.2). **Default true.** When on, a dirty working tree adds up to two
+  `◌` nodes (staged / unstaged) that update on the working-tree refresh (§3.4);
+  when off, the working tree is never read and no virtual commits appear.
 
 ### Known gap: setup() wiring
 
@@ -594,6 +686,12 @@ open function.)
 
 **Permanently** out of scope: repository mutation of any kind (no checkout,
 commit, rebase, reset). gitloom is a viewer.
+
+Showing the **working-tree state** (§3.3, §4.2) does not change this: gitloom
+*displays* the index and working tree as virtual commits, but **staging,
+unstaging, and committing are permanently out of scope** — the obvious next step
+from a working-tree node, and exactly the line a viewer does not cross. The diff
+is read; the index is never written.
 
 Acting on the commit under the cursor is reasonable where it arises naturally
 from the graph, and the **commit view** (§11) is the first realization of it: a
@@ -834,6 +932,14 @@ all-normal.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
   responsive.
+- **History refresh** — re-reading the commit DAG and refs in place when real
+  history changes (`commit`, `fetch`, `rebase`, a HEAD-moving `checkout`), so the
+  graph updates without reopening (§3.4). The working-tree refresh (§3.4) already
+  builds the refresh seam — re-resolve HEAD, reconcile against the identity-stable
+  model (§4), `reflow()` — and detects when history has moved; the general case
+  (appending new commits, dropping deleted refs, preserving view state and cursor
+  across the reflow) extends it. Deferred; today a history change is reflected
+  only on reopen.
 - **Toggle UX** — `<CR>` on a selected ref cycles its mode and `<CR>` on a head
   expands it (implemented); a picker for setting many at once is still future.
 - **Context panes** — header/footer windows showing off-screen topology folded
@@ -939,7 +1045,12 @@ construct a range.
 A `DiffRange` is `{ rev, from?, to }`: `rev` is a git rev-range the diff tool
 understands (e.g. `<hash>^!` for a commit's own changes, `<a>..<b>` for a span,
 or an empty-tree range for a root commit), and `from`/`to` are the structured
-endpoint commits (`from` is `nil` for a root). The provider's `open(range)` is
+endpoints. An endpoint is normally a `Commit` (`from` is `nil` for a root), but
+for the working-tree virtual commits (§4.2) it may instead name a **tree state** —
+`"index"` or `"worktree"` — so a range can run *to* the index or working tree
+rather than to a commit (the staged node is `from = HEAD, to = "index"` with
+`rev = "--cached"`; the unstaged node is `to = "worktree"` with `rev = "HEAD"`).
+The provider's `open(range)` is
 called to display it; the default opener runs diffview on `range.rev` and, when
 diffview is not installed, reports that instead of erroring. Overriding `open`
 (and `label`) switches to another diff plugin — diffview is therefore an
@@ -1099,6 +1210,27 @@ bumping several submodules gets one change graph per submodule.
   behind its tip" line (from refs *containing* `B`, when exactly one) could name
   the new pointer's home — deferred, fragile when several branches contain it.
 - **Nested submodules** are out of scope for the first cut.
+
+### 11.8 Working-tree commit view
+
+Opening the commit view (§11) on a **virtual commit** (§4.2) shows the
+uncommitted change it stands for. It reuses the §11 machinery — the diffstat
+(§11.4), the line-level diff (§11.3), the context header (§11.6), and the diff
+action label (§11.5) — but the data sources differ, branched on `Commit.virtual`:
+
+- the **metadata** region is not a `git show -s` (there is no commit object).
+  Instead it is a short working-tree summary: a title naming the state (staged /
+  unstaged), the changed-file counts, and the untracked-file count for the
+  unstaged node. There is no hash, author, committer, or parent list;
+- the **diff** is the node's own patch from §3.3 — `git diff --cached` for the
+  staged node, `git diff` plus the synthesized untracked additions for the
+  unstaged node — fed through the *same* diffstat and diff pipeline as a real
+  commit, so the file list, counts, and per-file jumps all work unchanged;
+- the **action label** and `D` open the node's working-tree `DiffRange` (§11.5)
+  in the external provider — the index or the working tree, not a commit range.
+
+Like the rest of the commit view it is strictly read-only (§9): it shows the
+staged/unstaged diff but offers no way to stage, unstage, or commit from it.
 
 ## 12. Reachability emphasis
 

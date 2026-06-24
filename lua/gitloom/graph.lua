@@ -115,6 +115,8 @@ local function help_lines()
     return lines
 end
 
+---@class Future
+---@field next fun(fn: fun(value: any): any): Future
 local function make_future()
     local state = {
         callback = nil,
@@ -1090,6 +1092,8 @@ end
 ---@field date? Timestamp
 ---@field message? string
 ---@field loaded? boolean   true once the commit's own log line has been parsed
+---@field virtual? "staged"|"unstaged"   set on a working-tree virtual commit (§4.2)
+---@field wt? { changed: integer, untracked?: integer }   working-tree file counts (virtual only)
 ---@field deco? string      raw `%d` ref decoration, only on submodule-view commits (§11.7)
 --- View-builder fields, present only on a synthetic **collapsed head** node
 --- (specification.md §10.3); a real commit leaves them nil. The head flows
@@ -1547,7 +1551,8 @@ local function get_column_chars(opts, columns, emphasis)
         elseif is_node then
             -- "⏺". A collapsed head (spec §10.3) gets its own glyph so a
             -- contracted region reads differently from a real commit.
-            char = track.commit.collapsed and "◍" or
+            char = track.commit.virtual and "◌" or
+                track.commit.collapsed and "◍" or
                 (#track.commit.parents == 0) and "◎" or
                 not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and opts.icons.merge or
                 (#track.commit.children == 0) and "◉" or "○"
@@ -1857,6 +1862,24 @@ local function dual_two_line(opts, commit)
         and #decoration_texts(commit) > 0
 end
 
+--- The graph-row label for a working-tree virtual commit (§4.2): a synthesized
+--- subject (the model carries no message), with the file counts from §3.3.
+---@param commit Commit
+---@return string
+local function worktree_label(commit)
+    local wt = commit.wt or {}
+    local n = wt.changed or 0
+    local files = ("%d file%s"):format(n, n == 1 and "" or "s")
+    if commit.virtual == "staged" then
+        return "Staged changes · " .. files
+    end
+    local s = "Unstaged changes · " .. files
+    if (wt.untracked or 0) > 0 then
+        s = s .. (", %d untracked"):format(wt.untracked)
+    end
+    return s
+end
+
 ---@param opts GraphOptions
 ---@param item OrderItem
 ---@param selection_state SelectionState
@@ -2025,6 +2048,21 @@ local function display_item(opts, item, selection_state, cone, sel_cursor)
             above = #above > 0 and above or nil,
             below = below,
             line = { "", "", graph_item, compose(parts) },
+        }
+    end
+
+    -- A working-tree virtual commit (§4.2): the ◌ node (get_column_chars) + a
+    -- synthesized subject, with blank date/author columns (it carries no commit
+    -- metadata). No refs, no split/merge — it is a lone tip above HEAD.
+    if item.commit and item.commit.virtual then
+        local graph_item = get_column_chars(opts, item.columns, emphasis)
+        return {
+            line = {
+                rh("", palette.date),
+                rh("", palette.author),
+                graph_item,
+                rh(worktree_label(item.commit), palette.message),
+            },
         }
     end
 
@@ -2260,6 +2298,34 @@ local function format_range_detail(commits, palette)
     return rows
 end
 
+--- Metadata rows for the working-tree commit view (spec §11.8): a short title
+--- naming the state (staged / unstaged), plus the untracked note for the
+--- unstaged node. There is no hash/author/committer/parent — the per-file counts
+--- come from the diffstat (§11.4) below. Pure.
+---@param commit Commit   a virtual commit (commit.virtual + commit.wt)
+---@param palette table
+---@return table[]
+local function format_worktree_detail(commit, palette)
+    palette = palette or {}
+    local wt = commit.wt or {}
+    local rows = {}
+    if commit.virtual == "staged" then
+        rows[#rows + 1] = highlight_text("Staged changes", palette.author)
+        rows[#rows + 1] = highlight_text("index vs HEAD", palette.date)
+    else
+        rows[#rows + 1] = highlight_text("Unstaged changes", palette.author)
+        rows[#rows + 1] = highlight_text("working tree vs index", palette.date)
+        if (wt.untracked or 0) > 0 then
+            rows[#rows + 1] = highlight_text(
+                ("includes %d untracked file%s as additions"):format(
+                    wt.untracked, wt.untracked == 1 and "" or "s"),
+                palette.date)
+        end
+    end
+    rows[#rows + 1] = highlight_text("")
+    return rows
+end
+
 -- Line prefixes that mark a diff's file-header lines (checked before +/- so the
 -- "+++"/"---" file markers don't read as added/removed content).
 local DIFF_HEADER_PREFIXES = {
@@ -2426,6 +2492,140 @@ end
 -- git's well-known empty-tree hash, used as the base for a root commit's diff.
 local EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+-- Reserved sentinel hashes for the working-tree virtual commits (§4.2): values
+-- git never produces for a real object, so every hash-keyed path keeps working.
+local WORKTREE_UNSTAGED_HASH = "0000000000000000000000000000000000000000"
+local WORKTREE_STAGED_HASH = "0000000000000000000000000000000000000001"
+-- The null device git's `--no-index` understands cross-platform as the empty
+-- side, so an untracked file renders as a whole-file addition (§3.3).
+local NULL_DEVICE = "/dev/null"
+-- Cap on untracked files synthesized into the unstaged diff, so a huge untracked
+-- tree never floods the commit view (§3.3 / spec open point).
+local UNTRACKED_DIFF_CAP = 100
+
+--- Count the staged / unstaged / untracked files from `git status --porcelain`
+--- output (spec §3.3). Each porcelain line is `XY <path>`: X is the index
+--- (staged) status, Y the working-tree (unstaged) status; `??` is untracked
+--- (counted on the unstaged side, where the untracked files live). Pure;
+--- exposed for testing.
+---@param lines string[]
+---@return { staged: integer, unstaged: integer, untracked: integer }
+local function parse_status(lines)
+    local st = { staged = 0, unstaged = 0, untracked = 0 }
+    for _, line in ipairs(lines or {}) do
+        if #line >= 2 then
+            if line:sub(1, 2) == "??" then
+                st.untracked = st.untracked + 1
+            else
+                local x, y = line:sub(1, 1), line:sub(2, 2)
+                if x ~= " " and x ~= "?" then st.staged = st.staged + 1 end
+                if y ~= " " and y ~= "?" then st.unstaged = st.unstaged + 1 end
+            end
+        end
+    end
+    return st
+end
+
+--- Run a git command and resolve the future with its stdout as a list of
+--- non-empty lines. A small sibling of fetch_commit_diff for the short
+--- working-tree queries (§3.3); runs in Neovim's cwd like the rest.
+---@param args string[]
+---@return Future
+local function git_lines(args)
+    local future, promise = make_future()
+    local out = {}
+    vim.fn.jobstart(vim.list_extend({ "git" }, args), {
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, l in ipairs(lines) do
+                if l ~= "" then out[#out + 1] = l end
+            end
+        end,
+        on_exit = function() promise.resolve(out) end,
+    })
+    return future
+end
+
+--- Run a git command and resolve the future with its full stdout as one string
+--- (the patch). Used for the working-tree diffs (§3.3); mirrors
+--- fetch_commit_diff but for an arbitrary git argv.
+---@param args string[]
+---@return Future
+local function git_output(args)
+    local future, promise = make_future()
+    local out = {}
+    vim.fn.jobstart(vim.list_extend({ "git" }, args), {
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, l in ipairs(lines) do out[#out + 1] = l end
+        end,
+        on_exit = function() promise.resolve(table.concat(out, "\n")) end,
+    })
+    return future
+end
+
+--- Read HEAD's hash and the dirty-state counts (spec §3.3). Resolves
+--- `{ head_hash, status }`; `head_hash` is nil on an unborn branch (no HEAD),
+--- which skips the virtual commits.
+---@return Future
+local function fetch_worktree_state()
+    return git_lines({ "rev-parse", "HEAD" }).next(function(rl)
+        local head_hash = rl[1]
+        return git_lines({ "status", "--porcelain" }).next(function(slines)
+            return { head_hash = head_hash, status = parse_status(slines) }
+        end)
+    end)
+end
+
+--- Synthesize the untracked files' additions as a patch (spec §3.3): each
+--- untracked file (respecting `.gitignore`) is diffed against the null device
+--- via `git diff --no-index`, so it renders as a whole-file addition through the
+--- existing diff pipeline. Capped at UNTRACKED_DIFF_CAP files. Chained
+--- sequentially so a dirty tree's untracked set produces one concatenated patch.
+---@return Future
+local function fetch_untracked_diff()
+    local future, promise = make_future()
+    git_lines({ "ls-files", "--others", "--exclude-standard" }).next(function(files)
+        local parts = {}
+        local i = 0
+        local function step()
+            i = i + 1
+            if i > #files or i > UNTRACKED_DIFF_CAP then
+                promise.resolve(table.concat(parts, "\n"))
+                return
+            end
+            -- `git diff --no-index` exits non-zero when the files differ; we
+            -- collect stdout regardless (on_exit ignores the code).
+            git_output({ "diff", "--no-index", "--", NULL_DEVICE, files[i] }).next(function(p)
+                if p and p ~= "" then parts[#parts + 1] = p end
+                step()
+            end)
+        end
+        step()
+    end)
+    return future
+end
+
+--- The patch for a working-tree virtual commit (spec §3.3 / §11.8). Staged is
+--- the index vs HEAD (`git diff --cached`); unstaged is the working tree vs the
+--- index (`git diff`) plus the untracked additions. On demand, like the rest of
+--- the commit view.
+---@param kind "staged"|"unstaged"
+---@return Future
+local function fetch_worktree_diff(kind)
+    if kind == "staged" then
+        return git_output({ "diff", "--cached" })
+    end
+    return git_output({ "diff" }).next(function(tracked)
+        return fetch_untracked_diff().next(function(untracked)
+            local parts = {}
+            if tracked and tracked ~= "" then parts[#parts + 1] = tracked end
+            if untracked and untracked ~= "" then parts[#parts + 1] = untracked end
+            return table.concat(parts, "\n")
+        end)
+    end)
+end
+
 --- The DiffRange for a single commit's own changes (specification.md §11.5).
 --- `rev` is `<hash>^!` (the commit vs its first parent), or an empty-tree range
 --- for a root commit (no parents) so it still diffs. `from`/`to` are the
@@ -2433,11 +2633,20 @@ local EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 --- graph range-selection will add more. Pure; exposed for testing.
 ---@class DiffRange
 ---@field rev string       git rev-range the diff tool understands
----@field from? Commit     base endpoint (nil for a root commit)
----@field to Commit        head endpoint
+---@field from? Commit|"index"|"worktree"   base endpoint (nil for a root commit; a tree state for a virtual commit, §11.5)
+---@field to Commit|"index"|"worktree"       head endpoint (a tree state for a virtual commit, §11.5)
 ---@param commit Commit
 ---@return DiffRange
 local function commit_range(commit)
+    -- Working-tree virtual commits (§4.2): the endpoint is a tree state, not a
+    -- commit (§11.5). Staged is the index vs HEAD; unstaged the working tree vs
+    -- HEAD. The exact provider invocation (rev) is a verify-against-diffview
+    -- point (spec §11.5 open).
+    if commit.virtual == "staged" then
+        return { rev = "--cached", from = (commit.parents or {})[1], to = "index" }
+    elseif commit.virtual == "unstaged" then
+        return { rev = "HEAD", from = "index", to = "worktree" }
+    end
     local parents = commit.parents or {}
     if #parents == 0 then
         return { rev = EMPTY_TREE .. ".." .. commit.hash, from = nil, to = commit }
@@ -2925,6 +3134,12 @@ local function open_commit_view(opts, commit, range)
     -- materializes only when there is something to stick (else it is closed).
     local diff_pal = (opts.palette or {}).diff or {}
     local ctx_win, ctx_buf = nil, nil
+    -- The commit-view window id, captured stably at open. snacks clears `w.win`
+    -- to nil on close, and its own WinClosed cleanup can run before ours, so
+    -- matching the close event against the live `w.win` may miss and orphan the
+    -- overlay float. The captured id stays valid for the match (and goes invalid
+    -- once the window is gone), so the teardown below always fires.
+    local view_win = w.win
 
     local function close_ctx()
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
@@ -3025,12 +3240,14 @@ local function open_commit_view(opts, commit, range)
         group = ctx_group,
         callback = function()
             -- This autocmd is global (it must catch scrolls in the commit view),
-            -- so once that window has closed — snacks clears `w.win` to nil — a
-            -- later scroll in any other window would call nvim_win_is_valid(nil)
-            -- and error. Guard the handle and tear the group down when it is gone.
-            if w.win and vim.api.nvim_win_is_valid(w.win) then
+            -- so once that window has closed a later scroll in any other window
+            -- would call nvim_win_is_valid(nil) and error. Guard on the captured
+            -- id; when the window is gone, close the overlay (in case WinClosed
+            -- missed it) and tear the group down.
+            if view_win and vim.api.nvim_win_is_valid(view_win) then
                 update_ctx()
             else
+                close_ctx()
                 pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
             end
         end,
@@ -3038,7 +3255,9 @@ local function open_commit_view(opts, commit, range)
     vim.api.nvim_create_autocmd("WinClosed", {
         group = ctx_group,
         callback = function(ev)
-            if w.win and tonumber(ev.match) == w.win then
+            -- Match the captured id, not the live `w.win` (which snacks may have
+            -- already cleared), so closing the view always closes the overlay.
+            if view_win and tonumber(ev.match) == view_win then
                 close_ctx()
                 pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
             end
@@ -3075,6 +3294,9 @@ local function open_commit_view(opts, commit, range)
         local meta_rows
         if range then
             meta_rows = format_range_detail(range.commits, opts.palette)
+        elseif commit and commit.virtual then
+            -- Working-tree commit view (§11.8): a short state header, not git show.
+            meta_rows = format_worktree_detail(commit, opts.palette)
         else
             ---@cast commit Commit
             meta_rows = format_commit_detail(parse_show(meta_output), {
@@ -3179,6 +3401,13 @@ local function open_commit_view(opts, commit, range)
         fetched = fetch_range_diff(range.range).next(function(diff_output)
             return { meta = nil, diff = diff_output }
         end)
+    elseif commit and commit.virtual then
+        -- Working-tree commit view (§11.8): the node's own diff (staged = index
+        -- vs HEAD; unstaged = working tree vs index + untracked). No git-show
+        -- metadata — the header is synthesized (format_worktree_detail).
+        fetched = fetch_worktree_diff(commit.virtual).next(function(diff_output)
+            return { meta = nil, diff = diff_output }
+        end)
     else
         ---@cast commit Commit
         fetched = fetch_commit_detail(commit.hash).next(function(meta_output)
@@ -3253,6 +3482,7 @@ end
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
+---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -3344,6 +3574,10 @@ function M.open(folder, opts)
             open = open_diffview,
             label = "▶ Open diff (diffview)",
         },
+        -- Working-tree state (§3.3/§4.2): show uncommitted changes as virtual
+        -- commits (◌) on top of HEAD. On by default; refreshes live (R, writes,
+        -- focus, §3.4). Set false to never read the working tree.
+        working_tree = true,
         icons = {
             --merge = "M",
         },
@@ -3496,6 +3730,15 @@ function M.open(folder, opts)
     -- close/reopen (§2). Assigned in the window block; forward-declared.
     local cursor_hash = function(_) return nil end
 
+    -- Working-tree virtual commits (§3.3/§4.2): the staged/unstaged Commits
+    -- currently spliced above HEAD (so a refresh can remove them), and the HEAD
+    -- hash they were anchored on (so a refresh can tell when history has moved).
+    local worktree_commits = {}
+    local worktree_head = nil
+    -- Re-reads the dirty state and rebuilds the virtual commits (§3.4). Assigned
+    -- in the window block; forward-declared for the `R` key and the autocmds.
+    local refresh_worktree = function(_) end
+
     -- The repository the graph reflects, identified by Neovim's cwd (git runs in
     -- cwd). Keys the remembered cursor position so reopening restores it (§2).
     local repo_key = vim.fn.getcwd()
@@ -3516,6 +3759,81 @@ function M.open(folder, opts)
             first = lv.controller.item_start and lv.controller.item_start(idx) or idx
         end
         return repo.display[idx], idx, line - first
+    end
+
+    -- Remove the working-tree virtual commits from the raw model (§4.2): unlink
+    -- each from its parent's children, drop it from the commit table, and filter
+    -- its OrderItem out of repo.order. Leaves the real DAG untouched. The caller
+    -- reflows afterwards.
+    local function clear_worktree_nodes()
+        if #worktree_commits == 0 then return end
+        for _, v in ipairs(worktree_commits) do
+            local p = v.parents and v.parents[1]
+            if p and p.children then
+                for i = #p.children, 1, -1 do
+                    if p.children[i] == v then table.remove(p.children, i) end
+                end
+            end
+            repo.commits[v.hash] = nil
+        end
+        local kept = {}
+        for _, it in ipairs(repo.order) do
+            if not (it.commit and it.commit.virtual) then kept[#kept + 1] = it end
+        end
+        repo.order = kept
+        worktree_commits = {}
+    end
+
+    -- Rebuild the working-tree virtual commits (§3.3/§4.2) from a fetched state
+    -- ({ head_hash, status }). Removes any existing ones, then — when enabled,
+    -- dirty, and the HEAD anchor is still in the model — splices up to two nodes
+    -- (unstaged → staged → HEAD) into repo.order just above HEAD. Returns a status
+    -- the caller surfaces: "ok" | "clean" | "off" | "moved" (HEAD advanced past
+    -- the snapshot, §3.4). The caller reflows.
+    local function apply_worktree(state)
+        clear_worktree_nodes()
+        if opts.working_tree == false then return "off" end
+        worktree_head = state and state.head_hash
+        local st = state and state.status
+        if not (st and worktree_head) then return "clean" end
+        local anchor = repo.commits[worktree_head]
+        if not anchor then return "moved" end -- history advanced past the snapshot
+        local want_staged = st.staged > 0
+        local want_unstaged = (st.unstaged > 0) or (st.untracked > 0)
+        if not (want_staged or want_unstaged) then return "clean" end
+
+        -- The anchor's row index in the raw order; the nodes splice just above it.
+        local ai
+        for i, it in ipairs(repo.order) do
+            if it.commit == anchor then ai = i; break end
+        end
+        if not ai then return "moved" end
+
+        -- Build bottom-up (parent first): staged on HEAD, unstaged on staged (or
+        -- HEAD when nothing is staged). `new_items` ends newest-first (unstaged,
+        -- staged) for the splice above the anchor.
+        local below = anchor
+        local new_items = {}
+        local function make(kind, wt, hash)
+            ---@type Commit
+            local v = { hash = hash, virtual = kind, parents = { below },
+                children = {}, refs = {}, wt = wt }
+            table.insert(below.children, v)
+            below = v
+            worktree_commits[#worktree_commits + 1] = v
+            repo.commits[hash] = v
+            table.insert(new_items, 1, { type = "commit", commit = v, columns = {} })
+        end
+        if want_staged then
+            make("staged", { changed = st.staged }, WORKTREE_STAGED_HASH)
+        end
+        if want_unstaged then
+            make("unstaged", { changed = st.unstaged, untracked = st.untracked }, WORKTREE_UNSTAGED_HASH)
+        end
+        for k = #new_items, 1, -1 do
+            table.insert(repo.order, ai, new_items[k])
+        end
+        return "ok"
     end
 
     -- A full reflow (§10.5): project the raw commit order under the current
@@ -3889,6 +4207,9 @@ function M.open(folder, opts)
     local function enter_selection(line)
         local item = order_at(line)
         if not item or not item.commit or item.type == "markers" then return end
+        -- Commit selection (§13) is over real commits; a working-tree virtual
+        -- commit (§4.2) is not a selectable range endpoint (v1).
+        if item.commit.virtual then return end
         build_display_index()
         selection_state.index = nil -- drop the ref selection (§13.3)
         sel.active, sel.anchor, sel.cursor = true, item.commit, item.commit
@@ -4117,6 +4438,14 @@ function M.open(folder, opts)
                     end,
                 })
             end).next(function()
+                -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
+                -- model, read the dirty state and splice the staged/unstaged nodes
+                -- above HEAD before the projection. Gated by working_tree; a clean
+                -- tree is a no-op. Chained so the reflow below projects them.
+                if opts.working_tree == false then return nil end
+                return fetch_worktree_state()
+            end).next(function(state)
+                if state then apply_worktree(state) end
                 -- Stream done: apply the projection (the first-parent default
                 -- collapse, §10.7) and compute the initial dimming (§12). reflow
                 -- swaps in the projected graph, recomputes the cone, and refreshes.
@@ -4293,6 +4622,12 @@ function M.open(folder, opts)
             lv.controller.refresh()
         end
         place_cursor()
+    end
+    -- R: refresh the working-tree state (§3.4) — re-read the uncommitted changes
+    -- and rebuild the virtual commits. Manual; not silent, so it reports when HEAD
+    -- has moved (history needs a reopen).
+    opts.win.keys.R = function()
+        refresh_worktree(false)
     end
     -- c: toggle the first-parent focus (§10.7) — collapse every non-mainline
     -- branch vs. show the full graph. Changes per-item line counts, so reflow.
@@ -4726,6 +5061,36 @@ function M.open(folder, opts)
             end, CONE_DEBOUNCE_MS)
         end
 
+        -- Working-tree refresh (§3.4): re-read the dirty state and rebuild the
+        -- virtual commits on the current HEAD anchor. It first re-resolves HEAD, so
+        -- it can tell when real history has moved out from under the snapshot
+        -- ("moved") — the seam the deferred history refresh (§10.8) extends. Keeps
+        -- the cursor on its commit across the reflow. `silent` suppresses the
+        -- "history moved" notice for the automatic (write/focus) triggers.
+        refresh_worktree = function(silent)
+            if opts.working_tree == false then return end
+            fetch_worktree_state().next(function(state)
+                if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+                    return
+                end
+                local keep
+                local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv.win.win)
+                if ok then keep = cursor_hash(pos[1]) end
+                local res = apply_worktree(state)
+                reflow()
+                update_footer()
+                if keep then goto_hash(keep) end
+                place_cursor()
+                update_cone()
+                if lv and lv.controller then lv.controller.refresh() end
+                update_panes()
+                if res == "moved" and not silent then
+                    vim.notify("gitloom: HEAD moved — reopen to refresh history (§3.4)",
+                        vim.log.levels.WARN)
+                end
+            end)
+        end
+
         -- Rebuild the dimmed highlight groups after a colorscheme change (the
         -- derived groups are wiped by `hi clear`) and redraw (§12).
         vim.api.nvim_create_autocmd("ColorScheme", {
@@ -4740,6 +5105,32 @@ function M.open(folder, opts)
         })
 
         local group = vim.api.nvim_create_augroup("Gitloom_" .. buf, { clear = true })
+
+        -- Working-tree refresh triggers (§3.4): a buffer write (in-Neovim edit /
+        -- stage) or regaining focus (the user did something in another terminal)
+        -- re-reads the dirty state, debounced so rapid events coalesce into one git
+        -- read. Skipped while a commit selection is active (§13) so a background
+        -- write never yanks the selection out from under the user.
+        local WT_DEBOUNCE_MS = 200
+        local wt_gen = 0
+        local function schedule_wt_refresh()
+            if opts.working_tree == false then return end
+            wt_gen = wt_gen + 1
+            local gen = wt_gen
+            vim.defer_fn(function()
+                if gen ~= wt_gen or not vim.api.nvim_win_is_valid(win) then return end
+                if sel.active then return end
+                refresh_worktree(true) -- silent: no "history moved" notice on auto-refresh
+            end, WT_DEBOUNCE_MS)
+        end
+        vim.api.nvim_create_autocmd("BufWritePost", {
+            group = group,
+            callback = schedule_wt_refresh,
+        })
+        vim.api.nvim_create_autocmd("FocusGained", {
+            group = group,
+            callback = schedule_wt_refresh,
+        })
 
         -- On moving to a different row, reset the selection to the message,
         -- recompute the cone for the new pivot, redraw the dimming, and re-park.
@@ -5111,6 +5502,9 @@ M._internal = {
     commit_range = commit_range,
     range_endpoints = range_endpoints,
     format_range_detail = format_range_detail,
+    parse_status = parse_status,
+    worktree_label = worktree_label,
+    format_worktree_detail = format_worktree_detail,
     sel_ascend_children = sel_ascend_children,
     sel_step = sel_step,
     sel_switch = sel_switch,
