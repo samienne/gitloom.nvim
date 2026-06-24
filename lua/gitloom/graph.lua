@@ -5304,8 +5304,19 @@ function M.open(folder, opts)
                     table.sort(bcols)
                     for _, col in ipairs(bcols) do
                         local l = boundary[col]
-                        out[#out + 1] = ("  col=%d id=%s color=%s begin_disp=%s"):format(
-                            col, tostring(l.id), tostring(l.color), tostring(l.begin and order_of(l.begin)))
+                        local b = l.begin
+                        local function hs(ns)
+                            local t = {}
+                            for _, n in ipairs(ns or {}) do
+                                t[#t + 1] = ("%s@%s"):format(tostring(n.hash and n.hash:sub(1, 10)),
+                                    tostring(order_of(n)))
+                            end
+                            return table.concat(t, ",")
+                        end
+                        out[#out + 1] = ("  col=%d id=%s color=%s begin=%s@%s up[%s] dn[%s]"):format(
+                            col, tostring(l.id), tostring(l.color),
+                            tostring(b and b.hash and b.hash:sub(1, 10)), tostring(b and order_of(b)),
+                            b and hs(b.children) or "", b and hs(b.parents) or "")
                     end
                     -- Pinned-anchor tip resolution: whether each pinned ref resolves to a
                     -- display node ABOVE the cutoff (so it seeds the header as a labelled
