@@ -9,6 +9,7 @@ local move_selection = internal.move_selection
 local decoration_texts = internal.decoration_texts
 local ref_byte_col = internal.ref_byte_col
 local pack_right = require("gitloom.listview")._internal.pack_right
+local window_right = require("gitloom.listview")._internal.window_right
 local refresh_columns = require("gitloom.listview")._internal.refresh_columns
 
 describe("move_selection", function()
@@ -88,6 +89,58 @@ describe("pack_right", function()
         local shown, overflow = pack_right({ 30, 30 }, 3)
         assert.equals(0, shown)
         assert.equals(2, overflow)
+    end)
+end)
+
+describe("window_right", function()
+    -- A contiguous window around the selected item, fitting the budget, with
+    -- separate left/right "+N" markers for the items hidden on each side (§6).
+
+    it("shows every item with no markers when they all fit", function()
+        local lo, hi, left, right = window_right({ 3, 3, 3 }, 20, 2)
+        assert.same({ 1, 3, 0, 0 }, { lo, hi, left, right })
+    end)
+
+    it("windows around the selection with markers on both sides", function()
+        -- five width-5 items, sel 3, budget 17: grows right first (hi→4); left
+        -- can't fit, leaving +2 hidden on the left and +1 on the right.
+        local lo, hi, left, right, used = window_right({ 5, 5, 5, 5, 5 }, 17, 3)
+        assert.same({ 3, 4, 2, 1 }, { lo, hi, left, right })
+        assert.equals(17, used)
+    end)
+
+    it("omits the left marker when the selection is the first item", function()
+        local lo, hi, left, right, used = window_right({ 4, 4, 4, 4 }, 12, 1)
+        assert.same({ 1, 2, 0, 2 }, { lo, hi, left, right })
+        assert.equals(12, used)
+    end)
+
+    it("omits the right marker when the selection is the last item", function()
+        local lo, hi, left, right, used = window_right({ 4, 4, 4, 4 }, 12, 4)
+        assert.same({ 3, 4, 2, 0 }, { lo, hi, left, right })
+        assert.equals(12, used)
+    end)
+
+    it("always shows the selected item even when it alone exceeds the budget", function()
+        local lo, hi, left, right = window_right({ 30 }, 5, 1)
+        assert.same({ 1, 1, 0, 0 }, { lo, hi, left, right })
+    end)
+
+    it("keeps the selection visible even when its markers overflow the budget", function()
+        -- sel alone + both markers (3 + "+1" + "+1" + gaps = 9) exceeds 4, but the
+        -- selected item is shown regardless.
+        local lo, hi, left, right = window_right({ 3, 3, 3 }, 4, 2)
+        assert.same({ 2, 2, 1, 1 }, { lo, hi, left, right })
+    end)
+
+    it("clamps an out-of-range selection into the item list", function()
+        local lo, hi = window_right({ 3, 3 }, 100, 9)
+        assert.same({ 1, 2 }, { lo, hi }) -- sel clamped to 2, everything fits
+    end)
+
+    it("returns an empty window for no items", function()
+        local lo, hi, left, right, used = window_right({}, 10, 1)
+        assert.same({ 1, 0, 0, 0, 0 }, { lo, hi, left, right, used })
     end)
 end)
 

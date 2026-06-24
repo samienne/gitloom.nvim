@@ -248,6 +248,8 @@ end
 ---@field lines? (DisplayItem|string)[][]  multiple real buffer rows (supersedes `line`)
 ---@field below? (DisplayItem|string)[][]  stacked virtual rows below (each a column array)
 ---@field line_right? DisplayItem[]  right-pinned items for the line (e.g. refs)
+---@field line_right_sel? integer  1-based index into line_right of the selected item; windows the right items around it (§6)
+---@field line_right_align? "left"|"right"  placement of the (windowed) line_right block: "right" (default) pins it to the edge, "left" puts it right after the graph in the flex area (packed marker rows, §10.4)
 
 --- Requested width in display cells. With `ellipsis`, truncation appends "…"
 --- (reserving one cell) instead of a hard cut.
@@ -354,6 +356,42 @@ local function pack_right(widths, budget, sep)
     return best, n - best, width_for(best)
 end
 
+--- Choose a contiguous window of right-pinned items that fits `budget` and always
+--- includes the selected item `sel` (1-based) — the "scrolling" overflow (§6).
+--- Items hidden before the window collapse into a left "+L" marker and those
+--- after into a right "+R" marker (each only when that side hides items), so
+--- moving the selection scrolls the window to keep `sel` visible. The window
+--- grows greedily from `sel` outward (right then left) while it fits; the
+--- selected item is always returned even if it alone exceeds the budget. Returns
+--- the inclusive window [lo, hi] (hi < lo iff there are no items), the hidden
+--- counts on each side, and the display width used. Pure; exposed for testing.
+---@param widths integer[]
+---@param budget integer
+---@param sel integer       -- 1-based index that must stay visible
+---@param sep integer?      -- gap between items / markers (default 1)
+---@return integer lo, integer hi, integer left, integer right, integer used
+local function window_right(widths, budget, sel, sep)
+    sep = sep or 1
+    local n = #widths
+    if n == 0 then return 1, 0, 0, 0, 0 end
+    sel = math.max(1, math.min(n, sel))
+    local function used(lo, hi)
+        local w = 0
+        for i = lo, hi do w = w + widths[i] + (i > lo and sep or 0) end
+        if lo > 1 then w = w + (1 + #tostring(lo - 1)) + sep end -- "+L" + gap
+        if hi < n then w = w + sep + (1 + #tostring(n - hi)) end -- gap + "+R"
+        return w
+    end
+    local lo, hi = sel, sel
+    local grow = true
+    while grow do
+        grow = false
+        if hi < n and used(lo, hi + 1) <= budget then hi = hi + 1; grow = true end
+        if lo > 1 and used(lo - 1, hi) <= budget then lo = lo - 1; grow = true end
+    end
+    return lo, hi, lo - 1, n - hi, used(lo, hi)
+end
+
 ---@param item DisplayItem
 local function build_virt_text_chunks(item)
     local text = item.text
@@ -430,8 +468,14 @@ local namespace = vim.api.nvim_create_namespace("gitloom.listview")
 --- all the free width except what the flex column needs — its natural width, but
 --- never reserving more than `model.message_min` (so refs fill empty space, yet
 --- a long message keeps its floor). Overflow collapses into a "+N" marker.
+---@param right_sel integer?  1-based index into `right` of the selected item; when
+---  set, the shown items form a window around it (separate left/right "+N"
+---  overflow markers) so the selection stays visible (§6). nil → leftmost-first.
+---@param right_align "left"|"right"|nil  where the (windowed) right block sits:
+---  "right" (default) pins it to the edge after the flex column; "left" places it
+---  right after the graph in the flex area (packed marker rows, §10.4).
 ---@return string line, table[] highlights
-local function build_line(win, model, columns, right)
+local function build_line(win, model, columns, right, right_sel, right_align)
     local line, highlights = "", {}
     local function append(fixed)
         local offset = string.len(line)
@@ -473,26 +517,67 @@ local function build_line(win, model, columns, right)
     local flex_w = vim.fn.strdisplaywidth(flex_item.text or "")
     local reserve = math.min(flex_w, model.message_min or 24)
     local budget = math.max(0, available - reserve)
-    local shown, overflow, right_w = pack_right(widths, budget)
 
-    -- Compose the right text: shown items, space-separated, then "+N".
-    local parts = {}
-    for k = 1, shown do
-        if k > 1 then parts[#parts + 1] = " " end
-        parts[#parts + 1] = right[k]
-    end
-    if overflow > 0 then
-        if shown > 0 then parts[#parts + 1] = " " end
-        local m = "+" .. overflow
-        parts[#parts + 1] = { text = m, highlight = model.overflow_hl
+    -- An "+N" overflow marker DisplayItem (highlighted with model.overflow_hl).
+    local function marker(count)
+        local m = "+" .. count
+        return { text = m, highlight = model.overflow_hl
             and { { start_pos = 0, end_pos = #m, hl = model.overflow_hl } } or {} }
+    end
+
+    -- Compose the right block. With a selection, window the items around it so it
+    -- stays visible, with separate left/right "+N" markers (§6); otherwise show a
+    -- leftmost-first prefix with a single trailing "+N".
+    local parts = {}
+    local right_w
+    if right_sel then
+        local lo, hi, left, rightn, used = window_right(widths, budget, right_sel)
+        right_w = used
+        if left > 0 then parts[#parts + 1] = marker(left) end
+        for k = lo, hi do
+            if #parts > 0 then parts[#parts + 1] = " " end
+            parts[#parts + 1] = right[k]
+        end
+        if rightn > 0 then
+            if #parts > 0 then parts[#parts + 1] = " " end
+            parts[#parts + 1] = marker(rightn)
+        end
+    else
+        local shown, overflow, used = pack_right(widths, budget)
+        right_w = used
+        for k = 1, shown do
+            if k > 1 then parts[#parts + 1] = " " end
+            parts[#parts + 1] = right[k]
+        end
+        if overflow > 0 then
+            if shown > 0 then parts[#parts + 1] = " " end
+            parts[#parts + 1] = marker(overflow)
+        end
     end
     local right_item = compose(parts)
 
-    -- The flex (message) column fills what's left of the packed refs.
+    -- Never let the right block overflow the window. It only exceeds `available`
+    -- when the selected ref alone (plus its markers) is wider than the whole line
+    -- (§6); truncate it with "…" so the line still fits, rather than spilling past
+    -- the edge as a ragged partial label. The non-selected path always fits (whole
+    -- items + "+N"), so this is a no-op there.
+    if right_w > available then
+        right_item = fix_width(right_item, available, true)
+        right_w = available
+    end
+
+    -- Place the flex (message) column and the right block. By default the message
+    -- fills the gap and the refs pin to the right edge. With `right_align == "left"`
+    -- (packed marker rows, §10.4) the windowed block sits right after the graph and
+    -- the empty flex pads the remainder, so the labels stay left-aligned.
     local flex_target = math.max(0, available - right_w)
-    append(fix_width(flex_item, flex_target, true))
-    append(right_item)
+    if right_align == "left" then
+        append(right_item)
+        append(fix_width(flex_item, flex_target))
+    else
+        append(fix_width(flex_item, flex_target, true))
+        append(right_item)
+    end
     return line, highlights
 end
 
@@ -550,7 +635,10 @@ local function display(win, buf, model, first, last)
             local row = rows[r]
             if row then
                 -- line_right (right-pinned refs) belongs to the first real row only.
-                local built, hls = build_line(win, model, row, (r == 1) and item.columns.line_right or nil)
+                local built, hls = build_line(win, model, row,
+                    (r == 1) and item.columns.line_right or nil,
+                    (r == 1) and item.columns.line_right_sel or nil,
+                    (r == 1) and item.columns.line_right_align or nil)
                 lines[#lines + 1] = built
                 for _, hl in ipairs(hls) do
                     highlight[#highlight + 1] = {
@@ -862,6 +950,7 @@ end
 -- Exposed for testing only. Not part of the public API.
 M._internal = {
     pack_right = pack_right,
+    window_right = window_right,
     refresh_columns = refresh_columns,
     rebuild_starts = rebuild_starts,
     item_index_at = item_index_at,

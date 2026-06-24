@@ -51,6 +51,18 @@ relative (§6). `H` toggles reachability highlighting (§12) off and on. `c`
 toggles the first-parent focus (§10.7) — collapse every non-mainline branch, or
 show the full graph. `p` toggles **marker packing** (§10.4) — merge concurrent
 collapsed heads onto shared lines, or one per line.
+  `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
+  remote-tracking branch, and tag, plus **HEAD**; selecting one moves the cursor
+  to that ref's commit and **centers** the view on it (like the initial HEAD
+  focus below). Refs **recently jumped to in this session** are surfaced at the
+  top of the list (per-repository, in-memory for the Neovim session — the same
+  scope as the remembered cursor position). The jump resolves the ref's commit to
+  its visible row, so a collapsed branch lands on its collapsed head (§10.3); a
+  ref whose commit is currently hidden (§10.1) is a no-op with a notice. Landing
+  also **pre-selects that ref's label** on the row (as if `h`/`l` had moved onto
+  it; §6), so `<CR>` / the action menu act on that branch with no further
+  navigation. Picking HEAD — which has no own label — just centers, cursor at the
+  message.
   `?` opens a float listing all keybindings. The footer shows live status
   (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
   when any branch modes are set, and `(mirrored)` when mirroring is on).
@@ -384,15 +396,24 @@ commit) from repeating the name per remote.
 everything the message does not need — its natural width, but never reserving
 more than `message_min` (§8). So refs fill empty space when the message is
 short, while a long message still keeps at least `message_min` columns
-(truncated with `…`). Ref labels are shown in order (leftmost first) until the
-budget is reached; labels that do not fit collapse into a trailing `+N` overflow
-marker. Each field is colored by its `palette` highlight group; lanes are
-colored by a palette slot allocated from a recycling free list (§5.5).
+(truncated with `…`). Each field is colored by its `palette` highlight group;
+lanes are colored by a palette slot allocated from a recycling free list (§5.5).
 
-The `h`/`l` selection (§2) cycles all of a row's ref decorations. One collapsed
-into the `+N` overflow can still be selected, but until it is visible it is not
-highlighted and the cursor falls back to the message (revisited with the §10
-actions).
+**Overflow is windowed around the selection.** With **no ref selected**, labels
+are shown in order (leftmost first) until the budget is reached and the rest
+collapse into a trailing `+N` overflow marker. When a ref **is** selected (via
+`h`/`l`, §2, or the picker, §2), the visible labels form a **window around the
+selection** sized to the budget, so the selected label is **always visible** and
+highlighted; labels hidden before and after the window collapse into **separate
+`+N` markers on the left and right** (e.g. `+2 (feat) (master) +3`). Moving the
+selection scrolls this window to keep the selected label in view. Labels are
+always shown **whole** — a label that does not fit is hidden into a `+N` marker,
+never partially drawn. The one exception is the **selected** label when it alone
+is wider than the line: it is brought into view and **truncated with `…`** (since
+it must stay visible), the only case a ref is truncated. This windowing applies to
+the right-pinned (`right`) mode and to **packed marker rows** (§10.4), where the
+labels are left-aligned after the graph but window the same way around the selected
+marker; `inline` and `dual` (§6.1) keep their flex-column `…` truncation.
 
 ### 6.1 Ref label modes
 
