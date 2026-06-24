@@ -1039,6 +1039,45 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert_continuous(res.rows)
     end)
 
+    it("keeps the trunk id through a COLLAPSED continuation at a merge (line-119) (§6.2)", function()
+        -- The lumets2 384eda8c bug: a merge M just above the cutoff continues up to HEAD
+        -- through a COLLAPSED node whose tip's main-view lane was RECYCLED to a different id
+        -- (99). The old logic saw mv ≠ the seam id and switched the trunk to a fresh id —
+        -- lane 1 "terminated" at the merge and HEAD got a brand-new id, so dev had no lane 1
+        -- to branch off. Topologically the collapsed node IS the trunk continuing (its first
+        -- parent is M), so the seam id must run unbroken to HEAD.
+        local HEAD = { hash = "HEAD", refs = { { name = "HEAD" } }, parents = {}, children = {} }
+        local ct = { hash = "collapsed:trunk", collapsed = true, tip = { hash = "ct_tip" }, refs = {}, parents = {}, children = {} }
+        local M = { hash = "M", refs = {}, parents = {}, children = {} }
+        local bump = { hash = "collapsed:bump", collapsed = true, tip = { hash = "bp_tip" }, refs = {}, parents = {}, children = {} }
+        local F = { hash = "F", parents = {}, children = {} }
+        HEAD.parents = { ct }; ct.children = { HEAD }; ct.parents = { M }
+        M.children = { ct }; M.parents = { F, bump }; bump.children = { M }; bump.parents = { F }; F.children = { M, bump }
+        local disp = { HEAD = 1, ["collapsed:trunk"] = 50, M = 118, ["collapsed:bump"] = 119, F = 120 }
+        -- ct's TIP main-view lane is recycled to 99 (≠ the seam id 1); HEAD's is 1.
+        local lm = { HEAD = { id = 1, color = 1 }, ct_tip = { id = 99, color = 9 },
+            M = { id = 1, color = 1 }, bp_tip = { id = 38, color = 8 } }
+        local function order_of(n) return disp[n.hash] end
+        local function lane_of(n) return n and lm[(n.tip and n.tip.hash) or n.hash] end
+        local function col_of() return 1 end
+        local boundary = { [1] = { id = 1, color = 1, begin = M }, [2] = { id = 38, color = 8, begin = bump } }
+        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 119)
+        local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
+        local head_id
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                if cell.has_commit and cell.commit and cell.commit.refs then
+                    for _, rf in ipairs(cell.commit.refs) do
+                        if rf.name == "HEAD" then head_id = cell.id end
+                    end
+                end
+            end
+        end
+        assert.equals(1, head_id, "HEAD must keep the trunk id (1), not switch to a fresh id at the merge")
+        assert_seam_match(res.rows, boundary)
+        assert_continuous(res.rows)
+    end)
+
     it("gives a pinned anchor a labelled head; an unpinned crossing lane a bare ◍", function()
         -- master (pinned) and feature each a lone crossing lane up to its own tip.
         local items = h.dag({

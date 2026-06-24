@@ -964,20 +964,19 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             if not is_head then
                 upcols[1] = pivot
                 local mv1, c1col = lane(upkids[1], plane)
-                if mv1 == plane.id then
-                    -- The surviving lane CONTINUES AS ITSELF: the pivot child is on the same
-                    -- main-view lane. Keep its id/colour straight through — even across a
-                    -- MERGE where another lane terminates into it (a bump rejoining the
-                    -- trunk). Switching to a fresh id here would hand the trunk off to a new
-                    -- lane that overlaps the arriving one at the junction row, forcing a
-                    -- colour de-collision that breaks the seam lane's colour mid-lane.
+                -- The surviving lane CONTINUES AS ITSELF when the pivot child is the mainline
+                -- continuation — recognised by main-view lane (mv1 == plane.id) OR
+                -- TOPOLOGICALLY (it is N's first-parent child). The topological test is what
+                -- keeps a COLLAPSED continuation connected: a collapsed branch on the trunk
+                -- whose tip's main-view lane was recycled to a different id still has the merge
+                -- N as its first parent, so it IS the trunk continuing. Without it the lane
+                -- switches to a fresh id at the merge — the trunk "terminates" and HEAD gets a
+                -- brand-new id (the line-119 bug). Only a genuine FAN-OUT (N is not this
+                -- child's first parent and the lanes differ) switches.
+                local first_parent = upkids[1].parents and upkids[1].parents[1] == N
+                if mv1 == plane.id or (first_parent and upkids[1].collapsed) then
                     upid[1], upcolor[1] = plane.id, plane.color
                 else
-                    -- A genuine branch CHANGE — a FAN-OUT (the parent lane does not continue
-                    -- to this child) or a MERGE whose continuation is a DIFFERENT branch. The
-                    -- surviving lane SWITCHES to the continuing branch's own id+colour above
-                    -- the join; the arriving lane(s) keep theirs up to the junction (so the
-                    -- seam never switches mid-lane — only at a junction).
                     upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color
                 end
                 for k = 2, #upkids do
