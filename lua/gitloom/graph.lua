@@ -3979,6 +3979,9 @@ function M.open(folder, opts)
                 local text = glyph_line(row.columns)
                 local c = row.commit
                 local labels = c and decoration_texts(c) or {}
+                -- Show the HEAD marker (as the main view does) so a pinned anchor that is
+                -- HEAD reads as HEAD, not just the branch that happens to share its commit.
+                if c and group_refs(c.refs or {}).head then table.insert(labels, 1, "HEAD") end
                 if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.

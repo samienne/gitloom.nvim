@@ -277,12 +277,17 @@ function M.cap(rows, max, keep_first)
         -- The contiguous bottom slice ending at the seam — continuous by construction.
         for i = 1, max do out[i] = rows[#rows - max + i] end
         -- The elided TOP rows are the far tips; surface any pinned anchor labels there.
+        -- One name per anchor row, preferring the HEAD marker over a branch that merely
+        -- shares the commit (so the anchor reads as HEAD, not e.g. the branch it points at).
         for i = 1, #rows - max do
             local r = rows[i]
             if r.pinned and r.commit and r.commit.refs then
+                local pick
                 for _, rf in ipairs(r.commit.refs) do
-                    if rf.name and not seen[rf.name] then seen[rf.name] = true; names[#names + 1] = rf.name end
+                    if rf.kind == "head" then pick = rf.name; break end
                 end
+                pick = pick or (r.commit.refs[1] and r.commit.refs[1].name)
+                if pick and not seen[pick] then seen[pick] = true; names[#names + 1] = pick end
             end
         end
     else

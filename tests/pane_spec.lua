@@ -965,14 +965,17 @@ describe("pane.cap — header keeps a continuous seam-adjacent slice (§6.2)", f
         -- bug: HEAD/dev were elided into a bare `+N above` with no indication they were up
         -- there.
         local rows = {}
-        rows[1] = { columns = {}, n = 1, pinned = true, commit = { refs = { { name = "HEAD" } } } }
-        rows[2] = { columns = {}, n = 2, pinned = true, commit = { refs = { { name = "dev" } } } }
+        -- Row 1's anchor commit carries BOTH a branch and the HEAD marker (HEAD points at
+        -- that branch) — the name surfaced must be HEAD, not the branch sharing the commit.
+        rows[1] = { columns = {}, n = 1, pinned = true, commit = { refs = {
+            { name = "enne/backport-cmake-fixes", kind = "local" }, { name = "HEAD", kind = "head" } } } }
+        rows[2] = { columns = {}, n = 2, pinned = true, commit = { refs = { { name = "dev", kind = "local" } } } }
         for i = 3, 10 do rows[i] = { columns = {}, n = i } end
         local capped, elided, names = pane.cap(rows, 4, true)
         assert.equals(4, #capped)             -- the continuous seam-adjacent slice
         assert.equals(7, capped[1].n)         -- rows 7..10 kept (no torn middle)
         assert.equals(6, elided)              -- rows 1..6 elided
-        assert.same({ "HEAD", "dev" }, names) -- both pinned tips named, newest-first
+        assert.same({ "HEAD", "dev" }, names) -- HEAD preferred over the branch; one per anchor
     end)
 
     it("reports no anchor names when nothing pinned is elided", function()
