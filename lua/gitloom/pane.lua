@@ -817,6 +817,14 @@ function M.header(items, boundary, node_of, lane_of, col_of)
     local maxid = 0
     for _, l in pairs(boundary) do if type(l.id) == "number" and l.id > maxid then maxid = l.id end end
     local boundary_max = maxid -- ids ≤ this are crossing/seam lanes (must keep their boundary colour)
+    -- A fresh (fork-child) id must clearly be NEW: above every id that appears in the
+    -- header — the boundary lanes AND every node's main-view lane — so it never
+    -- numerically coincides with an existing main-view lane id (which reads as the branch
+    -- "reusing" an id). Fresh ids then grow monotonically from there.
+    for _, it in ipairs(items) do
+        local lid = lane(it.commit)
+        if type(lid) == "number" and lid > maxid then maxid = lid end
+    end
     local function fresh_id() maxid = maxid + 1; return maxid end
     local function free_color(used, prefer)
         if prefer and not used[prefer] then return prefer end
@@ -868,7 +876,24 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             table.sort(arriving)
             local pivot = arriving[1]
             local plane = active[pivot] -- the surviving lane (continues up from pivot)
-            local upkids = N.children or {}
+            local upkids = {}
+            for _, c in ipairs(N.children or {}) do upkids[#upkids + 1] = c end
+            -- The pivot (upkids[1]) inherits the surviving lane's id/colour, so it must be
+            -- the child that ACTUALLY carries that lane in the main view (its lane_of id
+            -- equals the boundary lane's). The condensed first-parent order can diverge
+            -- from main-view lane continuity — a fork where the crossing lane really
+            -- belongs to a sibling — and then the seam lane would jump to the wrong branch
+            -- (the seam colour/id would not match the graph). Match by lane id; fall back
+            -- to the existing order when nothing matches (e.g. a merge, where the pivot's
+            -- colour switches at the junction anyway).
+            if #upkids > 1 and plane and plane.id ~= nil then
+                for k = 2, #upkids do
+                    if lane(upkids[k]) == plane.id then
+                        upkids[1], upkids[k] = upkids[k], upkids[1]
+                        break
+                    end
+                end
+            end
             local is_head = #upkids == 0
             local pinned = N.refs and #N.refs > 0
 
