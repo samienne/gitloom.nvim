@@ -191,6 +191,20 @@ Coverage:
   date formatters (`format_absolute`, `format_relative`), and `make_line_buffer`
   (the unbuffered-stdout de-chunker: whole lines vs. the held trailing partial,
   cross-chunk stitching, byte-by-byte reassembly, blank lines; spec §3 streaming)
+- `tests/future_spec.lua` — the vendored promise `make_future`: a `.next` callback
+  runs whether attached before **or after** the future resolves, values chain, and
+  a returned future flattens. Guards the regression where a synchronously-resolved
+  future (the gitloom sort mode's `apply_sort`) dropped its chained callbacks, so
+  the open-time worktree + reflow (the §10.7 default collapse) never ran
+- `tests/ordering_spec.lua` — gitloom's owned row order + the resync pure pieces
+  (spec §3.1/§3.4): `order_commits` (the DFS topological sort reproducing git's
+  `--topo-order` — child-before-parent validity is the hard invariant, plus
+  **lineage grouping** (a merged-in lineage emitted contiguously right after its
+  merge — the `m, f1, f2, p1, base` fixture), the newest-first tip tiebreak,
+  determinism, identity-preservation, and ordering only the given set so
+  out-of-set relationships are ignored), `diff_ref_tips` (the added/removed/moved
+  ref classification) and `reachable_hashes` (the orphan-prune reachability walk;
+  parents as Commit objects or raw hash strings)
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
   `parse_show` (git-show field splitting, multi-line body, empty parents),
   `format_commit_detail` (committer-differs branch, refs line, body indent),
@@ -284,7 +298,14 @@ Coverage:
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
-  tests survive visualization changes; see below).
+  tests survive visualization changes; see below). Includes two compaction
+  invariants (spec §5): **no-cross compaction** — on the both-lines style (both
+  fans on their own lines, so the commit line carries no fan) a fuzz sweep asserts
+  a commit line has **zero** lane crossings (a jog never reaches past an occupied
+  column into a farther gap); and **a fan line carries no compaction** — on an
+  inline-fan commit line a pure survivor (begin ≠ C and parent ≠ C) draws no
+  horizontal segment, i.e. it crosses the fan vertically instead of compacting
+  along it (fuzzed over the inline / split-line / merge-line styles).
 - `tests/graph_mirror_spec.lua` — the `mirror` render transform (spec §5.4):
   the same invariant suite must pass on mirrored output, the mirrored grid must
   equal the horizontal flip of the normal grid (reverse + glyph swap), and the
@@ -298,7 +319,11 @@ only** (not the public API): `classify_ref`, `group_refs`, `bump_recent` /
 `display_item` (the per-row renderer — exposed for the §6 ref-window integration
 test), `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`
-(the streaming-stdout line de-chunker; §3), `parse_timestamp`,
+(the streaming-stdout line de-chunker; §3), `make_future` (the vendored promise;
+exposed for `future_spec`), `order_commits` (the owned
+topological row sort that replaced `git log --topo-order`; §3.1),
+`diff_ref_tips` / `reachable_hashes` (the resync ref-diff + orphan-prune pure
+helpers; §3.4), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` /
@@ -557,6 +582,53 @@ Details not covered by the spec or architecture:
   turns (the per-column cap is 1 otherwise).
 - **git runs in Neovim's cwd** — `jobstart` is called without an explicit
   `cwd`, so the graph reflects the current working directory's repo.
+- **Sort modes** (specification.md §3.1, cycled by `S`): gitloom owns the
+  row-order *pipeline* (records, decides when to order, reflows), but each
+  **sort mode** sources its sequence differently. `SORT_MODES`: `topo`
+  (default) = `order_commits` (a Lua **DFS over a LIFO stack** mirroring git's
+  `sort_in_topological_order` — it reproduces `git rev-list --topo-order`
+  commit-for-commit, so there is no separate raw-git mode; see below); `date` /
+  `author` = `git rev-list --date-order` / `--author-date-order`. The `rev` modes
+  fetch their hash sequence via `fetch_rev_order` and `reorder_by_hashes` reorders
+  `repo.order` to match (in place, no re-stream); the `gitloom` mode runs
+  `reorder_repo`. `apply_sort()` dispatches (returns a Future — the `rev` modes
+  are async) and is the single seam used at stream completion, on `S`, and in
+  `resync`. The stream itself fetches `git log --topo-order` (a valid topo base
+  for progressive paint + the `git` mode's verbatim order). `opts.sort_mode`
+  picks the initial mode (default `gitloom`).
+- **`order_commits` reproduces git's `--topo-order`** (spec §3.1): a DFS over a
+  LIFO stack, not a date-priority sort. Ready tips (all in-set children placed)
+  seed the stack **oldest committer-date first** (`%ct`/`cepoch`, git's own
+  ordering; author date is the fallback for synthetic commits) so the newest pops
+  first (git seeds newest-first then reverses the LIFO); popping a commit emits it
+  and pushes each parent the instant it becomes ready (in parent order, so the
+  LAST parent is descended first — git's discipline), so a merge's merged-in
+  lineage is emitted contiguously right after the merge instead of scattered by
+  date (the spaghetti fix). Date only orders the independent tips. Verified 100%
+  commit-for-commit vs `git rev-list --topo-order` on a real (257) and a synthetic
+  (15) repo, which is why there is no separate raw-git sort mode. `ordering_spec`
+  locks the lineage-grouping on a merge fixture and the committer-date seeding;
+  `commit_spec` covers the `%ct` parse. **Gotcha:** `integrate_commit` MUST copy
+  `cepoch` when filling a placeholder — `fetch_refs` pre-creates every ref *tip*
+  as a placeholder, and the tips are exactly what `order_commits` seeds by, so
+  dropping `cepoch` silently falls back to author-date seeding and scrambles the
+  order on squash-merge repos (author ≠ committer date — a 39%-match regression on
+  a 638-commit repo).
+- **Owned ordering + resync** (specification.md §3.1/§3.4): `order_commits`
+  produces the authoritative `repo.order` for the default `gitloom`
+  sort mode (via `reorder_repo`, which reuses the existing OrderItem objects).
+  `resync` (the `R` key) is the in-place
+  history refresh: snapshot the old ref tips → `fetch_ref_entries` (non-mutating)
+  → `reconcile_refs` (`diff_ref_tips`-driven add/move/remove) → `fetch_new_commits`
+  (`git log <new tips> --not <old tips>`, only the newly-reachable) →
+  `integrate_commit` (the shared stream/resync per-commit linker, extracted from
+  `on_batch`) → `prune_to_reachable` (`reachable_hashes` orphan prune) →
+  `apply_sort` (re-establish the active sort mode) → `refresh_worktree` +
+  `reflow`, restoring the hash-keyed
+  cursor/scroll. The pure pieces (`order_commits`, `diff_ref_tips`,
+  `reachable_hashes`) are tested; the window glue is not (like the other glue).
+  NB: the `order_commits` heap uses sequential `hpop` assignment — a multi-assign
+  `heap[1], heap[n] = heap[n], nil` aliases when `n == 1` and spins forever.
 - **External diff is a pluggable provider** (specification.md §11.5): the
   `diff.open` callback takes a **`DiffRange`** (`{ rev, from, to }`), not a
   commit, so graph range-selection reuses it. `commit_range(commit)` builds a

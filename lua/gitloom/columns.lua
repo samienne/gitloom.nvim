@@ -277,6 +277,16 @@ function M.layout(opts, items, seed)
         local sep_split = opts.merge_style.split_on_separate_line and #incoming > 1 and not inline_junction
         local sep_merge = opts.merge_style.merge_on_separate_line and #outgoing > 1 and not inline_junction
 
+        -- Does the commit Line itself carry a fan? An *inline* split (≥2 children
+        -- converging) or merge (≥2 parents diverging) shares the commit Line with
+        -- the survivors. On such a Line a pass-through lane must cross the fan
+        -- **vertically** — never compact horizontally along it — since two
+        -- separated lanes may share a horizontal only at a fan they belong to. So
+        -- all compaction (the linear-commit slide and the survivor shift) is
+        -- suppressed on a fan Line; only the fan's own lanes draw the horizontal.
+        local fan_line = (#incoming > 1 and not sep_split)
+            or (#outgoing > 1 and not sep_merge)
+
         -- SPLIT LINE (above): the non-trunk children converge into the commit
         -- column and terminate; the leftmost child (the trunk) continues straight
         -- down to the commit line. Survivors pass through unchanged here; the
@@ -309,34 +319,51 @@ function M.layout(opts, items, seed)
         local occ0 = {}
         for j in pairs(active) do occ0[j] = true end
 
-        -- Compact a *linear* commit (reached by a single child-lane) leftward into
-        -- a column free since row start: the incoming lane turns into the new
-        -- column and continues there. A branch born one column out — an inline
-        -- merge-on-split couldn't reuse the just-freed cell, so it fanned past it —
-        -- otherwise stays stranded next to an empty column for its whole length
-        -- (the gap that bounces a mirrored graph). Reserved before survivor
-        -- compaction so a survivor keeps any nearer gap; the lane's single jog is a
-        -- turn, not a straight run, so id-continuity is untouched.
-        if #incoming == 1 and not (first_row and seed) then
-            for c = 1, cc - 1 do
-                if not occ0[c] and not blocked[c] then cc = c; break end
+        -- A compaction jog must not **cross** another lane: once two lanes have
+        -- separated they never re-share a horizontal except at a commit's own fan
+        -- (the split/merge funnel). So a lane compacts left only through a run of
+        -- columns free since row start, stopping at the first occupied column —
+        -- never reaching past it into a farther gap (which would lay its horizontal
+        -- across the occupant). `used` tracks the columns each placed lane's wire
+        -- spans this row, so a later lane neither lands on nor jogs across them.
+
+        -- Compact a *linear* commit (reached by a single child-lane) leftward: the
+        -- incoming lane turns into the nearest reachable column and continues there.
+        -- A branch born one column out otherwise stays stranded next to an empty
+        -- column for its whole length (the gap that bounces a mirrored graph). The
+        -- lane's single jog is a turn, not a straight run, so id-continuity holds.
+        -- Suppressed on a fan Line: the trunk's jog must not run along the merge
+        -- fan it shares the Line with.
+        if #incoming == 1 and not (first_row and seed) and not fan_line then
+            for c = cc - 1, 1, -1 do
+                if occ0[c] or blocked[c] then break end
+                cc = c
             end
         end
 
-        -- Gentle left compaction of survivors: each shifts to the leftmost
-        -- row-start gap to its left (a horizontal turn), else stays. A gap freed
-        -- this row is reclaimed on a later row (a ripple), so turns never collide.
-        local used = { [cc] = true }
+        -- Reserve the commit's horizontal extent (its incoming jog span) before the
+        -- survivors compact, so none of them jogs across it.
+        local used = {}
+        do
+            local a = (incoming[1] and incoming[1].col) or cc
+            for c = math.min(a, cc), math.max(a, cc) do used[c] = true end
+        end
+
+        -- Gentle left compaction of survivors: each shifts into the clear run of
+        -- gaps immediately to its left (a horizontal turn), else stays put. It stops
+        -- at the first occupied/used column rather than crossing it. A gap behind an
+        -- occupied lane is reclaimed on a later row once that lane moves (a ripple).
+        -- Suppressed on a fan Line: a pass-through lane crosses the fan vertically,
+        -- it does not compact along it.
         for _, s in ipairs(survivors) do
             local k = s.col
-            if not (first_row and seed) then
-                for c = 1, s.col - 1 do
-                    if not occ0[c] and not used[c] and not blocked[c] then
-                        k = c; break
-                    end
+            if not (first_row and seed) and not fan_line then
+                for c = s.col - 1, 1, -1 do
+                    if occ0[c] or used[c] or blocked[c] then break end
+                    k = c
                 end
             end
-            used[k] = true
+            for c = k, s.col do used[c] = true end -- reserve the whole jog span
             s.out = k
         end
 

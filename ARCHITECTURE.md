@@ -43,7 +43,8 @@ The model and rendering layers exist, and the **view-builder seam** is now in
 place; **view state** does not yet exist:
 
 - The repository model exists as `repo.commits` (an identity-stable DAG), and
-  **ordering is still seeded from `git log --topo-order`**.
+  **gitloom owns the row ordering**: commits are read without an ordering flag
+  and `order_commits` runs its own topological sort (spec §3.1).
 - Layout (Phase 1) is `columns.layout(opts, items)` — a pure, deterministic
   pass that lays out an ordered item list from scratch. Two entry points wrap it:
   - `build_graph(opts, items)` — the from-scratch reflow primitive and the test
@@ -103,12 +104,14 @@ Consequences for the build:
   changes — *not* by mode toggles; the per-region join is recomputed cheaply on
   every toggle; contraction + `columns.layout` rebuild only when the display
   set actually changes.
-- Row order is derived from the existing `git log --topo-order` by dropping
-  hidden rows and contracting collapsed regions to their tip's position, so
-  **ordering ownership is not a prerequisite** for branch modes.
+- Row order is derived from gitloom's owned topological sort (`order_commits`,
+  §3.1) by dropping hidden rows and contracting collapsed regions to their tip's
+  position.
 
-What remains for the broader target is **ordering ownership** (move ordering
-out of `git log` into the builder), still future.
+**Ordering ownership** is now in place: commits are read without an ordering
+flag and `order_commits` (graph.lua) runs the topological sort that produces
+`repo.order` (spec §3.1). This also underpins **resync** (§3.4): an in-place
+history refresh appends new commits, prunes unreachable ones, and re-sorts.
 
 ### Context panes (header / footer)
 
@@ -281,10 +284,13 @@ on_controller(controller)
           │    parse_commit_line → Commit
           │    merge into repo.commits (fills ref placeholders, keeps their refs)
           │    resolve parent hashes → Commit refs (+ child links, placeholders)
-          │    append OrderItem to repo.order
+          │    append OrderItem to repo.order   ← provisional arrival order
           │  then once per batch:
           │    refresh_columns(order)          ← Phase 1 relayout (columns.layout)
           │    controller.insert(new_items)    ← inserts the batch's blank lines
+          │  on stream completion:
+          │    apply_sort() → order_commits     ← owned topological sort (§3.1):
+          │      rebuilds repo.order in the authoritative row order, then reflow()
           ▼
    (rendering is deferred)
 ```
@@ -311,9 +317,11 @@ on_redraw(top, bottom)
   annotated tags).
 - `fetch_head(repo)` — `git symbolic-ref --short --quiet HEAD` for the current
   branch.
-- `fetch_commits(opts)` — `git log --topo-order --parents` with a
-  `%x1f`-delimited pretty-format (`%H %P %an %at %ai %s`). `%at` (epoch) + `%ai`
-  (offset) feed the parsed timestamp. No `--decorate`; refs are a separate query
+- `fetch_commits(opts)` — `git log --topo-order --parents` (a valid topo base for
+  progressive paint; the active sort mode produces the final order at completion,
+  §3.1) with a `%x1f`-delimited pretty-format (`%H %P %an %at %ai %ct %s`). `%at`
+  (epoch) + `%ai` (offset) feed the parsed author timestamp; `%ct` (committer
+  epoch) seeds `order_commits` (§3.1). No `--decorate`; refs are a separate query
   (specification.md §3). **Streamed unbuffered** so the view fills progressively
   (spec §3, §10.5): the `on_stdout` handler is kept light — `make_line_buffer`
   stitches the partial line at each chunk seam, the complete lines are enqueued,
@@ -346,7 +354,10 @@ on_redraw(top, bottom)
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
 documented placeholder contract — the de-facto way to script this. The
 plumbing-pure alternative (`git rev-list --no-commit-header`, same format) is a
-one-line swap with no real gain today; revisit only if §10 takes over ordering.
+one-line swap with no real gain today. gitloom owns row ordering (`order_commits`,
+§3.1); the stream's `--topo-order` is only a valid topo base for progressive
+paint (it equals the `topo` sort mode's own output), and the active sort mode
+produces the authoritative order at completion.
 
 All run via `vim.fn.jobstart` (no explicit `cwd`, so they observe Neovim's
 working directory) and resolve a `Future` on `on_exit`. The controller chains
@@ -452,14 +463,26 @@ render via the `Commit.virtual` branches in `get_column_chars` (the `◌` glyph)
 view branches on `virtual` to use `fetch_worktree_diff` + `format_worktree_detail`
 instead of `git show`.
 
-**Refresh seam (§3.4).** `refresh_worktree(silent)` re-reads the dirty state and
-rebuilds the virtual commits on the *current* HEAD anchor (re-resolving HEAD first,
-so it returns `"moved"` when real history advanced past the snapshot). It is the
-first case of the deferred general history refresh (§10.8): re-resolve HEAD →
-reconcile against the identity-stable model → `reflow()`. Triggered by `R`, a
-debounced `BufWritePost`/`FocusGained` autocmd, and once at stream completion;
-skipped while a commit selection is active. `parse_status`, `worktree_label`, and
-`format_worktree_detail` are pure and exposed via `graph._internal`.
+**Refresh seam (§3.4).** Two refreshes share this seam, at different radii:
+
+- `refresh_worktree(silent)` re-reads only the dirty state and rebuilds the
+  virtual commits on the *current* HEAD anchor (re-resolving HEAD first, so it
+  returns `"moved"` when real history advanced past the model). Triggered by a
+  debounced `BufWritePost`/`FocusGained` autocmd and once at stream completion;
+  skipped while a commit selection is active.
+- `resync()` (the `R` key) is the **general history refresh**: re-read refs
+  (`fetch_refs`), diff against the model for added / removed / moved tips
+  (`diff_ref_tips`), pull the newly-reachable commits (`git rev-list --parents
+  <new tips> --not <old tips>`, via `fetch_new_commits`) and link them into the
+  identity-stable DAG by hash, re-point moved ref bindings, prune commits no
+  longer reachable from any ref (`prune_unreachable`), re-run `order_commits`,
+  then fold in `refresh_worktree` and `reflow()` — restoring the hash-keyed
+  cursor / scroll / selection across the rebuild. The working-tree refresh is the
+  same seam at a smaller radius.
+
+`parse_status`, `worktree_label`, and `format_worktree_detail` are pure and
+exposed via `graph._internal`; `order_commits`, `diff_ref_tips`, and
+`prune_unreachable` (the resync pure pieces, §3.1/§3.4) are exposed there too.
 
 ### Lane layout — Phase 1 (`columns.lua`)
 
@@ -494,11 +517,13 @@ the current row. For each commit `C`:
    edges, terminating here); the rest are **survivors** (pass-throughs).
 2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
    column for a tip. A **linear** commit (a single incoming child-lane) then
-   **compacts** `cc` left into the leftmost column free since row start, its
+   **compacts** `cc` left through the run of columns free since row start, its
    incoming lane turning in — so a branch born one column out (an inline
    merge-on-split that had to fan past a freed cell) ends up next to the trunk
-   after a single jog rather than stranded beside an empty column for its whole
-   length (`cc` is reserved before step 4, so a survivor keeps any nearer gap). A
+   after a single jog rather than stranded beside an empty column (`cc` is reserved
+   before step 4, so a survivor keeps any nearer gap). The slide **stops at the
+   first occupied column** — it never reaches past one into a farther gap, which
+   would lay the lane's horizontal across the occupant (the no-cross rule below). A
    column a **root** (no-parent commit) occupied on the previous row is **blocked**
    for this row — tip placement, compaction targets, and fresh fan-out columns all
    skip it — so an independent history does not stack directly under a root (the
@@ -519,10 +544,19 @@ the current row. For each commit `C`:
    calmed graph drifts back to the curated palette.
    Without generation (no truecolor), exhaustion instead **shares** a curated
    slot, reference-counted so it returns only when its last holder ends.
-4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
-   (drawn as a horizontal turn), never a column another lane vacates this same
-   row — that is what keeps two turns out of one cell, so freed columns are
-   reclaimed over a ripple. An extra (non-first) parent likewise takes the
+4. **Compaction**: each survivor shifts left through the run of *row-start* gaps
+   to its left (drawn as a horizontal turn), **stopping at the first occupied
+   column** so the jog never crosses another lane — once two lanes have separated
+   they re-share a horizontal only at a commit's own fan. It never moves into a
+   column another lane vacates this same row either (two turns out of one cell), so
+   freed columns are reclaimed over a ripple. Each placed lane's jog span is
+   reserved (`used`) so a later one neither lands on nor crosses it. With both fans
+   on their own lines, a commit line then has no crossings at all. **A `fan_line`
+   — an *inline* split (≥2 incoming, no separate split line) or merge (≥2 outgoing,
+   no separate merge line) — suppresses all compaction on that line** (both the
+   survivor shift and step 2's linear slide): a pass-through lane crosses the fan
+   vertically, and only the fan's own lanes draw the horizontal. An extra
+   (non-first) parent likewise takes the
    leftmost column free since before this row — an interior gap, not a fresh
    rightmost one — so a staircase of sequential merges stays a bounded width. A
    column a *terminating child* frees is reusable by a parent only when that does

@@ -18,6 +18,9 @@ local MERGE_STYLES = {
     { name = "inline (merge on split)", style = { allow_merge_on_split = true,  merge_on_separate_line = false, split_on_separate_line = false } },
 }
 local merge_style_index = 1
+-- Active row sort mode (index into SORT_MODES, defined below; spec §3.1), cycled
+-- by `S`. 1 = topo (the default; order_commits, reproducing git's --topo-order).
+local sort_mode_index = 1
 
 -- Ref label placements the viewer cycles through with `B` (spec §6.1). `right`
 -- pins refs to the right edge (default); `inline` draws them left-aligned before
@@ -75,6 +78,8 @@ local KEYBINDS = {
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
+    { "R", "Resync with the repository (refs + new commits + working tree)" },
+    { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
@@ -87,9 +92,13 @@ local KEYBINDS = {
 ---@param mirror boolean?
 ---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
 ---@param focus boolean?  -- the first-parent focus default is on (§10.7)
-local function footer_text(mirror, modes, focus, nanchors)
+---@param sort_label string?  -- the active sort mode's label (§3.1)
+local function footer_text(mirror, modes, focus, nanchors, sort_label)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
+    if sort_label then
+        status = status .. " | Sort: " .. sort_label
+    end
     if focus then
         status = status .. " | focus"
         -- More than the single default anchor (HEAD) ⇒ note the anchor count.
@@ -128,8 +137,11 @@ local function make_future()
             local future, promise = make_future()
 
             if state.value then
+                -- Already resolved: still run `fn` (it was being dropped — the bug
+                -- behind the open-time reflow never firing after a synchronously
+                -- resolved future, e.g. the gitloom sort mode's apply_sort).
                 vim.schedule(function()
-                    promise.resolve(unpack(state.value))
+                    promise.resolve(fn(unpack(state.value)))
                 end)
             else
                 state.callback = function(value)
@@ -144,7 +156,9 @@ local function make_future()
     local promise = {
         resolve = function(value)
             state.value = { value }
-            if value and value.next then
+            -- A future is always a table; probing `.next` on a non-table (e.g. a
+            -- number) would throw "attempt to index a number value".
+            if type(value) == "table" and value.next then
                 value.next(function(next_value)
                     if state.callback then
                         state.callback(next_value)
@@ -407,6 +421,53 @@ local function fetch_head(repo)
             end,
             on_exit = function()
                 promise.resolve()
+            end,
+        })
+
+    return future
+end
+
+--- Read the current ref set **without mutating the model** — the resync (§3.4)
+--- needs the fresh refs to diff against `repo.refs` (added / removed / moved)
+--- before applying changes. Resolves to `{ entries, head }`: `entries` is a list
+--- of `{ name, kind, hash }` (annotated tags dereferenced like fetch_refs),
+--- `head` the current branch name (nil when detached).
+---@return Future
+local function fetch_ref_entries()
+    local future, promise = make_future()
+    local entries = {}
+
+    vim.fn.jobstart(
+        { "git", "for-each-ref", "--format=%(objectname) %(refname) %(*objectname)",
+            "refs/heads", "refs/remotes", "refs/tags" },
+        {
+            stdout_buffered = true,
+            on_stdout = function(_, lines)
+                for _, line in ipairs(lines) do
+                    if line ~= "" then
+                        local parts = vim.split(line, " ")
+                        local hash, refname, deref = parts[1], parts[2], parts[3]
+                        local kind, name = classify_ref(refname or "")
+                        if kind and name and hash then
+                            local target = (deref and deref ~= "") and deref or hash
+                            entries[#entries + 1] = { name = name, kind = kind, hash = target }
+                        end
+                    end
+                end
+            end,
+            on_exit = function()
+                -- Chain HEAD's symbolic-ref so the head binding can be reconciled
+                -- in the same pass.
+                local head = nil
+                vim.fn.jobstart({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }, {
+                    stdout_buffered = true,
+                    on_stdout = function(_, l)
+                        if l[1] and l[1] ~= "" then head = l[1] end
+                    end,
+                    on_exit = function()
+                        promise.resolve({ entries = entries, head = head })
+                    end,
+                })
             end,
         })
 
@@ -890,9 +951,11 @@ local function ref_byte_col(line_text, deco)
 end
 
 --- Parse one `git log` line. Fields are `%x1f`-separated:
---- hash, parent hashes, author, epoch (%at), iso date (%ai), subject. Refs are
---- NOT here — they come from `fetch_refs` (§3.2); a fresh commit starts with an
---- empty refs list.
+--- hash, parent hashes, author, author epoch (%at), iso date (%ai), committer
+--- epoch (%ct), subject. The committer epoch (`cepoch`) is what `order_commits`
+--- seeds tips by, to match git's `--topo-order` (which orders by committer date;
+--- §3.1). Refs are NOT here — they come from `fetch_refs` (§3.2); a fresh commit
+--- starts with an empty refs list.
 local function parse_commit_line(line)
     local fields = vim.split(line, "\x1f")
 
@@ -900,7 +963,8 @@ local function parse_commit_line(line)
     local parents = vim.split(fields[2] or "", " ")
     local author = fields[3]
     local date = parse_timestamp(fields[4], fields[5])
-    local subject = fields[6]
+    local cepoch = tonumber(fields[6])
+    local subject = fields[7]
 
     if not hash then
         return
@@ -919,6 +983,7 @@ local function parse_commit_line(line)
         children = {},
         author = author,
         date = date,
+        cepoch = cepoch,
         message = subject,
         loaded = true,
         refs = {},
@@ -962,6 +1027,160 @@ local function make_line_buffer()
     }
 end
 
+--- Topologically sort the row commits, child-first, reproducing **git's
+--- `--topo-order`** (spec §3.1): a parent is always emitted after **all** of its
+--- children (so it lands at a later row), and history is grouped by lineage
+--- rather than interleaved by date — what keeps the graph's lanes tight.
+---
+--- The algorithm mirrors git's `sort_in_topological_order`: it is a **depth-first
+--- walk over a LIFO stack**, not a date-priority sort. The ready tips (commits
+--- whose in-set children are all placed) seed the stack newest-first; popping one
+--- emits it and pushes each parent the instant it becomes ready, so the next pop
+--- descends straight into that parent — a merge's merged-in lineage is emitted
+--- right after the merge instead of being deferred. Parents are pushed in order,
+--- so under the LIFO the **last parent is descended first** (git's discipline),
+--- and the descent goes deep before the next tip is touched. Date (newest first,
+--- hash to break ties) only orders the **independent tips** on the stack — once a
+--- lineage starts it is followed by topology, not recency.
+---
+--- Pure (no I/O) and operates only on the given set: relationships to commits
+--- *outside* `commits` (e.g. unloaded parent placeholders) are ignored, so it
+--- orders the loaded rows without needing the full history. This is gitloom
+--- owning the row order itself (§1.1, §3.1). Unit-testable via `_internal`.
+---@param commits Commit[]  the row commits to order (each with resolved .parents/.children)
+---@return Commit[]         the same commits, child-first topological order
+local function order_commits(commits)
+    local in_set = {}
+    for _, c in ipairs(commits) do in_set[c.hash] = c end
+
+    -- pending[hash] = number of c's children still unemitted within the set; a
+    -- commit is ready (all children placed) when it reaches 0.
+    local pending = {}
+    for _, c in ipairs(commits) do
+        local n = 0
+        for _, ch in ipairs(c.children or {}) do
+            if in_set[ch.hash] then n = n + 1 end
+        end
+        pending[c.hash] = n
+    end
+
+    -- The stack is a plain array (push = append, pop = remove last = LIFO). Seed
+    -- the ready tips **oldest committer-date first** so the newest lands on top
+    -- and is popped first (git seeds newest-first then reverses the LIFO). git
+    -- orders by *committer* date (`%ct`, `cepoch`); fall back to author date for
+    -- synthetic commits without it. Hash breaks ties for determinism: the smaller
+    -- hash ends nearer the top, so among equal-date tips it is emitted first.
+    local function tip_epoch(c)
+        return c.cepoch or (c.date and c.date.epoch) or 0
+    end
+    local stack = {}
+    for _, c in ipairs(commits) do
+        if pending[c.hash] == 0 then stack[#stack + 1] = c end
+    end
+    table.sort(stack, function(a, b)
+        local ea, eb = tip_epoch(a), tip_epoch(b)
+        if ea ~= eb then return ea < eb end -- ascending: oldest first (top = newest)
+        return a.hash > b.hash
+    end)
+
+    local out, emitted = {}, {}
+    while #stack > 0 do
+        local c = stack[#stack]
+        stack[#stack] = nil
+        if not emitted[c.hash] then
+            out[#out + 1] = c
+            emitted[c.hash] = true
+            -- Push parents that just became ready, in parent order — the last
+            -- parent ends on top and is descended first (DFS), so a merged-in
+            -- lineage stays contiguous with its merge.
+            for _, p in ipairs(c.parents or {}) do
+                if in_set[p.hash] and not emitted[p.hash] and pending[p.hash] > 0 then
+                    pending[p.hash] = pending[p.hash] - 1
+                    if pending[p.hash] == 0 then
+                        stack[#stack + 1] = p
+                    end
+                end
+            end
+        end
+    end
+
+    -- Defensive: a consistent DAG emits everything, but never drop rows if the
+    -- child links are inconsistent — append any stragglers newest-first.
+    if #out < #commits then
+        local rest = {}
+        for _, c in ipairs(commits) do
+            if not emitted[c.hash] then rest[#rest + 1] = c end
+        end
+        table.sort(rest, function(a, b)
+            local ea, eb = tip_epoch(a), tip_epoch(b)
+            if ea ~= eb then return ea > eb end
+            return a.hash < b.hash
+        end)
+        for _, c in ipairs(rest) do out[#out + 1] = c end
+    end
+
+    return out
+end
+
+--- Diff two ref maps (key → tip hash) for the resync (spec §3.4). Returns the
+--- keys that are new, gone, or re-pointed since the last read. Pure — the window
+--- glue turns the result into ref-binding updates and a prune. Unit-testable.
+---@param old table<string, string>  previous key → tip hash
+---@param new table<string, string>  current  key → tip hash
+---@return { added: string[], removed: string[], moved: string[] }
+local function diff_ref_tips(old, new)
+    local added, removed, moved = {}, {}, {}
+    for k, h in pairs(new) do
+        if old[k] == nil then
+            added[#added + 1] = k
+        elseif old[k] ~= h then
+            moved[#moved + 1] = k
+        end
+    end
+    for k in pairs(old) do
+        if new[k] == nil then removed[#removed + 1] = k end
+    end
+    table.sort(added)
+    table.sort(removed)
+    table.sort(moved)
+    return { added = added, removed = removed, moved = moved }
+end
+
+--- The set of commit hashes reachable from `tips` by walking parents (spec
+--- §3.4). After a ref rewrite (force-push / rebase) the commits *not* in this
+--- set are orphans to prune. `commits` is a hash → Commit map; each Commit's
+--- `parents` may be resolved Commit objects or raw hash strings. Pure and
+--- unit-testable.
+---@param commits table<string, Commit>
+---@param tips string[]   ref tip hashes to seed the walk
+---@return table<string, boolean>  reachable hashes
+local function reachable_hashes(commits, tips)
+    local seen, stack = {}, {}
+    for _, h in ipairs(tips) do
+        if commits[h] and not seen[h] then
+            seen[h] = true
+            stack[#stack + 1] = h
+        end
+    end
+    while #stack > 0 do
+        local c = commits[table.remove(stack)]
+        for _, p in ipairs((c and c.parents) or {}) do
+            local ph = type(p) == "table" and p.hash or p
+            if commits[ph] and not seen[ph] then
+                seen[ph] = true
+                stack[#stack + 1] = ph
+            end
+        end
+    end
+    return seen
+end
+
+-- The `%x1f`-delimited `git log` pretty-format shared by the initial stream and
+-- the resync's bounded fetch: %H %P %an %at %ai %ct %s (author epoch + iso feed
+-- the Timestamp §4; committer epoch %ct seeds the sort §3.1); %s last (single
+-- line). Parsed by parse_commit_line.
+local COMMIT_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s"
+
 -- Commits parsed per scheduled worker turn. The stdout handler only enqueues
 -- raw lines; a `vim.schedule`d worker drains the queue this many at a time and
 -- yields back to the event loop between batches, so the UI stays responsive and
@@ -990,8 +1209,12 @@ local function fetch_commits(opts)
 
     -- Refs come from fetch_refs (§3.2), so no --decorate here. %at (epoch) +
     -- %ai (carries the tz offset) feed the structured Timestamp (§4).
+    -- Stream in git's `--topo-order` (spec §3.1): a valid topological base for
+    -- progressive painting, the verbatim order of the `git` sort mode, and the
+    -- input the `gitloom` sort mode re-clusters on top of. The active sort mode
+    -- (applied at completion) decides the final row order.
     local command = { "git", "log", "--topo-order", "--parents", unpack(branch),
-        "--pretty=format:%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%s" }
+        "--pretty=format:" .. COMMIT_LOG_FMT }
     if opts.count then
         table.insert(command, "-n")
         table.insert(command, tostring(opts.count))
@@ -1075,6 +1298,86 @@ local function fetch_commits(opts)
     return future
 end
 
+--- Fetch the commits newly reachable since the last read — the resync's bounded
+--- query (§3.4): `git log --parents <new tips> --not <old tips>` returns exactly
+--- the commits reachable from the current ref tips but not from the previous
+--- ones (usually a handful after a fetch / commit). Buffered (the set is small)
+--- and resolves to a list of parsed `Commit`s; their already-present parents are
+--- linked back into the model by the caller (`integrate_commit`). With no new
+--- tips it resolves empty; with no old tips it omits `--not` (fetches all
+--- reachable, the cold-start case the stream normally covers).
+---@param new_tips string[]  current ref tip hashes (positive refs)
+---@param old_tips string[]  previous ref tip hashes (negative refs)
+---@return Future
+local function fetch_new_commits(new_tips, old_tips)
+    local future, promise = make_future()
+    if #new_tips == 0 then
+        promise.resolve({})
+        return future
+    end
+
+    local command = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT }
+    for _, h in ipairs(new_tips) do command[#command + 1] = h end
+    if #old_tips > 0 then
+        command[#command + 1] = "--not"
+        for _, h in ipairs(old_tips) do command[#command + 1] = h end
+    end
+
+    local commits = {}
+    vim.fn.jobstart(command, {
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, line in ipairs(lines) do
+                if line ~= "" then
+                    local c = parse_commit_line(line)
+                    if c then commits[#commits + 1] = c end
+                end
+            end
+        end,
+        on_exit = function()
+            promise.resolve(commits)
+        end,
+    })
+
+    return future
+end
+
+--- The row sort modes (spec §3.1), cycled by `S`. The order gitloom renders is
+--- owned, but each mode sources its *sequence* differently: a mode with `fn`
+--- sorts the in-memory DAG in Lua; a mode with `rev` asks git for the exact
+--- sequence (`git rev-list <rev>`). `topo` (the default) is `order_commits`,
+--- which reproduces git's `--topo-order` itself; `date` / `author` are git's
+--- date-interleaved orders.
+local SORT_MODES = {
+    { id = "topo", label = "topo", fn = true },
+    { id = "date", label = "date", rev = "--date-order" },
+    { id = "author", label = "author-date", rev = "--author-date-order" },
+}
+
+--- Ask git for an exact commit order — the `rev`-based sort modes (spec §3.1).
+--- `git rev-list <flag> <refspec>` lists hashes newest-first in git's chosen
+--- order (same convention as the row order). Buffered; resolves to the hash list.
+---@param branch string[]  the refspec (e.g. { "--all" } or branch names)
+---@param flag string      the order flag (`--topo-order` / `--date-order` / …)
+---@return Future
+local function fetch_rev_order(branch, flag)
+    local future, promise = make_future()
+    local command = { "git", "rev-list", flag, unpack(branch) }
+    local hashes = {}
+    vim.fn.jobstart(command, {
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, line in ipairs(lines) do
+                if line ~= "" then hashes[#hashes + 1] = line end
+            end
+        end,
+        on_exit = function()
+            promise.resolve(hashes)
+        end,
+    })
+    return future
+end
+
 --- The rendered lines of an OrderItem in display order (split / commit / merge),
 --- skipping absent ones. A plain `{item.split, item.columns, item.merge}` can't be
 --- `ipairs`-ed because a nil `split` truncates the list.
@@ -1120,6 +1423,7 @@ end
 ---@field refs Ref[]
 ---@field author? string
 ---@field date? Timestamp
+---@field cepoch? integer    committer date as Unix time (%ct); seeds order_commits (§3.1)
 ---@field message? string
 ---@field loaded? boolean   true once the commit's own log line has been parsed
 ---@field virtual? "staged"|"unstaged"   set on a working-tree virtual commit (§4.2)
@@ -3518,6 +3822,7 @@ end
 -----@field merge_style "compact"|"normal"|"merge"
 ---@field merge_style MergeStyle
 ---@field branches? string|string[]
+---@field sort_mode? string  initial row sort mode id (§3.1): "topo" | "date" | "author"
 ---@field icons Icons
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
@@ -3669,6 +3974,14 @@ function M.open(folder, opts)
     -- (streaming appends to both) until a reflow swaps in a projected one (§10).
     repo.display = repo.order
 
+    -- Resolve the initial sort mode (§3.1) from opts.sort_mode (an id string),
+    -- defaulting to topo (order_commits). `S` cycles from here.
+    if opts.sort_mode then
+        for i, m in ipairs(SORT_MODES) do
+            if m.id == opts.sort_mode then sort_mode_index = i; break end
+        end
+    end
+
     local palette = opts.palette
 
     ---@type SelectionState
@@ -3785,8 +4098,12 @@ function M.open(folder, opts)
     local worktree_commits = {}
     local worktree_head = nil
     -- Re-reads the dirty state and rebuilds the virtual commits (§3.4). Assigned
-    -- in the window block; forward-declared for the `R` key and the autocmds.
+    -- in the window block; forward-declared for the autocmds.
     local refresh_worktree = function(_) end
+    -- Full history resync (§3.4): re-read refs, pull new commits, prune, re-sort,
+    -- refresh the worktree, reflow. Assigned in the window block; forward-declared
+    -- for the `R` key.
+    local resync = function(_) end
 
     -- The repository the graph reflects, identified by Neovim's cwd (git runs in
     -- cwd). Keys the remembered cursor position so reopening restores it (§2).
@@ -3808,6 +4125,215 @@ function M.open(folder, opts)
             first = lv.controller.item_start and lv.controller.item_start(idx) or idx
         end
         return repo.display[idx], idx, line - first
+    end
+
+    -- Re-establish gitloom's owned row order (§3.1): run order_commits over the
+    -- real (non-virtual) commit rows and rebuild repo.order in that order, reusing
+    -- the existing OrderItem objects so identity is preserved. Called once at
+    -- stream completion (the stream appended in provisional arrival order) and on
+    -- every resync after new commits land. Worktree virtual commits are spliced
+    -- separately (apply_worktree), so they are skipped and re-applied afterwards.
+    local function reorder_repo()
+        local item_of, commits = {}, {}
+        for _, it in ipairs(repo.order) do
+            if it.type == "commit" and it.commit and not it.commit.virtual then
+                item_of[it.commit.hash] = it
+                commits[#commits + 1] = it.commit
+            end
+        end
+        local ordered = order_commits(commits)
+        local new_order = {}
+        for _, c in ipairs(ordered) do
+            new_order[#new_order + 1] = item_of[c.hash]
+        end
+        repo.order = new_order
+    end
+
+    -- Reorder repo.order to match an external hash sequence (a `rev`-based sort
+    -- mode's `git rev-list` output; §3.1). Rows git lists but we lack are skipped;
+    -- in-memory rows git didn't list (refspec drift) are appended, so no row is
+    -- dropped. Reuses the existing OrderItem objects. Virtual worktree commits are
+    -- spliced separately, so they are excluded here.
+    ---@param hashlist string[]
+    local function reorder_by_hashes(hashlist)
+        local item_of = {}
+        for _, it in ipairs(repo.order) do
+            if it.type == "commit" and it.commit and not it.commit.virtual then
+                item_of[it.commit.hash] = it
+            end
+        end
+        local new_order, placed = {}, {}
+        for _, h in ipairs(hashlist) do
+            local it = item_of[h]
+            if it and not placed[h] then
+                new_order[#new_order + 1] = it
+                placed[h] = true
+            end
+        end
+        for _, it in ipairs(repo.order) do
+            if it.type == "commit" and it.commit and not it.commit.virtual
+                and not placed[it.commit.hash] then
+                new_order[#new_order + 1] = it
+                placed[it.commit.hash] = true
+            end
+        end
+        repo.order = new_order
+    end
+
+    -- Apply the active sort mode (§3.1) to repo.order, returning a Future (the
+    -- `rev` modes query git asynchronously). The `gitloom` mode sorts the
+    -- in-memory DAG (order_commits); the `rev` modes take git's exact sequence.
+    -- The caller reflows.
+    ---@return Future
+    local function apply_sort()
+        local mode = SORT_MODES[sort_mode_index]
+        if mode.rev then
+            local branch = opts.branches or { "--all" }
+            if type(branch) ~= "table" then branch = { branch } end
+            return fetch_rev_order(branch, mode.rev)
+                .next(function(hashes) reorder_by_hashes(hashes) end)
+        end
+        reorder_repo()
+        local future, promise = make_future()
+        promise.resolve()
+        return future
+    end
+
+    -- Merge a freshly-parsed Commit into the model (§3): fill its placeholder (or
+    -- insert it), resolve its parent hashes to Commit references with child
+    -- back-links, and append an OrderItem to repo.order (returned). Shared by the
+    -- initial stream (on_batch) and the resync's new-commit pass. Identity-stable:
+    -- a placeholder keeps its object and refs. Returns nil for an already-loaded
+    -- commit (re-seen) so the caller doesn't double-link or double-list it.
+    ---@param item Commit
+    ---@return OrderItem?
+    local function integrate_commit(item)
+        local existing = repo.commits[item.hash]
+        if existing then
+            if existing.loaded then return nil end -- already a row; don't re-link
+            -- Fill the placeholder; keep its resolved refs and children. cepoch
+            -- (committer date) MUST be copied: ref tips are pre-created as
+            -- placeholders by fetch_refs, and order_commits seeds tips by cepoch
+            -- (§3.1) — dropping it falls back to author date and breaks the order
+            -- on squash-merge repos (author ≠ committer date).
+            existing.author = item.author
+            existing.date = item.date
+            existing.cepoch = item.cepoch
+            existing.parents = item.parents
+            existing.message = item.message
+            existing.loaded = true
+            item = existing
+        else
+            repo.commits[item.hash] = item
+            item.children = item.children or {}
+        end
+
+        -- Resolve parent hashes (still strings from `git log`) to Commit refs.
+        local resolved = {}
+        for _, p in ipairs(item.parents) do
+            local parent = get_or_create_commit(repo, p --[[@as string]])
+            table.insert(parent.children, item)
+            table.insert(resolved, parent)
+        end
+        item.parents = resolved
+
+        ---@type OrderItem
+        local order_item = { type = "commit", commit = item, columns = {} }
+        table.insert(repo.order, order_item)
+        return order_item
+    end
+
+    -- Remove a Ref from the model: unlink it from its commit's back-list and drop
+    -- the registry entry. The resync uses it to retire a deleted or moved ref.
+    ---@param key string
+    local function unlink_ref(key)
+        local ref = repo.refs[key]
+        if not ref then return end
+        local c = ref.commit
+        if c and c.refs then
+            for i = #c.refs, 1, -1 do
+                if c.refs[i] == ref then table.remove(c.refs, i) end
+            end
+        end
+        repo.refs[key] = nil
+    end
+
+    -- Reconcile the model's refs with a freshly-read ref set (§3.4): drop deleted
+    -- refs, add new ones, and re-point moved ones (diff_ref_tips drives the three
+    -- cases), then re-bind HEAD to the current branch. add_ref creates a
+    -- placeholder Commit for a tip we haven't fetched yet; the new-commit pass
+    -- fills it. Mutates repo.refs / repo.commits.
+    ---@param entries { name: string, kind: string, hash: string }[]
+    ---@param head string?
+    local function reconcile_refs(entries, head)
+        local newmap, by_key = {}, {}
+        for _, e in ipairs(entries) do
+            newmap[e.name] = e.hash
+            by_key[e.name] = e
+        end
+        local oldmap = {}
+        for k, ref in pairs(repo.refs) do
+            if k ~= "HEAD" then oldmap[k] = ref.commit and ref.commit.hash end
+        end
+
+        local d = diff_ref_tips(oldmap, newmap)
+        for _, k in ipairs(d.removed) do unlink_ref(k) end
+        for _, k in ipairs(d.added) do
+            local e = by_key[k]
+            add_ref(repo, e.name, e.kind, e.hash)
+        end
+        for _, k in ipairs(d.moved) do
+            local e = by_key[k]
+            unlink_ref(k) -- detach the old binding before re-pointing
+            add_ref(repo, e.name, e.kind, e.hash)
+        end
+
+        -- HEAD always re-points to the current branch's (possibly new) commit; a
+        -- detached or vanished branch drops it.
+        unlink_ref("HEAD")
+        repo.head = head
+        if head and repo.refs[head] and repo.refs[head].commit then
+            add_ref(repo, "HEAD", "head", repo.refs[head].commit.hash)
+        end
+    end
+
+    -- Prune commits no longer reachable from any ref (§3.4) — the orphans a
+    -- force-push / rebase leaves behind. Walks parents from every ref tip, then
+    -- drops unreachable real commits from repo.commits, prunes child back-links
+    -- pointing at removed commits, and filters repo.order. Virtual worktree
+    -- commits are not present here (cleared before a resync).
+    local function prune_to_reachable()
+        local tips = {}
+        for _, ref in pairs(repo.refs) do
+            if ref.commit then tips[#tips + 1] = ref.commit.hash end
+        end
+        local keep = reachable_hashes(repo.commits, tips)
+
+        local removed = false
+        for hash, c in pairs(repo.commits) do
+            if not keep[hash] and not c.virtual then
+                repo.commits[hash] = nil
+                removed = true
+            end
+        end
+        if not removed then return end
+
+        for _, c in pairs(repo.commits) do
+            if c.children then
+                local kept = {}
+                for _, ch in ipairs(c.children) do
+                    if repo.commits[ch.hash] then kept[#kept + 1] = ch end
+                end
+                c.children = kept
+            end
+        end
+        local kept_order = {}
+        for _, it in ipairs(repo.order) do
+            if it.commit and repo.commits[it.commit.hash] then
+                kept_order[#kept_order + 1] = it
+            end
+        end
+        repo.order = kept_order
     end
 
     -- Remove the working-tree virtual commits from the raw model (§4.2): unlink
@@ -3985,7 +4511,7 @@ function M.open(folder, opts)
             local nanchors = 0
             for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
             local status = footer_text(opts.mirror, view_state.modes,
-                opts.collapse_merged ~= false, nanchors)
+                opts.collapse_merged ~= false, nanchors, SORT_MODES[sort_mode_index].label)
             -- Commit selection (§13): show the mode + the selected row count.
             if sel.active then
                 status = status .. (" | SELECT %d"):format(#(sel.path or {}))
@@ -4440,43 +4966,12 @@ function M.open(folder, opts)
                     on_batch = function(commits)
                         local new_items = {}
                         for _, item in ipairs(commits) do
-                            local existing = repo.commits[item.hash]
-                            if existing then
-                                -- Fill the placeholder; keep its resolved refs.
-                                existing.author = item.author
-                                existing.date = item.date
-                                existing.parents = item.parents
-                                existing.message = item.message
-                                existing.loaded = true
-
-                                item = existing
-                            else
-                                repo.commits[item.hash] = item
-                                item.children = {}
+                            local order_item = integrate_commit(item)
+                            if order_item then
+                                new_items[#new_items + 1] = order_item
                             end
-
-                            -- Convert parent hashes to references
-                            local newParents = {}
-                            for _, p in ipairs(item.parents) do
-                                -- At this point parents are still the hash
-                                -- strings parsed from `git log`, being resolved
-                                -- to Commits.
-                                local parent = get_or_create_commit(repo, p --[[@as string]])
-                                table.insert(parent.children, item)
-                                table.insert(newParents, parent)
-                            end
-
-                            item.parents = newParents
-
-                            ---@type OrderItem
-                            local order_item = {
-                                type = "commit",
-                                commit = item,
-                                columns = {},
-                            }
-                            table.insert(repo.order, order_item)
-                            new_items[#new_items + 1] = order_item
                         end
+                        if #new_items == 0 then return end
 
                         -- Fast path while the projection is the identity (the
                         -- common all-normal case): lay out and append the batch.
@@ -4491,6 +4986,11 @@ function M.open(folder, opts)
                         end
                     end,
                 })
+            end).next(function()
+                -- Stream closed: apply the active sort mode (§3.1) to establish the
+                -- authoritative row order before anything is projected or anchored.
+                -- (The stream appended git's --topo-order arrival order.)
+                return apply_sort()
             end).next(function()
                 -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
                 -- model, read the dirty state and splice the staged/unstaged nodes
@@ -4677,11 +5177,30 @@ function M.open(folder, opts)
         end
         place_cursor()
     end
-    -- R: refresh the working-tree state (§3.4) — re-read the uncommitted changes
-    -- and rebuild the virtual commits. Manual; not silent, so it reports when HEAD
-    -- has moved (history needs a reopen).
+    -- R: resync with the repository (§3.4) — re-read refs, pull newly-reachable
+    -- commits, prune orphans, re-sort, and rebuild the working-tree virtuals,
+    -- keeping the cursor/scroll/selection. The general history refresh; the
+    -- working-tree refresh is folded into it.
     opts.win.keys.R = function()
-        refresh_worktree(false)
+        resync(false)
+    end
+    -- S: cycle the row sort mode (§3.1) — gitloom's clustered topo sort, git's
+    -- exact --topo-order, or git's date / author-date order. Reorders repo.order
+    -- in place (no re-stream) and reflows, keeping the cursor on its commit.
+    opts.win.keys.S = function()
+        local keep
+        local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv and lv.win and lv.win.win)
+        if ok then keep = cursor_hash(pos[1]) end
+        sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
+        apply_sort().next(function()
+            reflow()
+            update_footer() -- footer shows the active sort mode
+            if keep then goto_hash(keep) end
+            place_cursor()
+            update_cone()
+            if lv and lv.controller then lv.controller.refresh() end
+            update_panes()
+        end)
     end
     -- c: toggle the first-parent focus (§10.7) — collapse every non-mainline
     -- branch vs. show the full graph. Changes per-item line counts, so reflow.
@@ -5117,8 +5636,8 @@ function M.open(folder, opts)
 
         -- Working-tree refresh (§3.4): re-read the dirty state and rebuild the
         -- virtual commits on the current HEAD anchor. It first re-resolves HEAD, so
-        -- it can tell when real history has moved out from under the snapshot
-        -- ("moved") — the seam the deferred history refresh (§10.8) extends. Keeps
+        -- it can tell when real history has moved out from under the model
+        -- ("moved") — the seam the general history resync (below) extends. Keeps
         -- the cursor on its commit across the reflow. `silent` suppresses the
         -- "history moved" notice for the automatic (write/focus) triggers.
         refresh_worktree = function(silent)
@@ -5142,6 +5661,76 @@ function M.open(folder, opts)
                     vim.notify("gitloom: HEAD moved — reopen to refresh history (§3.4)",
                         vim.log.levels.WARN)
                 end
+            end)
+        end
+
+        -- History resync (§3.4): re-read refs and reconcile the model in place so a
+        -- `commit` / `fetch` / `rebase` / HEAD-moving `checkout` shows without a
+        -- reopen. Snapshot the current ref tips (the rev-list exclude set) and the
+        -- focused commit, then: re-read refs (non-mutating) → reconcile bindings
+        -- (add/move/remove) → pull only the newly-reachable commits → link them →
+        -- prune orphans → re-establish the owned order → refresh the worktree →
+        -- reflow, restoring the cursor by hash and the scroll. Worktree virtuals
+        -- are dropped up front and re-applied at the end. `silent` suppresses the
+        -- completion notice (reserved for future automatic triggers).
+        resync = function(silent)
+            if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+                return
+            end
+
+            -- What we already have: every current ref tip becomes a negative ref,
+            -- so the fetch returns only commits newly reachable since this point.
+            local old_tips = {}
+            for _, ref in pairs(repo.refs) do
+                if ref.commit then old_tips[ref.commit.hash] = true end
+            end
+
+            -- Remember the focused commit + scroll so the view holds across the
+            -- rebuild (both are hash/topline based, so they survive the reflow).
+            local focus
+            local cok, pos = pcall(vim.api.nvim_win_get_cursor, win)
+            if cok then focus = cursor_hash(pos[1]) end
+            local vok, vview = pcall(vim.fn.winsaveview)
+            local view = vok and vview or nil
+
+            -- Drop the worktree virtuals during the rebuild; re-applied at the end.
+            clear_worktree_nodes()
+
+            fetch_ref_entries().next(function(res)
+                reconcile_refs(res.entries, res.head)
+                local new_tips, old_list = {}, {}
+                for _, e in ipairs(res.entries) do new_tips[e.hash] = true end
+                local new_list = {}
+                for h in pairs(new_tips) do new_list[#new_list + 1] = h end
+                for h in pairs(old_tips) do old_list[#old_list + 1] = h end
+                return fetch_new_commits(new_list, old_list)
+            end).next(function(commits)
+                for _, c in ipairs(commits) do integrate_commit(c) end
+                prune_to_reachable()
+                return apply_sort() -- re-establish the active sort mode (§3.1)
+            end).next(function()
+                if opts.working_tree == false then return nil end
+                return fetch_worktree_state()
+            end).next(function(state)
+                if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+                    return
+                end
+                if state then apply_worktree(state) end
+                reflow()
+                update_footer()
+                -- Restore the scroll first, then re-home the cursor on the focused
+                -- commit (goto_hash only scrolls if its new row is off-screen).
+                if view then pcall(vim.fn.winrestview, view) end
+                if not (focus and goto_hash(focus)) then
+                    -- The focused commit is gone (rewound away) — fall back to HEAD.
+                    local headref = repo.refs["HEAD"]
+                    if headref and headref.commit then goto_hash(headref.commit.hash) end
+                end
+                place_cursor()
+                update_cone()
+                if lv and lv.controller then lv.controller.refresh() end
+                update_panes()
+                if not silent then vim.notify("gitloom: resynced") end
             end)
         end
 
@@ -5939,6 +6528,10 @@ M._internal = {
     ref_byte_col = ref_byte_col,
     parse_commit_line = parse_commit_line,
     make_line_buffer = make_line_buffer,
+    make_future = make_future,
+    order_commits = order_commits,
+    diff_ref_tips = diff_ref_tips,
+    reachable_hashes = reachable_hashes,
     parse_timestamp = parse_timestamp,
     format_absolute = format_absolute,
     format_relative = format_relative,

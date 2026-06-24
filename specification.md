@@ -50,9 +50,13 @@ debug aid, hidden by default). `d` toggles the date column between absolute and
 relative (§6). `H` toggles reachability highlighting (§12) off and on. `c`
 toggles the first-parent focus (§10.7) — collapse every non-mainline branch, or
 show the full graph. `p` toggles **marker packing** (§10.4) — merge concurrent
-collapsed heads onto shared lines, or one per line. `R` refreshes the
-**working-tree state** (§3.4) — re-reads the uncommitted changes and rebuilds the
-virtual commits (§4.2). `V` enters **commit selection** (§13) — a modal range
+collapsed heads onto shared lines, or one per line. `R` **resyncs** the view with
+the repository (§3.4) — re-reads refs, pulls newly-reachable commits, prunes
+unreachable ones, re-sorts, and rebuilds the working-tree virtual commits (§4.2),
+preserving cursor/scroll/selection. `S` cycles the **row sort mode** (§3.1) —
+gitloom's own topological order (reproducing git's `--topo-order`), or git's date
+/ author-date order — reordering in place and keeping the cursor on its commit.
+`V` enters **commit selection** (§13) — a modal range
 selection along one branch, fed to the diff provider and the commit view's range
 mode.
   `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
@@ -110,7 +114,9 @@ Two independent queries, joined by commit hash.
 
 Commits are read via `git log` with:
 
-- `--topo-order` — topological ordering (children before parents).
+- `--topo-order` — git's topological order: a valid topological base (children
+  before parents) for progressive painting, the verbatim order of the `git` sort
+  mode, and the input the `gitloom` sort mode re-clusters on top of.
 - `--parents` — full parent hash list per commit.
 - a refspec, default `--all`.
 
@@ -118,6 +124,38 @@ Each commit carries: hash, parent hashes, author, author date, subject. The
 author date is read as a Unix epoch (`%at`) plus its tz offset (from `%ai`) and
 parsed into a structured `Timestamp` (§4), not kept as text. Refs are **not**
 taken from `--decorate`; they come from §3.2.
+
+**Row ordering — sort modes.** gitloom **owns the row-order pipeline** (§1.1): it
+records the commit set, decides *when* to (re)order, and reflows — but a given
+**sort mode** sources its *sequence* either from git or from its own algorithm.
+`S` cycles the mode; the active mode determines `repo.order`. All modes keep the
+hard invariant that a parent is never at an earlier row than a child (the layout
+and reachability invariant of §5/§12). The modes:
+
+- **`topo`** (default) — gitloom's own **topological sort**, computed in Lua to
+  **reproduce git's `--topo-order`**: a depth-first walk over a LIFO stack
+  (mirroring git's `sort_in_topological_order`) that groups history by lineage —
+  it descends a commit's parents the instant they become ready, so a merge's
+  merged-in lineage is emitted right after the merge instead of scattered by date,
+  which is what keeps the graph's lanes tight. The independent tips seed the stack
+  **newest committer-date first** (`%ct`, git's own ordering; hash breaks ties);
+  once a lineage starts it is followed by topology, not recency. This matches
+  `git rev-list --topo-order` commit-for-commit (verified against a real and a
+  synthetic repo during development), so gitloom owns this order outright rather
+  than delegating to git.
+- **`date`** / **`author`** — git's `--date-order` / `--author-date-order`
+  (`git rev-list`): topological, otherwise newest-first by committer / author
+  date, so branches interleave by date.
+
+The `topo` mode computes its sequence in Lua; the `date` / `author` modes obtain
+theirs from `git rev-list <flag>`. Cycling re-orders `repo.order` **in place** (no
+re-stream) and reflows, keeping the cursor on its commit. The default mode is
+configurable (`sort_mode`, §8).
+
+**Streaming.** While commits stream in they are appended in git's `--topo-order`
+arrival order so the view paints progressively. When the stream completes the
+active sort mode is applied once to produce the authoritative `repo.order`, after
+which the §10 projection / reflow proceeds.
 
 ### 3.2 Refs
 
@@ -160,25 +198,31 @@ when their queries resolve.
 
 ### 3.4 Liveness and refresh
 
-The graph is otherwise a **snapshot taken at open** — it does not yet re-read the
-repository as it changes underneath. Two refresh concerns are distinguished, and
-they are independent:
+The graph re-reads the repository as it changes underneath. Two refresh concerns
+are distinguished, and they are independent:
 
 - **Working-tree refresh** — re-reading only the dirty state (§3.3) when the
   index or working tree changes (the user edits, stages, or unstages). The set of
   real commits is unchanged. This **is** supported: a debounced refresh re-runs
   the §3.3 queries and rebuilds the virtual commits on the current HEAD anchor.
-  It is triggered manually (the `R` key, §2), on buffer writes, and on focus
-  regained, and it first re-reads HEAD's hash so it can detect when history has
-  moved out from under it.
+  It is triggered on buffer writes and on focus regained, and it first re-reads
+  HEAD's hash so it can detect when history has moved out from under it.
 - **History refresh** — re-reading the commit DAG and refs because real history
   changed (`commit`, `fetch`, `rebase`, a `checkout` that moves HEAD). This is
-  **deferred** (§10.8): today such a change is reflected only on reopen. The
-  working-tree refresh degrades gracefully across it — when HEAD has moved off the
-  snapshot's known commits, the virtual commits are not re-anchored onto stale
-  history; the view notes that history changed rather than drawing a wrong
-  picture. The working-tree refresh is deliberately structured as the first case
-  of the general refresh, so history refresh extends it rather than replacing it.
+  **supported** in place via *resync* (the `R` key, §2): gitloom re-reads the
+  refs (§3.2), diffs them against the model to find added / removed / moved tips,
+  fetches only the newly-reachable commits (`git rev-list --parents <new tips>
+  --not <previous tips>`) and links them into the identity-stable model (§4) by
+  hash, re-points moved ref bindings, prunes commits no longer reachable from any
+  ref (history rewrites / force-pushes), re-runs the owned sort (§3.1), and
+  `reflow()`s — preserving hash-keyed view state (selection, folds, cursor,
+  scroll) across the rebuild. The working-tree refresh is folded in (resync ends
+  by rebuilding the virtual commits on the new HEAD anchor). A full teardown
+  re-stream remains available by reopening the view.
+
+The working-tree refresh was the first case of this general refresh, so the
+history refresh extends it rather than replacing it: both re-resolve HEAD,
+reconcile against the identity-stable model (§4), and end in `reflow()`.
 
 ## 4. Data model
 
@@ -349,12 +393,29 @@ head, or a merge's second-and-later parent.
   keeps that style from leaving an empty-column gap that bounces a right-aligned
   (mirrored, §5.4) graph.
 - **Commit compaction.** A *linear* commit (reached by a single child-lane) slides
-  into the leftmost column free since row start, its incoming lane turning into the
-  new column. So a branch born one column out — an inline merge-on-split that had
-  to fan past a freed cell — compacts next to the trunk after a single jog rather
-  than running stranded beside an empty column for its whole length. The slide
-  reserves its column before survivor compaction, so a survivor keeps any nearer
-  gap; the lone jog is a turn, not a straight run, so id-continuity holds.
+  left, its incoming lane turning into the new column. So a branch born one column
+  out — an inline merge-on-split that had to fan past a freed cell — compacts next
+  to the trunk after a single jog rather than running stranded beside an empty
+  column. The slide reserves its column before survivor compaction, so a survivor
+  keeps any nearer gap; the lone jog is a turn, not a straight run, so
+  id-continuity holds.
+- **Compaction never crosses a lane.** Once two lanes have separated they share a
+  horizontal Line only at a commit's own fan (the split/merge funnel). A
+  compaction jog — the linear-commit slide above, or a survivor shifting into a gap
+  — therefore moves left only through a run of columns *free since row start*,
+  **stopping at the first occupied column** rather than reaching past it into a
+  farther gap (which would lay the lane's horizontal across the occupant). A gap
+  behind an occupied lane is reclaimed on a later row, once that lane itself moves
+  (a ripple). Consequently, with both fans on their own Lines (the both-lines
+  style), a commit Line has **no crossings at all**.
+- **A fan Line carries no compaction.** When the fan is drawn *inline* (the split
+  or merge shares the commit Line rather than getting its own Line), compaction is
+  suppressed on that Line entirely: a pass-through lane crosses the fan
+  **vertically**, never compacting horizontally along it, and the linear-commit
+  slide does not run. Only the fan's own lanes — the converging children, the
+  diverging parents — draw the horizontal; a lane joins it only if it belongs to
+  that fan. Compaction still applies on non-fan Lines and on a Line whose fan sits
+  on its own split/merge Line.
 
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view
@@ -670,8 +731,8 @@ options are specified here, not yet read by the command.)
 `GraphOptions` (see [README.md](README.md) for the full default table):
 
 ```
-GraphOptions = { win, palette, merge_style, icons, branches, mirror, highlight,
-                 date_format, date_mode, message_min, label_mode, diff,
+GraphOptions = { win, palette, merge_style, icons, branches, sort_mode, mirror,
+                 highlight, date_format, date_mode, message_min, label_mode, diff,
                  working_tree }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -700,6 +761,9 @@ Endpoint     = Commit | "index" | "worktree"
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
+- `sort_mode` — the initial **row sort mode** (§3.1): `"topo"` (default,
+  gitloom's own order reproducing git's `--topo-order`), `"date"`, or `"author"`.
+  Cycle live with `S`.
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
   conventional left-to-right layout. Purely a rendering transform; ordering and
@@ -734,14 +798,24 @@ open function.)
 
 ## 9. Non-goals
 
-**Permanently** out of scope: repository mutation of any kind (no checkout,
-commit, rebase, reset). gitloom is a viewer.
+gitloom is a **viewer**: today it does not itself mutate the repository. What is
+permanently out of scope is **implicit index or history mutation as a side
+effect of viewing** — gitloom never stages, unstages, commits, resets, or
+rewrites history silently while you browse.
 
-Showing the **working-tree state** (§3.3, §4.2) does not change this: gitloom
-*displays* the index and working tree as virtual commits, but **staging,
-unstaging, and committing are permanently out of scope** — the obvious next step
-from a working-tree node, and exactly the line a viewer does not cross. The diff
-is read; the index is never written.
+**Explicit, user-invoked graph operations** — fetch, rebase, cherry-pick, and
+the like — are a planned future direction, not a non-goal. They build on the
+refresh primitive (§3.4): the operation runs its git command, then the in-place
+resync mirrors the result into the model. The line that does not move is the
+*silent* one above; a deliberate, clearly-invoked operation is fair game.
+
+Showing the **working-tree state** (§3.3, §4.2) is *not* the wedge for this:
+gitloom *displays* the index and working tree as virtual commits, but **staging,
+unstaging, and committing remain out of scope** — gitloom is a graph viewer, not
+an index/staging UI. That is the obvious next step from a working-tree node and
+the one deliberately not taken; the operations that fall naturally out of the
+graph are history- and remote-level (above), not index editing. The diff is
+read; the index is never written.
 
 Acting on the commit under the cursor is reasonable where it arises naturally
 from the graph, and the **commit view** (§11) is the first realization of it: a
@@ -982,14 +1056,10 @@ all-normal.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
   responsive.
-- **History refresh** — re-reading the commit DAG and refs in place when real
-  history changes (`commit`, `fetch`, `rebase`, a HEAD-moving `checkout`), so the
-  graph updates without reopening (§3.4). The working-tree refresh (§3.4) already
-  builds the refresh seam — re-resolve HEAD, reconcile against the identity-stable
-  model (§4), `reflow()` — and detects when history has moved; the general case
-  (appending new commits, dropping deleted refs, preserving view state and cursor
-  across the reflow) extends it. Deferred; today a history change is reflected
-  only on reopen.
+- **Auto-refresh** — history refresh (§3.4) is in place via the manual `R`
+  resync; triggering it automatically when the repository changes underneath
+  (watching `.git` refs / `HEAD` via an fs-event or autocmd, debounced) is a
+  follow-up. Today a history change is mirrored only on `R` or reopen.
 - **Toggle UX** — `<CR>` on a selected ref cycles its mode and `<CR>` on a head
   expands it (implemented); a picker for setting many at once is still future.
 - **Context panes** — header/footer windows showing off-screen topology folded
