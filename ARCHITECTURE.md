@@ -795,7 +795,14 @@ rows, walking the **Lane graph** (no flood, no id heuristics):
   renders lit.
 - `reachable_cone` (above) remains a pure helper (commit-set only) with its own
   property tests; the production path uses `mark_reachable` (which subsumes it).
-  `update_cone` just calls `mark_reachable` over the visible window.
+  `update_cone` calls `mark_reachable` over the visible window — except on a
+  **packed marker line** (§10.4), where the `h`/`l`-selected head has no row of its
+  own (so `mark_reachable`'s index pivot can't reach it): there it calls
+  `mark_node_cone`, which seeds the same emphasis from the selected head's
+  DisplayNode (walking `.parents`/`.children`, lighting each lane via its shared
+  edge object by `node_loc`, as `mark_path` does). So selecting a packed head dims
+  the sibling heads/branches and keeps the selected one lit, exactly like moving
+  onto a normal head. With no marker selected the line is neutral (all lit).
 - `dim_hl(opts, group)` returns a dimmed derivative of a highlight group:
   it resolves the group's `fg`, blends it toward `Normal`'s `bg` by
   `palette.dim` (default `0.45`), and defines a cached `GitloomDim_<group>`

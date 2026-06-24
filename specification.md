@@ -737,7 +737,10 @@ commit the trunk reaches (the mainline) is not collapsible.
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
 which labels fit); `<Tab>` and the menu act on the selected marker. Reachability
-emphasis (§12) follows the selection, or is neutral when none is selected.
+emphasis (§12) **follows the selection**: the selected head's branch — its `◍`
+node, label, and lane — stays its normal colour while the sibling heads/branches
+sharing the row dim, exactly as moving onto a normal head dims everything outside
+its cone. With no marker selected the line is neutral (all lit).
 
 ### 10.5 Reflow
 

@@ -1949,20 +1949,24 @@ local function display_item(opts, item, selection_state, cone, sel_cursor)
 
     -- A packed marker-group (spec §10.4): several concurrent collapsed heads on
     -- one line — their ◍ nodes in the graph column, then each marker's ref
-    -- label(s), the selected one highlighted (`h`/`l`). No message. The labels go
-    -- in `line_right` (left-aligned after the graph, `line_right_align`) so they
+    -- label(s). The `h`/`l`-selected head drives the §12 cone (update_cone /
+    -- mark_node_cone), so the selected branch stays lit while the siblings dim; the
+    -- node glyphs follow the same cone via get_column_chars. No message. The labels
+    -- go in `line_right` (left-aligned after the graph, `line_right_align`) so they
     -- get the same windowed overflow as commit refs (§6): the selected marker is
     -- kept visible with `+N` markers, instead of the row truncating with `…`.
     if item.type == "markers" then
         local graph_item = get_column_chars(opts, item.columns, emphasis)
         local sel = (selection_state and selection_state.commit == item) and selection_state.index or nil
         local labels = {}
-        for i, u in ipairs(marker_units(item)) do
-            -- The commit-selection cursor head, or an h/l-selected marker, draws
-            -- with palette.selected; an in-cone head (a path member, §13.4) stays
-            -- lit; everything else dims with emphasis. Per-marker because a packed
-            -- line holds several heads, only the selected branch's being relevant.
-            if u.marker == sel_cursor or i == sel then
+        for _, u in ipairs(marker_units(item)) do
+            -- The commit-selection cursor head (§13.4) draws with palette.selected.
+            -- Otherwise the h/l marker selection drives the §12 reachability cone
+            -- (update_cone seeds it from the selected head), so the selected
+            -- branch renders in its normal colour and the others — out of its cone
+            -- — dim, exactly like selecting a normal head. (`sel` still windows the
+            -- selected label into view via line_right_sel.)
+            if u.marker == sel_cursor then
                 labels[#labels + 1] = highlight_text(u.text, palette.selected)
             elseif emphasis and not (cone and cone[u.marker]) then
                 labels[#labels + 1] = highlight_text(u.text, dim_hl(opts, palette.branch))
@@ -3777,6 +3781,99 @@ function M.open(folder, opts)
         return cone
     end
 
+    -- Reachability emphasis seeded from a packed marker head (spec §10.4 + §12).
+    -- On a packed line `h`/`l` selects a head with no row of its own, so
+    -- mark_reachable's index pivot can't reach it. Walk the DisplayNode graph from
+    -- the selected head — `.parents` (ancestors) then `.children` (descendants) —
+    -- bounded to the visible rows, lighting each traversed lane via its shared
+    -- edge object (by node_loc for a packed head, as mark_path does) and each cone
+    -- node's marker cell. Returns the cone set keyed by DisplayNode (row dimming).
+    -- So selecting a packed head dims the sibling heads/branches and keeps the
+    -- selected one lit, exactly like moving onto a normal head (§12).
+    local function mark_node_cone(pivot, top, bottom)
+        local visible, item_of = {}, {}
+        for i = top, bottom do
+            local it = repo.display[i]
+            if it then
+                if it.commit then
+                    visible[it.commit] = true; item_of[it.commit] = it
+                elseif it.type == "markers" then
+                    for _, m in ipairs(it.markers or {}) do visible[m] = true; item_of[m] = it end
+                end
+            end
+        end
+        -- Reset every lane/marker drawn in the window (same sweep as mark_reachable)
+        -- so a persistent lane keeps no stale highlight from the previous pivot.
+        for i = top, bottom do
+            local it = repo.display[i]
+            if it then
+                for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
+                for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
+                for _, line in ipairs(item_lines(it)) do
+                    for _, t in ipairs(line) do
+                        for _, s in ipairs(t.lanes or {}) do
+                            for _, e in ipairs(s.edges or {}) do e.highlighted = false end
+                        end
+                        if t.has_commit then t.active = false end
+                    end
+                end
+            end
+        end
+        local cone = {}
+        if not pivot or not visible[pivot] then return cone end
+        cone[pivot] = true
+        -- Light the lane the child→parent edge draws: on the child's own row via
+        -- its parent_lanes, or in a packed head's marker column by edge identity
+        -- (the same shared Lane the child row would draw).
+        local function light_edge(child, parent)
+            local it = node_item(child)
+            if it then
+                for _, lane in ipairs(it.parent_lanes or {}) do
+                    if lane.parent == parent then lane.highlighted = true end
+                end
+            else
+                local loc = node_loc[child.hash] or node_loc[parent.hash]
+                if loc then
+                    for _, s in ipairs(loc.item.columns[loc.col].lanes or {}) do
+                        for _, e in ipairs(s.edges or {}) do
+                            if e.begin == child and e.parent == parent then e.highlighted = true end
+                        end
+                    end
+                end
+            end
+        end
+        local stack = { pivot } -- ancestors via .parents
+        while #stack > 0 do
+            local n = table.remove(stack)
+            for _, p in ipairs(n.parents or {}) do
+                light_edge(n, p)
+                if visible[p] and not cone[p] then cone[p] = true; stack[#stack + 1] = p end
+            end
+        end
+        stack = { pivot } -- descendants via .children
+        while #stack > 0 do
+            local n = table.remove(stack)
+            for _, ch in ipairs(n.children or {}) do
+                light_edge(ch, n)
+                if visible[ch] and not cone[ch] then cone[ch] = true; stack[#stack + 1] = ch end
+            end
+        end
+        for n in pairs(cone) do -- light each cone node's marker cell
+            local it = node_item(n)
+            if it then
+                for _, line in ipairs(item_lines(it)) do
+                    for _, t in ipairs(line) do
+                        if t.has_commit and t.commit == n then t.active = true end
+                    end
+                end
+            else
+                local loc = node_loc[n.hash]
+                if loc then loc.item.columns[loc.col].active = true end
+            end
+        end
+        return cone
+    end
+
     -- Recompute the path emphasis, move the cursor onto the moving end, and
     -- redraw (§13). update_cone branches to mark_path while selection is active.
     local function selection_redraw()
@@ -4375,6 +4472,11 @@ function M.open(folder, opts)
                 selection_state.commit = item
                 selection_state.index = move_selection(pos, count, dir)
                 selection_visible = selection_state.index ~= nil
+                -- The reachability cone is seeded from the selected head (§12), so a
+                -- different marker means a different cone — recompute before redraw
+                -- so the dimming follows the selection. Synchronous: this is a
+                -- deliberate keypress, not debounced cursor drift.
+                update_cone()
                 if lv and lv.controller then lv.controller.refresh() end
                 place_cursor()
                 return
@@ -4577,6 +4679,18 @@ function M.open(folder, opts)
             -- replacing the cursor-pivot cone for the duration.
             if sel.active then
                 view_state.cone = mark_path(top, bottom)
+                return
+            end
+            -- A packed marker line (§10.4): the selected head drives the cone
+            -- (mark_node_cone) so its branch stays lit and the siblings dim, like a
+            -- normal head. No selection ⇒ neutral (everything lit).
+            if item and item.type == "markers" then
+                local sel_node
+                if selection_state.commit == item and selection_state.index then
+                    local u = marker_units(item)[selection_state.index]
+                    sel_node = u and u.marker
+                end
+                view_state.cone = sel_node and mark_node_cone(sel_node, top, bottom) or nil
                 return
             end
             -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
