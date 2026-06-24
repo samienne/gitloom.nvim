@@ -964,18 +964,20 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             if not is_head then
                 upcols[1] = pivot
                 local mv1, c1col = lane(upkids[1], plane)
-                if #arriving < 2 and mv1 == plane.id then
-                    -- A TRUE first-parent continuation: the pivot child carries the same
-                    -- main-view lane, so the surviving lane keeps its id/colour straight
-                    -- through (no junction here).
+                if mv1 == plane.id then
+                    -- The surviving lane CONTINUES AS ITSELF: the pivot child is on the same
+                    -- main-view lane. Keep its id/colour straight through — even across a
+                    -- MERGE where another lane terminates into it (a bump rejoining the
+                    -- trunk). Switching to a fresh id here would hand the trunk off to a new
+                    -- lane that overlaps the arriving one at the junction row, forcing a
+                    -- colour de-collision that breaks the seam lane's colour mid-lane.
                     upid[1], upcolor[1] = plane.id, plane.color
                 else
-                    -- A JUNCTION — either a MERGE (≥2 arriving) or a FAN-OUT where the
-                    -- parent lane does NOT continue to this child (the pivot child is on a
-                    -- different main-view lane, so the parent lane really ends here). The
-                    -- surviving lane SWITCHES to the continuing branch's own id+colour
-                    -- above the join; the arriving lane(s) keep theirs up to the junction
-                    -- (so the seam never switches mid-lane — only at a junction).
+                    -- A genuine branch CHANGE — a FAN-OUT (the parent lane does not continue
+                    -- to this child) or a MERGE whose continuation is a DIFFERENT branch. The
+                    -- surviving lane SWITCHES to the continuing branch's own id+colour above
+                    -- the join; the arriving lane(s) keep theirs up to the junction (so the
+                    -- seam never switches mid-lane — only at a junction).
                     upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color
                 end
                 for k = 2, #upkids do

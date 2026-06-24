@@ -993,6 +993,52 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert.equals(present.M, cond.node_of_hash["M"]) -- the boundary begin resolves to M itself
     end)
 
+    it("a merge at the cutoff keeps the trunk ONE colour through the junction (§6.2)", function()
+        -- A bump rejoining the trunk at a merge just above the cutoff must NOT switch the
+        -- trunk to a fresh id/colour: the seam lane keeps its colour straight up to the
+        -- anchor. (The "lane colours switched" regression: the merge handed the trunk off
+        -- to a fresh id that overlapped the arriving lane at the junction row and
+        -- de-collided off the seam colour.)
+        local HEAD = { hash = "HEAD", refs = { { name = "HEAD" } }, parents = {}, children = {} }
+        local t = { hash = "t", refs = {}, parents = {}, children = {} }
+        local M = { hash = "M", refs = {}, parents = {}, children = {} }
+        local tp = { hash = "tp", parents = {}, children = {} }   -- trunk parent, below cutoff
+        local bump = { hash = "bump", parents = {}, children = {} } -- bump, below cutoff
+        HEAD.parents = { t }; t.children = { HEAD }
+        t.parents = { M }; M.children = { t }
+        M.parents = { tp, bump }; tp.children = { M }; bump.children = { M }
+        local disp = { HEAD = 1, t = 2, M = 3, tp = 4, bump = 4 }
+        local lm = { HEAD = { id = 1, color = 1 }, t = { id = 1, color = 1 }, M = { id = 1, color = 1 } }
+        local function order_of(n) return disp[n.hash] end
+        local function lane_of(n) return n and lm[n.hash] end
+        local function col_of() return 1 end
+        local boundary = { [1] = { id = 1, color = 1, begin = M }, [2] = { id = 38, color = 8, begin = M } }
+        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 4)
+        local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
+        local opts = h.big_opts()
+        opts.palette = opts.palette or {}
+        opts.palette.tracks = {}
+        for i = 1, 32 do opts.palette.tracks[i] = "Track" .. i end
+        local seam_hl = opts.palette.tracks[1] -- the boundary trunk colour (id 1 -> colour 1)
+        -- The HEAD node and every glyph of the trunk lane (id 1) must render in the seam
+        -- colour — the trunk never switches colour between the seam and the anchor.
+        local head_hl
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                if cell.has_commit and cell.commit and cell.commit.refs then
+                    for _, rf in ipairs(cell.commit.refs) do
+                        if rf.name == "HEAD" then
+                            local g = get_column_chars(opts, r.columns, false)
+                            head_hl = g.highlight and g.highlight[1] and g.highlight[1].hl
+                        end
+                    end
+                end
+            end
+        end
+        assert.equals(seam_hl, head_hl, "HEAD's lane drifted off the seam colour at the merge")
+        assert_continuous(res.rows)
+    end)
+
     it("gives a pinned anchor a labelled head; an unpinned crossing lane a bare ◍", function()
         -- master (pinned) and feature each a lone crossing lane up to its own tip.
         local items = h.dag({
