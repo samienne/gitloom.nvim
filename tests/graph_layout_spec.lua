@@ -30,6 +30,10 @@ describe("top_lane colour priority (§5, §6.2)", function()
         -- "dev branch line alternates id 1 / id 3" regression.)
         local segs = { seg(1, { left = true, right = true }), seg(3, { up = true }) }
         assert.equals(1, top_lane(segs, false, false).id)
+        -- The bus END (the `┘` turn at the child's column): left-only + up stub — exactly
+        -- the live R03 col3 case. Must still read as the bus (id 1), not the stub (id 3).
+        local end_segs = { seg(1, { left = true }), seg(3, { up = true }) }
+        assert.equals(1, top_lane(end_segs, false, false).id)
     end)
 
     it("a NODE cell keeps its own lane, not a crossing arm", function()
