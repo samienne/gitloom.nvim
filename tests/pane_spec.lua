@@ -4,6 +4,7 @@
 local pane = require("gitloom.pane")
 local columns = require("gitloom.columns")
 local h = require("tests.graph_helpers")
+local get_column_chars = require("gitloom.graph")._internal.get_column_chars
 
 -- t1 merges the trunk (t2..) and a side branch (b1); both flow down past the
 -- visible boundary at row 2 (t2). Off-screen below: trunk t3,t4 (the anchor)
@@ -748,6 +749,51 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
                 assert.is_true(hid ~= did, ("si=%d head and dev share an id"):format(si))
             end
         end
+    end)
+
+    it("renders a fork bus in ONE colour through the real renderer (dev-branch regression)", function()
+        -- The live bug: in the header the dev branch's horizontal line alternated between
+        -- the bus colour (id 1) and the branch colour. One lane crosses the seam; above it
+        -- F forks into HEAD-line, dev-line and extra branches (pushing dev to a
+        -- non-adjacent column). The fork BUS — the horizontal fan to the children — must
+        -- render in a SINGLE colour end-to-end (through get_column_chars, the real
+        -- renderer), not alternate at each child's column. Earlier tests missed it because
+        -- they checked the cell glyphs (top_lane) but not the inter-column CONNECTOR scan.
+        local items = h.dag({
+            { "h1", { "h2" } }, { "h2", { "F" } },
+            { "d1", { "d2" } }, { "d2", { "F" } },
+            { "x", { "F" } }, { "yy", { "F" } },
+            { "F", { "trunk1" } }, { "trunk1", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "HEAD", kind = "head" } }
+        items[3].commit.refs = { { name = "dev", kind = "local" } }
+        local opts = h.big_opts()
+        opts.palette = opts.palette or {}
+        opts.palette.tracks = {}
+        for i = 1, 32 do opts.palette.tracks[i] = "Track" .. i end
+        local res, boundary = header_of(items, opts, 8, { HEAD = true, dev = true })
+        -- The fork-bus row is the one with a horizontal run (a cell with left/right).
+        local bus
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                if cell.connectivity and (cell.connectivity.left or cell.connectivity.right) then bus = r; break end
+            end
+            if bus then break end
+        end
+        assert.is_not_nil(bus, "expected a fork-bus row with a horizontal run")
+        -- Render it through the REAL renderer and read each glyph's highlight group: the
+        -- whole bus (glyphs AND the connectors between them) must be one colour.
+        local g = get_column_chars(opts, bus.columns, false)
+        local hls = {}
+        for _, hl in ipairs(g.highlight or {}) do hls[#hls + 1] = hl.hl end
+        assert.is_true(#hls > 1, "expected several coloured glyphs on the bus row")
+        for i = 2, #hls do
+            assert.equals(hls[1], hls[i],
+                ("fork bus colour alternates (%s vs %s) in [%s]"):format(hls[1], hls[i], g.text or ""))
+        end
+        -- And it is the crossing lane's colour (the fork source), not a branch colour.
+        local bid = boundary[1] and boundary[1].color
+        if bid then assert.equals(opts.palette.tracks[bid], hls[1]) end
     end)
 
     it("packs isolated seam heads onto a shared row; a pinned anchor keeps its own", function()

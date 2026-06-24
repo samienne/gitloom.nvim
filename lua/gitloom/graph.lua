@@ -1448,6 +1448,13 @@ local function get_column_chars(opts, columns, emphasis)
             local is_cross = cc.down and cc.up and cc.left and cc.right
             local is_jump = not cc.down and not cc.up and cc.right and cc.left
             if is_cross or is_jump then return false end
+            -- The connector follows the HORIZONTAL wire's own lane, not the cell's primary
+            -- (vertical) lane: at a fork-bus terminus the primary is the up-branch (dev),
+            -- but the bus arm arriving here is the fork source — so use the lane of the
+            -- segment that actually carries the horizontal, keeping the bus one colour.
+            for _, s in ipairs(t.lanes or {}) do
+                if s.connectivity.left or s.connectivity.right then return s.color end
+            end
             return t.color
         end
         local next_color
