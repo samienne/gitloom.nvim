@@ -227,6 +227,55 @@ local function assert_heads_le_crossing(rows, boundary, extra, ctx)
             heads, crossing, extra or 0))
 end
 
+-- The header's heads must sit in the SAME left-right order as the graph: for any two
+-- heads, the one whose main-view column is further left must be further left in the
+-- header too. Catches the bottom-up sweep ordering heads by which it reached first.
+local function assert_head_order(rows, col_of, ctx)
+    local heads = {} -- { header_col, main_col }
+    for _, r in ipairs(rows) do
+        for ci, cell in ipairs(r.columns or {}) do
+            if cell.has_commit and cell.commit then
+                local mc = col_of(cell.commit)
+                if mc then heads[#heads + 1] = { hc = ci, mc = mc } end
+            end
+        end
+    end
+    table.sort(heads, function(a, b) return a.mc < b.mc end)
+    for i = 2, #heads do
+        if heads[i].mc ~= heads[i - 1].mc then
+            assert.is_true(heads[i].hc > heads[i - 1].hc,
+                (ctx or "") .. (" head order ≠ graph (main %d→%d but header %d→%d)"):format(
+                    heads[i - 1].mc, heads[i].mc, heads[i - 1].hc, heads[i].hc))
+        end
+    end
+end
+
+-- A branch's colour in the header must equal its colour in the graph (lane_of), so the
+-- summary reads consistently with the main view — UNLESS the main view recycled that
+-- colour onto another concurrent header lane (then one is legitimately de-collided). We
+-- assert the no-clash case: a head whose main-view colour is unique among the heads.
+local function assert_head_colour_matches_graph(rows, lane_of, ctx)
+    local want, heads = {}, {}
+    for _, r in ipairs(rows) do
+        for _, cell in ipairs(r.columns or {}) do
+            if cell.has_commit and cell.commit then
+                local l = lane_of(cell.commit)
+                local mc = l and l.color
+                heads[#heads + 1] = { cell = cell, mc = mc }
+                if mc then want[mc] = (want[mc] or 0) + 1 end
+            end
+        end
+    end
+    for _, hd in ipairs(heads) do
+        -- only when this main-view colour isn't shared by another head (no recycle clash)
+        if hd.mc and want[hd.mc] == 1 then
+            assert.equals(hd.mc, hd.cell.color,
+                (ctx or "") .. " a head's colour drifted from its graph colour")
+        end
+    end
+end
+
+
 
 -- Run the full header pipeline on a laid-out DAG: read the up-boundary at the seam
 -- line, rebuild the focused sub-DAG (continue_up), and lay it out (header).
@@ -260,7 +309,7 @@ local function header_of(items, opts, seam_pos, pinned)
     -- its own distinct colour (matching the graph) — mirrors graph.lua's lane_of.
     local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
     local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
-    return pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of), boundary, cond, idx
+    return pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of), boundary, cond, idx, lane_of, col_of
 end
 
 -- The minimal-subgraph oracle (mirrors continue_up Pass 1): a **confluence** is a
@@ -529,7 +578,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
             end
         end
         assert.is_true(gcol.dev < gcol.head) -- dev is left in the graph
-        local res = header_of(items, opts, 4, { head = true, dev = true })
+        local res, _, _, _, _, col_of = header_of(items, opts, 4, { head = true, dev = true })
         local hcol = {}
         for _, r in ipairs(res.rows) do
             for ci, cell in ipairs(r.columns) do
@@ -540,6 +589,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         end
         assert.is_true(hcol.dev ~= nil and hcol.head ~= nil)
         assert.is_true(hcol.dev < hcol.head, "header must keep dev left of HEAD, as in the graph")
+        assert_head_order(res.rows, col_of) -- the general invariant, on this clean case
     end)
 
     it("keeps each pinned anchor's colour STABLE and DISTINCT across cutoffs", function()
@@ -1091,7 +1141,7 @@ describe("pane.header — fuzz invariants (§6.2)", function()
                 local seam_line = main[si].split or main[si].columns
                 local boundary = pane.boundary_of(seam_line, true)
                 if next(boundary) then
-                    local res, _, cond, idx = header_of(items, opts2, si, pinned)
+                    local res, _, cond, idx, lane_of, col_of = header_of(items, opts2, si, pinned)
                     local ctx = ("seed=%d n=%d si=%d"):format(seed, n, si)
                     if #res.rows > 0 then
                         -- Continuity/termination: every crossing lane appears at the
@@ -1102,6 +1152,7 @@ describe("pane.header — fuzz invariants (§6.2)", function()
                         assert_distinct_colours(res.rows)
                         assert_distinct_head_colours(res.rows, ctx)
                         assert_unique_terminations(res.rows, ctx)
+                        assert_head_colour_matches_graph(res.rows, lane_of, ctx)
                         -- non-crossing pinned tips above the cutoff (each a lone head)
                         local begins = {}
                         for _, l in pairs(boundary) do if l.begin then begins[l.begin.hash] = true end end

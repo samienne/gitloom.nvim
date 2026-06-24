@@ -4354,8 +4354,9 @@ function M.open(folder, opts)
                         local it = repo.display[di]
                         if it then
                             local function ids(ls) local t = {}; for _, l in ipairs(ls or {}) do t[#t + 1] = tostring(l.id) end; return table.concat(t, ",") end
-                            out[#out + 1] = ("  d%d: P[%s] | C[%s]%s"):format(di,
+                            out[#out + 1] = ("  d%d: P[%s] | C[%s] col=%s%s"):format(di,
                                 ids(it.parent_lanes), ids(it.child_lanes),
+                                tostring(it.commit and col_of(it.commit)),
                                 (it.split and " SPLIT" or "") .. (it.merge and " MERGE" or ""))
                         end
                     end

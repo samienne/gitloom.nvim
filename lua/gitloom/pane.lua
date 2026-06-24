@@ -1002,17 +1002,30 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                     if s.id ~= nil then
                         id_rows[s.id][ri] = true
                         local cc = s.connectivity or {}
-                        if cell.has_commit and cc.down and not cc.up then head_id[s.id] = true end
+                        if cell.has_commit and cc.down and not cc.up then
+                            head_id[s.id] = true
+                            -- A head reads as ITS OWN branch (the tip), so prefer the
+                            -- head node's main-view colour over the lane's birth colour
+                            -- (they differ when the lane is a pivot continuation through a
+                            -- merge — the merged lane terminates on a different branch).
+                            local _, hc = lane(cell.commit)
+                            if hc then pref[s.id] = hc end
+                        end
                     end
                 end
             end
         end
-        -- Assign ASCENDING by id so boundary lanes (low, main-view ids — the pinned
-        -- anchors and other crossing lanes) claim their preferred colour FIRST and keep
-        -- it; fork children (high, fresh ids) de-collide around them. This keeps each
-        -- anchor's colour STABLE as the cutoff moves (its main-view colour is fixed) and
-        -- matching the graph, instead of being bumped by whichever lane was seen first.
-        table.sort(order_ids)
+        -- Assign HEADS first, then ascending by id. Heads (the ◍ — the branches the
+        -- summary is about, including the pinned anchors) claim their own main-view
+        -- colour FIRST and keep it, so a head never drifts from its graph colour just
+        -- because a passing lane recycled that colour. Low ids (boundary/crossing lanes)
+        -- come next, so their colour is stable across cutoffs too; fork children
+        -- de-collide around everyone.
+        table.sort(order_ids, function(a, b)
+            local ha, hb = head_id[a] and 0 or 1, head_id[b] and 0 or 1
+            if ha ~= hb then return ha < hb end
+            return a < b
+        end)
         local final = {}
         for _, id in ipairs(order_ids) do
             local used = {}
