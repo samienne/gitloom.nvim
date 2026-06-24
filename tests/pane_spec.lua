@@ -965,6 +965,34 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert_no_regular_commits(res.rows)
     end)
 
+    it("keeps a merge at the cutoff as a junction, connecting crossing lanes to the anchor (§6.2)", function()
+        -- The line-119 bug: a merge M sits just ABOVE the cutoff; its two parents are the
+        -- two crossing lanes, BELOW the cutoff. In the above-cutoff induced graph M's
+        -- parents are gone so it looks linear and was SPLICED — dropping the whole
+        -- connection up to HEAD (which then rendered as a disconnected floating head). The
+        -- per-edge seam terminals keep M a junction, so HEAD stays connected through it.
+        local HEAD = { hash = "HEAD", refs = { { name = "HEAD" } }, parents = {}, children = {} }
+        local t = { hash = "t", refs = {}, parents = {}, children = {} } -- trunk HEAD..M (splices)
+        local M = { hash = "M", refs = {}, parents = {}, children = {} } -- the merge at the cutoff
+        local p1 = { hash = "p1", parents = {}, children = {} } -- crossing lane, below the cutoff
+        local p2 = { hash = "p2", parents = {}, children = {} } -- crossing lane, below the cutoff
+        HEAD.parents = { t }; t.children = { HEAD }
+        t.parents = { M }; M.children = { t }
+        M.parents = { p1, p2 }; p1.children = { M }; p2.children = { M }
+        local disp = { HEAD = 1, t = 2, M = 3, p1 = 4, p2 = 4 } -- p1,p2 at/below the cutoff (4)
+        local function order_of(n) return disp[n.hash] end
+        local boundary = { [1] = { id = 1, color = 1, begin = M }, [2] = { id = 2, color = 2, begin = M } }
+        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 4)
+        local present = {}
+        for _, it in ipairs(cond.items) do present[it.commit.hash] = it.commit end
+        assert.is_not_nil(present.M, "the merge at the cutoff must be kept (a junction), not spliced")
+        assert.is_not_nil(present.HEAD, "HEAD must be kept")
+        -- HEAD connects DOWN to M (the trunk t splices through) — not orphaned/floating
+        assert.equals("M", present.HEAD.parents[1] and present.HEAD.parents[1].hash)
+        assert.equals("HEAD", present.M.children[1] and present.M.children[1].hash)
+        assert.equals(present.M, cond.node_of_hash["M"]) -- the boundary begin resolves to M itself
+    end)
+
     it("gives a pinned anchor a labelled head; an unpinned crossing lane a bare ◍", function()
         -- master (pinned) and feature each a lone crossing lane up to its own tip.
         local items = h.dag({

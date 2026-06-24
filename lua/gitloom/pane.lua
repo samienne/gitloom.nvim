@@ -633,7 +633,21 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
         end)
         for _, ch in ipairs(kids) do m.children[#m.children + 1] = node[ch.hash] end
         for _, p in ipairs(c.parents or {}) do
-            if inducted[p.hash] then m.parents[#m.parents + 1] = node[p.hash] end
+            if inducted[p.hash] then
+                m.parents[#m.parents + 1] = node[p.hash]
+            elseif not above(p) then
+                -- A SEAM parent (it crosses the cutoff, so it has no kept node of its own).
+                -- Keep a UNIQUE per-edge sentinel terminal so `condense` still counts this
+                -- node as a junction where ≥2 boundary lanes converge — e.g. a merge sitting
+                -- just above the cutoff whose two parents both cross the seam. A per-edge
+                -- sentinel (NOT the shared parent node) keeps two distinct crossing lanes
+                -- that happen to share a below-cutoff parent counting as TWO terminals.
+                -- Without it the node looks linear (its parents are gone), gets spliced, and
+                -- the whole connection up to the pinned anchors is dropped. Re-pointing
+                -- discards the sentinel (no kept copy); M.header wires the lane in from the
+                -- boundary.
+                m.parents[#m.parents + 1] = { seam = true }
+            end
         end
     end
 
