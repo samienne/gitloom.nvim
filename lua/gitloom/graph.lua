@@ -3656,16 +3656,19 @@ function M.open(folder, opts)
         sel.cursor = by_hash[cursor_h] or newpath[#newpath]
         sel.active = true
 
-        update_cone()
-        if lv.controller then lv.controller.refresh() end
+        -- Settle the viewport first — move to the cursor, then pin its screen row
+        -- so the toggled head stays put — *then* recompute the emphasis over the
+        -- settled visible range and redraw (otherwise mark_path runs over the old
+        -- range and the unfolded rows render with a stale highlight).
         goto_hash(sel.cursor.hash)
-        place_cursor()
-        -- Pin the cursor's screen row so the toggled head stays on the same spot.
         vim.api.nvim_win_call(w, function()
             local cur = vim.api.nvim_win_get_cursor(w)
             pcall(vim.fn.winrestview,
                 { topline = math.max(1, cur[1] - (wl - 1)), lnum = cur[1], col = cur[2], leftcol = 0 })
         end)
+        update_cone()
+        if lv.controller then lv.controller.refresh() end
+        place_cursor()
         update_footer()
         update_panes()
     end
