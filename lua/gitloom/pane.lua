@@ -1064,10 +1064,22 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             -- A DISCONNECTED pinned anchor: its lane does not reach the cutoff (the lanes
             -- crossing the seam lead elsewhere — e.g. up into a collapsed branch — so none
             -- arrives at this node). A pinned anchor is ALWAYS visible (§6.2), so draw it as
-            -- a lone labelled ◍ head in its own free column, with no wires (it connects to
-            -- nothing in this view).
-            local col = free_col(col_of and col_of(N))
-            used_cols[col] = true
+            -- a lone labelled ◍ head. It has NO wires, so it needs no reserved column — it
+            -- only must not sit directly above a NODE or an up-going lane (which would read
+            -- as a connected lane). Pick the lowest such column so the header stays compact
+            -- next to the lane structure rather than floating off to the side.
+            local below = lines[#lines]
+            local function blocked(c)
+                local cell = below and below.columns and below.columns[c]
+                if not cell then return false end
+                if cell.has_commit then return true end
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.connectivity and s.connectivity.up then return true end
+                end
+                return false
+            end
+            local col = 1
+            while blocked(col) do col = col + 1 end
             if col > maxcol then maxcol = col end
             local mvid, color = lane(N)
             local cells = { [col] = { { id = pick_id(mvid), color = color or 1, connectivity = conn({}) } } }
