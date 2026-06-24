@@ -173,6 +173,15 @@ scroll the diff, a small **context header** sticks to the top of the view,
 showing the current file and `@@ … @@` hunk once their real headers have
 scrolled off — so you never lose track of where you are.
 
+When a commit **bumps a submodule**, the diff would normally show just the old
+and new `Subproject commit` hashes. If that submodule is checked out and both
+commits are present locally, gitloom replaces the pair with a **small change
+graph** of the submodule's own history — the commits the bump brought in (`+N`)
+or rolled back (`−N`), or, when the two pointers have diverged, a glanceable
+summary of the fork point and how far each side is ahead/behind. gitloom never
+fetches for this: if the submodule isn't checked out or the commits aren't
+present, it falls back to the plain hashes with a short reason.
+
 The first line of the commit view is an **action label** (`▶ Open diff
 (diffview)`) and the cursor parks on it when the view opens, so `<CR>` then
 `<CR>` opens the diff. The same diff opens from the graph with `D`. The diff
