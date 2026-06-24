@@ -191,6 +191,11 @@ Coverage:
   date formatters (`format_absolute`, `format_relative`), and `make_line_buffer`
   (the unbuffered-stdout de-chunker: whole lines vs. the held trailing partial,
   cross-chunk stitching, byte-by-byte reassembly, blank lines; spec §3 streaming)
+- `tests/future_spec.lua` — the vendored promise `make_future`: a `.next` callback
+  runs whether attached before **or after** the future resolves, values chain, and
+  a returned future flattens. Guards the regression where a synchronously-resolved
+  future (the gitloom sort mode's `apply_sort`) dropped its chained callbacks, so
+  the open-time worktree + reflow (the §10.7 default collapse) never ran
 - `tests/ordering_spec.lua` — gitloom's owned row order + the resync pure pieces
   (spec §3.1/§3.4): `order_commits` (the topological sort that replaced `git log
   --topo-order` — child-before-parent validity is the hard invariant, plus
@@ -313,7 +318,8 @@ only** (not the public API): `classify_ref`, `group_refs`, `bump_recent` /
 `display_item` (the per-row renderer — exposed for the §6 ref-window integration
 test), `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`
-(the streaming-stdout line de-chunker; §3), `order_commits` (the owned
+(the streaming-stdout line de-chunker; §3), `make_future` (the vendored promise;
+exposed for `future_spec`), `order_commits` (the owned
 topological row sort that replaced `git log --topo-order`; §3.1),
 `diff_ref_tips` / `reachable_hashes` (the resync ref-diff + orphan-prune pure
 helpers; §3.4), `parse_timestamp`,

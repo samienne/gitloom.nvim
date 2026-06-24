@@ -137,8 +137,11 @@ local function make_future()
             local future, promise = make_future()
 
             if state.value then
+                -- Already resolved: still run `fn` (it was being dropped — the bug
+                -- behind the open-time reflow never firing after a synchronously
+                -- resolved future, e.g. the gitloom sort mode's apply_sort).
                 vim.schedule(function()
-                    promise.resolve(unpack(state.value))
+                    promise.resolve(fn(unpack(state.value)))
                 end)
             else
                 state.callback = function(value)
@@ -153,7 +156,9 @@ local function make_future()
     local promise = {
         resolve = function(value)
             state.value = { value }
-            if value and value.next then
+            -- A future is always a table; probing `.next` on a non-table (e.g. a
+            -- number) would throw "attempt to index a number value".
+            if type(value) == "table" and value.next then
                 value.next(function(next_value)
                     if state.callback then
                         state.callback(next_value)
@@ -6534,6 +6539,7 @@ M._internal = {
     ref_byte_col = ref_byte_col,
     parse_commit_line = parse_commit_line,
     make_line_buffer = make_line_buffer,
+    make_future = make_future,
     order_commits = order_commits,
     diff_ref_tips = diff_ref_tips,
     reachable_hashes = reachable_hashes,
