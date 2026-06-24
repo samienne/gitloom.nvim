@@ -264,6 +264,17 @@ on_redraw(top, bottom)
 - `fetch_commit_diff(hash)` — `git show --format= -p <hash>`, buffered and
   resolved as the raw patch string. The commit view's diff source (§11.3),
   fetched on demand and chained after `fetch_commit_detail`.
+- **Working-tree state** (specification.md §3.3) — small porcelain queries that
+  run *after* the commit stream (so HEAD is in the model). `fetch_worktree_state`
+  resolves `{ head_hash (rev-parse HEAD), status (parse_status of git status
+  --porcelain) }`; `parse_status` counts the staged (index, `X`) / unstaged
+  (working tree, `Y`) / untracked (`??`) files. The diffs are on demand, like the
+  commit view: `fetch_worktree_diff("staged")` is `git diff --cached`;
+  `fetch_worktree_diff("unstaged")` is `git diff` concatenated with the untracked
+  additions (`fetch_untracked_diff`: each `git ls-files --others
+  --exclude-standard` file rendered via `git diff --no-index -- /dev/null <f>`,
+  capped at `UNTRACKED_DIFF_CAP`). `git_lines` / `git_output` are the thin
+  jobstart helpers these share.
 
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
 documented placeholder contract — the de-facto way to script this. The
@@ -357,6 +368,31 @@ kept). Parent hash strings resolve to `Commit` references; unseen parents get
 a placeholder so the graph stays connected. Child links are populated on the
 parent side. Refs are resolved the same way (a `Ref` holds a direct `Commit`
 reference, and `Commit.refs` is the inverse).
+
+### Working-tree virtual commits (§3.3 / §4.2)
+
+When the working tree is dirty, up to two **virtual commits** (`Commit.virtual =
+"staged" | "unstaged"`, with reserved sentinel hashes) are spliced into
+`repo.order` just above the HEAD commit — `unstaged → staged → HEAD`, each present
+only when it has content. `apply_worktree(state)` builds them (wiring
+`parents`/`children` like real commits) from the fetched dirty-state counts and
+`clear_worktree_nodes()` removes them; both leave the real DAG untouched. Because
+they sit *above* HEAD, no owner's first-parent reach (§10.2) touches them, so they
+project (`view.lua`) as **empty-signature → normal** nodes that are never
+collapsible — the §4.2 "always shown" behaviour with no new owner kind. They
+render via the `Commit.virtual` branches in `get_column_chars` (the `◌` glyph) and
+`display_item` (a synthesized `worktree_label`, blank date/author), and the commit
+view branches on `virtual` to use `fetch_worktree_diff` + `format_worktree_detail`
+instead of `git show`.
+
+**Refresh seam (§3.4).** `refresh_worktree(silent)` re-reads the dirty state and
+rebuilds the virtual commits on the *current* HEAD anchor (re-resolving HEAD first,
+so it returns `"moved"` when real history advanced past the snapshot). It is the
+first case of the deferred general history refresh (§10.8): re-resolve HEAD →
+reconcile against the identity-stable model → `reflow()`. Triggered by `R`, a
+debounced `BufWritePost`/`FocusGained` autocmd, and once at stream completion;
+skipped while a commit selection is active. `parse_status`, `worktree_label`, and
+`format_worktree_detail` are pure and exposed via `graph._internal`.
 
 ### Lane layout — Phase 1 (`columns.lua`)
 

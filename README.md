@@ -42,6 +42,10 @@ even though it ships as part of the same suite. See
 - **Reachability emphasis** — the row under the cursor dims everything not in
   its history (ancestors) or downstream of it (descendants), keeping each
   lane's colour (just muted) so the relevant graph stands out
+- **Working-tree changes** — uncommitted work shows as up to two `◌` nodes
+  (staged, then unstaged + untracked) on top of HEAD; open either to inspect its
+  diff in the commit view or the external viewer. Updates live as you edit or
+  stage (and on `R`); strictly read-only — gitloom never stages or commits
 
 ### Planned
 
@@ -104,6 +108,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
+| `R` | Refresh the working-tree state — re-read the uncommitted changes (`◌` nodes) and rebuild them |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `F` | Toggle the off-screen context footer (the summary band below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
@@ -279,6 +284,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
+    working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
     diff = {
         -- External diff provider, operating on a git range (§11.5). Default opens
         -- diffview; override to use another plugin, or set open = nil to disable.
@@ -326,10 +332,18 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   See [specification.md](specification.md) §6.1.
 - **`diff`** — the external diff provider (`D` and the commit view's action
   label). `open` is called with a `DiffRange` (`{ rev, from, to }` — `rev` is a
-  git rev-range like `<hash>^!`) and defaults to opening diffview; `label` is the
-  action-label text. Override `open` to use a different diff plugin, or set it to
-  `nil` to disable the integration. See [specification.md](specification.md)
-  §11.5.
+  git rev-range like `<hash>^!`; an endpoint may also be the tree state `"index"`
+  or `"worktree"` for a working-tree node) and defaults to opening diffview;
+  `label` is the action-label text. Override `open` to use a different diff
+  plugin, or set it to `nil` to disable the integration. See
+  [specification.md](specification.md) §11.5.
+- **`working_tree`** — show uncommitted changes as virtual `◌` commits on top of
+  HEAD (default `true`): a *staged* node (index vs HEAD) and an *unstaged* node
+  (working tree vs index, plus untracked files as additions), each shown only when
+  it has content. They open in the commit view / external diff like any commit, and
+  refresh live as you edit or stage (`BufWritePost` / focus) or on `R`. Read-only —
+  gitloom never stages or commits. See [specification.md](specification.md)
+  §3.3 / §4.2.
 
 > **Note:** `require("gitloom").setup(opts)` currently stores config but does
 > not yet forward it to `:GitloomGraph` — the command uses the defaults above.
