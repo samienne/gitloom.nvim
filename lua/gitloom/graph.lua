@@ -1179,7 +1179,7 @@ end
 ---@param segs Segment[]|nil
 ---@param emphasis boolean|nil
 ---@return Segment|nil
-local function top_lane(segs, emphasis)
+local function top_lane(segs, emphasis, is_node)
     if not segs then return nil end
     if emphasis then
         for _, s in ipairs(segs) do
@@ -1204,6 +1204,17 @@ local function top_lane(segs, emphasis)
     end
     for _, s in ipairs(segs) do
         if s.connectivity.down then return s end
+    end
+    -- On a NODE-LESS cell, a horizontal arm/bus outranks a pure-UP stub so a fork bus
+    -- keeps ONE colour: the branch's own colour begins in the row ABOVE (at the junction),
+    -- not mid-bus. Without this the bus alternates between the bus colour and each
+    -- up-branch's colour at the column it leaves from. A through-vertical (up+down) already
+    -- won above via `down`, so a genuine crossing still keeps the passing lane's colour. A
+    -- NODE cell is exempt: its glyph must read in the node's own lane, not a crossing arm.
+    if not is_node then
+        for _, s in ipairs(segs) do
+            if s.connectivity.left or s.connectivity.right then return s end
+        end
     end
     for _, s in ipairs(segs) do
         if s.connectivity.up then return s end
@@ -1336,7 +1347,7 @@ local function get_column_chars(opts, columns, emphasis)
         -- Colour (and dim state) from the Column's "top" Segment (§5): the
         -- Segment whose edge colours the glyph (a highlighted edge wins, but
         -- only with emphasis — so the picture is unchanged when it is off).
-        local color_seg = top_lane(track.lanes, emphasis)
+        local color_seg = top_lane(track.lanes, emphasis, is_node)
         local track_color = seg_color(color_seg, emphasis)
         if track.override ~= nil then
             char = track.override
@@ -4497,6 +4508,7 @@ M._internal = {
     mark_reachable = mark_reachable,
     build_graph = build_graph,
     get_column_chars = get_column_chars,
+    top_lane = top_lane,
     passthrough_columns = passthrough_columns,
     owners_from_refs = owners_from_refs,
     next_mode = next_mode,
