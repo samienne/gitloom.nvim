@@ -1,6 +1,6 @@
 local M = {}
 
-local color = require("gitloom.color")
+local color = require("gitloom.graph.color")
 local submodule = require("gitloom.submodule")
 local util = require("gitloom.util")
 local git = require("gitloom.git")
@@ -605,7 +605,7 @@ local function build_graph(opts, items)
     -- Phase 1 of the two-phase pipeline (see lua/gitloom/columns.lua): lane
     -- layout into columns with per-segment connectivity, validated for continuity.
     -- Phase 2 (get_column_chars) renders glyphs/colour from the segments.
-    return require("gitloom.columns").layout(opts, items)
+    return require("gitloom.graph.columns").layout(opts, items)
 end
 
 -- Commit / Ref classes now declared in gitloom.git.model.
@@ -667,7 +667,7 @@ end
 ---@param opts GraphOptions
 ---@param order OrderItem[]
 local function refresh_columns(opts, order, _start_pos)
-    local rebuilt = require("gitloom.columns").layout(opts, order)
+    local rebuilt = require("gitloom.graph.columns").layout(opts, order)
     for i = 1, #order do
         local r = rebuilt[i]
         order[i].columns = r.columns
@@ -1800,7 +1800,7 @@ local function submodule_block(opts, change, result)
     -- fork-point anchor last; when there are too many, keep the newest
     -- SUBMODULE_MAX-1 plus the anchor (pane.cap keeps the last row) and note the
     -- commits elided between (§11.7.3).
-    local pane = require("gitloom.pane")
+    local pane = require("gitloom.graph.pane")
     local laid = build_graph(opts, result.items or {})
     local shown = pane.cap(laid, SUBMODULE_MAX)
     local dropped = #laid - #shown
@@ -2883,7 +2883,7 @@ function M.open(folder, opts)
     -- path every branch-mode change takes (and the stream takes once the
     -- projection is no longer the identity). Recomputes the cone over the new map.
     reflow = function()
-        local viewbuilder = require("gitloom.view")
+        local viewbuilder = require("gitloom.graph.view")
         -- Owners under the first-parent default (§10.7): the pinned anchors
         -- (§10.6; HEAD by default) are first-parent-only + normal, every other ref
         -- and merge parent defaults collapsed; view_state.modes overrides. No
@@ -4310,7 +4310,7 @@ function M.open(folder, opts)
         -- (`pane.header`): linear runs drop, junctions go node-less, heads become ◍,
         -- pinned anchors keep a labelled row. Both seed/match the seam so lanes meet
         -- the main view. (Sizing hysteresis and the async rebuild are still to come.)
-        local pane = require("gitloom.pane")
+        local pane = require("gitloom.graph.pane")
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         -- Debug overlay (toggled with `i`): a full-line highlight on the buffer line the
         -- header treats as its cutoff/seam (and the footer's), so a misaligned seam is

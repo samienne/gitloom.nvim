@@ -1,6 +1,6 @@
 --- Phase 1 (lane layout) invariants, checked on columns.layout output directly
 --- (no build_graph), so the new engine can be TDD'd before it is wired in.
-local columns = require("gitloom.columns")
+local columns = require("gitloom.graph.columns")
 local graph = require("gitloom.graph")
 local h = require("tests.graph_helpers")
 
