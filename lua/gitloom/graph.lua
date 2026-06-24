@@ -4307,14 +4307,18 @@ function M.open(folder, opts)
                     if di and di < (w0disp or 1) then P = P + 1 end
                 end
                 local rows, seam_tag, height, sidx
-                -- The number of off-screen-newer commits the header summarises: the raw
-                -- commits above the seam = the seam commit's repo.order index − 1 (order is
-                -- 1:1 with commits, newest-first), so collapsed regions are counted in full.
+                -- The number of off-screen-newer commits the header summarises. Best: the
+                -- raw commits above the seam = the seam commit's repo.order index − 1 (order
+                -- is 1:1 with commits, newest-first), so collapsed regions count in full.
+                -- The seam can land on a junction / markers row with no order-resolvable
+                -- commit, so fall back to the display rows above the cutoff — always
+                -- available, so the note is never silently dropped.
                 local function above_count()
-                    local it = sidx and repo.display[sidx]
+                    if not sidx or sidx <= 1 then return nil end
+                    local it = repo.display[sidx]
                     local c = it and it.commit
                     local oi = c and idx[(c.tip and c.tip.hash) or c.hash]
-                    return oi and (oi - 1) or nil
+                    return oi and (oi - 1) or (sidx - 1)
                 end
                 -- Clamp the guess to the cap so the loop always runs at least once.
                 for cover = math.min(math.max(2, P + 1), HEADER_MAX), HEADER_MAX do
