@@ -391,12 +391,21 @@ head, or a merge's second-and-later parent.
   keeps that style from leaving an empty-column gap that bounces a right-aligned
   (mirrored, §5.4) graph.
 - **Commit compaction.** A *linear* commit (reached by a single child-lane) slides
-  into the leftmost column free since row start, its incoming lane turning into the
-  new column. So a branch born one column out — an inline merge-on-split that had
-  to fan past a freed cell — compacts next to the trunk after a single jog rather
-  than running stranded beside an empty column for its whole length. The slide
-  reserves its column before survivor compaction, so a survivor keeps any nearer
-  gap; the lone jog is a turn, not a straight run, so id-continuity holds.
+  left, its incoming lane turning into the new column. So a branch born one column
+  out — an inline merge-on-split that had to fan past a freed cell — compacts next
+  to the trunk after a single jog rather than running stranded beside an empty
+  column. The slide reserves its column before survivor compaction, so a survivor
+  keeps any nearer gap; the lone jog is a turn, not a straight run, so
+  id-continuity holds.
+- **Compaction never crosses a lane.** Once two lanes have separated they share a
+  horizontal Line only at a commit's own fan (the split/merge funnel). A
+  compaction jog — the linear-commit slide above, or a survivor shifting into a gap
+  — therefore moves left only through a run of columns *free since row start*,
+  **stopping at the first occupied column** rather than reaching past it into a
+  farther gap (which would lay the lane's horizontal across the occupant). A gap
+  behind an occupied lane is reclaimed on a later row, once that lane itself moves
+  (a ripple). Consequently, with both fans on their own Lines (the both-lines
+  style), a commit Line has **no crossings at all**.
 
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view

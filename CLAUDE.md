@@ -292,7 +292,12 @@ Coverage:
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
-  tests survive visualization changes; see below).
+  tests survive visualization changes; see below). Includes the **no-cross
+  compaction** invariant (spec §5): on the both-lines style — both fans on their
+  own lines, so the commit line carries no fan — a fuzz sweep asserts a commit
+  line has **zero** lane crossings, i.e. a compaction jog never reaches past an
+  occupied column into a farther gap (the regression that laid a lane's horizontal
+  across another).
 - `tests/graph_mirror_spec.lua` — the `mirror` render transform (spec §5.4):
   the same invariant suite must pass on mirrored output, the mirrored grid must
   equal the horizontal flip of the normal grid (reverse + glyph swap), and the

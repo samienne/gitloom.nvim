@@ -515,11 +515,13 @@ the current row. For each commit `C`:
    edges, terminating here); the rest are **survivors** (pass-throughs).
 2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
    column for a tip. A **linear** commit (a single incoming child-lane) then
-   **compacts** `cc` left into the leftmost column free since row start, its
+   **compacts** `cc` left through the run of columns free since row start, its
    incoming lane turning in — so a branch born one column out (an inline
    merge-on-split that had to fan past a freed cell) ends up next to the trunk
-   after a single jog rather than stranded beside an empty column for its whole
-   length (`cc` is reserved before step 4, so a survivor keeps any nearer gap). A
+   after a single jog rather than stranded beside an empty column (`cc` is reserved
+   before step 4, so a survivor keeps any nearer gap). The slide **stops at the
+   first occupied column** — it never reaches past one into a farther gap, which
+   would lay the lane's horizontal across the occupant (the no-cross rule below). A
    column a **root** (no-parent commit) occupied on the previous row is **blocked**
    for this row — tip placement, compaction targets, and fresh fan-out columns all
    skip it — so an independent history does not stack directly under a root (the
@@ -540,10 +542,15 @@ the current row. For each commit `C`:
    calmed graph drifts back to the curated palette.
    Without generation (no truecolor), exhaustion instead **shares** a curated
    slot, reference-counted so it returns only when its last holder ends.
-4. **Compaction**: each survivor shifts left into the leftmost *row-start* gap
-   (drawn as a horizontal turn), never a column another lane vacates this same
-   row — that is what keeps two turns out of one cell, so freed columns are
-   reclaimed over a ripple. An extra (non-first) parent likewise takes the
+4. **Compaction**: each survivor shifts left through the run of *row-start* gaps
+   to its left (drawn as a horizontal turn), **stopping at the first occupied
+   column** so the jog never crosses another lane — once two lanes have separated
+   they re-share a horizontal only at a commit's own fan. It never moves into a
+   column another lane vacates this same row either (two turns out of one cell), so
+   freed columns are reclaimed over a ripple. Each placed lane's jog span is
+   reserved (`used`) so a later one neither lands on nor crosses it. With both fans
+   on their own lines, a commit line then has no crossings at all. An extra
+   (non-first) parent likewise takes the
    leftmost column free since before this row — an interior gap, not a fresh
    rightmost one — so a staircase of sequential merges stays a bounded width. A
    column a *terminating child* frees is reusable by a parent only when that does

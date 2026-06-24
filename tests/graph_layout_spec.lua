@@ -161,6 +161,50 @@ for _, style in ipairs(STYLES) do
     end)
 end
 
+describe("compaction never crosses a lane (§5)", function()
+    -- A compaction jog must never lay its horizontal across another lane: once two
+    -- lanes have separated they share a horizontal only at a commit's own fan
+    -- (split/merge funnel). With BOTH fans on their own lines, the commit line
+    -- carries no fan, so any crossing there is an illegal compaction jog. Repro:
+    -- the linear-commit / survivor compaction used to reach past an occupied
+    -- column into a farther gap, jogging the lane across the occupant.
+    local build_graph = require("gitloom.graph")._internal.build_graph
+
+    -- Count cells where a vertical lane (up+down) is crossed by a *different*
+    -- lane's horizontal segment (left/right) — a crossing.
+    local function commit_line_crossings(row)
+        local n = 0
+        for _, col in ipairs(row.columns or {}) do
+            local vid, hid
+            for _, s in ipairs(col.lanes or {}) do
+                local c = s.connectivity
+                if c.up and c.down then vid = s.id end
+                if (c.left or c.right) and not (c.up and c.down) then hid = hid or s.id end
+            end
+            if vid and hid and vid ~= hid then n = n + 1 end
+        end
+        return n
+    end
+
+    it("lays out no commit-line crossing across a fuzz sweep (both-lines style)", function()
+        local opts = h.big_opts({ split_on_separate_line = true, merge_on_separate_line = true })
+        local bad = {}
+        for seed = 1, 250 do
+            local n = 3 + (seed % 12) -- sizes 3..14
+            local items = h.dag(h.random_dag(n, seed))
+            local rows = build_graph(opts, items)
+            for ri, row in ipairs(rows) do
+                local x = commit_line_crossings(row)
+                if x > 0 then
+                    bad[#bad + 1] = ("seed=%d row=%d crossings=%d"):format(seed, ri, x)
+                end
+            end
+            if #bad >= 6 then break end
+        end
+        assert.equals(0, #bad, "\nillegal compaction crossings:\n" .. table.concat(bad, "\n"))
+    end)
+end)
+
 describe("graph layout [inline+mergesplit] characterization", function()
     -- Locks the current (debatable) rendering of the merge lane-handoff so any
     -- change is flagged for review. NOT an assertion of correctness: at a merge
