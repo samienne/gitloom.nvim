@@ -844,82 +844,10 @@ local function ref_byte_col(line_text, deco)
     return s and (s - 1) or nil
 end
 
---- Parse one `git log` line. Fields are `%x1f`-separated:
---- hash, parent hashes, author, author epoch (%at), iso date (%ai), committer
---- epoch (%ct), subject. The committer epoch (`cepoch`) is what `order_commits`
---- seeds tips by, to match git's `--topo-order` (which orders by committer date;
---- §3.1). Refs are NOT here — they come from `fetch_refs` (§3.2); a fresh commit
---- starts with an empty refs list.
-local function parse_commit_line(line)
-    local fields = vim.split(line, "\x1f")
-
-    local hash = fields[1]
-    local parents = vim.split(fields[2] or "", " ")
-    local author = fields[3]
-    local date = parse_timestamp(fields[4], fields[5])
-    local cepoch = tonumber(fields[6])
-    local subject = fields[7]
-
-    if not hash then
-        return
-    end
-
-    local new_parents = {}
-    for _, p in ipairs(parents) do
-        if p ~= "" then
-            table.insert(new_parents, p)
-        end
-    end
-
-    return {
-        hash = hash,
-        parents = new_parents,
-        children = {},
-        author = author,
-        date = date,
-        cepoch = cepoch,
-        message = subject,
-        loaded = true,
-        refs = {},
-    }
-end
-
---- Stateful line de-chunker for an **unbuffered** `jobstart` stdout stream.
---- Neovim delivers stdout as lists of strings split on "\n": the first element
---- continues the previous chunk's trailing (partial) line, and the last element
---- is itself partial — continued in the next chunk (`:help channel-lines`).
---- `feed(data)` returns the complete lines contained in this chunk; `flush()`
---- returns the final held line at EOF (git's last line has no trailing newline).
---- Pure (no I/O) so it is unit-testable via `_internal`.
----@class LineBuffer
----@field feed fun(data: string[]): string[]
----@field flush fun(): string
-
----@return LineBuffer
-local function make_line_buffer()
-    local pending = ""
-    return {
-        feed = function(data)
-            local out = {}
-            if #data == 0 then
-                return out
-            end
-            -- Stitch the held partial onto this chunk's first element; hold the
-            -- new trailing partial back for the next chunk.
-            data[1] = pending .. data[1]
-            pending = data[#data]
-            for i = 1, #data - 1 do
-                out[#out + 1] = data[i]
-            end
-            return out
-        end,
-        flush = function()
-            local last = pending
-            pending = ""
-            return last
-        end,
-    }
-end
+-- git output parsers now live in gitloom.git.parse (the commit-line + diff +
+-- status parsers; §3, §11). graph.lua aliases them.
+local parse_commit_line = git.parse_commit_line
+local make_line_buffer = git.make_line_buffer
 
 -- Row ordering (gitloom owning the order, §3.1) now lives in gitloom.git.order.
 local order_commits = git.order_commits
@@ -2311,44 +2239,9 @@ local function format_lane_info(item)
     return lines
 end
 
---- Full per-commit detail for the commit view (specification.md §11). Fetched
---- on demand via `git show -s`, independent of the streaming graph model.
----@class CommitDetail
----@field hash string
----@field author_name string
----@field author_email string
----@field author_date string
----@field committer_name string
----@field committer_email string
----@field committer_date string
----@field parents string[]   parent hashes
----@field body string        full message (subject + body), trailing space trimmed
-
---- Parse the `fetch_commit_detail` output into a CommitDetail. Fields are
---- `%x1f`-separated; the body (`%B`) is last so its embedded newlines stay in
---- the final field. Pure; exposed for testing.
----@param output string?
----@return CommitDetail
-local function parse_show(output)
-    local fields = vim.split(output or "", "\x1f")
-    local parents = {}
-    for _, p in ipairs(vim.split(fields[8] or "", " ")) do
-        if p ~= "" then
-            parents[#parents + 1] = p
-        end
-    end
-    return {
-        hash = fields[1] or "",
-        author_name = fields[2] or "",
-        author_email = fields[3] or "",
-        author_date = fields[4] or "",
-        committer_name = fields[5] or "",
-        committer_email = fields[6] or "",
-        committer_date = fields[7] or "",
-        parents = parents,
-        body = (fields[9] or ""):gsub("%s+$", ""),
-    }
-end
+-- CommitDetail / parse_show (the commit view's git-show parser, §11) now live
+-- in gitloom.git.parse.
+local parse_show = git.parse_show
 
 --- Render a CommitDetail into the commit view's display lines (one compose-style
 --- `{ text, highlight }` per buffer line). The committer block is shown only
@@ -2459,35 +2352,9 @@ local function format_worktree_detail(commit, palette)
     return rows
 end
 
--- Line prefixes that mark a diff's file-header lines (checked before +/- so the
--- "+++"/"---" file markers don't read as added/removed content).
-local DIFF_HEADER_PREFIXES = {
-    "diff --git", "index ", "--- ", "+++ ", "old mode", "new mode",
-    "deleted file", "new file", "similarity index", "dissimilarity index",
-    "rename ", "copy ", "Binary files",
-}
-
---- Classify one patch line by role: "header", "hunk", "add", "delete", or nil
---- (a context line). Pure.
----@param line string
----@return string|nil
-local function diff_line_role(line)
-    for _, p in ipairs(DIFF_HEADER_PREFIXES) do
-        if line:sub(1, #p) == p then
-            return "header"
-        end
-    end
-    if line:sub(1, 2) == "@@" then
-        return "hunk"
-    end
-    local c = line:sub(1, 1)
-    if c == "+" then
-        return "add"
-    elseif c == "-" then
-        return "delete"
-    end
-    return nil
-end
+-- The patch-line role classifier (and its header-prefix table) now live in
+-- gitloom.git.parse.
+local diff_line_role = git.diff_line_role
 
 --- Render a patch into the commit view's diff lines (one compose-style
 --- `{ text, highlight }` per line), each line colored by its role via
@@ -2507,67 +2374,9 @@ local function format_diff(patch, palette)
     return rows
 end
 
---- Parse a patch into a per-file diffstat (specification.md §11.4). Each entry
---- carries the display path, insertion/deletion counts, a binary flag, and
---- `start` — the 1-based index (into the patch's split lines) of that file's
---- `diff --git` line, used as the jump target. Renames (a/ != b/) show as
---- "old => new". Pure; exposed for testing.
----@param patch string?
----@return { path: string, added: integer, removed: integer, binary: boolean, start: integer }[]
-local function diffstat_files(patch)
-    local files = {}
-    local cur = nil
-    for i, line in ipairs(vim.split(patch or "", "\n")) do
-        local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
-        if a then
-            cur = { a = a, b = b, added = 0, removed = 0, binary = false, start = i }
-            files[#files + 1] = cur
-        elseif cur then
-            if line:sub(1, 13) == "Binary files " then
-                cur.binary = true
-            elseif line:sub(1, 3) ~= "+++" and line:sub(1, 1) == "+" then
-                cur.added = cur.added + 1
-            elseif line:sub(1, 3) ~= "---" and line:sub(1, 1) == "-" then
-                cur.removed = cur.removed + 1
-            end
-        end
-    end
-    for _, f in ipairs(files) do
-        f.path = (f.a ~= f.b) and (f.a .. " => " .. f.b) or f.b
-        f.a, f.b = nil, nil
-    end
-    return files
-end
+local diffstat_files = git.diffstat_files
 
---- Precompute the diff context-header data (specification.md §11.6): for each
---- 1-based line of the rendered patch, the **governing** file and hunk header —
---- the nearest `diff --git` and `@@ … @@` line at or above it — together with the
---- patch-line index where each begins. The window glue (`update_ctx`) compares
---- those begin-indices against the viewport's effective top to decide whether a
---- header has scrolled off and should stick. The file is shown as its display
---- path, with renames as "old => new" (matching the diffstat). A line before any
---- `diff --git` (or a hunk before its file's first `@@`) yields a nil field, so
---- the overlay simply omits it. Pure; exposed for testing.
----@param patch string?
----@return { file?: string, file_line?: integer, hunk?: string, hunk_line?: integer }[]
-local function diff_contexts(patch)
-    local ctx = {}
-    if not patch or patch == "" then return ctx end
-    local file, file_line, hunk, hunk_line = nil, nil, nil, nil
-    for i, line in ipairs(vim.split(patch or "", "\n")) do
-        local a, b = line:match("^diff %-%-git a/(.-) b/(.+)$")
-        if a then
-            file = (a ~= b) and (a .. " => " .. b) or b
-            file_line = i
-            hunk, hunk_line = nil, nil
-        elseif line:sub(1, 2) == "@@" then
-            hunk = line
-            hunk_line = i
-        end
-        ctx[i] = { file = file, file_line = file_line, hunk = hunk, hunk_line = hunk_line }
-    end
-    return ctx
-end
+local diff_contexts = git.diff_contexts
 
 -- Max width of the +/- bar in a diffstat row; long files scale down to fit.
 local DIFFSTAT_BAR_MAX = 40
@@ -2636,28 +2445,8 @@ local NULL_DEVICE = "/dev/null"
 -- tree never floods the commit view (§3.3 / spec open point).
 local UNTRACKED_DIFF_CAP = 100
 
---- Count the staged / unstaged / untracked files from `git status --porcelain`
---- output (spec §3.3). Each porcelain line is `XY <path>`: X is the index
---- (staged) status, Y the working-tree (unstaged) status; `??` is untracked
---- (counted on the unstaged side, where the untracked files live). Pure;
---- exposed for testing.
----@param lines string[]
----@return { staged: integer, unstaged: integer, untracked: integer }
-local function parse_status(lines)
-    local st = { staged = 0, unstaged = 0, untracked = 0 }
-    for _, line in ipairs(lines or {}) do
-        if #line >= 2 then
-            if line:sub(1, 2) == "??" then
-                st.untracked = st.untracked + 1
-            else
-                local x, y = line:sub(1, 1), line:sub(2, 2)
-                if x ~= " " and x ~= "?" then st.staged = st.staged + 1 end
-                if y ~= " " and y ~= "?" then st.unstaged = st.unstaged + 1 end
-            end
-        end
-    end
-    return st
-end
+-- The `git status --porcelain` counter (§3.3) now lives in gitloom.git.parse.
+local parse_status = git.parse_status
 
 --- Run a git command and resolve the future with its stdout as a list of
 --- non-empty lines. A small sibling of fetch_commit_diff for the short
