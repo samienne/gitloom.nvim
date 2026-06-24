@@ -3598,10 +3598,12 @@ function M.open(folder, opts)
     end
     -- <Tab> while selecting (§13.4): fold/unfold the head under the cursor in
     -- place. Expand the cursor's collapsed head (or collapse its region), then
-    -- re-resolve the selection against the new projection **by hash** so the
-    -- anchor and cursor stay on the same commits — the toggled head maps to its
-    -- tip (expand) and a collapsed run maps back to its head — and finally restore
-    -- the cursor's screen row so the view does not jump. A no-op on a mainline
+    -- re-resolve the selection against the new projection **by hash** so it covers
+    -- the same commits: an unfolded head expands into its whole region (so the
+    -- revealed branch stays selected/lit), a collapsed run maps back to its head.
+    -- The diff range is therefore unchanged by fold/unfold; the anchor keeps its
+    -- end and the cursor lands on the toggled (opposite) end. The saved scroll
+    -- (topline) is restored so the view does not jump. A no-op on a mainline
     -- commit (nothing collapsible there).
     local function selection_toggle()
         local node = sel.active and sel.cursor
@@ -3619,20 +3621,26 @@ function M.open(folder, opts)
         end
         if #owners == 0 then return end
 
-        -- Capture the selection by hash + the cursor's screen row before reflow
-        -- recreates the DisplayNodes (a head's representative hash is its tip).
+        -- Capture the selection by hash + the scroll position before reflow
+        -- recreates the DisplayNodes. A collapsed head stands in for its whole
+        -- region, so expand it to its region member hashes; a normal node is
+        -- itself. Remember which end holds the anchor so we can restore both ends.
         local w = lv.win.win
-        local wl = vim.api.nvim_win_call(w, function() return vim.fn.winline() end)
-        local function rep(n) return (n.collapsed and n.tip and n.tip.hash) or n.hash end
-        local anchor_h = sel.anchor and rep(sel.anchor)
-        local cursor_h = rep(sel.cursor)
+        local view = vim.api.nvim_win_call(w, function() return vim.fn.winsaveview() end)
+        local anchor_is_top = (sel.path or {})[1] == sel.anchor
+        local function members(n) return n.collapsed and (n.region or {}) or { n.hash } end
         local path_h = {}
-        for _, n in ipairs(sel.path or {}) do path_h[#path_h + 1] = rep(n) end
+        for _, n in ipairs(sel.path or {}) do
+            for _, h in ipairs(members(n)) do path_h[#path_h + 1] = h end
+        end
 
         for _, oid in ipairs(owners) do view_state.modes[oid] = mode end
         reflow() -- rebuilds display + node_loc, drops sel
 
-        -- Map every real-commit / head hash to its new node (members → the head).
+        -- Map every real-commit / head hash to its new node (members → the head),
+        -- then rebuild the path: an expanded head's members resolve to their own
+        -- nodes (all kept, so the branch stays selected); a still-collapsed run's
+        -- members all resolve to one head (dedup), as does a newly-collapsed run.
         local by_hash = {}
         local function add(n)
             by_hash[n.hash] = n
@@ -3652,19 +3660,22 @@ function M.open(folder, opts)
         end
         if #newpath == 0 then return end -- selection lost (e.g. all hidden); stay dropped
         sel.path = newpath
-        sel.anchor = by_hash[anchor_h] or newpath[1]
-        sel.cursor = by_hash[cursor_h] or newpath[#newpath]
+        -- Keep the anchor on its end; the cursor takes the other (the toggled end).
+        if anchor_is_top then
+            sel.anchor, sel.cursor = newpath[1], newpath[#newpath]
+        else
+            sel.anchor, sel.cursor = newpath[#newpath], newpath[1]
+        end
         sel.active = true
 
-        -- Settle the viewport first — move to the cursor, then pin its screen row
-        -- so the toggled head stays put — *then* recompute the emphasis over the
-        -- settled visible range and redraw (otherwise mark_path runs over the old
-        -- range and the unfolded rows render with a stale highlight).
+        -- Settle the viewport first (move to the cursor, restore the saved scroll
+        -- so the rows above the toggle stay put), *then* recompute the emphasis
+        -- over the settled range and redraw — otherwise mark_path runs over the
+        -- old range and the unfolded rows render with a stale highlight.
         goto_hash(sel.cursor.hash)
         vim.api.nvim_win_call(w, function()
             local cur = vim.api.nvim_win_get_cursor(w)
-            pcall(vim.fn.winrestview,
-                { topline = math.max(1, cur[1] - (wl - 1)), lnum = cur[1], col = cur[2], leftcol = 0 })
+            pcall(vim.fn.winrestview, { topline = view.topline, lnum = cur[1], col = cur[2], leftcol = 0 })
         end)
         update_cone()
         if lv.controller then lv.controller.refresh() end

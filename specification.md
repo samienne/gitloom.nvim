@@ -1234,11 +1234,13 @@ unambiguous even though the line holds many.
 
 `<Tab>` while selecting **folds / unfolds the head under the cursor in place**
 (the §10.4 collapse⇄expand toggle, scoped to the selection): it expands the
-collapsed head the cursor sits on (or collapses the cursor's region), **without
-disturbing the selection** — the anchor and cursor stay on the same commits (the
-toggled head maps to its tip when expanded, a collapsed run back to its head) and
-the cursor's **screen row is held**, so the view does not jump. It is a no-op on
-a mainline commit (nothing there is collapsible).
+collapsed head the cursor sits on (or collapses the cursor's region) **without
+changing what is selected**. An unfolded head expands into its **whole region**,
+so the revealed branch stays selected and lit (not just its tip); a collapsed run
+maps back to its head. The **diff range is therefore unchanged** by fold/unfold.
+The anchor keeps its end and the cursor lands on the toggled (opposite) end, and
+the saved scroll position is restored so the rows above the toggle stay put. It
+is a no-op on a mainline commit (nothing there is collapsible).
 
 ### 13.5 Range and the commit view
 

@@ -475,10 +475,12 @@ Details not covered by the spec or architecture:
   even when packed, and `display_item` draws the selected head with
   `palette.selected` and dims the other heads on the shared line (§13.4).
   `selection_toggle` (`<Tab>` while selecting) folds/unfolds the cursor's head in
-  place: it captures the path/anchor/cursor **by hash** (a head's representative
-  is its tip), applies the mode + reflow, then re-resolves the selection against
-  the new projection via a fresh hash→node map (region members → their head) and
-  restores the cursor's screen row (`winline`/`winrestview`) so the view holds.
+  place: it captures the path **by member hash** (a head expands to its whole
+  region so the unfolded branch stays selected/lit — the diff range is unchanged),
+  applies the mode + reflow, re-resolves against a fresh hash→node map (region
+  members → their head, dedup consecutive), keeps the anchor on its end and the
+  cursor on the toggled end, and restores the saved scroll (`winsaveview`/
+  `winrestview` topline) so the view holds.
   Selection isn't started *on* a packed-marker line. The pure helpers are tested;
   the window glue is not (like the other window glue).
 - **Reachability dimming = Lane model + walk** (specification.md §5, §12):
