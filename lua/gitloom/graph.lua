@@ -76,9 +76,9 @@ local KEYBINDS = {
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
-    { "F", "Toggle the off-screen context footer" },
+    { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
-    { "i", "Toggle the per-lane id column" },
+    { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
     { "?", "Show this help" },
 }
 
@@ -609,6 +609,36 @@ local function decoration_texts(commit)
     end
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = "[" .. tag .. "]"
+    end
+    return out
+end
+
+--- The labels to draw for a commit in a topology PANE (header/footer), as
+--- `{ text, kind }` segments so each can be coloured by kind ("head"|"branch"|"remote"|
+--- "tag") the same way the main view colours them. The pinned anchors, with a leading
+--- HEAD marker when the commit carries one (decoration_texts omits HEAD — the main view
+--- draws it as a separate pinned marker, kept out of the cursor-target list — so a pinned
+--- anchor that is HEAD would otherwise read as just the branch sharing its commit). When
+--- HEAD is present, the branch it points at (`head_branch`, = repo.head) is DROPPED:
+--- HEAD already represents it, so the pane shows only the pinned heads (HEAD plus any
+--- OTHER pinned anchor on the same commit), not the branch that merely co-locates.
+---@param commit { refs: Ref[] }?
+---@param head_branch string?  -- the branch HEAD points at (suppressed in favour of HEAD)
+---@return { text: string, kind: string }[]
+local function pane_labels(commit, head_branch)
+    local g = group_refs(commit and commit.refs or {})
+    local out = {}
+    if g.head then out[#out + 1] = { text = "HEAD", kind = "head" } end
+    for _, b in ipairs(g.branches) do
+        -- Skip the branch HEAD points at (HEAD already stands for it).
+        if not (g.head and head_branch and b.name == head_branch) then
+            local t = "(" .. b.name
+            if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
+            out[#out + 1] = { text = t .. ")", kind = b.has_local and "branch" or "remote" }
+        end
+    end
+    for _, tag in ipairs(g.tags) do
+        out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag" }
     end
     return out
 end
@@ -1387,7 +1417,7 @@ end
 ---@param segs Segment[]|nil
 ---@param emphasis boolean|nil
 ---@return Segment|nil
-local function top_lane(segs, emphasis)
+local function top_lane(segs, emphasis, is_node)
     if not segs then return nil end
     if emphasis then
         for _, s in ipairs(segs) do
@@ -1412,6 +1442,17 @@ local function top_lane(segs, emphasis)
     end
     for _, s in ipairs(segs) do
         if s.connectivity.down then return s end
+    end
+    -- On a NODE-LESS cell, a horizontal arm/bus outranks a pure-UP stub so a fork bus
+    -- keeps ONE colour: the branch's own colour begins in the row ABOVE (at the junction),
+    -- not mid-bus. Without this the bus alternates between the bus colour and each
+    -- up-branch's colour at the column it leaves from. A through-vertical (up+down) already
+    -- won above via `down`, so a genuine crossing still keeps the passing lane's colour. A
+    -- NODE cell is exempt: its glyph must read in the node's own lane, not a crossing arm.
+    if not is_node then
+        for _, s in ipairs(segs) do
+            if s.connectivity.left or s.connectivity.right then return s end
+        end
     end
     for _, s in ipairs(segs) do
         if s.connectivity.up then return s end
@@ -1544,7 +1585,7 @@ local function get_column_chars(opts, columns, emphasis)
         -- Colour (and dim state) from the Column's "top" Segment (§5): the
         -- Segment whose edge colours the glyph (a highlighted edge wins, but
         -- only with emphasis — so the picture is unchanged when it is off).
-        local color_seg = top_lane(track.lanes, emphasis)
+        local color_seg = top_lane(track.lanes, emphasis, is_node)
         local track_color = seg_color(color_seg, emphasis)
         if track.override ~= nil then
             char = track.override
@@ -1646,6 +1687,13 @@ local function get_column_chars(opts, columns, emphasis)
             local is_cross = cc.down and cc.up and cc.left and cc.right
             local is_jump = not cc.down and not cc.up and cc.right and cc.left
             if is_cross or is_jump then return false end
+            -- The connector follows the HORIZONTAL wire's own lane, not the cell's primary
+            -- (vertical) lane: at a fork-bus terminus the primary is the up-branch (dev),
+            -- but the bus arm arriving here is the fork source — so use the lane of the
+            -- segment that actually carries the horizontal, keeping the bus one colour.
+            for _, s in ipairs(t.lanes or {}) do
+                if s.connectivity.left or s.connectivity.right then return s.color end
+            end
             return t.color
         end
         local next_color
@@ -3709,10 +3757,11 @@ function M.open(folder, opts)
     -- Rebuilds the context panes (§6.2) for the current viewport. Assigned after
     -- the listview opens; forward-declared so reflow/scroll can trigger it.
     local update_panes = function() end
-    -- Footer-pane debug state (the seam buffer line + height; or, when nothing
-    -- showed, why), surfaced in the footer status when lane ids are on (`i`).
-    -- Set by update_panes.
+    -- Pane debug state (the seam buffer line + height; or, when nothing showed,
+    -- why), surfaced in the footer status when lane ids are on (`i`). Set by
+    -- update_panes — one set per pane (footer below, header above).
     local footer_seam, footer_height, footer_dbg
+    local header_seam, header_height, header_dbg
     -- Rebuilds the projected OrderItem graph under the current view state and
     -- swaps it into the listview (§10). Assigned after `order_at`/`lv` exist;
     -- forward-declared so the stream and key handlers can close over it.
@@ -3944,10 +3993,15 @@ function M.open(folder, opts)
             -- Debug (lane ids on, `i`): the footer-pane cutoff (seam buffer line)
             -- and height when shown, or why it is hidden.
             if show_lane_ids then
+                if header_seam then
+                    status = status .. (" | hdr@%s h=%d"):format(tostring(header_seam), header_height or 0)
+                elseif header_dbg then
+                    status = status .. " | hdr hidden: " .. header_dbg
+                end
                 if footer_seam then
-                    status = status .. (" | pane cut@%s h=%d"):format(tostring(footer_seam), footer_height or 0)
+                    status = status .. (" | ftr@%s h=%d"):format(tostring(footer_seam), footer_height or 0)
                 elseif footer_dbg then
-                    status = status .. " | pane hidden: " .. footer_dbg
+                    status = status .. " | ftr hidden: " .. footer_dbg
                 end
             end
             lv.win.opts.footer = status
@@ -5193,14 +5247,34 @@ function M.open(folder, opts)
             end,
         })
 
-        -- Context panes (spec §6.2) — minimal first cut: a footer window below the
-        -- main graph showing the anchors-only topology of the off-screen-older
-        -- commits, seeded at the bottom seam so its lanes meet the main view.
-        -- (Header, sizing hysteresis, async, and arrow-caps are still to come.)
+        -- Context panes (spec §6.2): two borderless overlays summarising off-screen
+        -- topology folded onto the pinned anchors. The FOOTER (below) continues the
+        -- bottom-seam lanes down their first-parent chains to the roots (a sub-DAG
+        -- rebuild, `pane.continue`/`footer`). The HEADER (above) is a vertical
+        -- compaction of the already-laid-out projection slice above the cutoff
+        -- (`pane.header`): linear runs drop, junctions go node-less, heads become ◍,
+        -- pinned anchors keep a labelled row. Both seed/match the seam so lanes meet
+        -- the main view. (Sizing hysteresis and the async rebuild are still to come.)
         local pane = require("gitloom.pane")
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
+        -- Debug overlay (toggled with `i`): a full-line highlight on the buffer line the
+        -- header treats as its cutoff/seam (and the footer's), so a misaligned seam is
+        -- visible. Lives on the MAIN buffer; refreshed on every pane rebuild.
+        local seam_ns = vim.api.nvim_create_namespace("gitloom_seam")
+        -- GitloomCutoff: the first VISIBLE main-view line (ground truth). GitloomSeam:
+        -- the line the header read its boundary from (the system's belief). They should
+        -- be adjacent; a gap (or a hidden seam) means the seam is misaligned.
+        vim.api.nvim_set_hl(0, "GitloomCutoff", { link = "Search", default = true })
+        vim.api.nvim_set_hl(0, "GitloomSeam", { link = "DiffChange", default = true })
         local PANE_MAX = 12
-        local footer_win, footer_buf
+        -- The header (off-screen-newer) diverges going up — its content grows ~1:1
+        -- with how deep the seam is read — so it is capped tighter than the footer to
+        -- stay a glanceable summary; the surplus collapses into a `+N above`.
+        local HEADER_MAX = 8
+        -- The two overlays: the footer (off-screen-older topology, below) and the
+        -- header (off-screen-newer topology, above). Each is `{ win, buf }`.
+        local footer = { win = nil, buf = nil }
+        local header = { win = nil, buf = nil }
         local last_pane_err -- throttle repeated pane-error notifications
         -- Force scrolloff off for this window (any inherited value interacts badly
         -- with the overlay and scrolling); revisit once the stuck-scroll is solved.
@@ -5214,40 +5288,81 @@ function M.open(folder, opts)
             split_on_separate_line = false,
         }
 
-        local function close_footer()
-            if footer_win and vim.api.nvim_win_is_valid(footer_win) then
-                pcall(vim.api.nvim_win_close, footer_win, true)
+        local function close_pane(p)
+            if p.win and vim.api.nvim_win_is_valid(p.win) then
+                pcall(vim.api.nvim_win_close, p.win, true)
             end
-            footer_win = nil
-            footer_seam, footer_height = nil, nil
+            p.win = nil
+        end
+        -- The buffer line a seam tag (e.g. "12s"/"12c") points at.
+        local function seam_line(tag) return tag and tonumber(tostring(tag):match("^(%d+)")) end
+        -- Refresh the debug cutoff highlight (the `i` overlay). Two full-line marks on
+        -- the MAIN buffer, cleared first so they track the view:
+        --   • GitloomCutoff — the first FULLY-visible line (the topmost line of the
+        --     main view, just below the header overlay): the ground truth.
+        --   • GitloomFooterCutoff — the header's seam line (what the system *thinks* the
+        --     cutoff is). If the two differ — or the seam line is hidden behind the
+        --     overlay — the seam is misaligned (the bug we are chasing).
+        local function mark_cutoff()
+            pcall(vim.api.nvim_buf_clear_namespace, buf, seam_ns, 0, -1)
+            if not show_lane_ids then return end
+            pcall(function()
+                -- The header's own seam line (may sit behind the overlay).
+                local hs = seam_line(header_seam)
+                if hs and hs >= 1 and hs <= vim.api.nvim_buf_line_count(buf) then
+                    vim.api.nvim_buf_set_extmark(buf, seam_ns, hs - 1, 0,
+                        { line_hl_group = "GitloomSeam", priority = 248 })
+                end
+                -- The first line whose columns row is at/below the overlay's bottom edge
+                -- — the topmost VISIBLE line of the main view.
+                local r0 = vim.api.nvim_win_call(win, function() return vim.fn.win_screenpos(win)[1] end)
+                local floor = r0 + (header_height or 0)
+                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                local lastl = vim.api.nvim_buf_line_count(buf)
+                for l = w0, lastl do
+                    local rr = vim.api.nvim_win_call(win, function() return vim.fn.screenpos(win, l, 1).row end)
+                    if rr >= floor then
+                        vim.api.nvim_buf_set_extmark(buf, seam_ns, l - 1, 0,
+                            { line_hl_group = "GitloomCutoff", priority = 250 })
+                        break
+                    end
+                end
+            end)
         end
 
-        -- The footer is a borderless overlay covering the bottom `height` content
-        -- rows of the main window (relative="win"), so its lanes butt directly
-        -- against the seam — the last main row above it — with no border or gap
-        -- between (the sticky-scroll pattern). The covered main rows are exactly
-        -- the off-screen-older topology the footer replaces with its summary.
-        local function ensure_footer_win(height)
+        local function close_panes()
+            close_pane(footer); footer_seam, footer_height = nil, nil
+            close_pane(header); header_seam, header_height = nil, nil
+            pcall(vim.api.nvim_buf_clear_namespace, buf, seam_ns, 0, -1)
+        end
+
+        -- A pane is a borderless overlay covering `height` content rows of the main
+        -- window (relative="win"), so its lanes butt directly against the seam with
+        -- no border or gap (the sticky-scroll pattern). `top` pins it to the very
+        -- top (the header); otherwise the bottom (the footer). The covered main
+        -- rows are exactly the off-screen topology the pane replaces with its
+        -- summary.
+        local function ensure_pane_win(p, top, height)
             local wh = vim.api.nvim_win_get_height(win)
             local cfg = {
                 relative = "win", win = win,
-                row = math.max(0, wh - height), col = 0,
+                row = top and 0 or math.max(0, wh - height), col = 0,
                 width = vim.api.nvim_win_get_width(win),
                 height = height,
                 style = "minimal",
                 focusable = false,
                 zindex = 200,
             }
-            if footer_win and vim.api.nvim_win_is_valid(footer_win) then
-                pcall(vim.api.nvim_win_set_config, footer_win, cfg)
+            if p.win and vim.api.nvim_win_is_valid(p.win) then
+                pcall(vim.api.nvim_win_set_config, p.win, cfg)
                 return
             end
-            footer_buf = vim.api.nvim_create_buf(false, true)
-            footer_win = vim.api.nvim_open_win(footer_buf, false, cfg)
-            -- A faint background so the footer reads as a distinct band while its
-            -- lanes still line up with the main graph above.
+            p.buf = vim.api.nvim_create_buf(false, true)
+            p.win = vim.api.nvim_open_win(p.buf, false, cfg)
+            -- A faint background so the pane reads as a distinct band while its
+            -- lanes still line up with the main graph.
             pcall(vim.api.nvim_set_option_value, "winhl",
-                "Normal:NormalFloat,NormalFloat:NormalFloat", { win = footer_win })
+                "Normal:NormalFloat,NormalFloat:NormalFloat", { win = p.win })
         end
 
         -- Render topology-only pane rows (graph glyphs + ref labels, no
@@ -5256,13 +5371,41 @@ function M.open(folder, opts)
         -- `goff` (the date+author width), so left-pad by it; under mirror the main
         -- graph is right-aligned at the message edge (`foff`), so right-pad so the
         -- glyphs end there.
-        local function render_pane(buf, rows, goff, foff)
+        -- A dashed-vertical (┊) separator row: one bar per lane crossing `row`'s
+        -- seam edge (`dir` = "up" for the footer's top edge, "down" for the
+        -- header's bottom edge), so the eye sees each lane being continued.
+        local function sep_row(row, dir)
+            local sep = {}
+            for j, cell in ipairs(row.columns) do
+                local lane
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.connectivity[dir] then lane = s; break end
+                end
+                sep[j] = lane
+                    and { connectivity = { up = true, down = true },
+                        lanes = { { connectivity = { up = true, down = true }, id = lane.id, color = lane.color } } }
+                    or { connectivity = {}, lanes = {} }
+            end
+            return sep
+        end
+
+        -- Render topology-only pane rows. `is_header` flips the layout: a footer
+        -- puts its seam separator on TOP (lanes enter from the seam above, then the
+        -- rows descend to the root); a header pins the tip at the TOP and the seam
+        -- at the BOTTOM, padding any slack between the rows and the seam with
+        -- straight lane bars so growth/shrink happens at the bottom and the tip
+        -- never bounces (§6.2). `overflow` (header) renders a leading `+N above`;
+        -- `height` (header) is the exact overlay height the seam was sized for.
+        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names, clipped)
             local lines, marks = {}, {}
+            local pal = opts.palette or {}
+            -- Ref-label highlight by kind, matching the main view's ref colours.
+            local label_hl = { head = pal.head, branch = pal.branch, remote = pal.remote, tag = pal.tags }
             -- Render one columns array (graph glyphs) into a padded, aligned line,
             -- recording highlight extmarks; returns the line text for suffixing.
             local function glyph_line(columns)
                 local g = get_column_chars(opts, columns, false)
-                -- Dash every straight run so the footer reads as a sketch/summary:
+                -- Dash every straight run so the pane reads as a sketch/summary:
                 -- vertical │ → ┊ (quadruple), horizontal ─ → ╌ (double — lighter
                 -- horizontally). Both 3-byte, so highlight byte offsets are
                 -- unchanged. Corners/junctions have no dashed variant, so they
@@ -5281,28 +5424,17 @@ function M.open(folder, opts)
                 return string.rep(" ", pad) .. gtext
             end
 
-            -- Separator row on top: a dashed vertical (┊) per lane entering from the
-            -- seam, so the eye sees each lane being continued.
-            if rows[1] then
-                local sep = {}
-                for j, cell in ipairs(rows[1].columns) do
-                    local up
-                    for _, s in ipairs(cell.lanes or {}) do
-                        if s.connectivity.up then up = s; break end
-                    end
-                    sep[j] = up
-                        and { connectivity = { up = true, down = true },
-                            lanes = { { connectivity = { up = true, down = true }, id = up.id, color = up.color } } }
-                        or { connectivity = {}, lanes = {} }
-                end
-                lines[#lines + 1] = glyph_line(sep)
-            end
-
-            for _, row in ipairs(rows) do
+            local function body_line(row)
+                local li = #lines -- 0-based index this line will occupy (for label marks)
                 local text = glyph_line(row.columns)
                 local c = row.commit
-                local labels = c and decoration_texts(c) or {}
-                if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
+                -- Ref labels in the SAME colours as the main view (HEAD, branches, tags).
+                for _, seg in ipairs(c and pane_labels(c, repo.head) or {}) do
+                    text = text .. " "
+                    local s = #text
+                    text = text .. seg.text
+                    if label_hl[seg.kind] then marks[#marks + 1] = { li, s, #text, label_hl[seg.kind] } end
+                end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.
                 if show_lane_ids then
@@ -5314,7 +5446,43 @@ function M.open(folder, opts)
                     end
                     if #ids > 0 then text = text .. "  [" .. table.concat(ids, ",") .. "]" end
                 end
-                lines[#lines + 1] = text
+                return text
+            end
+
+            if is_header then
+                local ovfrow = (overflow and overflow > 0) and 1 or 0
+                if ovfrow == 1 then
+                    -- Name the elided pinned anchors so off-screen branches stay visible
+                    -- by name even when their ◍ heads are capped away (§6.2).
+                    local tag = ("+%d above"):format(overflow)
+                    if overflow_names and #overflow_names > 0 then
+                        tag = tag .. ": " .. table.concat(overflow_names, ", ")
+                    end
+                    lines[#lines + 1] = (string.rep(" ", goff or 0)) .. tag
+                end
+                for _, row in ipairs(rows) do lines[#lines + 1] = body_line(row) end
+                -- Pad the bottom with seam bars down to the exact overlay height, so
+                -- the seam (last bar row) butts the main view's top. At least one.
+                local seams = math.max(1, (height or (#rows + 1)) - ovfrow - #rows)
+                if rows[#rows] then
+                    local sep = sep_row(rows[#rows], "down")
+                    for k = 1, seams do
+                        local li = #lines
+                        local sline = glyph_line(sep)
+                        -- Annotate the very bottom seam row with how many buffer lines the
+                        -- header clips above the seam (a comment-style note).
+                        if k == seams and clipped and clipped > 0 then
+                            local note = ("   … clipped %d lines …"):format(clipped)
+                            local s = #sline
+                            sline = sline .. note
+                            marks[#marks + 1] = { li, s, #sline, "Comment" }
+                        end
+                        lines[#lines + 1] = sline
+                    end
+                end
+            else
+                if rows[1] then lines[#lines + 1] = glyph_line(sep_row(rows[1], "up")) end
+                for _, row in ipairs(rows) do lines[#lines + 1] = body_line(row) end
             end
             if #lines == 0 then lines = { "" } end
             vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -5325,24 +5493,24 @@ function M.open(folder, opts)
             end
         end
 
-        -- Hide the footer and record why (surfaced in the `i` status).
-        local function hide_footer(why)
-            footer_dbg = why
-            close_footer()
+        -- Hide both panes and record why (surfaced in the `i` status).
+        local function hide_all(why)
+            footer_dbg, header_dbg = why, why
+            close_panes()
             update_footer()
         end
 
         -- The pane build, wrapped so any error is fully contained — it runs inside
         -- the scroll/cone path, and must never break the main view's scrolling.
         local function build_panes()
-            if opts.panes == false then return hide_footer("off") end
+            if opts.panes == false then return hide_all("off") end
             if not vim.api.nvim_win_is_valid(win) then return end
             -- Panes are a focus feature: need HEAD and a graph.
-            if not (repo.head and repo.refs[repo.head]) then return hide_footer("no HEAD") end
-            if not repo.display or #repo.display == 0 then return hide_footer("no display") end
+            if not (repo.head and repo.refs[repo.head]) then return hide_all("no HEAD") end
+            if not repo.display or #repo.display == 0 then return hide_all("no display") end
 
             local pinned = effective_pinned()
-            -- repo.order index per commit hash, for "below the cutoff" tests.
+            -- repo.order index per commit hash, for "below the cutoff" tests (footer).
             local idx = {}
             for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
             local function item_order(item)
@@ -5351,26 +5519,98 @@ function M.open(folder, opts)
                 local m = item and item.markers and item.markers[1]
                 if m then return idx[(m.tip and m.tip.hash) or m.hash] end
             end
+            -- repo.display index per commit hash, for "above the cutoff" (header).
+            local didx = {}
+            for i, it in ipairs(repo.display) do
+                local c = it.commit
+                if c then didx[(c.tip and c.tip.hash) or c.hash] = i end
+                for _, m in ipairs(it.markers or {}) do didx[(m.tip and m.tip.hash) or m.hash] = i end
+            end
+            -- DisplayNode per hash (own/tip/region) — for resolving pinned tips and
+            -- the boundary lanes' projected begins to the projected nodes (§6.2). Also
+            -- each branch's main-view lane { id, color } (its first-parent lane), so
+            -- the header can colour every branch the SAME as the graph (distinct per
+            -- branch, not all the pivot's colour).
+            -- dnode (hash → node), lane_main (hash → its branch's main-view {id,color})
+            -- and node_col (hash → the COLUMN the node sits in, i.e. its left-right
+            -- position in the graph) so the header can order forks to match the graph.
+            local dnode, lane_main, node_col = {}, {}, {}
+            for _, it in ipairs(repo.display) do
+                local pl = it.parent_lanes
+                local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color }
+                local hcol = {} -- this row's rendered nodes → their column
+                for j, cell in ipairs(it.columns or {}) do
+                    if cell.has_commit and cell.commit then hcol[cell.commit.hash] = j end
+                end
+                local function add(n)
+                    if not n then return end
+                    local col = hcol[n.hash]
+                    dnode[n.hash] = n
+                    if main then lane_main[n.hash] = main end
+                    if col then node_col[n.hash] = col end
+                    if n.tip then
+                        dnode[n.tip.hash] = n
+                        if main then lane_main[n.tip.hash] = main end
+                        if col then node_col[n.tip.hash] = col end
+                    end
+                    for _, hh in ipairs(n.region or {}) do
+                        dnode[hh] = n
+                        if main then lane_main[hh] = main end
+                        if col then node_col[hh] = col end
+                    end
+                end
+                add(it.commit)
+                for _, m in ipairs(it.markers or {}) do add(m) end
+            end
+            local function order_of(n) return n and didx[(n.tip and n.tip.hash) or n.hash] end
+            local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
+            local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
 
-            -- The down-lanes of whichever RENDERED line sits at absolute screen row
-            -- `target` — a commit's columns line, or its split (above) / merge
-            -- (below) virtual line. This is the key fix: the cutoff can fall on a
+            -- The lanes crossing one edge of whichever RENDERED line sits at
+            -- absolute screen row `target` — a commit's columns line, or its split
+            -- (above) / merge (below) virtual line. The cutoff can fall on a
             -- split/merge virtual line, which has no buffer line, so reading the
-            -- nearest buffer line's lanes was wrong. Returns the lanes + a debug tag.
-            local function boundary_at(target)
+            -- nearest buffer line's lanes was wrong. `up` reads the top edge
+            -- (ascending lanes — for the header); default the bottom (footer).
+            -- Returns the lanes, a debug tag, the seam's DISPLAY index (header
+            -- slice), and its repo.order index (footer cutoff tests).
+            local function boundary_at(target, up)
                 local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
                 local last = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
                 for l = last, w0, -1 do
                     local r = vim.fn.screenpos(win, l, 1).row
                     if r > 0 then
-                        local item = order_at(l)
-                        if item then
-                            if r == target and item.columns then
-                                return pane.boundary_of(item.columns), l .. "c", item_order(item)
+                        local item, disp_idx = order_at(l)
+                        -- The item's rendered block spans `r-1` (split, above), `r`
+                        -- (columns), `r+1` (merge, below). The seam may fall on any.
+                        if item and (r == target or (item.split and r - 1 == target)
+                                or (item.merge and r + 1 == target)) then
+                            if up then
+                                -- HEADER: read the TOP edge of whichever rendered
+                                -- sub-line of the item actually sits AT the seam (the
+                                -- first *uncovered* screen row). The seam item's block
+                                -- spans r-1 (split), r (columns), r+1 (merge); reading
+                                -- the wrong one is an off-by-one into the COVERED region.
+                                --   • merge at the seam (r+1==target): the commit row is
+                                --     covered and only its merge (virtual) line shows —
+                                --     read the merge's top edge (the lane up into the
+                                --     commit), NOT the covered columns line above it.
+                                --   • otherwise (columns/split at the seam): read the
+                                --     split when present so a fork right below the
+                                --     viewport shows all its off-screen children.
+                                local line, suff
+                                if item.merge and r + 1 == target then
+                                    line, suff = item.merge, "m"
+                                else
+                                    line, suff = (item.split or item.columns), (item.split and "s" or "c")
+                                end
+                                return pane.boundary_of(line, true), l .. suff, disp_idx, item_order(item)
+                            elseif r == target and item.columns then
+                                return pane.boundary_of(item.columns), l .. "c", disp_idx, item_order(item)
                             elseif item.merge and r + 1 == target then
-                                return pane.boundary_of(item.merge), l .. "m", item_order(item)
+                                return pane.boundary_of(item.merge), l .. "m", disp_idx, item_order(item)
                             elseif item.split and r - 1 == target then
-                                return pane.boundary_of(item.split), l .. "s", item_order(item)
+                                return pane.boundary_of(item.split), l .. "s", disp_idx, item_order(item)
                             end
                         end
                     end
@@ -5378,12 +5618,15 @@ function M.open(folder, opts)
                 return {}, "?"
             end
 
-            -- The absolute screen row just above the overlay (which covers the
-            -- bottom `sh` SCREEN rows). Anchored on the window's own position so it
-            -- is independent of w0's virtual lines.
-            local function seam_for(sh)
+            -- The absolute screen row of the seam — the main row adjacent to an
+            -- `sh`-tall overlay. Anchored on the window's own position so it is
+            -- independent of w0's virtual lines. `top` (header): the row just below
+            -- the top overlay; default (footer): the row just above the bottom one.
+            local function seam_for(sh, top)
                 return vim.api.nvim_win_call(win, function()
-                    return vim.fn.win_screenpos(win)[1] + vim.api.nvim_win_get_height(win) - sh
+                    local r0 = vim.fn.win_screenpos(win)[1]
+                    if top then return r0 + sh end
+                    return r0 + vim.api.nvim_win_get_height(win) - sh
                 end)
             end
 
@@ -5392,8 +5635,8 @@ function M.open(folder, opts)
             -- (`pane.continue`), condensed, seeded and laid out — every active lane
             -- reaches a root, no non-active branch introduced. Returns rows, tag on
             -- success; nil, reason on failure.
-            local function build(target)
-                local boundary, tag, seam_idx = boundary_at(target)
+            local function build_footer(target)
+                local boundary, tag, _, seam_idx = boundary_at(target)
                 if not next(boundary) then return nil, "no lanes@" .. target end
                 -- Pinned-ref tips below the cutoff that aren't on an active lane —
                 -- add them so a divergent pinned branch still shows as a marker.
@@ -5412,30 +5655,107 @@ function M.open(folder, opts)
                 return res.rows, tag
             end
 
-            -- The overlay is the separator row + the footer rows, so its screen
-            -- height is `#rows + 1`. Grow the row count until it stabilises (§6.2
-            -- sizing), bounded by PANE_MAX. The final rows + seam come from the
-            -- SAME build so the overlay height and the boundary line up.
-            local R, rows, seam_tag, reason = 0, nil, nil, nil
-            for _ = 1, PANE_MAX do
-                local r, tag = build(seam_for(R + 1))
-                if not r then rows = nil; reason = tag; break end
-                rows, seam_tag = r, tag
-                local nr = math.min(#r, PANE_MAX)
-                if nr == R then break end -- converged
-                R = nr
+            -- Build the HEADER for an overlay covering at least `cover` screen rows
+            -- (off-screen-NEWER topology). The seam is computed from the display items
+            -- directly (`pane.header_seam` — NO screenpos, so it's testable and never
+            -- splits a commit across the seam: a covered commit's trailing merge line is
+            -- covered with it). `pane.continue_up` then rebuilds the focused sub-DAG and
+            -- `pane.header` lays it out seam-up. Returns rows, tag, actual-cover on
+            -- success; nil, reason on failure. `actual cover` ≥ `cover` (rounded up to
+            -- the commit boundary) is the overlay height the rows must fit in.
+            local function build_header(cover)
+                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                local _, w0disp = order_at(w0)
+                if not w0disp or w0disp <= 1 then return nil, "at top" end
+                local seam = pane.header_seam(repo.display, w0disp, cover)
+                if not seam then return nil, "past end" end
+                local line = (seam.kind == "split") and seam.item.split or seam.item.columns
+                local boundary = pane.boundary_of(line, true)
+                if not next(boundary) then return nil, "no lanes@" .. seam.idx end
+                -- Pinned anchor tips above the cutoff, as the display nodes that
+                -- represent them (consistent with the boundary lanes' projected begins).
+                local tips = {}
+                for name in pairs(pinned) do
+                    local ref = repo.refs[name]
+                    local dn = ref and ref.commit and dnode[ref.commit.hash]
+                    if dn and (order_of(dn) or math.huge) < seam.idx then tips[#tips + 1] = dn end
+                end
+                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx)
+                if #cond.items == 0 then return nil, "empty@" .. seam.idx end
+                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
+                if #res.rows == 0 then return nil, "norows@" .. seam.idx end
+                return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover, seam.idx
             end
-            if not rows or #rows == 0 then return hide_footer(reason or "no rows") end
-            rows = pane.cap(rows, PANE_MAX) -- keep the seam-nearest rows AND the root
-            local total = #rows + 1         -- + the separator row
-            footer_seam, footer_height, footer_dbg = seam_tag, total, nil
-            update_footer() -- refresh the debug readout (cutoff line) if `i` is on
-            -- Offsets of the main graph column so the pane lanes line up: `goff`
-            -- = its left edge (date+author width), `foff` = the message edge (the
+
+            -- The footer overlay is the separator row + the footer rows, so its
+            -- screen height is `#rows + 1`. Grow the row count until it stabilises
+            -- (§6.2 sizing), bounded by PANE_MAX. The final rows + seam come from the
+            -- SAME build so the overlay height and the boundary line up.
+            local function converge_footer()
+                local R, rows, seam_tag = 0, nil, nil
+                for _ = 1, PANE_MAX do
+                    local r, tag = build_footer(seam_for(R + 1))
+                    if not r then return nil, tag end
+                    rows, seam_tag = r, tag
+                    local nr = math.min(#r, PANE_MAX)
+                    if nr == R then break end -- converged
+                    R = nr
+                end
+                return rows, seam_tag
+            end
+
+            -- Size the HEADER by a **min-fit search** (spec §6.2): start at the
+            -- guess `cover = (#pinned tips above the viewport) + 1` screen rows, build
+            -- the seam that budget implies, and grow `cover` until the folded rows fit
+            -- in the overlay (the rows + the seam separator). The overlay height is the
+            -- seam's actual cover (whole commit blocks, so ≥ the request). Cap at
+            -- PANE_MAX, then clip continuity-preserving with `+N above`. Returns rows,
+            -- tag, overlay-height, overflow.
+            local function converge_header()
+                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                local _, w0disp = order_at(w0)
+                -- Nothing scrolled off above the viewport ⇒ no header at all.
+                if (w0disp or 1) <= 1 then return nil, "at top" end
+                local P = 0
+                for name in pairs(pinned) do
+                    local ref = repo.refs[name]
+                    local di = ref and ref.commit and didx[ref.commit.hash]
+                    if di and di < (w0disp or 1) then P = P + 1 end
+                end
+                local rows, seam_tag, height, sidx
+                -- The number of buffer lines the header clips: every line above the seam (the
+                -- boundary the overlay stands in for). Read straight from the line-map — the
+                -- seam item's first buffer line − 1 — so it is exact and always resolvable
+                -- (no order-index lookup that a junction/markers seam could miss), and it
+                -- accounts for multi-line items (dual mode). Falls back to the display rows
+                -- above only if the map is somehow unavailable.
+                local function clipped_lines()
+                    if not sidx or sidx <= 1 then return nil end
+                    local start = lv.controller.item_start and lv.controller.item_start(sidx)
+                    return (start and start > 1 and (start - 1)) or (sidx - 1)
+                end
+                -- Clamp the guess to the cap so the loop always runs at least once.
+                for cover = math.min(math.max(2, P + 1), HEADER_MAX), HEADER_MAX do
+                    local r, tag, actual, si = build_header(cover)
+                    if not r then return nil, tag end
+                    rows, seam_tag, height, sidx = r, tag, actual, si
+                    if #r + 1 <= actual then return r, tag, actual, 0, nil, clipped_lines() end -- fits
+                end
+                if not rows then return nil, "no rows" end
+                -- Didn't fit: clip to the overlay height while **preserving continuity**
+                -- — keep the seam-continuous bottom slice and elide the far tips into
+                -- `+N above` (room for the +N line and the seam separator). Eliding the
+                -- middle instead would tear every lane at the gap (the old bug).
+                local kept, ovf, ovf_names = pane.cap(rows, math.max(1, height - 2), true)
+                return kept, seam_tag, height, ovf, ovf_names, clipped_lines()
+            end
+
+            -- Offsets of the main graph column so the pane lanes line up: `goff` =
+            -- its left edge (date+author width), `foff` = the message edge (the
             -- graph's right side under mirror). The columns are sticky-aligned, so
-            -- any visible commit row measures the same offset; use the first
-            -- visible line. col_offset is in BYTES; convert to display columns via
-            -- the line's text so multi-byte author names don't skew it.
+            -- any visible commit row measures the same offset; use the first visible
+            -- line. col_offset is in BYTES; convert to display columns via the
+            -- line's text so multi-byte author names don't skew it.
             local goff, foff = 0, 0
             local refl = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
             if lv.controller.col_offset then
@@ -5443,14 +5763,142 @@ function M.open(folder, opts)
                 goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", GRAPH_COL) or 0))
                 foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", FLEX_COL) or 0))
             end
-            ensure_footer_win(total)
-            render_pane(footer_buf, rows, goff, foff)
+
+            -- FOOTER (off-screen-older topology, below).
+            local frows, ftag = converge_footer()
+            if not frows or #frows == 0 then
+                footer_dbg = ftag or "no rows"; close_pane(footer); footer_seam, footer_height = nil, nil
+            else
+                frows = pane.cap(frows, PANE_MAX) -- keep the seam-nearest rows AND the root
+                footer_seam, footer_height, footer_dbg = ftag, #frows + 1, nil
+                ensure_pane_win(footer, false, #frows + 1)
+                render_pane(footer.buf, frows, goff, foff, false)
+            end
+
+            -- HEADER (off-screen-newer topology, above). The overlay is exactly `H`
+            -- tall (the height the seam was sized at), padded at the bottom so the
+            -- seam butts the main view's top edge.
+            local hrows, htag, H, ovf, ovf_names, hclipped = converge_header()
+            if not hrows or #hrows == 0 then
+                header_dbg = htag or "no rows"; close_pane(header); header_seam, header_height = nil, nil
+            else
+                header_seam, header_height, header_dbg = htag, H, nil
+                ensure_pane_win(header, true, H)
+                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names, hclipped)
+            end
+
+            -- Topology-only debug dump (set `vim.g.gitloom_pane_debug` to a file path):
+            -- the live seam/boundary/header-lane structure, no commit messages — for
+            -- diagnosing seam alignment. Overwrites each build; never breaks the view.
+            if type(vim.g.gitloom_pane_debug) == "string" then
+                pcall(function()
+                    local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                    local _, w0disp = order_at(w0)
+                    local out = { ("w0=%d w0disp=%s H=%s seam_tag=%s ovf=%s"):format(
+                        w0, tostring(w0disp), tostring(H), tostring(htag), tostring(ovf)) }
+                    -- The boundary the header was built from (the whole-commit seam).
+                    local seam = w0disp and pane.header_seam(repo.display, w0disp, H or 2)
+                    local disp_idx = seam and seam.idx
+                    local boundary = seam
+                        and pane.boundary_of((seam.kind == "split") and seam.item.split or seam.item.columns, true)
+                        or {}
+                    out[#out + 1] = ("boundary @disp=%s kind=%s:"):format(
+                        tostring(disp_idx), tostring(seam and seam.kind))
+                    local bcols = {}
+                    for col in pairs(boundary) do bcols[#bcols + 1] = col end
+                    table.sort(bcols)
+                    for _, col in ipairs(bcols) do
+                        local l = boundary[col]
+                        local b = l.begin
+                        local function hs(ns)
+                            local t = {}
+                            for _, n in ipairs(ns or {}) do
+                                t[#t + 1] = ("%s@%s"):format(tostring(n.hash and n.hash:sub(1, 10)),
+                                    tostring(order_of(n)))
+                            end
+                            return table.concat(t, ",")
+                        end
+                        out[#out + 1] = ("  col=%d id=%s color=%s begin=%s@%s up[%s] dn[%s]"):format(
+                            col, tostring(l.id), tostring(l.color),
+                            tostring(b and b.hash and b.hash:sub(1, 10)), tostring(b and order_of(b)),
+                            b and hs(b.children) or "", b and hs(b.parents) or "")
+                    end
+                    -- Pinned-anchor tip resolution: whether each pinned ref resolves to a
+                    -- display node ABOVE the cutoff (so it seeds the header as a labelled
+                    -- head). If a tip is missing here, the header can't show that anchor.
+                    out[#out + 1] = ("pinned tips (seam_idx=%s):"):format(tostring(disp_idx))
+                    for name in pairs(effective_pinned()) do
+                        local ref = repo.refs[name]
+                        local c = ref and ref.commit
+                        local dn = c and dnode[c.hash]
+                        local oi = dn and order_of(dn)
+                        out[#out + 1] = ("  %s -> commit=%s dnode=%s order=%s above=%s"):format(
+                            name, tostring(c and c.hash), tostring(dn ~= nil),
+                            tostring(oi), tostring(oi ~= nil and disp_idx ~= nil and oi < disp_idx))
+                    end
+                    -- The header rows (tip-on-top): per row, each cell's lane ids +
+                    -- connectivity + whether it carries a node/head.
+                    out[#out + 1] = ("header rows = %d (overlay H=%s):"):format(#(hrows or {}), tostring(H))
+                    for ri, r in ipairs(hrows or {}) do
+                        local parts = {}
+                        for ci, cell in ipairs(r.columns or {}) do
+                            local ids = {}
+                            for _, s in ipairs(cell.lanes or {}) do
+                                local c = s.connectivity or {}
+                                ids[#ids + 1] = ("%s.col%s%s%s%s%s"):format(tostring(s.id), tostring(s.color),
+                                    c.up and "^" or "", c.down and "v" or "", c.left and "<" or "", c.right and ">" or "")
+                            end
+                            local node = ""
+                            if cell.has_commit and cell.commit then
+                                local nm = cell.commit.refs and cell.commit.refs[1] and cell.commit.refs[1].name
+                                local mv = lane_of(cell.commit)
+                                local hh = cell.commit.hash
+                                node = ("[%s hash=%s disp=%s gcol=%s mv=%s/%s]"):format(tostring(nm or "head"),
+                                    tostring(hh and hh:sub(1, 8)), tostring(hh and didx[hh]),
+                                    tostring(col_of(cell.commit)), tostring(mv and mv.id), tostring(mv and mv.color))
+                            end
+                            if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node) end
+                        end
+                        out[#out + 1] = ("  R%02d %s"):format(ri, table.concat(parts, "  "))
+                        -- The ACTUAL rendered glyphs + per-glyph highlight group, so the
+                        -- colour you SEE is captured alongside the structure.
+                        local ok, g = pcall(get_column_chars, opts, r.columns, false)
+                        if ok and g then
+                            local hl = {}
+                            for _, m in ipairs(g.highlight or {}) do
+                                hl[#hl + 1] = ("%d-%d:%s"):format(m.start_pos, m.end_pos, tostring(m.hl))
+                            end
+                            out[#out + 1] = ("      render=[%s] %s"):format(g.text or "", table.concat(hl, " "))
+                        end
+                    end
+                    -- The main-view display items around the seam, with their lane ids,
+                    -- so the boundary can be checked against the real topology.
+                    out[#out + 1] = "main display items (disp: parent_lanes | child_lanes  split/merge):"
+                    local lo = math.max(1, (disp_idx or w0disp or 2) - 2)
+                    local hi = math.min(#repo.display, (disp_idx or w0disp or 2) + (H or 2) + 1)
+                    for di = lo, hi do
+                        local it = repo.display[di]
+                        if it then
+                            local function ids(ls) local t = {}; for _, l in ipairs(ls or {}) do t[#t + 1] = tostring(l.id) end; return table.concat(t, ",") end
+                            out[#out + 1] = ("  d%d: P[%s] | C[%s] col=%s%s"):format(di,
+                                ids(it.parent_lanes), ids(it.child_lanes),
+                                tostring(it.commit and col_of(it.commit)),
+                                (it.split and " SPLIT" or "") .. (it.merge and " MERGE" or ""))
+                        end
+                    end
+                    local fh = io.open(vim.g.gitloom_pane_debug, "w")
+                    if fh then fh:write(table.concat(out, "\n") .. "\n"); fh:close() end
+                end)
+            end
+
+            mark_cutoff()   -- refresh the debug cutoff highlight (the `i` overlay)
+            update_footer() -- refresh the debug readout (cutoff lines) if `i` is on
         end
 
         update_panes = function()
             local ok, err = pcall(build_panes)
             if not ok then
-                close_footer() -- on any pane error, hide rather than leave a bad state
+                close_panes() -- on any pane error, hide rather than leave a bad state
                 err = tostring(err)
                 if err ~= last_pane_err then -- surface once per distinct error
                     last_pane_err = err
@@ -5466,7 +5914,7 @@ function M.open(folder, opts)
         vim.api.nvim_create_autocmd("WinClosed", {
             group = group,
             pattern = tostring(win),
-            callback = close_footer,
+            callback = close_panes,
         })
 
         -- No initial cone/refresh here: the fetch is async, so no commits are
@@ -5484,6 +5932,7 @@ M._internal = {
     bump_recent = bump_recent,
     ref_picker_items = ref_picker_items,
     decoration_texts = decoration_texts,
+    pane_labels = pane_labels,
     move_selection = move_selection,
     ref_decoration_index = ref_decoration_index,
     display_item = display_item,
@@ -5512,6 +5961,7 @@ M._internal = {
     mark_reachable = mark_reachable,
     build_graph = build_graph,
     get_column_chars = get_column_chars,
+    top_lane = top_lane,
     passthrough_columns = passthrough_columns,
     owners_from_refs = owners_from_refs,
     next_mode = next_mode,

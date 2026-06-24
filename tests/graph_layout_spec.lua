@@ -18,6 +18,39 @@
 --- silently change. See specification.md §5.2 and CLAUDE.md.
 
 local h = require("tests.graph_helpers")
+local top_lane = require("gitloom.graph")._internal.top_lane
+
+describe("top_lane colour priority (§5, §6.2)", function()
+    local function seg(id, conn) return { id = id, color = id, connectivity = conn } end
+
+    it("a node-less fork bus prefers the horizontal bus over an up-branch stub", function()
+        -- A fork-bus cell where a child branch leaves upward: bus (id 1, the fork source)
+        -- + the child's up stub (id 3). The cell must read as the BUS so the horizontal
+        -- line stays one colour — the child colour begins in the row above. (The header
+        -- "dev branch line alternates id 1 / id 3" regression.)
+        local segs = { seg(1, { left = true, right = true }), seg(3, { up = true }) }
+        assert.equals(1, top_lane(segs, false, false).id)
+        -- The bus END (the `┘` turn at the child's column): left-only + up stub — exactly
+        -- the live R03 col3 case. Must still read as the bus (id 1), not the stub (id 3).
+        local end_segs = { seg(1, { left = true }), seg(3, { up = true }) }
+        assert.equals(1, top_lane(end_segs, false, false).id)
+    end)
+
+    it("a NODE cell keeps its own lane, not a crossing arm", function()
+        -- e.g. a root ◉ with a merge arm turning in: the glyph must read in the node's
+        -- own lane (the up stub, id 1), not the arm (id 6) — the snapshot regression.
+        local segs = { seg(1, { up = true }), seg(6, { right = true }) }
+        assert.equals(1, top_lane(segs, false, true).id)
+    end)
+
+    it("a genuine crossing keeps the passing through-lane's colour", function()
+        -- A through vertical (up+down, id 5) crossed by a horizontal arm (id 2): the
+        -- passing lane wins on BOTH node-less and node cells (continuity).
+        local segs = { seg(2, { left = true, right = true }), seg(5, { up = true, down = true }) }
+        assert.equals(5, top_lane(segs, false, false).id)
+        assert.equals(5, top_lane(segs, false, true).id)
+    end)
+end)
 
 -- merge_style variants exercised for every fixture.
 local STYLES = {

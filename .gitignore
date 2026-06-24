@@ -1,3 +1,4 @@
 *.swp
 *.lua.luarc.json
 .luals-log/
+.claude/

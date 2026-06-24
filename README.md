@@ -110,7 +110,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Refresh the working-tree state — re-read the uncommitted changes (`◌` nodes) and rebuild them |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
-| `F` | Toggle the off-screen context footer (the summary band below the graph) |
+| `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `?` | Float listing all keybindings |
@@ -167,13 +167,23 @@ The selected path is highlighted and everything else dims (reusing the
 reachability emphasis). The footer shows a `SELECT N` indicator. See
 [specification.md §13](specification.md).
 
-**Context footer.** Below the graph, a compact summary band continues the lanes
-that are active at the bottom of the view down to where they merge into the main
-branch and reach the root — so you keep sight of how off-screen-older history
-connects without scrolling. It is drawn topology-only (dashed lanes, solid
-junctions, no commit text), with a marker for any pinned ref that falls below the
-cutoff. Toggle it with `F` (§6.2). The **header** counterpart (off-screen-newer)
-is not built yet.
+**Context panes.** Two compact summary bands flank the graph so you keep sight of
+how off-screen history connects without scrolling. Each shows **only** the lanes
+crossing its edge plus the pinned anchors — a minimal rebuilt summary, not the
+whole off-screen graph. The **footer** (below) continues the lanes active at the
+bottom of the view down to where they merge into the main branch and reach the
+root, with a marker for any pinned ref below the cutoff. The **header** (above)
+shows the **minimal** off-screen-newer picture: only how the pinned anchors relate to
+each other and to the lanes crossing the cutoff. Two crossing lanes that meet above
+the view draw a node-less junction where they converge; an anchor gets its own
+labelled row; a crossing lane that connects to nothing terminates at its own bare `◍`.
+An unpinned branch that forks off the trunk and reconnects to nothing is **not shown**
+— no stray feature heads. Every lane crossing the bottom edge always continues (so the
+bottom row lines up with the graph's top with no broken lanes), and the header
+vanishes when you scroll to the top. Each lane keeps **the same colour it has in the
+graph**, so branches stay distinct, and isolated `◍` tips pack onto as few rows as
+possible (the pinned anchors keep their own labelled rows). Both are topology-only
+(dashed lanes, solid junctions, no commit text). Toggle them with `F` (§6.2).
 
 The footer shows the active merge mode, the ref label mode, a `N collapsed,
 M hidden` summary when any branch modes are set, and whether the graph is

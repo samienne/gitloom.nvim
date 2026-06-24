@@ -110,12 +110,16 @@ Consequences for the build:
 What remains for the broader target is **ordering ownership** (move ordering
 out of `git log` into the builder), still future.
 
-### Context panes (header / footer) — in progress
+### Context panes (header / footer)
 
-The header/footer context panes (spec §6.2) summarise off-screen topology by
-continuing the lanes active at the cutoff. The **footer is built**; the header is
-not yet wired. `pane.lua` is the pure, window-agnostic core; `update_panes` in
-graph.lua does the windowing.
+The header/footer context panes (spec §6.2) summarise off-screen topology folded
+onto the pinned anchors. **Both are built**, and both are **focused rebuilds** —
+each reconstructs a small sub-DAG of *only* the lanes crossing the cutoff (plus the
+pinned anchors), never the whole off-screen graph. The **footer** continues the
+seam lanes **down** their first-parent chains to the roots and lays them out with
+`columns.layout`; the **header** mirrors it **up** and lays the result out with a
+bespoke seam-up grid. `pane.lua` is the pure, window-agnostic core; `update_panes`
+in graph.lua does the windowing.
 
 **The footer pipeline** (`update_panes`, gated by `opts.panes`), per scroll:
 
@@ -144,15 +148,78 @@ graph.lua does the windowing.
    point and is capped (always keeping the root, `pane.cap`).
 
 `pane.continue` errors are contained (`update_panes` pcalls the build and hides
-the footer on failure); `scrolloff` is forced to 0 so `<C-e>`/`<C-y>` and the
+both panes on failure); `scrolloff` is forced to 0 so `<C-e>`/`<C-y>` and the
 scroll-driven refresh work.
 
-**Header (`pane.header`, tested but unwired).** Its seam is at the sweep *end*
-(it sweeps newer commits *down to* the seam), so a start-seed can't pin it: it
-lays out **transposed and seam-first** (reverse to oldest-first, swap edges, seed
-the seam via `columns.layout`'s optional `seed` arg, then `flip` vertically back
-to display order). Wiring it (plus arrow-caps for terminators and moving the
-rebuild off the cone-debounce path) is the remaining work.
+**The header pipeline** — the **minimal connecting subgraph** (a focused rebuild,
+*not* a reduction of the whole off-screen graph): only how the pinned anchors relate
+to each other and to the lanes crossing the cutoff:
+
+1. **Seam.** `boundary_at(target, up=true)` reads the **up-lanes** of the rendered
+   line at the seam screen row and its *display* index. **Virtual lines matter:**
+   when the seam item is a fork its children diverge on its **split** (virtual) line,
+   so for the header the boundary is read from `item.split` (the divergence), not the
+   single mainline lane on the columns line — otherwise a fork sitting right below
+   the viewport hides every branch that forks from it.
+2. **Rebuild the focused sub-DAG** — `pane.continue_up(boundary, tips, anchors,
+   order_of, seam)` runs a three-pass reachability over the **display** DAG (the
+   projected nodes, so `order_of` is always defined), up-only, bounded above the seam:
+   - **Pass 1 — `seed_reach`.** Each boundary column is a distinct **seed** (a fork
+     seam yields ≥2 columns on one commit — different lanes, so seed identity is the
+     *column*, not the begin hash); each pinned tip is a seed too. From every seed walk
+     **up** via `children`, recording the **set** of seed-ids reaching each node. A node
+     reached by **≥2 distinct seeds** is a **confluence**.
+   - **Pass 2 — `useful`.** From every confluence and every pinned tip walk **down** via
+     `parents`, marking the above-seam ancestors that lead up to one of them. (Seeding
+     pinned tips keeps a lone anchor's full spine; over-marking is harmless because the
+     induction is seed-driven.)
+   - **Pass 3 — induce.** Walk up from each *useful* seed keeping only *useful*
+     children (first-parent child first, for colour-pivot continuity). A seed that is
+     **not** useful becomes a **seam head** (a childless node → it terminates at the
+     seam). The induced node's restricted `children`/`parents` then drive `condense`'s
+     role: ≥2 kept children → junction, 1 → collapse, 0 → head (so a confluence whose
+     merged output dead-ends caps with a head). Each pinned anchor is then connected
+     **down** its own first-parent spine to the already-seeded part (induct for *edges
+     only* — the spine nodes are not re-walked up, or the up-walk would pull in every
+     collapsed fork off the trunk and balloon the header). When both boundary lanes begin
+     at one merge sitting at the cutoff, the up-walk's single first-parent chain can
+     dead-end at a collapsed node before it reaches an anchor on a folded branch; without
+     this step the anchor is inducted but **disconnected**, and `M.header` renders it as a
+     lone head on a fresh lane id, severed from its crossing lane (the merge-at-cutoff
+     bug — HEAD jumped to id 39). Every spliced spine node is `useful`, so `condense`
+     collapses the linear run back to one edge and the header does not grow.
+
+   So an unpinned branch that forks off the trunk and reconnects to nothing is
+   **pruned** (the stray-fork regression — no stray feature heads); a branch that only merges
+   back condenses to a node-less junction. **Invariant:** every above-seam boundary
+   `begin` ends up in the node set handed to `condense` (a useful node or a seam head),
+   so no seam lane is dropped and the header's bottom row matches the main view's top
+   edge. `condense(up=true)` then splices linear runs.
+3. **Direct seam-up grid.** `pane.header(items, boundary, node_of, lane_of)` lays
+   the condensed sub-DAG out by a bespoke **bottom-up sweep** — no `columns.layout`,
+   no transpose. `active` (col → lane → the node it ascends toward) is seeded from the
+   boundary, so the bottom row *is* the seam. Processing nodes nearest-seam first,
+   each emits one line: still-active lanes carry up as bars, a head places a `◍`
+   (labelled for an anchor, bare otherwise), a junction draws a node-less crossing.
+   **Colour** comes from `lane_of(node)` — the node's main-view lane colour (graph.lua
+   builds `lane_main[hash]` from each display item's `parent_lanes[1]`), so the pane
+   matches the graph and forks are distinct. The **pivot continuation keeps the
+   pivot's colour**; each *extra* fork child takes its own, and fork children take
+   fresh columns (**columns are never reused**) so colour continuity is exact. Lines
+   are collected bottom-up then reversed (tip on top), and `pack_heads` merges
+   consecutive **unpinned-head** rows (`overlay_rows`, the §10.4 marker rule) so bare
+   `◍` heads share rows — pinned-anchor and junction rows break a run and keep their
+   own line.
+4. **Size + render.** `converge_header` does a **min-fit search**: start at
+   `H = (#pinned tips above) + 1`, grow until the rows + the seam separator fit; cap
+   at `HEADER_MAX` (8), then clip with a `+N above` indicator (`pane.cap(...,
+   keep_first=true)`). The header **vanishes** when the viewport is already at the
+   top (`w0` display index ≤ 1). Rendered topology-only, dashed, tip on top, the
+   seam separator at the **bottom** (padded so the seam butts the main view).
+
+Full cross-level head packing (lifting *all* unpinned heads onto a single row, vs.
+today's consecutive packing) and moving the rebuild off the cone-debounce path are
+the remaining refinements.
 
 ## Layers
 
@@ -162,7 +229,7 @@ lua/gitloom/
   graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
   view.lua       View builder: commit DAG + view state → OrderItem graph (spec §10)
   columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
-  pane.lua       Context-pane layout core: boundary extraction + footer builder (spec §6.2)
+  pane.lua       Context-pane layout core: boundary extraction + focused-rebuild footer (continue/condense/footer) and header (continue_up/condense/seam-up grid) builders (spec §6.2)
   color.lua      OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua   Reusable virtualized list widget (snacks.win)
 ```

@@ -1,12 +1,20 @@
 --- Context panes (spec §6.2): the pure layout core for the header/footer windows
 --- that summarise off-screen topology folded onto the pinned anchors (§10.6).
 ---
---- A pane is laid out by `columns.layout` over its own **anchors-only**
---- projection (built by `view.project` with the anchor owner set, *no* user mode
---- overrides — see ARCHITECTURE.md "Context panes"), seeded at the **seam** with
---- the main view's boundary lanes so the two meet without a jog. This module is
---- git-agnostic and window-agnostic — it consumes already-projected OrderItems
---- and a boundary map and returns laid-out rows, so it is unit-testable without
+--- Both panes are **focused rebuilds** — they reconstruct a small sub-DAG of just
+--- the lanes crossing the cutoff (plus the pinned anchors), never the whole graph:
+---   * **Footer** (`continue` → `condense` → `footer`): continues each boundary
+---     lane **down** its first-parent chain to a root, condenses, and lays it out
+---     with `columns.layout` seeded at the **seam** so the two meet without a jog.
+---   * **Header** (`continue_up` → `condense(up)` → `header`): continues each
+---     boundary lane **up** (the mirror) to where it merges into a pinned anchor (a
+---     node-less junction) or ends at its own `◍` head; pinned anchors are drawn as
+---     labelled spines. It is laid out by a bespoke **bottom-up grid builder**
+---     (`header`) that starts from the boundary (so the seam matches by
+---     construction) and walks up — no `columns.layout`, no transpose.
+---
+--- This module is git-agnostic and window-agnostic — it consumes already-projected
+--- OrderItems and a boundary map and returns rows, so it is unit-testable without
 --- snacks. Window placement, sizing, and the async rebuild live in graph.lua.
 local M = {}
 
@@ -23,47 +31,98 @@ local columns = require("gitloom.columns")
 ---
 --- `node_of_hash` maps **every** original commit hash — including a spliced run's
 --- members — to the condensed node that represents it: a kept node maps its own
---- hashes; a spliced node maps to the next kept node toward the **root** (so a
---- seam lane descending through the run terminates at the right node).
+--- hashes; a spliced node maps to the next kept node toward the kept end (the
+--- **root** down, the **tip** up), so a seam lane running through the run
+--- terminates at the right node.
 --- `anchor_names` (optional): only refs whose name is in this set count as
 --- markers — non-anchor refs (tags, unpinned branches) on intermediate commits
 --- are ignored, so a run carrying only those still splices away. When omitted,
 --- any ref keeps a node.
----@param nodes table[]  -- DisplayNodes (projection .nodes), newest-first
+---
+--- `up` flips the kept ends for the **header**: a footer condenses toward the
+--- **root** (keep roots, splice bare tips); a header condenses toward the **tip**
+--- (keep tips, splice the bare seam-adjacent nodes whose real parent is below the
+--- seam). So `transparent` and the `node_of` follow-direction swap.
+---@param nodes table[]  -- DisplayNodes, newest-first
 ---@param anchor_names table<string, boolean>?  -- ref names that count as markers
+---@param up boolean?  -- header orientation (keep tips, splice seam pass-throughs)
 ---@return table  -- { items = OrderItem[], node_of_hash = table<string, table> }
-function M.condense(nodes, anchor_names)
-    -- Refs on a node that count as markers (anchor refs, or all when unfiltered).
+function M.condense(nodes, anchor_names, up)
+    -- Refs on a node that count as markers (anchor refs, or all when unfiltered). The
+    -- HEAD marker (kind == "head") is ALWAYS kept: the pinned set is keyed by the BRANCH
+    -- name HEAD points at (repo.head), not "HEAD", so filtering by anchor_names alone
+    -- would drop HEAD and leave only the branch sharing its commit — the header must show
+    -- HEAD, not just that branch.
     local function marker_refs(n)
         if not anchor_names then return n.refs or {} end
         local out = {}
         for _, r in ipairs(n.refs or {}) do
-            if r.name and anchor_names[r.name] then out[#out + 1] = r end
+            if (r.name and anchor_names[r.name]) or r.kind == "head" then out[#out + 1] = r end
         end
         return out
     end
-    -- A node splices away when it is a pass-through with no anchor marker: one
-    -- parent and **at most one** child. So a lane's linear stretch AND its bare
-    -- entry **tip** (one parent, no children — the lane just continuing from the
-    -- seam) both contract to an edge; only a **root** (no parent), a real
-    -- **fork/merge** (≥2 edges, where lanes meet), and an **anchor-ref** head are
-    -- kept. (Keeping tips would render them with the root glyph — the spurious
-    -- "second root".)
-    local function transparent(n)
-        return #marker_refs(n) == 0 and #n.parents == 1 and #n.children <= 1
+    -- TRANSPARENT (spliced) nodes, by **fixpoint**. A node with no anchor marker
+    -- splices when — counting only the DISTINCT SURVIVING nodes it connects to (skipping
+    -- other spliced runs) — it is a pure pass-through: not a kept **endpoint** (the
+    -- header keeps a tip with no child; the footer keeps a root with no parent) and not
+    -- a true fork/merge (≥2 distinct survivors on a side). Splicing one node can make a
+    -- **reconverging** neighbour linear too — a diamond with a linear side (a fork whose
+    -- two branches immediately rejoin) leaves a "false junction" of effective degree 1 —
+    -- so iterate until stable. Otherwise that node is kept but renders as a contentless
+    -- all-vertical row. (Original-degree splicing missed this — it never cascaded.)
+    local transp = {}
+    -- The distinct **terminals** reached from `n` along `field`, following spliced runs:
+    -- the first surviving node on each path, or — if a path dead-ends among spliced
+    -- nodes (a lane heading off to the seam) — that dead-end node. Counting terminals
+    -- (not just surviving nodes) is what distinguishes a real merge of two distinct seam
+    -- lanes (2 terminals → a junction) from a **bubble** whose two sides reconverge to
+    -- the same node (1 terminal → splice it away).
+    local function reach(n, field)
+        local seen, out, walked = {}, {}, {}
+        local function walk(m)
+            if walked[m] then return end
+            walked[m] = true
+            local nbrs = m[field] or {}
+            if #nbrs == 0 then -- dead end among spliced nodes: m is the terminal
+                if not seen[m] then seen[m] = true; out[#out + 1] = m end
+                return
+            end
+            for _, x in ipairs(nbrs) do
+                if transp[x] then walk(x)
+                elseif not seen[x] then seen[x] = true; out[#out + 1] = x end
+            end
+        end
+        for _, x in ipairs(n[field] or {}) do
+            if transp[x] then walk(x)
+            elseif not seen[x] then seen[x] = true; out[#out + 1] = x end
+        end
+        return out
+    end
+    local changed = true
+    while changed do
+        changed = false
+        for _, n in ipairs(nodes) do
+            if not transp[n] and #marker_refs(n) == 0 then
+                local kc, kp = #reach(n, "children"), #reach(n, "parents")
+                -- Kept endpoints: the header keeps a tip (no child), the footer a root
+                -- (no parent). A true junction has ≥2 distinct terminals on a side.
+                local keep = (up and kc == 0) or (not up and kp == 0) or kc >= 2 or kp >= 2
+                if not keep then transp[n] = true; changed = true end
+            end
+        end
     end
     -- The next kept node along a chain of transparent nodes, via `field`
-    -- ("parents" toward the root, "children" toward the seam).
+    -- ("parents" toward the root, "children" toward the seam/tip).
     local function follow(start, field)
         local cur = start
-        while cur and transparent(cur) do cur = cur[field][1] end
+        while cur and transp[cur] do cur = cur[field][1] end
         return cur
     end
 
     -- A copy per kept node (inherits the original's fields via metatable).
     local copy = {}
     for _, n in ipairs(nodes) do
-        if not transparent(n) then
+        if not transp[n] then
             copy[n] = setmetatable({
                 hash = n.hash, parents = {}, children = {},
                 refs = marker_refs(n), region = n.region, tip = n.tip,
@@ -77,13 +136,13 @@ function M.condense(nodes, anchor_names)
         if c then
             local pseen, cseen = {}, {}
             for _, p in ipairs(n.parents) do
-                local k = transparent(p) and follow(p, "parents") or p
+                local k = transp[p] and follow(p, "parents") or p
                 if k and copy[k] and not pseen[k] then
                     pseen[k] = true; c.parents[#c.parents + 1] = copy[k]
                 end
             end
             for _, ch in ipairs(n.children) do
-                local k = transparent(ch) and follow(ch, "children") or ch
+                local k = transp[ch] and follow(ch, "children") or ch
                 if k and copy[k] and not cseen[k] then
                     cseen[k] = true; c.children[#c.children + 1] = copy[k]
                 end
@@ -91,17 +150,18 @@ function M.condense(nodes, anchor_names)
         end
     end
 
-    -- Rendering role per kept node, from its anchor refs and its **original**
-    -- degree (not the post-splice degree — a convergence keeps its junction role
-    -- even after a tip child splices away, so it never decays into a stray node):
-    -- an anchor-ref head is a `◍` marker; a fork/merge is a node-less junction
-    -- (just the join glyph); a root is a real node.
+    -- Rendering role per kept node, from its anchor refs and its **terminal** degree:
+    -- an anchor-ref head is a `◍` marker; a fork/merge reaching ≥2 distinct terminals on
+    -- a side is a node-less junction; otherwise a plain node. Terminals (not the
+    -- re-pointed kept degree) are used because a junction's branches may run off to the
+    -- **seam** — distinct boundary lanes with no kept node of their own — which still
+    -- make it a real merge (`M.header` wires those lanes in from the boundary).
     for _, n in ipairs(nodes) do
         local c = copy[n]
         if c then
             if #c.refs > 0 then
                 c.collapsed, c.junction = true, false
-            elseif #n.parents >= 2 or #n.children >= 2 then
+            elseif #reach(n, "parents") >= 2 or #reach(n, "children") >= 2 then
                 c.collapsed, c.junction = false, true
             else
                 c.collapsed, c.junction = false, false
@@ -110,7 +170,8 @@ function M.condense(nodes, anchor_names)
     end
 
     -- node_of: kept nodes map their own hashes; a spliced node maps to the next
-    -- kept node toward the root.
+    -- kept node toward the kept end — the **root** (down) or the **tip** (up).
+    local toward = up and "children" or "parents"
     local node_of = {}
     local function map_to(n, target)
         if not target then return end
@@ -121,7 +182,7 @@ function M.condense(nodes, anchor_names)
         if copy[n] then
             map_to(n, copy[n])
         else
-            local k = follow(n.parents[1], "parents")
+            local k = follow(n[toward][1], toward)
             map_to(n, k and copy[k])
         end
     end
@@ -195,33 +256,105 @@ function M.continue(boundary, anchor_names, extra, order_of)
     return M.condense(nodes, anchor_names)
 end
 
---- Cap a footer's rows to `max` while **always keeping the root** (the last row).
---- Rows are newest-first (seam at the top, root at the bottom): keep the
---- seam-nearest `max-1` rows and the final root row. (When over the cap the
---- middle is elided — a deliberate gap — so the root stays visible, §6.2.)
+--- Cap a pane's rows to `max` (spec §6.2). A **header** (`keep_first` on) runs
+--- tip→seam (seam at the **bottom**): keep the seam-continuous **bottom** `max` rows
+--- and elide the far **tips** into a `+N above` marker. Keeping a contiguous
+--- seam-adjacent slice preserves lane **continuity** — every lane runs unbroken from
+--- the seam up to the cap, where it exits into the `+N` marker (one clean boundary).
+--- (Eliding the *middle* instead — to keep both the tips and the seam — would tear
+--- every lane in two at the gap: no head, no junction, a dangling stub. That is the
+--- continuity bug this avoids.) A **footer** (`keep_first` off) runs seam→root (seam
+--- at the top): it keeps the seam-nearest rows and the final **root** (it is small
+--- and the root anchors it). Returns the kept rows and the number elided.
+--- A capped **header** also reports the **names of the pinned anchors it elided** (the
+--- tips it dropped), so the `+N above` marker can name them — the off-screen anchors stay
+--- visible-by-name even when the header can't draw their ◍ heads (spec §6.2). Order is
+--- newest-first (top of the elided slice), de-duplicated.
 ---@param rows table[]
 ---@param max integer
----@return table[]
-function M.cap(rows, max)
-    if #rows <= max then return rows end
-    local out = {}
-    for i = 1, max - 1 do out[i] = rows[i] end
-    out[max] = rows[#rows] -- the root, always
-    return out
+---@param keep_first boolean?  -- header orientation (seam at the bottom)
+---@return table[] kept, integer elided, string[] elided_anchors
+function M.cap(rows, max, keep_first)
+    if #rows <= max then return rows, 0, {} end
+    local out, names, seen = {}, {}, {}
+    if keep_first then
+        -- The contiguous bottom slice ending at the seam — continuous by construction.
+        for i = 1, max do out[i] = rows[#rows - max + i] end
+        -- The elided TOP rows are the far tips; surface any pinned anchor labels there.
+        -- One name per anchor row, preferring the HEAD marker over a branch that merely
+        -- shares the commit (so the anchor reads as HEAD, not e.g. the branch it points at).
+        for i = 1, #rows - max do
+            local r = rows[i]
+            if r.pinned and r.commit and r.commit.refs then
+                local pick
+                for _, rf in ipairs(r.commit.refs) do
+                    if rf.kind == "head" then pick = rf.name; break end
+                end
+                pick = pick or (r.commit.refs[1] and r.commit.refs[1].name)
+                if pick and not seen[pick] then seen[pick] = true; names[#names + 1] = pick end
+            end
+        end
+    else
+        for i = 1, max - 1 do out[i] = rows[i] end
+        out[max] = rows[#rows] -- the root, always
+    end
+    return out, #rows - max, names
 end
 
---- Every lane flowing *down* out of a single rendered line (a commit's columns
+--- The header **seam** (spec §6.2): which rendered line is the cutoff for an overlay
+--- that should cover at least `cover` screen rows, given the display `items` and the
+--- top visible one (`top`, whose split line is scrolled off above the viewport).
+---
+--- A commit renders as a block of `[split?] columns [merge?]` screen rows. The overlay
+--- covers **whole commit blocks** — it never splits a commit across the seam — so the
+--- cutoff rounds **up** to the top of the first commit whose block lies entirely below
+--- the covered region. A covered commit's trailing **merge** line is part of it, so it
+--- is covered too (the "+1 padding" a naive screen-row cutoff left dangling, reading
+--- the covered commit's columns line instead of the visible row below it).
+---
+--- Pure — no `screenpos` — so the cutoff is **unit-testable** (the live glue only
+--- supplies `top` via `line('w0')` and the per-item height). `height_of(item)` gives a
+--- commit's columns rows (default 1; the dual label mode is 2).
+---@param items table[]            -- the display OrderItems (with `.split`/`.merge`)
+---@param top integer              -- index of the top visible item (its split is off-screen)
+---@param cover integer            -- the overlay's requested screen-row budget
+---@param height_of (fun(item: table): integer)?  -- a commit's columns rows (default 1)
+---@return table?  -- { item, kind = "split"|"columns", idx, cover } or nil past the end
+function M.header_seam(items, top, cover, height_of)
+    height_of = height_of or function() return 1 end
+    local row = 0
+    for i = top, #items do
+        if row >= cover then
+            local it = items[i]
+            return {
+                item = it,
+                kind = (i > top and it.split) and "split" or "columns",
+                idx = i,
+                cover = row, -- whole commit blocks covered (≥ the requested budget)
+            }
+        end
+        local it = items[i]
+        row = row + ((i > top and it.split) and 1 or 0) + height_of(it) + (it.merge and 1 or 0)
+    end
+    return nil
+end
+
+--- Every lane crossing one edge of a single rendered line (a commit's columns
 --- line, or a split/merge fan line), as `col → Lane`. This is the seam primitive:
---- the footer seeds with the down-lanes of whichever rendered line sits at the
---- cutoff — including a split/merge virtual line, which has no buffer line of its
---- own.
+--- a pane seeds with the lanes of whichever rendered line sits at the cutoff —
+--- including a split/merge virtual line, which has no buffer line of its own.
+--- The default reads the **bottom** edge (lanes flowing *down* — for a footer
+--- below the view); `up` reads the **top** edge (lanes flowing *up* — for a
+--- header above it).
 ---@param line table[]|nil  -- a rendered line (GraphColumn[])
+---@param up boolean?  -- read the top (up) edge instead of the bottom
 ---@return table<integer, table>  -- col → { id, color, parent, begin }
-function M.boundary_of(line)
+function M.boundary_of(line, up)
+    local dir = up and "up" or "down"
     local out = {}
     for col, cell in ipairs(line or {}) do
         for _, s in ipairs(cell.lanes or {}) do
-            if s.connectivity.down then
+            if s.connectivity[dir] then
                 out[col] = { id = s.id, color = s.color, parent = s.parent,
                     begin = s.begin, highlighted = false }
             end
@@ -321,120 +454,774 @@ function M.footer(opts, pane_items, boundary, node_of)
     return { rows = columns.layout(opts, pane_items, seed), terminate = term }
 end
 
---- Transpose: shallow proxy items whose parent/child edges are **swapped** and
---- restricted to the item set (a proxy `__index`es the original for refs/flags).
---- Laying the transpose out newest-first is laying the original out oldest-first,
---- which is how the header sweeps its seam (its sweep end) first. Returns the
---- proxy items (in input order) and an original-hash → proxy map.
----@param items table[]
----@return table[] titems, table<string, table> proxy
-local function transpose(items)
-    local inset, proxy = {}, {}
-    for _, it in ipairs(items) do inset[it.commit.hash] = true end
-    for _, it in ipairs(items) do
-        local c = it.commit
-        proxy[c.hash] = setmetatable({ hash = c.hash, parents = {}, children = {} }, { __index = c })
+--- Build the **minimal connecting sub-DAG** for the header (spec §6.2): the smallest
+--- graph that shows how the **pinned anchors** relate to each other and to the lanes
+--- **crossing the cutoff** (the "seeds"). A lane is drawn only where it connects two
+--- such endpoints; an unrelated crossing lane terminates immediately at the seam with
+--- a head, so no irrelevant branch heads leak in. Up-only (toward children/newer) over
+--- the **display** DAG (the projected DisplayNodes the main view shows — so the header
+--- summarises exactly what is on screen, and `order_of` is always defined), bounded
+--- above the seam by `order_of < seam_idx`.
+---
+--- Three passes:
+---   1. **seed_reach** — each boundary column is a distinct seed (a fork seam yields
+---      ≥2 columns; they are different lanes, so seed identity is the *column*, not the
+---      begin hash), plus each pinned tip. From every seed walk **up** via `children`,
+---      recording the set of seed-ids reaching each node. A node reached by **≥2
+---      distinct seeds** is a **confluence** (two seeds converge there going up).
+---   2. **useful** — from every confluence and every pinned tip walk **down** via
+---      `parents`, marking the above-seam ancestors `useful` (= "leads up to a
+---      confluence or an anchor"). Seeding the pinned tips is what keeps a lone
+---      anchor's full spine visible; over-marking is harmless because the induction
+---      below is seed-driven.
+---   3. **induce** — walk up from each *useful* seed keeping only *useful* children
+---      (first-parent child first, so the pivot keeps the branch colour). A seed that
+---      is **not** useful becomes a **seam head** (a childless node → it terminates at
+---      the seam). The induced node's restricted children/parents drive `condense`'s
+---      role: ≥2 kept children → junction, 1 → collapse (spliced away), 0 → head — so a
+---      confluence whose merged output dead-ends caps with a head (the merge is shown,
+---      the dangling continuation is not).
+---
+--- **Invariant:** every above-seam boundary `begin` ends up in the node set handed to
+--- `condense` (a useful node or a seam head), so no seam lane is ever dropped and the
+--- header's bottom row always matches the main view's top edge. Then `condense(up)`.
+---@param boundary table<integer, table>  -- col → lane with `.begin` (the DisplayNode above)
+---@param tips table[]  -- pinned anchor tip DisplayNodes above the seam
+---@param anchor_names table<string, boolean>?
+---@param order_of (fun(node: table): integer|nil)?  -- node → index (newer = smaller)
+---@param seam_idx integer  -- only nodes with a smaller index are above the seam
+---@return table
+function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
+    local function above(n)
+        local i = n and order_of and order_of(n)
+        return i ~= nil and i < seam_idx
     end
-    for _, it in ipairs(items) do
-        local c, p = it.commit, proxy[it.commit.hash]
+    local function pos_of(n) return (order_of and order_of(n)) or 0 end
+
+    -- Seeds — each boundary column is its own seed; plus each pinned anchor tip. A
+    -- seed's `begin`/tip node is its **floor**: always eligible even if it sits exactly
+    -- on the seam row (the crossing itself), while everything else must be strictly
+    -- above. (Fixes the seam off-by-one — a begin at `seam_idx` is still seeded.)
+    local seeds = {}
+    local seed_floor = {} -- hash → true
+    for col, lane in pairs(boundary) do
+        if lane.begin then
+            seeds[#seeds + 1] = { id = "c" .. tostring(col), node = lane.begin }
+            seed_floor[lane.begin.hash] = true
+        end
+    end
+    for ti, t in ipairs(tips) do
+        seeds[#seeds + 1] = { id = "t" .. tostring(ti), node = t, pinned = true }
+        seed_floor[t.hash] = true
+    end
+    local function in_region(n) return n and (seed_floor[n.hash] or above(n)) end
+
+    -- Pass 1 — seed_reach: multi-source walk UP via children. `reach[hash]` is the SET
+    -- of seed-ids that reach the node; ≥2 distinct ⇒ a confluence.
+    local reach = {}   -- hash → { seed-id → true }
+    for _, s in ipairs(seeds) do
+        local n0 = s.node
+        reach[n0.hash] = reach[n0.hash] or {}
+        reach[n0.hash][s.id] = true
+        local seen, stack = { [n0.hash] = true }, { n0 }
+        while #stack > 0 do
+            local c = stack[#stack]; stack[#stack] = nil
+            for _, ch in ipairs(c.children or {}) do
+                if above(ch) then
+                    local r = reach[ch.hash]; if not r then r = {}; reach[ch.hash] = r end
+                    r[s.id] = true
+                    if not seen[ch.hash] then seen[ch.hash] = true; stack[#stack + 1] = ch end
+                end
+            end
+        end
+    end
+    local function is_confluence(hash)
+        local r, n = reach[hash], 0
+        if not r then return false end
+        for _ in pairs(r) do n = n + 1; if n >= 2 then return true end end
+        return false
+    end
+
+    -- Pass 2 — useful: walk DOWN via parents from every confluence and every pinned
+    -- tip, marking the above-seam ancestors that lead up to one of them.
+    local useful, stack2 = {}, {}
+    local function mark_useful(n)
+        if n and not useful[n.hash] then useful[n.hash] = true; stack2[#stack2 + 1] = n end
+    end
+    local function walk_useful()
+        while #stack2 > 0 do
+            local c = stack2[#stack2]; stack2[#stack2] = nil
+            for _, p in ipairs(c.parents or {}) do
+                if in_region(p) then mark_useful(p) end
+            end
+        end
+    end
+    for _, s in ipairs(seeds) do
+        if s.pinned then mark_useful(s.node) end
+        local seen, stack = { [s.node.hash] = true }, { s.node }
+        while #stack > 0 do
+            local c = stack[#stack]; stack[#stack] = nil
+            if is_confluence(c.hash) then mark_useful(c) end
+            for _, ch in ipairs(c.children or {}) do
+                if above(ch) and not seen[ch.hash] then seen[ch.hash] = true; stack[#stack + 1] = ch end
+            end
+        end
+    end
+    walk_useful()
+
+    -- Pass 3 — induce: the kept commits are the useful seeds and the useful nodes
+    -- reachable UP from them (keeping only useful children).
+    local inducted, stack3 = {}, {}
+    local function induct(n)
+        if not inducted[n.hash] then inducted[n.hash] = n; stack3[#stack3 + 1] = n end
+    end
+    for _, s in ipairs(seeds) do
+        if useful[s.node.hash] then induct(s.node) end
+    end
+    -- Connect each pinned anchor DOWN to the already-seeded part along its own
+    -- first-parent spine. The up-walk below climbs ONE first-parent chain from each
+    -- boundary lane and can dead-end at a collapsed node before it reaches a pinned
+    -- anchor that sits on a folded branch — the anchor is then inducted (Pass 2 marks it
+    -- useful) but left DISCONNECTED, so M.header renders it as a lone head on a fresh id,
+    -- severed from its crossing lane (the merge-at-cutoff anchor-severing bug: HEAD jumps to id 39).
+    -- Walking the anchor's spine down until it meets a seed (or crosses the seam) keeps
+    -- the anchor on its real lane. Every spliced spine node is `useful`, so condense
+    -- collapses the linear run back to a single edge — the header does not grow.
+    for _, s in ipairs(seeds) do
+        if s.pinned and inducted[s.node.hash] then
+            local c = s.node
+            while c do
+                local p = c.parents and c.parents[1]
+                if not (p and above(p) and useful[p.hash]) then break end
+                local met = inducted[p.hash]
+                -- Induct for EDGES only — do NOT feed the spine node back into the up-walk
+                -- (stack3). Both boundary lanes start at the same merge, so every commit
+                -- above it is a confluence; letting the up-walk's else-branch process a
+                -- non-confluence spine node would pull in every collapsed fork off the
+                -- trunk as a stray head and balloon the header. The spine's only relevant
+                -- up-child is the next spine node, already inducted here.
+                inducted[p.hash] = inducted[p.hash] or p
+                if met then break end -- reached the connected part — done
+                c = p
+            end
+        end
+    end
+    while #stack3 > 0 do
+        local c = stack3[#stack3]; stack3[#stack3] = nil
+        -- Follow each lane's OWN continuation, not the whole shared future.
+        --   * Below a confluence, a lane goes up via its **first-parent child** (its
+        --     identity); the only other child worth taking is a **confluence** — a
+        --     commit where this lane MEETS another (a real merge of two tracked lanes).
+        --     Everything else (forks off to unrelated tips) is left out.
+        --   * AT/above a confluence the lanes have already merged into one, so follow a
+        --     SINGLE continuation (its first-parent child) up to the tip — the shared
+        --     future may itself fork into dozens of branches, but none of them relate to
+        --     the crossing lanes, so they are dropped. (This is the shared-future blowup:
+        --     every branch of the shared future was being pulled in as its own head.)
+        if is_confluence(c.hash) then
+            for _, ch in ipairs(c.children or {}) do
+                if useful[ch.hash] and above(ch) and ch.parents and ch.parents[1] == c then
+                    induct(ch); break -- one merged lane, not every fork above it
+                end
+            end
+        else
+            for _, ch in ipairs(c.children or {}) do
+                if useful[ch.hash] and above(ch)
+                    and ((ch.parents and ch.parents[1] == c) or is_confluence(ch.hash)) then
+                    induct(ch)
+                end
+            end
+        end
+    end
+
+    -- Build DisplayNodes with edges restricted to the inducted set (children
+    -- first-parent-first, for colour-pivot continuity in M.header).
+    local node = {}
+    local function ensure(n)
+        local m = node[n.hash]
+        if not m then
+            m = setmetatable({ hash = n.hash, refs = n.refs, parents = {}, children = {} },
+                { __index = n })
+            node[n.hash] = m
+        end
+        return m
+    end
+    for _, c in pairs(inducted) do ensure(c) end
+    for _, c in pairs(inducted) do
+        local m = node[c.hash]
+        local kids = {}
         for _, ch in ipairs(c.children or {}) do
-            if inset[ch.hash] then p.parents[#p.parents + 1] = proxy[ch.hash] end
+            if inducted[ch.hash] then kids[#kids + 1] = ch end
         end
-        for _, pa in ipairs(c.parents or {}) do
-            if inset[pa.hash] then p.children[#p.children + 1] = proxy[pa.hash] end
+        table.sort(kids, function(a, b)
+            local af = (a.parents and a.parents[1] == c) and 0 or 1
+            local bf = (b.parents and b.parents[1] == c) and 0 or 1
+            if af ~= bf then return af < bf end
+            return pos_of(a) < pos_of(b)
+        end)
+        for _, ch in ipairs(kids) do m.children[#m.children + 1] = node[ch.hash] end
+        for _, p in ipairs(c.parents or {}) do
+            if inducted[p.hash] then
+                m.parents[#m.parents + 1] = node[p.hash]
+            elseif not above(p) then
+                -- A SEAM parent (it crosses the cutoff, so it has no kept node of its own).
+                -- Keep a UNIQUE per-edge sentinel terminal so `condense` still counts this
+                -- node as a junction where ≥2 boundary lanes converge — e.g. a merge sitting
+                -- just above the cutoff whose two parents both cross the seam. A per-edge
+                -- sentinel (NOT the shared parent node) keeps two distinct crossing lanes
+                -- that happen to share a below-cutoff parent counting as TWO terminals.
+                -- Without it the node looks linear (its parents are gone), gets spliced, and
+                -- the whole connection up to the pinned anchors is dropped. Re-pointing
+                -- discards the sentinel (no kept copy); M.header wires the lane in from the
+                -- boundary.
+                m.parents[#m.parents + 1] = { seam = true }
+            end
         end
     end
-    local titems = {}
-    for _, it in ipairs(items) do
-        titems[#titems + 1] = { type = it.type, commit = proxy[it.commit.hash] }
+
+    -- Non-useful seeds terminate at the seam with a head (a childless node → a kept
+    -- tip → a bare ◍ on the seam row). A pinned but disconnected anchor is always
+    -- useful via Pass 2, so it lands in the inducted set as a lone labelled head.
+    for _, s in ipairs(seeds) do
+        if not node[s.node.hash] then ensure(s.node) end
     end
-    return titems, proxy
+
+    -- Newest-first (children before parents — the topo order condense wants).
+    local nodes = {}
+    for _, m in pairs(node) do nodes[#nodes + 1] = m end
+    table.sort(nodes, function(a, b) return pos_of(a) < pos_of(b) end)
+    return M.condense(nodes, anchor_names, true)
 end
 
-local function flip_conn(c)
-    return { up = c.down, down = c.up, left = c.left, right = c.right }
+--- Connectivity literal → a full `{up,down,left,right}` table (Phase-2 cell shape).
+local function conn(t)
+    return { up = t.up or false, down = t.down or false, left = t.left or false, right = t.right or false }
 end
 
---- Vertical mirror of one rendered line: swap up↔down on every segment and the
---- cell union, keeping columns and node fields.
-local function flip_line(line)
-    if not line then return nil end
-    local out = {}
-    for i, cell in ipairs(line) do
-        local segs = {}
-        for _, s in ipairs(cell.lanes or {}) do
-            local ns = {}
-            for k, v in pairs(s) do ns[k] = v end
-            ns.connectivity = flip_conn(s.connectivity)
-            segs[#segs + 1] = ns
-        end
-        local nc = {}
-        for k, v in pairs(cell) do nc[k] = v end
-        nc.connectivity = flip_conn(cell.connectivity)
-        nc.lanes = segs
-        out[i] = nc
+--- The segment a NODE (◍/junction) sits on — its own **vertical** lane, preferred
+--- over a passing horizontal arm (a merge arm crossing the column), so the node is
+--- coloured by its branch, not by a lane that merely turns through it. Falls back to
+--- the first segment.
+local function node_seg(segs)
+    local best
+    for _, s in ipairs(segs) do
+        local c = s.connectivity
+        if (c.up or c.down) and not (c.left or c.right) then return s end
+        best = best or s
     end
-    return out
+    return best
 end
 
---- Flip a laid-out sweep vertically: reverse the rows and, per row, swap up↔down,
---- swap the split (above) and merge (below) lines, and swap parent/child lanes.
---- Turns the transposed seam-first sweep back into header display order (tip at
---- top, seam at bottom).
----@param rows table[]
+--- The union of a cell's segments' connectivity (the flat glyph connectivity).
+local function union(segs)
+    local u = { up = false, down = false, left = false, right = false }
+    for _, s in ipairs(segs) do
+        local c = s.connectivity
+        u.up = u.up or c.up; u.down = u.down or c.down
+        u.left = u.left or c.left; u.right = u.right or c.right
+    end
+    return u
+end
+
+--- Turn a `col → Segment[]` line into a `GraphColumn[]` (the shape Phase 2 /
+--- `get_column_chars` consumes). The vertical/passing segment is added **first** so
+--- the renderer colours a crossing cell by the bar (vertical colour continuity).
+---@param cells table<integer, table[]>
+---@param width integer
+---@param node_col integer?
+---@param node_commit table?
 ---@return table[]
-local function flip(rows)
+local function assemble(cells, width, node_col, node_commit)
     local out = {}
-    for i = #rows, 1, -1 do
-        local r = rows[i]
-        out[#out + 1] = {
-            type = r.type,
-            commit = r.commit,
-            columns = flip_line(r.columns),
-            split = flip_line(r.merge), -- below → above
-            merge = flip_line(r.split), -- above → below
-            parent_lanes = r.child_lanes,
-            child_lanes = r.parent_lanes,
+    for j = 1, width do
+        local segs = cells[j] or {}
+        -- A cell is coloured by the lane running THROUGH it vertically, not by a
+        -- horizontal arm that merely turns into it — so a lane keeps its own colour
+        -- across corners and crossings (the fork arm into dev's column was colouring
+        -- dev's corner in the parent's colour).
+        local prim = node_seg(segs)
+        out[j] = {
+            connectivity = union(segs),
+            lanes = segs,
+            has_commit = node_col == j,
+            commit = (node_col == j) and node_commit or nil,
+            id = prim and prim.id or nil,
+            color = prim and prim.color or nil,
         }
     end
     return out
 end
 
---- Build the **header** pane above the main view (spec §6.2). `header_items` is
---- the anchors-only projection of the off-screen-newer commits (newest-first, the
---- tips at the front); `boundary` is the main view's top seam (`boundary_above`).
+--- Vertically overlay a group of header rows (each `{ columns = GraphColumn[] }`,
+--- top-to-bottom) into one `GraphColumn[]`, or `nil` if any column is incompatible
+--- (≥2 nodes, ≥2 distinct lane ids, or an overlapping column carrying a turn). Same
+--- rule as graph.lua's `pack_markers`: `up` from the topmost occupant, `down` from
+--- the bottom one, horizontals only from a sole occupant. Used to pack several bare
+--- `◍` heads onto one line — a `◍` tip wins its column over a passing bar of the
+--- same lane (the lane simply ends one row lower, which a summary tolerates).
+---@param group table[]  -- rows { columns = GraphColumn[] }, top-to-bottom
+---@return table[]|nil
+local function overlay_rows(group)
+    local width = 0
+    for _, r in ipairs(group) do if #r.columns > width then width = #r.columns end end
+    local cols = {}
+    for c = 1, width do
+        local occ, node_cell, lane_id, seg = {}, nil, nil, nil
+        for _, r in ipairs(group) do
+            local cell = r.columns[c]
+            if cell and (cell.has_commit or (cell.lanes and #cell.lanes > 0)) then
+                occ[#occ + 1] = cell
+                if cell.has_commit then
+                    if node_cell then return nil end
+                    node_cell = cell
+                end
+                for _, s in ipairs(cell.lanes or {}) do
+                    seg = seg or s
+                    if lane_id == nil then lane_id = s.id elseif lane_id ~= s.id then return nil end
+                end
+            end
+        end
+        local has_h = false
+        for _, cell in ipairs(occ) do
+            local cc = cell.connectivity
+            if cc and (cc.left or cc.right) then has_h = true end
+        end
+        if #occ >= 2 and has_h then return nil end
+        local cn = { up = false, down = false, left = false, right = false }
+        if #occ >= 1 then
+            cn.up = occ[1].connectivity.up or false
+            cn.down = occ[#occ].connectivity.down or false
+            if #occ == 1 then
+                cn.left = occ[1].connectivity.left or false
+                cn.right = occ[1].connectivity.right or false
+            end
+        end
+        local lanes = {}
+        if seg then
+            lanes[1] = { id = seg.id, color = seg.color, connectivity = cn,
+                edges = seg.edges, begin = seg.begin, parent = seg.parent }
+        end
+        cols[c] = {
+            connectivity = cn, lanes = lanes,
+            has_commit = node_cell ~= nil,
+            commit = node_cell and node_cell.commit or nil,
+            id = seg and seg.id or nil, color = seg and seg.color or nil,
+        }
+    end
+    return cols
+end
+
+--- Pack consecutive **unpinned head** rows (`row.commit` set, `row.pinned` false)
+--- onto as few lines as possible (§6.2): only the pinned anchors keep their own
+--- line, every other `◍` head compacts. Pinned-anchor rows and node-less junction
+--- rows (`commit == nil`) break a run and are never merged.
+---@param rows table[]
+---@return table[]
+local function pack_heads(rows)
+    local out, i = {}, 1
+    while i <= #rows do
+        if rows[i].commit == nil or rows[i].pinned then
+            out[#out + 1] = rows[i]; i = i + 1
+        else
+            local group, merged, j = { rows[i] }, rows[i].columns, i + 1
+            while j <= #rows and rows[j].commit ~= nil and not rows[j].pinned do
+                local cand = vim.list_extend({}, group)
+                cand[#cand + 1] = rows[j]
+                local m = overlay_rows(cand)
+                if not m then break end
+                group, merged, j = cand, m, j + 1
+            end
+            out[#out + 1] = (#group == 1) and rows[i] or { columns = merged, commit = nil }
+            i = j
+        end
+    end
+    return out
+end
+
+--- Build the **header** pane above the main view (spec §6.2) by a bespoke
+--- **bottom-up grid sweep** (the direct-grid algorithm) over the focused condensed
+--- sub-DAG from `continue_up`. No `columns.layout`, no transpose.
 ---
---- The header's seam is its sweep **end**, which a start-seed cannot pin, so the
---- sweep is run **transposed and seam-first**: reverse to oldest-first, swap the
---- edges, seed the seam (now the start), lay out, then `flip` back to display
---- order. A continuing lane terminates (in transposed terms) at its **child** —
---- the in-header commit it ascends to. Returns `{ rows, terminate }` like footer.
----@param opts table
----@param header_items table[]
----@param boundary table<integer, table>
----@return table  -- { rows = table[], terminate = table<integer, table> }
-function M.header(opts, header_items, boundary)
-    -- A header lane continues iff its child (the lane's `begin`, the commit it
-    -- ascends to) is present; the rest terminate at the seam.
-    local present = {}
-    for _, it in ipairs(header_items) do present[it.commit.hash] = true end
-    local cont, term = {}, {}
-    for col, lane in pairs(boundary) do
-        if lane.begin and present[lane.begin.hash] then cont[col] = lane else term[col] = lane end
+--- The header's seam is its **bottom** edge: it is seeded directly from `boundary`
+--- (each column's lane ascends toward `node_of[lane.begin.hash]`), so the bottom
+--- row IS the main view's top edge by construction — every boundary lane continues.
+--- The sweep then processes the condensed nodes **nearest-seam first**, emitting one
+--- line per node:
+---   * every still-active lane is carried up as a vertical bar (continuity);
+---   * a **head** (no up-children) places a `◍` and ends its lane (labelled when the
+---     node is a pinned anchor, bare otherwise);
+---   * a **junction** (merge/fork) draws a node-less 3-way crossing, converging the
+---     arriving columns into one (merge) and/or fanning to fresh columns (fork);
+---   * a **linear** anchor marker continues straight up.
+--- Lines are collected bottom-up then reversed so the tip is on top.
+---@param items table[]  -- condensed OrderItems from continue_up, newest-first
+---@param boundary table<integer, table>  -- col → lane { id, color, begin }
+---@param node_of table<string, table>?  -- hash → condensed node (continue_up's node_of_hash)
+---@param lane_of (fun(node: table): table?)?  -- node → its branch's main-view { id, color }
+---@param col_of (fun(node: table): integer?)?  -- node → its main-view column (left-right order)
+---@return table  -- { rows = table[] }
+function M.header(items, boundary, node_of, lane_of, col_of)
+    node_of = node_of or {}
+    -- The main-view lane id/colour for a node's branch, so each branch keeps its OWN
+    -- distinct colour (matching the graph). Falls back to a given default.
+    local function lane(node, def)
+        local l = lane_of and lane_of(node)
+        if l then return l.id, l.color end
+        return def and def.id, def and def.color
     end
 
-    local rev = {}
-    for i = #header_items, 1, -1 do rev[#rev + 1] = header_items[i] end
-    local titems, proxy = transpose(rev)
-
-    -- In transposed terms a continuing lane terminates at its child's proxy.
-    local seed = {}
-    for col, lane in pairs(cont) do
-        seed[col] = { id = lane.id, color = lane.color, begin = lane.parent,
-            parent = proxy[lane.begin.hash], highlighted = false }
+    -- Header-local lane identity. The main view RECYCLES lane ids/colours (a slot is
+    -- reused once a lane ends), but the header can show those recycled lanes
+    -- CONCURRENTLY — so two distinct branches must not collapse onto one id/colour (the
+    -- "pinned branches both id 1" bug, and the lane that terminates twice). A fork child
+    -- therefore gets a **fresh unique id** (above every boundary id, so no lane id ever
+    -- repeats → no double termination) and a colour **de-collided** against the lanes
+    -- alive beside it — preferring its main-view colour when that is still free, so the
+    -- header keeps matching the graph wherever it can.
+    local maxid = 0
+    for _, l in pairs(boundary) do if type(l.id) == "number" and l.id > maxid then maxid = l.id end end
+    -- The crossing/seam lane ids (must keep their boundary colour to the seam). Above-seam
+    -- lanes (fork children / merge continuations) carry their own main-view ids now, so the
+    -- distinction is set membership, not an id threshold.
+    local boundary_set = {}
+    for _, l in pairs(boundary) do if l.id ~= nil then boundary_set[l.id] = true end end
+    -- A fresh (fork-child) id must clearly be NEW: above every id that appears in the
+    -- header — the boundary lanes AND every node's main-view lane — so it never
+    -- numerically coincides with an existing main-view lane id (which reads as the branch
+    -- "reusing" an id). Fresh ids then grow monotonically from there.
+    for _, it in ipairs(items) do
+        local lid = lane(it.commit)
+        if type(lid) == "number" and lid > maxid then maxid = lid end
+    end
+    local function fresh_id() maxid = maxid + 1; return maxid end
+    -- A header lane PREFERS its main-view lane id, so a branch keeps the SAME id as the
+    -- graph (the header is a faithful continuation, not a relabelling). A fresh
+    -- (monotonic, above-everything) id is used only on a genuine collision — the main view
+    -- recycled that id onto a lane already alive in the header, so the two must differ
+    -- (the "both id 1" / double-termination bug). Seeded with the boundary ids, which the
+    -- pivots keep.
+    local used_ids = {}
+    for _, l in pairs(boundary) do if l.id ~= nil then used_ids[l.id] = true end end
+    local function pick_id(mvid)
+        local id
+        if type(mvid) == "number" and not used_ids[mvid] then id = mvid else id = fresh_id() end
+        used_ids[id] = true
+        return id
+    end
+    local function free_color(used, prefer)
+        if prefer and not used[prefer] then return prefer end
+        local c = 1
+        while used[c] do c = c + 1 end
+        return c
     end
 
-    return { rows = flip(columns.layout(opts, titems, seed)), terminate = term }
+    -- Sweep position per condensed node (newest-first index; larger = nearer seam).
+    local pos = {}
+    for i, it in ipairs(items) do pos[it.commit] = i end
+
+    -- active columns: col → { id, color, node } — the lane in this column ascends
+    -- toward `node`. Seeded from the boundary so the bottom edge matches the seam.
+    local active = {}
+    for col, l in pairs(boundary) do
+        local n = l.begin and node_of[l.begin.hash]
+        if n then active[col] = { id = l.id, color = l.color, node = n } end
+    end
+
+    -- Condensed nodes, nearest-seam first.
+    local order = {}
+    for _, it in ipairs(items) do order[#order + 1] = it.commit end
+    table.sort(order, function(a, b) return (pos[a] or 0) > (pos[b] or 0) end)
+
+    -- Columns are **never reused** (a vacated lane can't be confused with a live one →
+    -- no vertical colour break). `used_cols` is every column that has EVER held a lane;
+    -- a fork child takes the nearest free column to its OWN main-view column, so the
+    -- header's left-right order matches the graph without reusing a column.
+    local maxcol = 0
+    local used_cols = {}
+    for c in pairs(active) do used_cols[c] = true; if c > maxcol then maxcol = c end end
+    local function free_col(want)
+        want = (type(want) == "number" and want >= 1) and want or (maxcol + 1)
+        if not used_cols[want] then return want end
+        for d = 1, 512 do
+            if want - d >= 1 and not used_cols[want - d] then return want - d end
+            if not used_cols[want + d] then return want + d end
+        end
+        return want
+    end
+
+    local lines = {} -- { columns, commit }, bottom-up
+
+    for _, N in ipairs(order) do
+        local arriving = {}
+        for col, a in pairs(active) do if a.node == N then arriving[#arriving + 1] = col end end
+        if #arriving > 0 then
+            table.sort(arriving)
+            local pivot = arriving[1]
+            local plane = active[pivot] -- the surviving lane (continues up from pivot)
+            local upkids = {}
+            for _, c in ipairs(N.children or {}) do upkids[#upkids + 1] = c end
+            -- The pivot (upkids[1]) inherits the surviving lane's id/colour, so it must be
+            -- the child that ACTUALLY carries that lane in the main view (its lane_of id
+            -- equals the boundary lane's). The condensed first-parent order can diverge
+            -- from main-view lane continuity — a fork where the crossing lane really
+            -- belongs to a sibling — and then the seam lane would jump to the wrong branch
+            -- (the seam colour/id would not match the graph). Match by lane id; fall back
+            -- to the existing order when nothing matches (e.g. a merge, where the pivot's
+            -- colour switches at the junction anyway).
+            if #upkids > 1 and plane and plane.id ~= nil then
+                for k = 2, #upkids do
+                    if lane(upkids[k]) == plane.id then
+                        upkids[1], upkids[k] = upkids[k], upkids[1]
+                        break
+                    end
+                end
+            end
+            local is_head = #upkids == 0
+            local pinned = N.refs and #N.refs > 0
+
+            local arr_set = {}
+            for _, c in ipairs(arriving) do arr_set[c] = true end
+
+            -- Up columns: the pivot continues straight (its surviving lane's id/colour,
+            -- so the column's vertical colour never breaks); each extra fork child is
+            -- placed at its OWN main-view column when free, so the header's left-right
+            -- order MATCHES THE GRAPH (no bottom-up swap) — never reusing a column. Each
+            -- keeps its branch's MAIN-VIEW id+colour (de-collided only on a genuine clash),
+            -- so a branch's id is the same in the header as in the graph.
+            local upcols, upid, upcolor = {}, {}, {}
+            if not is_head then
+                upcols[1] = pivot
+                local mv1, c1col = lane(upkids[1], plane)
+                -- The surviving lane CONTINUES AS ITSELF when the pivot child is the mainline
+                -- continuation — recognised by main-view lane (mv1 == plane.id) OR
+                -- TOPOLOGICALLY (it is N's first-parent child). The topological test is what
+                -- keeps a COLLAPSED continuation connected: a collapsed branch on the trunk
+                -- whose tip's main-view lane was recycled to a different id still has the merge
+                -- N as its first parent, so it IS the trunk continuing. Without it the lane
+                -- switches to a fresh id at the merge — the trunk "terminates" and HEAD gets a
+                -- brand-new id (the merge-at-cutoff bug). Only a genuine FAN-OUT (N is not this
+                -- child's first parent and the lanes differ) switches.
+                local first_parent = upkids[1].parents and upkids[1].parents[1] == N
+                if mv1 == plane.id or (first_parent and upkids[1].collapsed) then
+                    upid[1], upcolor[1] = plane.id, plane.color
+                else
+                    upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color
+                end
+                for k = 2, #upkids do
+                    local mvid, pref = lane(upkids[k], plane)
+                    local col = free_col(col_of and col_of(upkids[k]))
+                    used_cols[col] = true
+                    if col > maxcol then maxcol = col end
+                    upcols[k] = col
+                    upid[k] = pick_id(mvid)
+                    upcolor[k] = pref
+                end
+            end
+
+            local width = pivot
+            for c in pairs(active) do if c > width then width = c end end
+            for _, c in ipairs(upcols) do if c > width then width = c end end
+
+            local cells = {}
+            local function add(col, c, id, color)
+                cells[col] = cells[col] or {}
+                cells[col][#cells[col] + 1] = { id = id, color = color, connectivity = conn(c) }
+            end
+            -- A lane's horizontal arm from `from` to `to`, `down` at `from`, in the
+            -- lane's OWN colour (so a crossed passing bar stays its own colour and the
+            -- arm stays uniform — the wires-connect colour checks).
+            local function arm(from, to, id, color, downcol, upcol)
+                local lo, hi = math.min(from, to), math.max(from, to)
+                for m = lo, hi do
+                    add(m, {
+                        left = m > lo or nil, right = m < hi or nil,
+                        down = (m == downcol) or nil, up = (m == upcol) or nil,
+                    }, id, color)
+                end
+            end
+
+            -- 1. Passing lanes (active, not arriving) — vertical bars FIRST, so a
+            --    crossing cell is coloured by the bar (vertical colour continuity).
+            for col = 1, width do
+                local a = active[col]
+                if a and not arr_set[col] then add(col, { up = true, down = true }, a.id, a.color) end
+            end
+            -- 2. Each arriving non-pivot lane turns into the pivot, keeping its OWN
+            --    id/colour on the `down` arm (so the seam matches the main view).
+            for _, c in ipairs(arriving) do
+                if c ~= pivot then
+                    local a = active[c]
+                    arm(c, pivot, a.id, a.color, c, nil)
+                end
+            end
+            -- 3. The fork fan. Each FORK CHILD's arm is drawn in the CHILD's OWN colour
+            --    (from the pivot to its column), so a diverging branch line reads as THAT
+            --    branch — its colour runs unbroken from the seam-side arm up its bar, not
+            --    the trunk's colour. Arms are drawn FARTHEST-FIRST so a shared inner
+            --    segment takes the NEARER child's colour (each segment reads as the child
+            --    at its outer end). The pivot's own vertical (the trunk continuing down to
+            --    the seam and up to its child) keeps the pivot colour.
+            if not is_head then
+                if arr_set[pivot] then add(pivot, { down = true }, plane.id, plane.color) end
+                local forks = {}
+                for k = 2, #upcols do forks[#forks + 1] = k end
+                table.sort(forks, function(a, b)
+                    return math.abs(upcols[a] - pivot) > math.abs(upcols[b] - pivot)
+                end)
+                for _, k in ipairs(forks) do
+                    local c = upcols[k]
+                    local lo, hi = math.min(pivot, c), math.max(pivot, c)
+                    for m = lo, hi do
+                        add(m, { left = m > lo or nil, right = m < hi or nil }, upid[k], upcolor[k])
+                    end
+                end
+                for k, col in ipairs(upcols) do add(col, { up = true }, upid[k], upcolor[k]) end
+            elseif arr_set[pivot] then
+                -- head: terminate the lane. The down arm connects to the seam below,
+                -- so it MUST keep the boundary id/colour (the seam never switches) —
+                -- a dead-end head has no above-segment to switch into.
+                add(pivot, { down = true }, plane.id, plane.color)
+            end
+
+            -- 4. The node glyph: a `◍` head/anchor marker at the pivot; a junction is
+            --    node-less (the crossing itself is the join).
+            local node_col, node_commit
+            if is_head or pinned then
+                node_col = pivot
+                node_commit = { hash = N.hash, collapsed = true,
+                    parents = N.parents, children = N.children, refs = pinned and N.refs or {} }
+            end
+
+            lines[#lines + 1] = {
+                columns = assemble(cells, width, node_col, node_commit),
+                commit = node_commit,
+                pinned = pinned,
+            }
+
+            -- 5. Advance the active front (each up-child in its own branch colour).
+            for _, c in ipairs(arriving) do active[c] = nil end
+            for k, col in ipairs(upcols) do
+                active[col] = { id = upid[k], color = upcolor[k], node = upkids[k] }
+            end
+        elseif N.refs and #N.refs > 0 then
+            -- A DISCONNECTED pinned anchor: its lane does not reach the cutoff (the lanes
+            -- crossing the seam lead elsewhere — e.g. up into a collapsed branch — so none
+            -- arrives at this node). A pinned anchor is ALWAYS visible (§6.2), so draw it as
+            -- a lone labelled ◍ head. It has NO wires, so it needs no reserved column — it
+            -- only must not sit directly above a NODE or an up-going lane (which would read
+            -- as a connected lane). Pick the lowest such column so the header stays compact
+            -- next to the lane structure rather than floating off to the side.
+            local below = lines[#lines]
+            local function blocked(c)
+                local cell = below and below.columns and below.columns[c]
+                if not cell then return false end
+                if cell.has_commit then return true end
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.connectivity and s.connectivity.up then return true end
+                end
+                return false
+            end
+            local col = 1
+            while blocked(col) do col = col + 1 end
+            if col > maxcol then maxcol = col end
+            local mvid, color = lane(N)
+            local cells = { [col] = { { id = pick_id(mvid), color = color or 1, connectivity = conn({}) } } }
+            local node_commit = { hash = N.hash, collapsed = true,
+                parents = N.parents, children = N.children, refs = N.refs }
+            lines[#lines + 1] = {
+                columns = assemble(cells, col, col, node_commit),
+                commit = node_commit,
+                pinned = true,
+            }
+        end
+    end
+
+    -- Bottom-up → newest-first (tip on top).
+    local rows = {}
+    for i = #lines, 1, -1 do rows[#rows + 1] = lines[i] end
+
+    -- Global colour de-collision (interval colouring). Each unique lane id spans a set
+    -- of rows; the main view RECYCLES colours, so two ids alive on the same row can
+    -- arrive here sharing one. Assign each id a colour distinct from every id it shares
+    -- a row with, preferring its own (main-view) colour so the header still matches the
+    -- graph wherever there is no clash. One colour per id keeps a lane's colour
+    -- vertically continuous by construction.
+    do
+        local id_rows, pref, order_ids, seen = {}, {}, {}, {}
+        for _, r in ipairs(rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.id ~= nil then
+                        id_rows[s.id] = id_rows[s.id] or {}
+                        if pref[s.id] == nil then pref[s.id] = s.color end
+                        if not seen[s.id] then seen[s.id] = true; order_ids[#order_ids + 1] = s.id end
+                    end
+                end
+            end
+        end
+        local head_id = {} -- ids that terminate at a ◍ head (a node cell that does not
+                           -- continue up: a down-head, or a lone disconnected anchor with
+                           -- no wires at all)
+        for ri, r in ipairs(rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.id ~= nil then
+                        id_rows[s.id][ri] = true
+                        local cc = s.connectivity or {}
+                        if cell.has_commit and not cc.up and not cc.left and not cc.right then
+                            head_id[s.id] = true
+                            -- A head reads as ITS OWN branch (the tip) colour — but ONLY
+                            -- for above-seam lanes (fork children and merge continuations).
+                            -- A crossing/seam lane keeps its boundary colour all the way to
+                            -- the seam and must NOT be switched (the seam-never-switches
+                            -- rule); being a straight lane its colour already equals its
+                            -- head's.
+                            if s.id ~= nil and not boundary_set[s.id] then
+                                local _, hc = lane(cell.commit)
+                                if hc then pref[s.id] = hc end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        -- Assign HEADS first, then ascending by id. Heads (the ◍ — the branches the
+        -- summary is about, including the pinned anchors) claim their own main-view
+        -- colour FIRST and keep it, so a head never drifts from its graph colour just
+        -- because a passing lane recycled that colour. Low ids (boundary/crossing lanes)
+        -- come next, so their colour is stable across cutoffs too; fork children
+        -- de-collide around everyone.
+        table.sort(order_ids, function(a, b)
+            local ha, hb = head_id[a] and 0 or 1, head_id[b] and 0 or 1
+            if ha ~= hb then return ha < hb end
+            return a < b
+        end)
+        local final = {}
+        for _, id in ipairs(order_ids) do
+            local used = {}
+            for oid, c in pairs(final) do
+                local overlap = false
+                for ri in pairs(id_rows[id]) do if id_rows[oid][ri] then overlap = true; break end end
+                -- Two HEADS must differ even when not concurrent: each is a distinct
+                -- branch tip, so it must read as a distinct colour (no HEAD/dev clash).
+                if overlap or (head_id[id] and head_id[oid]) then used[c] = true end
+            end
+            final[id] = free_color(used, pref[id])
+        end
+        for _, r in ipairs(rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.id ~= nil and final[s.id] then s.color = final[s.id] end
+                end
+                -- Re-pick the cell's primary colour after recolouring: the lane running
+                -- through it vertically, so a turn keeps its own lane's colour.
+                local prim = node_seg(cell.lanes or {})
+                if prim then cell.color = prim.color; cell.id = prim.id end
+            end
+        end
+    end
+
+    return { rows = pack_heads(rows) }
 end
 
 return M

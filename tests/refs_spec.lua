@@ -101,6 +101,67 @@ describe("group_refs", function()
     end)
 end)
 
+describe("pane_labels (header/footer §6.2)", function()
+    local pane_labels = internal.pane_labels
+    local function ref(kind, name) return { kind = kind, name = name } end
+    -- Segments → plain text / kind lists (pane_labels returns { text, kind } so each
+    -- label can be coloured by kind the same as the main view).
+    local function texts(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.text end return t end
+    local function kinds(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.kind end return t end
+
+    it("shows ONLY HEAD, dropping the branch HEAD points at on the same commit", function()
+        -- The report: HEAD points at `feature/topic`, both on the same commit.
+        -- HEAD already represents that branch, so the pane shows just HEAD — not the branch
+        -- (passed as head_branch = repo.head) that merely co-locates with it.
+        local segs = pane_labels({ refs = {
+            ref("local", "feature/topic"),
+            ref("head", "HEAD"),
+        } }, "feature/topic")
+        assert.same({ "HEAD" }, texts(segs))
+        assert.same({ "head" }, kinds(segs)) -- coloured as HEAD
+    end)
+
+    it("also drops the HEAD branch's remote-tracking ref", function()
+        local segs = pane_labels({ refs = {
+            ref("local", "feat"),
+            ref("remote", "origin/feat"),
+            ref("head", "HEAD"),
+        } }, "feat")
+        assert.same({ "HEAD" }, texts(segs))
+    end)
+
+    it("keeps ANOTHER pinned anchor on HEAD's commit, dropping only the HEAD branch", function()
+        -- HEAD is on `feat`, but pinned `release` also lands here — show both HEAD and the
+        -- other anchor; only the HEAD branch itself is suppressed.
+        local segs = pane_labels({ refs = {
+            ref("local", "feat"),
+            ref("local", "release"),
+            ref("head", "HEAD"),
+        } }, "feat")
+        assert.same({ "HEAD", "(release)" }, texts(segs))
+        assert.same({ "head", "branch" }, kinds(segs))
+    end)
+
+    it("colours a remote-only branch and a tag by their own kind", function()
+        local segs = pane_labels({ refs = {
+            ref("remote", "origin/feat"),
+            ref("tag", "v1.0"),
+        } })
+        assert.same({ "(feat ↑origin)", "[v1.0]" }, texts(segs))
+        assert.same({ "remote", "tag" }, kinds(segs))
+    end)
+
+    it("shows a detached HEAD as HEAD even with no branch on the commit", function()
+        local segs = pane_labels({ refs = { ref("head", "HEAD") } }, nil)
+        assert.same({ "HEAD" }, texts(segs))
+    end)
+
+    it("omits HEAD when the commit has no HEAD marker (just branches/tags)", function()
+        local segs = pane_labels({ refs = { ref("local", "feat"), ref("tag", "v1.0") } })
+        assert.same({ "(feat)", "[v1.0]" }, texts(segs)) -- same text as decoration_texts
+    end)
+end)
+
 describe("owners_from_refs", function()
     -- The view builder's owner list (spec §10): one owner per ref, keyed by ref
     -- name, carrying its current mode; the HEAD symref is skipped.

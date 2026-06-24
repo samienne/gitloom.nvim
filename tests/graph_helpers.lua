@@ -339,7 +339,9 @@ end
 -- With `skip_color`, the color-continuity checks (steps 6–7) are omitted —
 -- used for styles where lane color is intentionally allowed to change (e.g.
 -- the lane handoff at a merge under allow_merge_on_split).
-local function check_grid(grid, opts, skip_color)
+-- `allow_floating_heads`: a collapsed `◍` head with no wires is allowed (the context
+-- header draws a DISCONNECTED pinned anchor as a lone labelled head; §6.2).
+local function check_grid(grid, opts, skip_color, allow_floating_heads)
     local errors = {}
     local function err(msg) errors[#errors + 1] = msg end
 
@@ -432,7 +434,7 @@ local function check_grid(grid, opts, skip_color)
                     local connected = (up and (up.stub.d or up.node))
                         or (down and (down.stub.u or down.node))
                         or (left and left.stub.r) or (right and right.stub.l)
-                    if not connected then
+                    if not connected and not (allow_floating_heads and cl.ch == "◍") then
                         err(("floating node %q at row %d col %d"):format(cl.ch, r, c))
                     end
                 end

@@ -3,6 +3,7 @@
     "runtime": { "version": "LuaJIT" },
     "workspace": {
         "checkThirdParty": false,
+        "ignoreDir": [".claude"],
         "library": [
             "tests/types",
             "${env:VIMRUNTIME}/lua"
