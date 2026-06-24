@@ -103,6 +103,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
+| `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `F` | Toggle the off-screen context footer (the summary band below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |

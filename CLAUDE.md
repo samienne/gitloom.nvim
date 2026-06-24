@@ -134,6 +134,14 @@ Coverage:
   `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), and the
   branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
   (§10/§10.4)
+- `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
+  `bump_recent` (the session MRU list — newest first, deduped, input not mutated),
+  `ref_picker_items` (name → Ref registry → ordered picker entries: session-
+  recent first in MRU order then grouped HEAD / local / remote / tag by name,
+  commitless refs skipped, fields the picker shows incl. the match `text`), and
+  `ref_decoration_index` (picked ref → its decoration index for pre-selection:
+  local/remote → branch group by short name, tag → after the branches, HEAD/absent
+  → nil)
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
   collapsed contraction to one head with junctions kept, **branch-topology
@@ -152,8 +160,20 @@ Coverage:
   the real layout's wires-connect checks
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
-  (the right-pinned ref width budget), and `refresh_columns` width aggregation
-  from `below` and from every stacked `above`/`below` row (spec §6.1)
+  (the right-pinned ref width budget), `window_right` (the selection-windowed
+  overflow, §6: a contiguous window around the selected ref with separate
+  left/right `+N` markers; greedy right-then-left growth; the selected item always
+  shown even when it alone overflows; sel clamping; empty), and `refresh_columns`
+  width aggregation from `below` and from every stacked `above`/`below` row (§6.1)
+- `tests/ref_window_spec.lua` — the windowed right-ref overflow **end to end** (§6):
+  gitloom's `display_item` (setting `line_right` + `line_right_sel`) feeding the
+  listview's `build_line` windowing, rendered into a stubbed window — default shows
+  whole labels + a trailing `+N` (overflow hidden), selecting the overflowed ref
+  scrolls it fully into view with the cursor target (`ref_byte_col`) resolving to
+  it, and a single over-long selected ref truncates cleanly with `…` within the
+  window (never spilling past the edge); plus the **packed marker row** (§10.4):
+  its labels left-align after the graph (`line_right_align = "left"`) but window the
+  same way around the selected marker (`+N` overflow, selected scrolled into view)
 - `tests/label_mode_spec.lua` — the dual label mode's continuation graph
   (spec §6.1): `passthrough_columns` in both directions (`up` keeps lanes
   entering from above, `down` keeps lanes leaving below — the message row;
@@ -230,7 +250,11 @@ Coverage:
   connector-color scan that flips direction under mirror).
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
-only** (not the public API): `classify_ref`, `group_refs`, `decoration_texts`,
+only** (not the public API): `classify_ref`, `group_refs`, `bump_recent` /
+`ref_picker_items` (the `<leader>b` ref-picker MRU + ordered entries; §2),
+`ref_decoration_index` (picked ref → decoration index for pre-selection; §2),
+`display_item` (the per-row renderer — exposed for the §6 ref-window integration
+test), `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`
 (the streaming-stdout line de-chunker; §3), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
@@ -245,8 +269,10 @@ owners under the cursor; §10.4). `columns.layout` is reached via
 `require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
 / `view.owners` via `require("gitloom.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
-`refresh_columns` (the column-width packer), and `rebuild_starts`/`item_index_at`
-(the buffer-line ↔ item offset map for multi-real-line items; §6.1).
+`window_right` (the selection-windowed overflow packer — window + left/right `+N`
+counts; §6), `refresh_columns` (the column-width packer), and
+`rebuild_starts`/`item_index_at` (the buffer-line ↔ item offset map for
+multi-real-line items; §6.1).
 
 ### Layout testing approach
 
@@ -362,7 +388,10 @@ Details not covered by the spec or architecture:
   "one commit per line" (§5.1). Overlay-compatible = each column has ≤1 node and
   ≤1 lane id and no horizontal overlap; compaction makes only safe merges
   compatible. On a packed line `h`/`l` selects a marker (`marker_units`); the
-  listview stays 1-item-per-line (a group is one item).
+  listview stays 1-item-per-line (a group is one item). The marker labels render
+  via `line_right` with `line_right_align = "left"` (left-aligned after the graph)
+  so they get the windowed `+N` overflow (§6) around the selected marker instead of
+  truncating the row with `…`.
 - **Collapse interaction** (spec §10.4): acts on the *region under the cursor*,
   not a ref — `branch_under_cursor(line)` resolves the selection (ref/marker) or
   the commit's signature (`collapse_owners`) into `{state, owners, follow,

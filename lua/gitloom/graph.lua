@@ -42,6 +42,11 @@ local show_lane_ids = false
 -- for the Neovim session; not persisted to disk.
 local saved_positions = {}
 
+-- Per-repository session MRU for the ref picker (`<leader>b`, §2): the ref names
+-- jumped to this session, newest first, keyed by Neovim's cwd (the repo, like
+-- saved_positions). Surfaced at the top of the picker. In-memory for the session.
+local recent_refs = {}
+
 -- Index of the flex (message) column in a row's `line` field: date, author,
 -- graph, message. The message fills the remaining width and refs are pinned to
 -- the right edge of the row (specification.md §6; see listview's build_line).
@@ -69,6 +74,7 @@ local KEYBINDS = {
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
+    { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "F", "Toggle the off-screen context footer" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle the per-lane id column" },
@@ -521,6 +527,68 @@ local function group_refs(refs)
     return { head = head, branches = branches, tags = tags }
 end
 
+--- Push a ref name to the front of a session most-recently-used list, dropping
+--- any earlier occurrence so each name appears once (the ref-picker recency,
+--- §2). Pure: returns a fresh list, newest first; the input is not mutated.
+---@param list string[]?   the current MRU list, newest first
+---@param name string      the ref just jumped to
+---@return string[]
+local function bump_recent(list, name)
+    local out = { name }
+    for _, n in ipairs(list or {}) do
+        if n ~= name then out[#out + 1] = n end
+    end
+    return out
+end
+
+-- Sort key for the ref picker's stable (non-recent) grouping: HEAD first, then
+-- local branches, remotes, and tags.
+local REF_KIND_RANK = { head = 1, ["local"] = 2, remote = 3, tag = 4 }
+
+--- Build the ordered ref-picker item list (§2). Each ref (the name → Ref
+--- registry, "HEAD" included) becomes an entry carrying what the picker shows
+--- and the hash to jump to. Order: refs jumped to this session first, in MRU
+--- order (`recents`, newest first); the rest grouped HEAD / local / remote / tag
+--- then by name. Refs without a resolved commit are skipped (nothing to jump
+--- to). Each item's `text` is the picker's match string (name then subject, both
+--- searchable). Pure (no I/O) so it is unit-testable via `_internal`.
+---@param refs table<string, Ref>?   the repo's name → Ref registry
+---@param recents string[]?          session MRU ref names, newest first
+---@return { name: string, kind: string, hash: string, short: string, subject: string, recent: boolean, text: string }[]
+local function ref_picker_items(refs, recents)
+    local rank = {} -- ref name -> 1-based MRU position
+    for i, n in ipairs(recents or {}) do
+        if not rank[n] then rank[n] = i end
+    end
+    local items = {}
+    for name, ref in pairs(refs or {}) do
+        local commit = ref and ref.commit
+        if commit and commit.hash then
+            local subject = (commit.message or ""):match("^[^\r\n]*") or ""
+            items[#items + 1] = {
+                name = name,
+                kind = ref.kind,
+                hash = commit.hash,
+                short = commit.hash:sub(1, 8),
+                subject = subject,
+                recent = rank[name] ~= nil,
+                text = name .. " " .. subject, -- the picker's fuzzy-match string
+            }
+        end
+    end
+    table.sort(items, function(a, b)
+        local ra, rb = rank[a.name], rank[b.name]
+        if ra or rb then
+            if ra and rb then return ra < rb end
+            return ra ~= nil -- a recent ref sorts before a non-recent one
+        end
+        local ka, kb = REF_KIND_RANK[a.kind] or 9, REF_KIND_RANK[b.kind] or 9
+        if ka ~= kb then return ka < kb end
+        return a.name < b.name
+    end)
+    return items
+end
+
 --- The plain text of each selectable ref decoration on a commit, in selection
 --- order (branch groups then tags). The single source of truth so the rendered
 --- text and the cursor-target search use byte-identical strings.
@@ -590,6 +658,32 @@ local function selected_owner_ids(commit, index)
     end
     local tag = g.tags[index - #g.branches]
     return tag and { tag } or nil
+end
+
+--- The 1-based decoration index (into decoration_texts / the `h`/`l` selection
+--- order) of the decoration that represents the ref named `name` of kind `kind`,
+--- or nil if it has none. A local/remote ref maps to its branch group (keyed by
+--- the short name — the part after the first path component for a remote); a tag
+--- maps to its tag entry; HEAD has no own decoration (nil). Used to pre-select a
+--- picked ref on its landed row (§2). Pure; the inverse of `selected_owner_ids`.
+---@param commit { refs: Ref[] }?
+---@param name string
+---@param kind string   -- "local" | "remote" | "tag" | "head"
+---@return integer|nil
+local function ref_decoration_index(commit, name, kind)
+    local g = group_refs(commit and commit.refs or {})
+    if kind == "tag" then
+        for i, t in ipairs(g.tags) do
+            if t == name then return #g.branches + i end
+        end
+        return nil
+    end
+    -- local / remote → a branch group keyed by the short name.
+    local short = (kind == "remote") and (name:match("^[^/]+/(.+)$") or name) or name
+    for i, b in ipairs(g.branches) do
+        if b.name == short then return i end
+    end
+    return nil
 end
 
 --- Move the ref selection. `nil` is the message (the default; the message is to
@@ -1713,17 +1807,24 @@ local function display_item(opts, item, selection_state, cone)
 
     -- A packed marker-group (spec §10.4): several concurrent collapsed heads on
     -- one line — their ◍ nodes in the graph column, then each marker's ref
-    -- label(s) inline, the selected one highlighted (`h`/`l`). No message.
+    -- label(s), the selected one highlighted (`h`/`l`). No message. The labels go
+    -- in `line_right` (left-aligned after the graph, `line_right_align`) so they
+    -- get the same windowed overflow as commit refs (§6): the selected marker is
+    -- kept visible with `+N` markers, instead of the row truncating with `…`.
     if item.type == "markers" then
         local graph_item = get_column_chars(opts, item.columns, emphasis)
         local sel = (selection_state and selection_state.commit == item) and selection_state.index or nil
-        local parts = {}
+        local labels = {}
         for i, u in ipairs(marker_units(item)) do
-            if i > 1 then parts[#parts + 1] = " " end
-            parts[#parts + 1] = (i == sel) and highlight_text(u.text, palette.selected)
+            labels[#labels + 1] = (i == sel) and highlight_text(u.text, palette.selected)
                 or rh(u.text, palette.branch)
         end
-        return { line = { "", "", graph_item, compose(parts) } }
+        return {
+            line = { "", "", graph_item, "" },
+            line_right = labels,
+            line_right_sel = sel,
+            line_right_align = "left",
+        }
     end
 
     -- A collapsed head is a **marker** (spec §10.4): a messageless node standing
@@ -1827,6 +1928,13 @@ local function display_item(opts, item, selection_state, cone)
             element.line = { date_item, author_item, graph_item, compose({ ids, message }) }
             if label_mode ~= "dual" then
                 element.line_right = ref_items
+                -- The selected decoration's index *within line_right* (which may
+                -- prepend a non-selectable HEAD marker), so the listview windows
+                -- the right-pinned refs around it (§6). nil → leftmost-first +N.
+                if selected then
+                    local extra = #ref_items - #decoration_texts(item.commit)
+                    element.line_right_sel = selected + extra
+                end
             end
         end
 
@@ -3008,6 +3116,12 @@ function M.open(folder, opts)
         index = nil,
     }
 
+    -- The last buffer line the CursorMoved handler reacted to (it resets the ref
+    -- selection on a row change). Lifted to this scope so a programmatic jump that
+    -- sets its own selection (the ref picker, §2) can mark the landed row as
+    -- already-visited and suppress the reset. Assigned in the window block below.
+    local last_line = nil
+
     -- Reachability cone for the dimming pass (§12); nil until a pivot exists.
     -- `modes` is the branch-mode view state (ref name → mode); empty = all normal
     -- (the projection is then the identity). The reflow below reads it (§10).
@@ -3488,6 +3602,104 @@ function M.open(folder, opts)
         update_footer()
         place_cursor()
     end
+    -- <leader>b: jump to a branch / ref via a snacks.picker (§2). Lists every ref
+    -- (HEAD included), recently jumped refs first (the session MRU); selecting one
+    -- centers the view on its commit. The jump (goto_hash) resolves a folded
+    -- commit to its collapsed head and re-runs the open-time focus steps (cone +
+    -- panes) so dimming/footer follow the new pivot; a hidden ref is a no-op.
+    opts.win.keys["<leader>b"] = function(self)
+        local gwin = self and self.win -- the graph float to refocus / move
+        local picker_ok, picker = pcall(require, "snacks.picker")
+        if not picker_ok then
+            vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
+            return
+        end
+        local items = ref_picker_items(repo.refs, recent_refs[repo_key])
+        if #items == 0 then
+            vim.notify("gitloom: no refs to jump to", vim.log.levels.INFO)
+            return
+        end
+        -- ref_picker_items sets each item's `text` (name + subject) for fuzzy
+        -- matching; snacks keeps the original (MRU) order when the query is empty.
+        local align = picker.util.align
+        picker.pick({
+            source = "gitloom_refs",
+            title = "Gitloom refs",
+            items = items,
+            layout = { preset = "select" }, -- compact, no preview window
+            ---@param item { name: string, kind: string, short: string, subject: string }
+            format = function(item)
+                local kind_hl = ({
+                    head = "SnacksPickerGitBranchCurrent",
+                    ["local"] = "SnacksPickerGitBranch",
+                    remote = "SnacksPickerGitBranch",
+                    tag = "SnacksPickerLabel",
+                })[item.kind]
+                local ret = {}
+                ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
+                ret[#ret + 1] = { " " }
+                ret[#ret + 1] = { align(item.short, 8), "SnacksPickerGitCommit" }
+                ret[#ret + 1] = { " " }
+                ret[#ret + 1] = { item.subject, "SnacksPickerComment" }
+                return ret
+            end,
+            confirm = function(p, item)
+                p:close()
+                if not item then return end
+                recent_refs[repo_key] = bump_recent(recent_refs[repo_key], item.name)
+                -- Run after the picker tears down. snacks restores focus to the
+                -- window behind the float, so refocus the graph float first — else
+                -- the cursor we move lands in the wrong (background) window.
+                vim.schedule(function()
+                    if not (gwin and vim.api.nvim_win_is_valid(gwin)) then return end
+                    pcall(vim.api.nvim_set_current_win, gwin)
+                    if not goto_hash(item.hash) then
+                        vim.notify(
+                            ("gitloom: %s is not visible (hidden?)"):format(item.name),
+                            vim.log.levels.INFO)
+                        return
+                    end
+                    -- Pre-select the picked ref's label on the landed row (§2) so
+                    -- <CR>/the menu act on it with no h/l. A packed marker row
+                    -- selects the marker carrying the ref; a commit / collapsed
+                    -- head selects its decoration. HEAD has no label → message.
+                    local line = vim.api.nvim_win_get_cursor(gwin)[1]
+                    local landed = order_at(line)
+                    selection_state.commit, selection_state.index = nil, nil
+                    if landed and landed.type == "markers" then
+                        for i, u in ipairs(marker_units(landed)) do
+                            for _, r in ipairs(u.marker.refs or {}) do
+                                if r.name == item.name then
+                                    selection_state.commit, selection_state.index = landed, i
+                                    break
+                                end
+                            end
+                            if selection_state.commit == landed and selection_state.index == i then break end
+                        end
+                    elseif landed and landed.commit then
+                        local idx = ref_decoration_index(landed.commit, item.name, item.kind)
+                        if idx then
+                            selection_state.commit, selection_state.index = landed.commit, idx
+                        end
+                    end
+                    center_view()
+                    update_cone()
+                    -- Refresh first so the windowed refs (§6) are in the buffer,
+                    -- then park the cursor on the now-visible selected label.
+                    if lv and lv.controller then lv.controller.refresh() end
+                    place_cursor()
+                    -- Mark the landed row visited so the CursorMoved reset (which
+                    -- fires after this) keeps our pre-selection instead of clearing
+                    -- it to the message; record the remembered position (§2) too,
+                    -- since that handler — which normally does — now early-returns.
+                    last_line = vim.api.nvim_win_get_cursor(gwin)[1]
+                    local h = cursor_hash(last_line)
+                    if h then saved_positions[repo_key] = h end
+                    update_panes()
+                end)
+            end,
+        })
+    end
     -- P: pin / unpin the branch under the cursor as an **anchor** (§10.6).
     -- Anchors stay normal under focus; everything else collapses. HEAD is pinned
     -- by default. Acts on the selected ref (or the region under the cursor),
@@ -3741,7 +3953,9 @@ function M.open(folder, opts)
 
         -- On moving to a different row, reset the selection to the message,
         -- recompute the cone for the new pivot, redraw the dimming, and re-park.
-        local last_line = nil
+        -- last_line is declared in the outer scope so a programmatic jump can
+        -- pre-set the selection and suppress the reset (the ref picker, §2).
+        last_line = nil
         vim.api.nvim_create_autocmd("CursorMoved", {
             group = group,
             buffer = buf,
@@ -4083,8 +4297,12 @@ end
 M._internal = {
     classify_ref = classify_ref,
     group_refs = group_refs,
+    bump_recent = bump_recent,
+    ref_picker_items = ref_picker_items,
     decoration_texts = decoration_texts,
     move_selection = move_selection,
+    ref_decoration_index = ref_decoration_index,
+    display_item = display_item,
     ref_byte_col = ref_byte_col,
     parse_commit_line = parse_commit_line,
     make_line_buffer = make_line_buffer,
