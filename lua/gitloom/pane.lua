@@ -816,6 +816,7 @@ function M.header(items, boundary, node_of, lane_of, col_of)
     -- header keeps matching the graph wherever it can.
     local maxid = 0
     for _, l in pairs(boundary) do if type(l.id) == "number" and l.id > maxid then maxid = l.id end end
+    local boundary_max = maxid -- ids ≤ this are crossing/seam lanes (must keep their boundary colour)
     local function fresh_id() maxid = maxid + 1; return maxid end
     local function free_color(used, prefer)
         if prefer and not used[prefer] then return prefer end
@@ -883,7 +884,18 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             local upcols, upid, upcolor = {}, {}, {}
             if not is_head then
                 upcols[1] = pivot
-                upid[1], upcolor[1] = plane.id, plane.color
+                if #arriving >= 2 then
+                    -- A MERGE is a junction: the surviving lane SWITCHES to the
+                    -- merged branch's colour above the join. The arriving lanes
+                    -- keep their own colour up to the junction (so the seam never
+                    -- switches mid-lane — only at a junction, per the colour rule).
+                    -- A fresh id keeps the post-merge lane distinct from the lanes
+                    -- it merged.
+                    local _, mc = lane(upkids[1], plane)
+                    upid[1], upcolor[1] = fresh_id(), mc or plane.color
+                else
+                    upid[1], upcolor[1] = plane.id, plane.color
+                end
                 for k = 2, #upkids do
                     local _, pref = lane(upkids[k], plane)
                     local col = free_col(col_of and col_of(upkids[k]))
@@ -946,7 +958,10 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                 end
                 for k, col in ipairs(upcols) do add(col, { up = true }, upid[k], upcolor[k]) end
             elseif arr_set[pivot] then
-                add(pivot, { down = true }, plane.id, plane.color) -- head: terminate the lane
+                -- head: terminate the lane. The down arm connects to the seam below,
+                -- so it MUST keep the boundary id/colour (the seam never switches) —
+                -- a dead-end head has no above-segment to switch into.
+                add(pivot, { down = true }, plane.id, plane.color)
             end
 
             -- 4. The node glyph: a `◍` head/anchor marker at the pivot; a junction is
@@ -1004,12 +1019,16 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                         local cc = s.connectivity or {}
                         if cell.has_commit and cc.down and not cc.up then
                             head_id[s.id] = true
-                            -- A head reads as ITS OWN branch (the tip), so prefer the
-                            -- head node's main-view colour over the lane's birth colour
-                            -- (they differ when the lane is a pivot continuation through a
-                            -- merge — the merged lane terminates on a different branch).
-                            local _, hc = lane(cell.commit)
-                            if hc then pref[s.id] = hc end
+                            -- A head reads as ITS OWN branch (the tip) colour — but ONLY
+                            -- for above-seam lanes (fresh ids: fork children and merge
+                            -- continuations). A crossing/seam lane (id ≤ boundary_max)
+                            -- keeps its boundary colour all the way to the seam and must
+                            -- NOT be switched (the seam-never-switches rule); being a
+                            -- straight lane its colour already equals its head's.
+                            if type(s.id) == "number" and s.id > boundary_max then
+                                local _, hc = lane(cell.commit)
+                                if hc then pref[s.id] = hc end
+                            end
                         end
                     end
                 end

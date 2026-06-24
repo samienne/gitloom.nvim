@@ -254,23 +254,55 @@ end
 -- summary reads consistently with the main view — UNLESS the main view recycled that
 -- colour onto another concurrent header lane (then one is legitimately de-collided). We
 -- assert the no-clash case: a head whose main-view colour is unique among the heads.
-local function assert_head_colour_matches_graph(rows, lane_of, ctx)
-    local want, heads = {}, {}
+--
+-- Two kinds of head are EXEMPT, both because the seam-never-switches rule pins their
+-- colour so it CAN'T also be set to lane_of:
+--  * Convergence head — a head where ≥2 lanes merge (the cell has horizontal arms): a
+--    dead-end junction whose colour is pinned by the lanes converging into it.
+--  * Crossing-lane head — a head on a boundary lane (id ≤ boundary_max): the lane carries
+--    its boundary colour straight up to the head. When the main view changed colour at a
+--    junction that `condense` spliced away, the header shows a straight lane with NO
+--    junction to switch at, so it legitimately keeps the boundary colour (this is the
+--    desired dev/HEAD behaviour: a crossing lane's head reads in its seam colour).
+-- Only an above-seam head (a fresh-id fork child / in-header merge continuation) must
+-- match its graph colour.
+local function assert_head_colour_matches_graph(rows, lane_of, boundary, ctx)
+    local boundary_ids = {}
+    for _, l in pairs(boundary or {}) do if l.id ~= nil then boundary_ids[l.id] = true end end
+    -- Every head's rendered colour (exempt or not) — a graph colour already shown by
+    -- ANOTHER head means the main view recycled it onto two header-concurrent lanes, so a
+    -- de-collision off it is legitimate (the palette-recycling limit), not a drift.
+    local shown = {}
+    for _, r in ipairs(rows) do
+        for _, cell in ipairs(r.columns or {}) do
+            if cell.has_commit and cell.commit then shown[cell.color] = (shown[cell.color] or 0) + 1 end
+        end
+    end
+    local heads = {}
     for _, r in ipairs(rows) do
         for _, cell in ipairs(r.columns or {}) do
             if cell.has_commit and cell.commit then
-                local l = lane_of(cell.commit)
-                local mc = l and l.color
-                heads[#heads + 1] = { cell = cell, mc = mc }
-                if mc then want[mc] = (want[mc] or 0) + 1 end
+                local exempt = boundary_ids[cell.id] or false
+                for _, s in ipairs(cell.lanes or {}) do
+                    local c = s.connectivity or {}
+                    if c.left or c.right then exempt = true end -- convergence
+                    if boundary_ids[s.id] and c.down then exempt = true end -- crossing lane
+                end
+                if not exempt then
+                    local l = lane_of(cell.commit)
+                    heads[#heads + 1] = { cell = cell, mc = l and l.color }
+                end
             end
         end
     end
     for _, hd in ipairs(heads) do
-        -- only when this main-view colour isn't shared by another head (no recycle clash)
-        if hd.mc and want[hd.mc] == 1 then
-            assert.equals(hd.mc, hd.cell.color,
-                (ctx or "") .. " a head's colour drifted from its graph colour")
+        if hd.mc then
+            -- legitimate de-collision: another head already shows this graph colour
+            local others = (shown[hd.mc] or 0) - (hd.cell.color == hd.mc and 1 or 0)
+            if others == 0 then
+                assert.equals(hd.mc, hd.cell.color,
+                    (ctx or "") .. " a head's colour drifted from its graph colour")
+            end
         end
     end
 end
@@ -1152,7 +1184,7 @@ describe("pane.header — fuzz invariants (§6.2)", function()
                         assert_distinct_colours(res.rows)
                         assert_distinct_head_colours(res.rows, ctx)
                         assert_unique_terminations(res.rows, ctx)
-                        assert_head_colour_matches_graph(res.rows, lane_of, ctx)
+                        assert_head_colour_matches_graph(res.rows, lane_of, boundary, ctx)
                         -- non-crossing pinned tips above the cutoff (each a lone head)
                         local begins = {}
                         for _, l in pairs(boundary) do if l.begin then begins[l.begin.hash] = true end end

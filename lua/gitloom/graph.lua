@@ -4325,8 +4325,8 @@ function M.open(folder, opts)
                     table.sort(bcols)
                     for _, col in ipairs(bcols) do
                         local l = boundary[col]
-                        out[#out + 1] = ("  col=%d id=%s begin_disp=%s"):format(
-                            col, tostring(l.id), tostring(l.begin and order_of(l.begin)))
+                        out[#out + 1] = ("  col=%d id=%s color=%s begin_disp=%s"):format(
+                            col, tostring(l.id), tostring(l.color), tostring(l.begin and order_of(l.begin)))
                     end
                     -- The header rows (tip-on-top): per row, each cell's lane ids +
                     -- connectivity + whether it carries a node/head.
@@ -4337,13 +4337,15 @@ function M.open(folder, opts)
                             local ids = {}
                             for _, s in ipairs(cell.lanes or {}) do
                                 local c = s.connectivity or {}
-                                ids[#ids + 1] = ("%s%s%s%s%s"):format(tostring(s.id),
+                                ids[#ids + 1] = ("%s.col%s%s%s%s%s"):format(tostring(s.id), tostring(s.color),
                                     c.up and "^" or "", c.down and "v" or "", c.left and "<" or "", c.right and ">" or "")
                             end
                             local node = ""
                             if cell.has_commit and cell.commit then
                                 local nm = cell.commit.refs and cell.commit.refs[1] and cell.commit.refs[1].name
-                                node = ("[%s gcol=%s]"):format(tostring(nm or "head"), tostring(col_of(cell.commit)))
+                                local mv = lane_of(cell.commit)
+                                node = ("[%s gcol=%s mv=%s/%s]"):format(tostring(nm or "head"),
+                                    tostring(col_of(cell.commit)), tostring(mv and mv.id), tostring(mv and mv.color))
                             end
                             if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node) end
                         end
