@@ -3596,6 +3596,79 @@ function M.open(folder, opts)
         sel.anchor, sel.cursor = sel.cursor, sel.anchor
         selection_redraw()
     end
+    -- <Tab> while selecting (§13.4): fold/unfold the head under the cursor in
+    -- place. Expand the cursor's collapsed head (or collapse its region), then
+    -- re-resolve the selection against the new projection **by hash** so the
+    -- anchor and cursor stay on the same commits — the toggled head maps to its
+    -- tip (expand) and a collapsed run maps back to its head — and finally restore
+    -- the cursor's screen row so the view does not jump. A no-op on a mainline
+    -- commit (nothing collapsible there).
+    local function selection_toggle()
+        local node = sel.active and sel.cursor
+        if not node or not (lv and lv.win and lv.win.win) then return end
+        local owners, mode = {}, nil
+        if node.collapsed then -- a head: expand its still-collapsed owners
+            for oid in pairs(node.signature or {}) do
+                if (view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
+            end
+            mode = "normal"
+        else -- a normal/expanded commit: collapse its region, unless mainline
+            owners = collapse_owners(sig_cache.sig and sig_cache.sig[node.hash],
+                effective_pinned(), view_state.effective) or {}
+            mode = "collapsed"
+        end
+        if #owners == 0 then return end
+
+        -- Capture the selection by hash + the cursor's screen row before reflow
+        -- recreates the DisplayNodes (a head's representative hash is its tip).
+        local w = lv.win.win
+        local wl = vim.api.nvim_win_call(w, function() return vim.fn.winline() end)
+        local function rep(n) return (n.collapsed and n.tip and n.tip.hash) or n.hash end
+        local anchor_h = sel.anchor and rep(sel.anchor)
+        local cursor_h = rep(sel.cursor)
+        local path_h = {}
+        for _, n in ipairs(sel.path or {}) do path_h[#path_h + 1] = rep(n) end
+
+        for _, oid in ipairs(owners) do view_state.modes[oid] = mode end
+        reflow() -- rebuilds display + node_loc, drops sel
+
+        -- Map every real-commit / head hash to its new node (members → the head).
+        local by_hash = {}
+        local function add(n)
+            by_hash[n.hash] = n
+            if n.collapsed then for _, h in ipairs(n.region or {}) do by_hash[h] = n end end
+        end
+        for _, it in ipairs(repo.display or {}) do
+            if it.commit then
+                add(it.commit)
+            elseif it.type == "markers" then
+                for _, m in ipairs(it.markers or {}) do add(m) end
+            end
+        end
+        local newpath = {}
+        for _, h in ipairs(path_h) do
+            local nn = by_hash[h]
+            if nn and nn ~= newpath[#newpath] then newpath[#newpath + 1] = nn end
+        end
+        if #newpath == 0 then return end -- selection lost (e.g. all hidden); stay dropped
+        sel.path = newpath
+        sel.anchor = by_hash[anchor_h] or newpath[1]
+        sel.cursor = by_hash[cursor_h] or newpath[#newpath]
+        sel.active = true
+
+        update_cone()
+        if lv.controller then lv.controller.refresh() end
+        goto_hash(sel.cursor.hash)
+        place_cursor()
+        -- Pin the cursor's screen row so the toggled head stays on the same spot.
+        vim.api.nvim_win_call(w, function()
+            local cur = vim.api.nvim_win_get_cursor(w)
+            pcall(vim.fn.winrestview,
+                { topline = math.max(1, cur[1] - (wl - 1)), lnum = cur[1], col = cur[2], leftcol = 0 })
+        end)
+        update_footer()
+        update_panes()
+    end
 
     ---@type ListViewOptions
     local listview_options = {
@@ -3759,6 +3832,9 @@ function M.open(folder, opts)
     -- the result (set_branch → goto_hash) so repeated <Tab> flips it in place.
     -- Two-state — hidden is the menu's job, so nothing vanishes under the cursor.
     opts.win.keys["<Tab>"] = function(self)
+        -- While selecting (§13.4), <Tab> folds/unfolds the head under the cursor
+        -- in place, keeping the selection and the screen position.
+        if sel.active then selection_toggle(); return end
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local b = branch_under_cursor(line)
         if not b or not b.owners or #b.owners == 0 then return end

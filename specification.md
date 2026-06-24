@@ -1232,6 +1232,14 @@ head is lit and it is drawn with `palette.selected` (and the cursor parks on its
 label); the other heads on that line dim. So the right head on a shared line is
 unambiguous even though the line holds many.
 
+`<Tab>` while selecting **folds / unfolds the head under the cursor in place**
+(the §10.4 collapse⇄expand toggle, scoped to the selection): it expands the
+collapsed head the cursor sits on (or collapses the cursor's region), **without
+disturbing the selection** — the anchor and cursor stay on the same commits (the
+toggled head maps to its tip when expanded, a collapsed run back to its head) and
+the cursor's **screen row is held**, so the view does not jump. It is a no-op on
+a mainline commit (nothing there is collapsible).
+
 ### 13.5 Range and the commit view
 
 The selection defines a **`DiffRange`** (§11.5): `to` is the **newer** end's

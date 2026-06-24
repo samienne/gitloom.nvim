@@ -148,6 +148,8 @@ follows the branch, skipping rows that belong to other branches:
   cursor parks on the lit lane so you can see which branch you are on);
 - `h` / `l` switch which branch the selection follows at the nearest fork / merge
   inside it;
+- `<Tab>` folds / unfolds the head under the cursor in place — peek into a
+  collapsed branch without losing the selection or moving the view;
 - `<C-d>` / `<C-u>` jump roughly half a screen of branch commits;
 - `o` swaps the fixed and moving ends;
 - `<CR>` or `D` open the selected range in the external diff viewer;
