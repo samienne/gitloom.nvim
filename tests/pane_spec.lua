@@ -958,6 +958,30 @@ describe("pane.cap — header keeps a continuous seam-adjacent slice (§6.2)", f
         assert.equals(6, elided)       -- 10 - 4 hidden (rendered as "+N above")
     end)
 
+    it("names the elided pinned anchors so off-screen branches stay visible (§6.2)", function()
+        -- A tall header whose far tips are pinned anchors (HEAD, dev). Capping keeps the
+        -- continuous seam-adjacent slice and drops the tip ROWS — but their anchor names
+        -- must be reported so the `+N above` marker can name them. This is the line-277
+        -- bug: HEAD/dev were elided into a bare `+N above` with no indication they were up
+        -- there.
+        local rows = {}
+        rows[1] = { columns = {}, n = 1, pinned = true, commit = { refs = { { name = "HEAD" } } } }
+        rows[2] = { columns = {}, n = 2, pinned = true, commit = { refs = { { name = "dev" } } } }
+        for i = 3, 10 do rows[i] = { columns = {}, n = i } end
+        local capped, elided, names = pane.cap(rows, 4, true)
+        assert.equals(4, #capped)             -- the continuous seam-adjacent slice
+        assert.equals(7, capped[1].n)         -- rows 7..10 kept (no torn middle)
+        assert.equals(6, elided)              -- rows 1..6 elided
+        assert.same({ "HEAD", "dev" }, names) -- both pinned tips named, newest-first
+    end)
+
+    it("reports no anchor names when nothing pinned is elided", function()
+        local rows = {}
+        for i = 1, 10 do rows[i] = { columns = {}, n = i } end
+        local _, _, names = pane.cap(rows, 4, true)
+        assert.same({}, names)
+    end)
+
     it("preserves vertical id-continuity of a real header when capped", function()
         -- A tall header (six crossing lanes all converging at M above the cutoff)
         -- capped must stay continuous: a contiguous seam slice never breaks a lane (the

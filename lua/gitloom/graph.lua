@@ -3950,7 +3950,7 @@ function M.open(folder, opts)
         -- straight lane bars so growth/shrink happens at the bottom and the tip
         -- never bounces (§6.2). `overflow` (header) renders a leading `+N above`;
         -- `height` (header) is the exact overlay height the seam was sized for.
-        local function render_pane(buf, rows, goff, foff, is_header, overflow, height)
+        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names)
             local lines, marks = {}, {}
             -- Render one columns array (graph glyphs) into a padded, aligned line,
             -- recording highlight extmarks; returns the line text for suffixing.
@@ -3997,7 +3997,13 @@ function M.open(folder, opts)
             if is_header then
                 local ovfrow = (overflow and overflow > 0) and 1 or 0
                 if ovfrow == 1 then
-                    lines[#lines + 1] = (string.rep(" ", goff or 0)) .. ("+%d above"):format(overflow)
+                    -- Name the elided pinned anchors so off-screen branches stay visible
+                    -- by name even when their ◍ heads are capped away (§6.2).
+                    local tag = ("+%d above"):format(overflow)
+                    if overflow_names and #overflow_names > 0 then
+                        tag = tag .. ": " .. table.concat(overflow_names, ", ")
+                    end
+                    lines[#lines + 1] = (string.rep(" ", goff or 0)) .. tag
                 end
                 for _, row in ipairs(rows) do lines[#lines + 1] = body_line(row) end
                 -- Pad the bottom with seam bars down to the exact overlay height, so
@@ -4262,8 +4268,8 @@ function M.open(folder, opts)
                 -- — keep the seam-continuous bottom slice and elide the far tips into
                 -- `+N above` (room for the +N line and the seam separator). Eliding the
                 -- middle instead would tear every lane at the gap (the old bug).
-                local kept, ovf = pane.cap(rows, math.max(1, height - 2), true)
-                return kept, seam_tag, height, ovf
+                local kept, ovf, ovf_names = pane.cap(rows, math.max(1, height - 2), true)
+                return kept, seam_tag, height, ovf, ovf_names
             end
 
             -- Offsets of the main graph column so the pane lanes line up: `goff` =
@@ -4294,13 +4300,13 @@ function M.open(folder, opts)
             -- HEADER (off-screen-newer topology, above). The overlay is exactly `H`
             -- tall (the height the seam was sized at), padded at the bottom so the
             -- seam butts the main view's top edge.
-            local hrows, htag, H, ovf = converge_header()
+            local hrows, htag, H, ovf, ovf_names = converge_header()
             if not hrows or #hrows == 0 then
                 header_dbg = htag or "no rows"; close_pane(header); header_seam, header_height = nil, nil
             else
                 header_seam, header_height, header_dbg = htag, H, nil
                 ensure_pane_win(header, true, H)
-                render_pane(header.buf, hrows, goff, foff, true, ovf, H)
+                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names)
             end
 
             -- Topology-only debug dump (set `vim.g.gitloom_pane_debug` to a file path):

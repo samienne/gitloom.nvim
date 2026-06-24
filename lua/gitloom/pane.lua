@@ -262,21 +262,34 @@ end
 --- continuity bug this avoids.) A **footer** (`keep_first` off) runs seam→root (seam
 --- at the top): it keeps the seam-nearest rows and the final **root** (it is small
 --- and the root anchors it). Returns the kept rows and the number elided.
+--- A capped **header** also reports the **names of the pinned anchors it elided** (the
+--- tips it dropped), so the `+N above` marker can name them — the off-screen anchors stay
+--- visible-by-name even when the header can't draw their ◍ heads (spec §6.2). Order is
+--- newest-first (top of the elided slice), de-duplicated.
 ---@param rows table[]
 ---@param max integer
 ---@param keep_first boolean?  -- header orientation (seam at the bottom)
----@return table[] kept, integer elided
+---@return table[] kept, integer elided, string[] elided_anchors
 function M.cap(rows, max, keep_first)
-    if #rows <= max then return rows, 0 end
-    local out = {}
+    if #rows <= max then return rows, 0, {} end
+    local out, names, seen = {}, {}, {}
     if keep_first then
         -- The contiguous bottom slice ending at the seam — continuous by construction.
         for i = 1, max do out[i] = rows[#rows - max + i] end
+        -- The elided TOP rows are the far tips; surface any pinned anchor labels there.
+        for i = 1, #rows - max do
+            local r = rows[i]
+            if r.pinned and r.commit and r.commit.refs then
+                for _, rf in ipairs(r.commit.refs) do
+                    if rf.name and not seen[rf.name] then seen[rf.name] = true; names[#names + 1] = rf.name end
+                end
+            end
+        end
     else
         for i = 1, max - 1 do out[i] = rows[i] end
         out[max] = rows[#rows] -- the root, always
     end
-    return out, #rows - max
+    return out, #rows - max, names
 end
 
 --- The header **seam** (spec §6.2): which rendered line is the cutoff for an overlay
