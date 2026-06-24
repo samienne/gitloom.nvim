@@ -20,5 +20,6 @@ reexport(require("gitloom.git.order"))
 reexport(require("gitloom.git.date"))
 reexport(require("gitloom.git.parse"))
 reexport(require("gitloom.git.refs"))
+reexport(require("gitloom.git.range"))
 
 return M
