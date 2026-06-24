@@ -5307,6 +5307,19 @@ function M.open(folder, opts)
                         out[#out + 1] = ("  col=%d id=%s color=%s begin_disp=%s"):format(
                             col, tostring(l.id), tostring(l.color), tostring(l.begin and order_of(l.begin)))
                     end
+                    -- Pinned-anchor tip resolution: whether each pinned ref resolves to a
+                    -- display node ABOVE the cutoff (so it seeds the header as a labelled
+                    -- head). If a tip is missing here, the header can't show that anchor.
+                    out[#out + 1] = ("pinned tips (seam_idx=%s):"):format(tostring(disp_idx))
+                    for name in pairs(effective_pinned()) do
+                        local ref = repo.refs[name]
+                        local c = ref and ref.commit
+                        local dn = c and dnode[c.hash]
+                        local oi = dn and order_of(dn)
+                        out[#out + 1] = ("  %s -> commit=%s dnode=%s order=%s above=%s"):format(
+                            name, tostring(c and c.hash), tostring(dn ~= nil),
+                            tostring(oi), tostring(oi ~= nil and disp_idx ~= nil and oi < disp_idx))
+                    end
                     -- The header rows (tip-on-top): per row, each cell's lane ids +
                     -- connectivity + whether it carries a node/head.
                     out[#out + 1] = ("header rows = %d (overlay H=%s):"):format(#(hrows or {}), tostring(H))
