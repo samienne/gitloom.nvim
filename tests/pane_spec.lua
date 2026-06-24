@@ -307,6 +307,38 @@ local function assert_head_colour_matches_graph(rows, lane_of, boundary, ctx)
     end
 end
 
+-- A branch head's lane id must equal its MAIN-VIEW lane id (lane_of), so the header is a
+-- faithful continuation of the graph — a branch never silently switches to a synthetic
+-- id. Crossing/boundary lanes are pinned at the seam (covered by assert_seam_match) and a
+-- merge-tip can legitimately end on a sibling lane, so both are checked elsewhere; here we
+-- cover lanes BORN above the seam (fork children), whose id IS the head's main-view id.
+-- A genuine de-collision (the main view recycled that id onto another header-concurrent
+-- lane, so it is taken) is allowed.
+local function assert_head_id_matches_graph(rows, lane_of, boundary, ctx)
+    local boundary_ids = {}
+    for _, l in pairs(boundary or {}) do if l.id ~= nil then boundary_ids[l.id] = true end end
+    local used = {} -- every lane id rendered anywhere (to detect a forced de-collision)
+    for _, r in ipairs(rows) do
+        for _, cell in ipairs(r.columns or {}) do
+            for _, s in ipairs(cell.lanes or {}) do if s.id ~= nil then used[s.id] = true end end
+        end
+    end
+    for _, r in ipairs(rows) do
+        for _, cell in ipairs(r.columns or {}) do
+            if cell.has_commit and cell.commit and not boundary_ids[cell.id] then
+                local l = lane_of(cell.commit)
+                local mv = l and l.id
+                if mv ~= nil and cell.id ~= mv then
+                    -- allowed only when the graph id is taken by another header lane
+                    assert.is_true(used[mv] == true,
+                        (ctx or "") .. (" a branch head switched id: header %s vs graph %s"):format(
+                            tostring(cell.id), tostring(mv)))
+                end
+            end
+        end
+    end
+end
+
 
 
 -- Run the full header pipeline on a laid-out DAG: read the up-boundary at the seam
@@ -669,6 +701,51 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
                 assert.equals(want_head, hc, ("si=%d head colour drifted"):format(si))
                 assert.equals(want_dev, dc, ("si=%d dev colour drifted"):format(si))
                 assert.is_true(hc ~= dc, ("si=%d head and dev share a colour"):format(si))
+            end
+        end
+    end)
+
+    it("gives each fork head the SAME lane id as the main view (no switch to a synthetic id)", function()
+        -- Same two-branch shape: head (h1..h4) continues the trunk off `base`, dev
+        -- (d1..d4) forks. Each head must render with ITS OWN main-view lane id — head keeps
+        -- the boundary/trunk id, dev keeps dev's graph id — never a fresh synthetic id and
+        -- never the trunk's id (the dump bug: dev kept head's id=1 while head got a fresh
+        -- id). The id must also stay stable as the cutoff scrolls.
+        local items = h.dag({
+            { "h1", { "h2" } }, { "h2", { "h3" } }, { "h3", { "h4" } }, { "h4", { "base" } },
+            { "d1", { "d2" } }, { "d2", { "d3" } }, { "d3", { "d4" } }, { "d4", { "base" } },
+            { "base", {} },
+        })
+        items[1].commit.refs = { { name = "head" } } -- h1
+        items[5].commit.refs = { { name = "dev" } }  -- d1
+        local opts = h.big_opts()
+        local main = columns.layout(opts, items)
+        local idx, lane_main = {}, {}
+        for i, it in ipairs(items) do
+            idx[it.commit.hash] = i
+            local pl = main[i].parent_lanes
+            if pl and pl[1] then lane_main[it.commit.hash] = { id = pl[1].id, color = pl[1].color } end
+        end
+        assert.is_true(lane_main.h1.id ~= lane_main.d1.id) -- distinct lanes in the graph
+
+        local function head_id(res, name)
+            for _, r in ipairs(res.rows) do
+                for _, cell in ipairs(r.columns) do
+                    if cell.has_commit and cell.commit.refs then
+                        for _, rf in ipairs(cell.commit.refs) do
+                            if rf.name == name then return cell.id end
+                        end
+                    end
+                end
+            end
+        end
+        for si = 2, 9 do
+            local res = header_of(items, opts, si)
+            local hid, did = head_id(res, "head"), head_id(res, "dev")
+            if hid and did then
+                assert.equals(lane_main.h1.id, hid, ("si=%d head id ≠ graph"):format(si))
+                assert.equals(lane_main.d1.id, did, ("si=%d dev id ≠ graph (switched to a synthetic id)"):format(si))
+                assert.is_true(hid ~= did, ("si=%d head and dev share an id"):format(si))
             end
         end
     end)
@@ -1185,6 +1262,7 @@ describe("pane.header — fuzz invariants (§6.2)", function()
                         assert_distinct_head_colours(res.rows, ctx)
                         assert_unique_terminations(res.rows, ctx)
                         assert_head_colour_matches_graph(res.rows, lane_of, boundary, ctx)
+                        assert_head_id_matches_graph(res.rows, lane_of, boundary, ctx)
                         -- non-crossing pinned tips above the cutoff (each a lone head)
                         local begins = {}
                         for _, l in pairs(boundary) do if l.begin then begins[l.begin.hash] = true end end

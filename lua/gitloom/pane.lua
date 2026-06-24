@@ -816,7 +816,11 @@ function M.header(items, boundary, node_of, lane_of, col_of)
     -- header keeps matching the graph wherever it can.
     local maxid = 0
     for _, l in pairs(boundary) do if type(l.id) == "number" and l.id > maxid then maxid = l.id end end
-    local boundary_max = maxid -- ids ≤ this are crossing/seam lanes (must keep their boundary colour)
+    -- The crossing/seam lane ids (must keep their boundary colour to the seam). Above-seam
+    -- lanes (fork children / merge continuations) carry their own main-view ids now, so the
+    -- distinction is set membership, not an id threshold.
+    local boundary_set = {}
+    for _, l in pairs(boundary) do if l.id ~= nil then boundary_set[l.id] = true end end
     -- A fresh (fork-child) id must clearly be NEW: above every id that appears in the
     -- header — the boundary lanes AND every node's main-view lane — so it never
     -- numerically coincides with an existing main-view lane id (which reads as the branch
@@ -826,6 +830,20 @@ function M.header(items, boundary, node_of, lane_of, col_of)
         if type(lid) == "number" and lid > maxid then maxid = lid end
     end
     local function fresh_id() maxid = maxid + 1; return maxid end
+    -- A header lane PREFERS its main-view lane id, so a branch keeps the SAME id as the
+    -- graph (the header is a faithful continuation, not a relabelling). A fresh
+    -- (monotonic, above-everything) id is used only on a genuine collision — the main view
+    -- recycled that id onto a lane already alive in the header, so the two must differ
+    -- (the "both id 1" / double-termination bug). Seeded with the boundary ids, which the
+    -- pivots keep.
+    local used_ids = {}
+    for _, l in pairs(boundary) do if l.id ~= nil then used_ids[l.id] = true end end
+    local function pick_id(mvid)
+        local id
+        if type(mvid) == "number" and not used_ids[mvid] then id = mvid else id = fresh_id() end
+        used_ids[id] = true
+        return id
+    end
     local function free_color(used, prefer)
         if prefer and not used[prefer] then return prefer end
         local c = 1
@@ -904,30 +922,33 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             -- so the column's vertical colour never breaks); each extra fork child is
             -- placed at its OWN main-view column when free, so the header's left-right
             -- order MATCHES THE GRAPH (no bottom-up swap) — never reusing a column. Each
-            -- gets a fresh UNIQUE id (→ no lane terminates twice); colour is its branch's
-            -- main-view colour, de-collided by the global pass below.
+            -- keeps its branch's MAIN-VIEW id+colour (de-collided only on a genuine clash),
+            -- so a branch's id is the same in the header as in the graph.
             local upcols, upid, upcolor = {}, {}, {}
             if not is_head then
                 upcols[1] = pivot
-                if #arriving >= 2 then
-                    -- A MERGE is a junction: the surviving lane SWITCHES to the
-                    -- merged branch's colour above the join. The arriving lanes
-                    -- keep their own colour up to the junction (so the seam never
-                    -- switches mid-lane — only at a junction, per the colour rule).
-                    -- A fresh id keeps the post-merge lane distinct from the lanes
-                    -- it merged.
-                    local _, mc = lane(upkids[1], plane)
-                    upid[1], upcolor[1] = fresh_id(), mc or plane.color
-                else
+                local mv1, c1col = lane(upkids[1], plane)
+                if #arriving < 2 and mv1 == plane.id then
+                    -- A TRUE first-parent continuation: the pivot child carries the same
+                    -- main-view lane, so the surviving lane keeps its id/colour straight
+                    -- through (no junction here).
                     upid[1], upcolor[1] = plane.id, plane.color
+                else
+                    -- A JUNCTION — either a MERGE (≥2 arriving) or a FAN-OUT where the
+                    -- parent lane does NOT continue to this child (the pivot child is on a
+                    -- different main-view lane, so the parent lane really ends here). The
+                    -- surviving lane SWITCHES to the continuing branch's own id+colour
+                    -- above the join; the arriving lane(s) keep theirs up to the junction
+                    -- (so the seam never switches mid-lane — only at a junction).
+                    upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color
                 end
                 for k = 2, #upkids do
-                    local _, pref = lane(upkids[k], plane)
+                    local mvid, pref = lane(upkids[k], plane)
                     local col = free_col(col_of and col_of(upkids[k]))
                     used_cols[col] = true
                     if col > maxcol then maxcol = col end
                     upcols[k] = col
-                    upid[k] = fresh_id()
+                    upid[k] = pick_id(mvid)
                     upcolor[k] = pref
                 end
             end
@@ -1045,12 +1066,12 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                         if cell.has_commit and cc.down and not cc.up then
                             head_id[s.id] = true
                             -- A head reads as ITS OWN branch (the tip) colour — but ONLY
-                            -- for above-seam lanes (fresh ids: fork children and merge
-                            -- continuations). A crossing/seam lane (id ≤ boundary_max)
-                            -- keeps its boundary colour all the way to the seam and must
-                            -- NOT be switched (the seam-never-switches rule); being a
-                            -- straight lane its colour already equals its head's.
-                            if type(s.id) == "number" and s.id > boundary_max then
+                            -- for above-seam lanes (fork children and merge continuations).
+                            -- A crossing/seam lane keeps its boundary colour all the way to
+                            -- the seam and must NOT be switched (the seam-never-switches
+                            -- rule); being a straight lane its colour already equals its
+                            -- head's.
+                            if s.id ~= nil and not boundary_set[s.id] then
                                 local _, hc = lane(cell.commit)
                                 if hc then pref[s.id] = hc end
                             end
