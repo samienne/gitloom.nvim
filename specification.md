@@ -406,6 +406,14 @@ head, or a merge's second-and-later parent.
   behind an occupied lane is reclaimed on a later row, once that lane itself moves
   (a ripple). Consequently, with both fans on their own Lines (the both-lines
   style), a commit Line has **no crossings at all**.
+- **A fan Line carries no compaction.** When the fan is drawn *inline* (the split
+  or merge shares the commit Line rather than getting its own Line), compaction is
+  suppressed on that Line entirely: a pass-through lane crosses the fan
+  **vertically**, never compacting horizontally along it, and the linear-commit
+  slide does not run. Only the fan's own lanes — the converging children, the
+  diverging parents — draw the horizontal; a lane joins it only if it belongs to
+  that fan. Compaction still applies on non-fan Lines and on a Line whose fan sits
+  on its own split/merge Line.
 
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view

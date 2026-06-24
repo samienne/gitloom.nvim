@@ -549,7 +549,11 @@ the current row. For each commit `C`:
    column another lane vacates this same row either (two turns out of one cell), so
    freed columns are reclaimed over a ripple. Each placed lane's jog span is
    reserved (`used`) so a later one neither lands on nor crosses it. With both fans
-   on their own lines, a commit line then has no crossings at all. An extra
+   on their own lines, a commit line then has no crossings at all. **A `fan_line`
+   — an *inline* split (≥2 incoming, no separate split line) or merge (≥2 outgoing,
+   no separate merge line) — suppresses all compaction on that line** (both the
+   survivor shift and step 2's linear slide): a pass-through lane crosses the fan
+   vertically, and only the fan's own lanes draw the horizontal. An extra
    (non-first) parent likewise takes the
    leftmost column free since before this row — an interior gap, not a fresh
    rightmost one — so a staircase of sequential merges stays a bounded width. A
