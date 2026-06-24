@@ -1203,6 +1203,10 @@ growing:
 - a strictly linear path (no junction between the two ends) → `h` / `l` is a
   **no-op** (there is no branch to switch to).
 
+The rotation follows the **rendered** lane order: under mirroring (§5.4, lane 1
+at the right) it is reversed, so `l` always moves toward the branch drawn to the
+right and `h` toward the left, matching how the graph reads.
+
 After a switch the cursor **stays on its current row** when the newly-chosen
 branch has a lane there, snapping to the nearest commit on the new branch
 otherwise; `j` / `k` then walks the new branch. The path is re-derived from the

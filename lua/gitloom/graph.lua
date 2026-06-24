@@ -3581,9 +3581,13 @@ function M.open(folder, opts)
         selection_redraw()
         center_view()
     end
-    -- h/l: switch branch at the nearest junction (§13.3).
+    -- h/l: switch branch at the nearest junction (§13.3). The rotation is in lane
+    -- order, so under mirroring (§5.4, lane 1 at the right) the visual direction is
+    -- reversed — negate `delta` so `l` always moves toward the visually-right
+    -- branch and `h` the left, matching how the graph reads.
     local function selection_switch(delta)
         if not sel.active then return end
+        if opts.mirror ~= false then delta = -delta end
         if sel_switch(sel, delta) then selection_redraw() end
     end
     -- o: swap the anchor and the moving end (§13.2).
