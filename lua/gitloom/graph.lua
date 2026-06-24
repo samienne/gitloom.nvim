@@ -4436,6 +4436,16 @@ function M.open(folder, opts)
                             if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node) end
                         end
                         out[#out + 1] = ("  R%02d %s"):format(ri, table.concat(parts, "  "))
+                        -- The ACTUAL rendered glyphs + per-glyph highlight group, so the
+                        -- colour you SEE is captured alongside the structure.
+                        local ok, g = pcall(get_column_chars, opts, r.columns, false)
+                        if ok and g then
+                            local hl = {}
+                            for _, m in ipairs(g.highlight or {}) do
+                                hl[#hl + 1] = ("%d-%d:%s"):format(m.start_pos, m.end_pos, tostring(m.hl))
+                            end
+                            out[#out + 1] = ("      render=[%s] %s"):format(g.text or "", table.concat(hl, " "))
+                        end
                     end
                     -- The main-view display items around the seam, with their lane ids,
                     -- so the boundary can be checked against the real topology.
