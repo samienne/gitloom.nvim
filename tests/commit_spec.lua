@@ -18,7 +18,7 @@ end
 describe("parse_commit_line", function()
     it("parses a commit with a single parent", function()
         local c = parse_commit_line(line({
-            "abc123", "def456", "Alice", "1704110400", "2024-01-01 12:00:00 +0000", "Initial commit",
+            "abc123", "def456", "Alice", "1704110400", "2024-01-01 12:00:00 +0000", "1704110500", "Initial commit",
         }))
         ---@cast c -nil
         assert.equals("abc123", c.hash)
@@ -26,24 +26,25 @@ describe("parse_commit_line", function()
         assert.equals("Alice", c.author)
         assert.equals(1704110400, c.date.epoch)
         assert.equals(0, c.date.offset)
+        assert.equals(1704110500, c.cepoch) -- committer epoch (%ct), seeds the sort (§3.1)
         assert.equals("Initial commit", c.message)
         assert.is_true(c.loaded)
     end)
 
     it("parses multiple parents", function()
-        local c = parse_commit_line(line({ "h", "p1 p2", "A", "0", "d", "merge" }))
+        local c = parse_commit_line(line({ "h", "p1 p2", "A", "0", "d", "0", "merge" }))
         ---@cast c -nil
         assert.same({ "p1", "p2" }, c.parents)
     end)
 
     it("handles a root commit with no parents", function()
-        local c = parse_commit_line(line({ "h", "", "A", "0", "d", "root" }))
+        local c = parse_commit_line(line({ "h", "", "A", "0", "d", "0", "root" }))
         ---@cast c -nil
         assert.same({}, c.parents)
     end)
 
     it("starts with an empty refs list (refs are resolved separately)", function()
-        local c = parse_commit_line(line({ "h", "", "A", "0", "d", "subj" }))
+        local c = parse_commit_line(line({ "h", "", "A", "0", "d", "0", "subj" }))
         ---@cast c -nil
         assert.same({}, c.refs)
     end)

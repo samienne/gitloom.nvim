@@ -277,7 +277,7 @@ on_controller(controller)
    ├─ fetch_head()               git symbolic-ref → mark current branch (head Ref)
    │      │ (Future)
    │      ▼
-   └─ fetch_commits()            git log --all --parents   (no ordering flag)
+   └─ fetch_commits()            git log --all --topo-order --parents
           │  stdout handler (light): stitch partial lines, enqueue raw text,
           │    schedule a drain — no per-commit work here (see Git I/O).
           │  scheduled worker, COMMIT_BATCH at a time (yields between batches):
@@ -289,7 +289,7 @@ on_controller(controller)
           │    refresh_columns(order)          ← Phase 1 relayout (columns.layout)
           │    controller.insert(new_items)    ← inserts the batch's blank lines
           │  on stream completion:
-          │    order_commits(repo.commits)     ← owned topological sort (§3.1):
+          │    apply_sort() → order_commits     ← owned topological sort (§3.1):
           │      rebuilds repo.order in the authoritative row order, then reflow()
           ▼
    (rendering is deferred)
@@ -317,10 +317,11 @@ on_redraw(top, bottom)
   annotated tags).
 - `fetch_head(repo)` — `git symbolic-ref --short --quiet HEAD` for the current
   branch.
-- `fetch_commits(opts)` — `git log --parents` (no ordering flag — gitloom owns
-  the row order, §3.1) with a
-  `%x1f`-delimited pretty-format (`%H %P %an %at %ai %s`). `%at` (epoch) + `%ai`
-  (offset) feed the parsed timestamp. No `--decorate`; refs are a separate query
+- `fetch_commits(opts)` — `git log --topo-order --parents` (a valid topo base for
+  progressive paint; the active sort mode produces the final order at completion,
+  §3.1) with a `%x1f`-delimited pretty-format (`%H %P %an %at %ai %ct %s`). `%at`
+  (epoch) + `%ai` (offset) feed the parsed author timestamp; `%ct` (committer
+  epoch) seeds `order_commits` (§3.1). No `--decorate`; refs are a separate query
   (specification.md §3). **Streamed unbuffered** so the view fills progressively
   (spec §3, §10.5): the `on_stdout` handler is kept light — `make_line_buffer`
   stitches the partial line at each chunk seam, the complete lines are enqueued,
@@ -354,8 +355,9 @@ on_redraw(top, bottom)
 documented placeholder contract — the de-facto way to script this. The
 plumbing-pure alternative (`git rev-list --no-commit-header`, same format) is a
 one-line swap with no real gain today. gitloom owns row ordering (`order_commits`,
-§3.1), so no ordering flag is passed to `git log` — git's emission is only the
-arrival order for progressive streaming.
+§3.1); the stream's `--topo-order` is only a valid topo base for progressive
+paint (it equals the `topo` sort mode's own output), and the active sort mode
+produces the authoritative order at completion.
 
 All run via `vim.fn.jobstart` (no explicit `cwd`, so they observe Neovim's
 working directory) and resolve a `Future` on `on_exit`. The controller chains

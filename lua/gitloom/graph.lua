@@ -19,7 +19,7 @@ local MERGE_STYLES = {
 }
 local merge_style_index = 1
 -- Active row sort mode (index into SORT_MODES, defined below; spec §3.1), cycled
--- by `S`. 1 = the gitloom clustered sort (default).
+-- by `S`. 1 = topo (the default; order_commits, reproducing git's --topo-order).
 local sort_mode_index = 1
 
 -- Ref label placements the viewer cycles through with `B` (spec §6.1). `right`
@@ -79,7 +79,7 @@ local KEYBINDS = {
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "R", "Resync with the repository (refs + new commits + working tree)" },
-    { "S", "Cycle the row sort mode (gitloom / git topo / date / author)" },
+    { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
@@ -951,9 +951,11 @@ local function ref_byte_col(line_text, deco)
 end
 
 --- Parse one `git log` line. Fields are `%x1f`-separated:
---- hash, parent hashes, author, epoch (%at), iso date (%ai), subject. Refs are
---- NOT here — they come from `fetch_refs` (§3.2); a fresh commit starts with an
---- empty refs list.
+--- hash, parent hashes, author, author epoch (%at), iso date (%ai), committer
+--- epoch (%ct), subject. The committer epoch (`cepoch`) is what `order_commits`
+--- seeds tips by, to match git's `--topo-order` (which orders by committer date;
+--- §3.1). Refs are NOT here — they come from `fetch_refs` (§3.2); a fresh commit
+--- starts with an empty refs list.
 local function parse_commit_line(line)
     local fields = vim.split(line, "\x1f")
 
@@ -961,7 +963,8 @@ local function parse_commit_line(line)
     local parents = vim.split(fields[2] or "", " ")
     local author = fields[3]
     local date = parse_timestamp(fields[4], fields[5])
-    local subject = fields[6]
+    local cepoch = tonumber(fields[6])
+    local subject = fields[7]
 
     if not hash then
         return
@@ -980,6 +983,7 @@ local function parse_commit_line(line)
         children = {},
         author = author,
         date = date,
+        cepoch = cepoch,
         message = subject,
         loaded = true,
         refs = {},
@@ -1061,17 +1065,20 @@ local function order_commits(commits)
     end
 
     -- The stack is a plain array (push = append, pop = remove last = LIFO). Seed
-    -- the ready tips **oldest author-date first** so the newest lands on top and
-    -- is popped first (git seeds newest-first then reverses the LIFO). Hash breaks
-    -- ties for determinism: the smaller hash ends nearer the top, so among
-    -- equal-date tips the smaller hash is emitted first.
+    -- the ready tips **oldest committer-date first** so the newest lands on top
+    -- and is popped first (git seeds newest-first then reverses the LIFO). git
+    -- orders by *committer* date (`%ct`, `cepoch`); fall back to author date for
+    -- synthetic commits without it. Hash breaks ties for determinism: the smaller
+    -- hash ends nearer the top, so among equal-date tips it is emitted first.
+    local function tip_epoch(c)
+        return c.cepoch or (c.date and c.date.epoch) or 0
+    end
     local stack = {}
     for _, c in ipairs(commits) do
         if pending[c.hash] == 0 then stack[#stack + 1] = c end
     end
     table.sort(stack, function(a, b)
-        local ea = a.date and a.date.epoch or 0
-        local eb = b.date and b.date.epoch or 0
+        local ea, eb = tip_epoch(a), tip_epoch(b)
         if ea ~= eb then return ea < eb end -- ascending: oldest first (top = newest)
         return a.hash > b.hash
     end)
@@ -1105,8 +1112,7 @@ local function order_commits(commits)
             if not emitted[c.hash] then rest[#rest + 1] = c end
         end
         table.sort(rest, function(a, b)
-            local ea = a.date and a.date.epoch or 0
-            local eb = b.date and b.date.epoch or 0
+            local ea, eb = tip_epoch(a), tip_epoch(b)
             if ea ~= eb then return ea > eb end
             return a.hash < b.hash
         end)
@@ -1170,9 +1176,10 @@ local function reachable_hashes(commits, tips)
 end
 
 -- The `%x1f`-delimited `git log` pretty-format shared by the initial stream and
--- the resync's bounded fetch: %H %P %an %at %ai %s (epoch + iso feed the
--- Timestamp, §4); %s last is fine (single line). Parsed by parse_commit_line.
-local COMMIT_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%s"
+-- the resync's bounded fetch: %H %P %an %at %ai %ct %s (author epoch + iso feed
+-- the Timestamp §4; committer epoch %ct seeds the sort §3.1); %s last (single
+-- line). Parsed by parse_commit_line.
+local COMMIT_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s"
 
 -- Commits parsed per scheduled worker turn. The stdout handler only enqueues
 -- raw lines; a `vim.schedule`d worker drains the queue this many at a time and
@@ -1338,14 +1345,13 @@ end
 --- The row sort modes (spec §3.1), cycled by `S`. The order gitloom renders is
 --- owned, but each mode sources its *sequence* differently: a mode with `fn`
 --- sorts the in-memory DAG in Lua; a mode with `rev` asks git for the exact
---- sequence (`git rev-list <rev>`), so the `git` mode reproduces git's
---- `--topo-order` byte-for-byte. `gitloom` (the clustered `order_commits`) is the
---- default; `git` is the raw git order; `date` / `author` are git's other orders.
+--- sequence (`git rev-list <rev>`). `topo` (the default) is `order_commits`,
+--- which reproduces git's `--topo-order` itself; `date` / `author` are git's
+--- date-interleaved orders.
 local SORT_MODES = {
-    { id = "gitloom", label = "gitloom topo", fn = true },
-    { id = "git", label = "git topo", rev = "--topo-order" },
-    { id = "date", label = "git date", rev = "--date-order" },
-    { id = "author", label = "git author-date", rev = "--author-date-order" },
+    { id = "topo", label = "topo", fn = true },
+    { id = "date", label = "date", rev = "--date-order" },
+    { id = "author", label = "author-date", rev = "--author-date-order" },
 }
 
 --- Ask git for an exact commit order — the `rev`-based sort modes (spec §3.1).
@@ -1417,6 +1423,7 @@ end
 ---@field refs Ref[]
 ---@field author? string
 ---@field date? Timestamp
+---@field cepoch? integer    committer date as Unix time (%ct); seeds order_commits (§3.1)
 ---@field message? string
 ---@field loaded? boolean   true once the commit's own log line has been parsed
 ---@field virtual? "staged"|"unstaged"   set on a working-tree virtual commit (§4.2)
@@ -3815,7 +3822,7 @@ end
 -----@field merge_style "compact"|"normal"|"merge"
 ---@field merge_style MergeStyle
 ---@field branches? string|string[]
----@field sort_mode? string  initial row sort mode id (§3.1): "gitloom" | "git" | "date" | "author"
+---@field sort_mode? string  initial row sort mode id (§3.1): "topo" | "date" | "author"
 ---@field icons Icons
 ---@field mirror? boolean  render the graph mirrored (lane 1 on the right); §5.4
 ---@field highlight? boolean  reachability dimming on/off (default true); §12
@@ -3968,7 +3975,7 @@ function M.open(folder, opts)
     repo.display = repo.order
 
     -- Resolve the initial sort mode (§3.1) from opts.sort_mode (an id string),
-    -- defaulting to the gitloom clustered sort. `S` cycles from here.
+    -- defaulting to topo (order_commits). `S` cycles from here.
     if opts.sort_mode then
         for i, m in ipairs(SORT_MODES) do
             if m.id == opts.sort_mode then sort_mode_index = i; break end

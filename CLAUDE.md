@@ -584,12 +584,11 @@ Details not covered by the spec or architecture:
   `cwd`, so the graph reflects the current working directory's repo.
 - **Sort modes** (specification.md §3.1, cycled by `S`): gitloom owns the
   row-order *pipeline* (records, decides when to order, reflows), but each
-  **sort mode** sources its sequence differently. `SORT_MODES`: `gitloom`
+  **sort mode** sources its sequence differently. `SORT_MODES`: `topo`
   (default) = `order_commits` (a Lua **DFS over a LIFO stack** mirroring git's
   `sort_in_topological_order` — it reproduces `git rev-list --topo-order`
-  commit-for-commit; see below); `git` = git's exact `--topo-order` (verbatim,
-  ground truth for the `gitloom` mode); `date` / `author` = `git rev-list
-  --date-order` / `--author-date-order`. The `rev` modes
+  commit-for-commit, so there is no separate raw-git mode; see below); `date` /
+  `author` = `git rev-list --date-order` / `--author-date-order`. The `rev` modes
   fetch their hash sequence via `fetch_rev_order` and `reorder_by_hashes` reorders
   `repo.order` to match (in place, no re-stream); the `gitloom` mode runs
   `reorder_repo`. `apply_sort()` dispatches (returns a Future — the `rev` modes
@@ -599,16 +598,17 @@ Details not covered by the spec or architecture:
   picks the initial mode (default `gitloom`).
 - **`order_commits` reproduces git's `--topo-order`** (spec §3.1): a DFS over a
   LIFO stack, not a date-priority sort. Ready tips (all in-set children placed)
-  seed the stack **oldest author-date first** so the newest pops first (git seeds
-  newest-first then reverses the LIFO); popping a commit emits it and pushes each
-  parent the instant it becomes ready (in parent order, so the LAST parent is
-  descended first — git's discipline), so a merge's merged-in lineage is emitted
-  contiguously right after the merge instead of scattered by date (the spaghetti
-  fix). Date only orders the independent tips. Verified 100% commit-for-commit vs
-  `git rev-list --topo-order` on the real repo; the only possible divergence is
-  where author vs committer date disagree on two independent tips' order (git
-  seeds by committer date — we only fetch author date). `ordering_spec` locks the
-  lineage-grouping on a merge fixture.
+  seed the stack **oldest committer-date first** (`%ct`/`cepoch`, git's own
+  ordering; author date is the fallback for synthetic commits) so the newest pops
+  first (git seeds newest-first then reverses the LIFO); popping a commit emits it
+  and pushes each parent the instant it becomes ready (in parent order, so the
+  LAST parent is descended first — git's discipline), so a merge's merged-in
+  lineage is emitted contiguously right after the merge instead of scattered by
+  date (the spaghetti fix). Date only orders the independent tips. Verified 100%
+  commit-for-commit vs `git rev-list --topo-order` on a real (257) and a synthetic
+  (15) repo, which is why there is no separate raw-git sort mode. `ordering_spec`
+  locks the lineage-grouping on a merge fixture; `commit_spec` covers the `%ct`
+  parse.
 - **Owned ordering + resync** (specification.md §3.1/§3.4): `order_commits`
   produces the authoritative `repo.order` for the default `gitloom`
   sort mode (via `reorder_repo`, which reuses the existing OrderItem objects).
