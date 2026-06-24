@@ -2912,13 +2912,24 @@ local function open_commit_view(opts, commit, range)
     vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized" }, {
         group = ctx_group,
         callback = function()
-            if vim.api.nvim_win_is_valid(w.win) then update_ctx() end
+            -- This autocmd is global (it must catch scrolls in the commit view),
+            -- so once that window has closed — snacks clears `w.win` to nil — a
+            -- later scroll in any other window would call nvim_win_is_valid(nil)
+            -- and error. Guard the handle and tear the group down when it is gone.
+            if w.win and vim.api.nvim_win_is_valid(w.win) then
+                update_ctx()
+            else
+                pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
+            end
         end,
     })
     vim.api.nvim_create_autocmd("WinClosed", {
         group = ctx_group,
         callback = function(ev)
-            if tonumber(ev.match) == w.win then close_ctx() end
+            if w.win and tonumber(ev.match) == w.win then
+                close_ctx()
+                pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
+            end
         end,
     })
 
