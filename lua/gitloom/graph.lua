@@ -3980,7 +3980,7 @@ function M.open(folder, opts)
         -- straight lane bars so growth/shrink happens at the bottom and the tip
         -- never bounces (§6.2). `overflow` (header) renders a leading `+N above`;
         -- `height` (header) is the exact overlay height the seam was sized for.
-        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names, above_count)
+        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names, clipped)
             local lines, marks = {}, {}
             local pal = opts.palette or {}
             -- Ref-label highlight by kind, matching the main view's ref colours.
@@ -4053,10 +4053,10 @@ function M.open(folder, opts)
                     for k = 1, seams do
                         local li = #lines
                         local sline = glyph_line(sep)
-                        -- Annotate the very bottom seam row with how many off-screen
-                        -- commits the header summarises (a comment-style note).
-                        if k == seams and above_count and above_count > 0 then
-                            local note = ("   … %d commits above …"):format(above_count)
+                        -- Annotate the very bottom seam row with how many buffer lines the
+                        -- header clips above the seam (a comment-style note).
+                        if k == seams and clipped and clipped > 0 then
+                            local note = ("   … clipped %d lines …"):format(clipped)
                             local s = #sline
                             sline = sline .. note
                             marks[#marks + 1] = { li, s, #sline, "Comment" }
@@ -4307,25 +4307,23 @@ function M.open(folder, opts)
                     if di and di < (w0disp or 1) then P = P + 1 end
                 end
                 local rows, seam_tag, height, sidx
-                -- The number of off-screen-newer commits the header summarises. Best: the
-                -- raw commits above the seam = the seam commit's repo.order index − 1 (order
-                -- is 1:1 with commits, newest-first), so collapsed regions count in full.
-                -- The seam can land on a junction / markers row with no order-resolvable
-                -- commit, so fall back to the display rows above the cutoff — always
-                -- available, so the note is never silently dropped.
-                local function above_count()
+                -- The number of buffer lines the header clips: every line above the seam (the
+                -- boundary the overlay stands in for). Read straight from the line-map — the
+                -- seam item's first buffer line − 1 — so it is exact and always resolvable
+                -- (no order-index lookup that a junction/markers seam could miss), and it
+                -- accounts for multi-line items (dual mode). Falls back to the display rows
+                -- above only if the map is somehow unavailable.
+                local function clipped_lines()
                     if not sidx or sidx <= 1 then return nil end
-                    local it = repo.display[sidx]
-                    local c = it and it.commit
-                    local oi = c and idx[(c.tip and c.tip.hash) or c.hash]
-                    return oi and (oi - 1) or (sidx - 1)
+                    local start = lv.controller.item_start and lv.controller.item_start(sidx)
+                    return (start and start > 1 and (start - 1)) or (sidx - 1)
                 end
                 -- Clamp the guess to the cap so the loop always runs at least once.
                 for cover = math.min(math.max(2, P + 1), HEADER_MAX), HEADER_MAX do
                     local r, tag, actual, si = build_header(cover)
                     if not r then return nil, tag end
                     rows, seam_tag, height, sidx = r, tag, actual, si
-                    if #r + 1 <= actual then return r, tag, actual, 0, nil, above_count() end -- fits
+                    if #r + 1 <= actual then return r, tag, actual, 0, nil, clipped_lines() end -- fits
                 end
                 if not rows then return nil, "no rows" end
                 -- Didn't fit: clip to the overlay height while **preserving continuity**
@@ -4333,7 +4331,7 @@ function M.open(folder, opts)
                 -- `+N above` (room for the +N line and the seam separator). Eliding the
                 -- middle instead would tear every lane at the gap (the old bug).
                 local kept, ovf, ovf_names = pane.cap(rows, math.max(1, height - 2), true)
-                return kept, seam_tag, height, ovf, ovf_names, above_count()
+                return kept, seam_tag, height, ovf, ovf_names, clipped_lines()
             end
 
             -- Offsets of the main graph column so the pane lanes line up: `goff` =
@@ -4364,13 +4362,13 @@ function M.open(folder, opts)
             -- HEADER (off-screen-newer topology, above). The overlay is exactly `H`
             -- tall (the height the seam was sized at), padded at the bottom so the
             -- seam butts the main view's top edge.
-            local hrows, htag, H, ovf, ovf_names, habove = converge_header()
+            local hrows, htag, H, ovf, ovf_names, hclipped = converge_header()
             if not hrows or #hrows == 0 then
                 header_dbg = htag or "no rows"; close_pane(header); header_seam, header_height = nil, nil
             else
                 header_seam, header_height, header_dbg = htag, H, nil
                 ensure_pane_win(header, true, H)
-                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names, habove)
+                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names, hclipped)
             end
 
             -- Topology-only debug dump (set `vim.g.gitloom_pane_debug` to a file path):
