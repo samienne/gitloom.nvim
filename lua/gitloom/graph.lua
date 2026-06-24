@@ -1,6 +1,11 @@
 local M = {}
 
 local color = require("gitloom.color")
+local submodule = require("gitloom.submodule")
+
+-- Max commits drawn in a submodule change graph before capping (spec §11.7.3);
+-- the rest collapse into a "+K more" note.
+local SUBMODULE_MAX = 12
 
 -- merge_style presets the viewer cycles through with `m` (see M.open). Each
 -- toggles whether merges/splits get their own virtual line, or are folded
@@ -844,6 +849,7 @@ end
 ---@field date? Timestamp
 ---@field message? string
 ---@field loaded? boolean   true once the commit's own log line has been parsed
+---@field deco? string      raw `%d` ref decoration, only on submodule-view commits (§11.7)
 --- View-builder fields, present only on a synthetic **collapsed head** node
 --- (specification.md §10.3); a real commit leaves them nil. The head flows
 --- through `OrderItem.commit`/`GraphColumn.commit` as a commit-like node.
@@ -2222,6 +2228,237 @@ local function fetch_commit_diff(hash)
     return future
 end
 
+-- Trim leading/trailing whitespace (git command output is line-wrapped).
+local function trim_ws(s)
+    return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+--- Run a git command and resolve `{ code, out }` (stdout joined with newlines).
+--- A thin future over `jobstart` for the submodule change view (§11.7). The
+--- submodule is addressed with `git -C <path>` by the caller rather than
+--- jobstart's `cwd`, so a missing checkout fails the command (nonzero exit)
+--- instead of throwing on an invalid working directory. Resolves `{ code = -1 }`
+--- if the job cannot be spawned.
+---@param args string[]
+---@return table  -- future resolving { code: integer, out: string }
+local function git_output(args)
+    local future, promise = make_future()
+    local out = {}
+    local ok, jid = pcall(vim.fn.jobstart, args, {
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, l in ipairs(lines) do out[#out + 1] = l end
+        end,
+        on_exit = function(_, code)
+            promise.resolve({ code = code, out = table.concat(out, "\n") })
+        end,
+    })
+    if not ok or jid <= 0 then
+        vim.schedule(function() promise.resolve({ code = -1, out = "" }) end)
+    end
+    return future
+end
+
+-- The `git log` format the submodule view parses: the same fields as the main
+-- stream (so parse_commit_line handles it) plus a trailing `%d` decoration field.
+local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%s%x1f%d"
+
+--- Fetch the change graph for one parsed submodule bump (spec §11.7), gated and
+--- asynchronous — it **never fetches**. Resolves a result table consumed by
+--- `submodule_block`:
+---   `{ path, available, reason? }`                              -- gate failed
+---   `{ path, available, class, ahead, behind, base, items }`   -- ff / rewind
+---   `{ path, available, class, ahead, behind, base,
+---      new_commit, old_commit, base_commit }`                  -- diverged
+--- `items` are linked OrderItems (the commits the bump brings in / rolls back).
+---@param opts GraphOptions
+---@param change { path: string, old: string, new: string }
+---@return table  -- a future
+local function fetch_submodule_graph(opts, change)
+    local p, old, new = change.path, change.old, change.new
+    -- `git -C <submodule path> …` (path is relative to Neovim's cwd, where the
+    -- job runs), so an absent checkout simply errors rather than throwing.
+    local function gc(args)
+        local full = { "git", "-C", p }
+        for _, a in ipairs(args) do full[#full + 1] = a end
+        return git_output(full)
+    end
+    local function parse_log(out)
+        local commits = {}
+        for _, line in ipairs(vim.split(out or "", "\n")) do
+            if line ~= "" then
+                local c = parse_commit_line(line)
+                if c then
+                    c.deco = trim_ws((vim.split(line, "\x1f"))[7] or "")
+                    commits[#commits + 1] = c
+                end
+            end
+        end
+        return commits
+    end
+    local function one(hash) -- future of a single Commit (nil if absent)
+        return gc({ "log", "-1", "--format=" .. SUBMODULE_LOG_FMT, hash }).next(function(r)
+            return parse_log(r.out)[1]
+        end)
+    end
+
+    -- Presence gate (§11.7.1): both commits must resolve in the checked-out
+    -- submodule. We never fetch to satisfy this.
+    return gc({ "cat-file", "-e", old .. "^{commit}" }).next(function(r1)
+        return gc({ "cat-file", "-e", new .. "^{commit}" }).next(function(r2)
+            if r1.code ~= 0 or r2.code ~= 0 then
+                return gc({ "rev-parse", "--git-dir" }).next(function(rp)
+                    return {
+                        path = p, available = false,
+                        reason = (rp.code ~= 0) and "submodule not checked out"
+                            or "commits not present locally",
+                    }
+                end)
+            end
+            -- Classify by merge-base, then fetch per class (§11.7.2).
+            return gc({ "merge-base", old, new }).next(function(rb)
+                local base = (rb.code == 0) and trim_ws(rb.out) or ""
+                local class = submodule.classify(old, new, base)
+                if class == "unrelated" then
+                    return { path = p, available = false, reason = "unrelated histories" }
+                end
+                return gc({ "rev-list", "--count", base .. ".." .. new }).next(function(ra)
+                    return gc({ "rev-list", "--count", base .. ".." .. old }).next(function(rbh)
+                        local res = {
+                            path = p, available = true, class = class, base = base,
+                            ahead = tonumber(trim_ws(ra.out)) or 0,
+                            behind = tonumber(trim_ws(rbh.out)) or 0,
+                        }
+                        if class == "diverged" then
+                            -- Glanceable only (§11.7.2): the two tips + the fork
+                            -- point, no paths drawn.
+                            return one(new).next(function(nc)
+                                return one(old).next(function(oc)
+                                    return one(base).next(function(bc)
+                                        res.new_commit, res.old_commit, res.base_commit = nc, oc, bc
+                                        return res
+                                    end)
+                                end)
+                            end)
+                        end
+                        -- ff / rewind: the moving tip's first-parent line down to
+                        -- the fork point (§11.7.3) — `--first-parent` so a merge
+                        -- stays a mainline node without dragging its side branch
+                        -- in (no lane "from nowhere" at the range boundary). The
+                        -- fork point itself is appended as the bottom anchor so
+                        -- the old/new pointer there is shown and marked.
+                        local tip = (class == "ff") and new or old
+                        return gc({ "log", "--first-parent",
+                            "--format=" .. SUBMODULE_LOG_FMT, base .. ".." .. tip })
+                            .next(function(rl)
+                                return one(base).next(function(bc)
+                                    local commits = parse_log(rl.out)
+                                    if bc then commits[#commits + 1] = bc end
+                                    res.items = submodule.link(commits)
+                                    return res
+                                end)
+                            end)
+                    end)
+                end)
+            end)
+        end)
+    end)
+end
+
+--- Render one submodule change's fetched `result` (spec §11.7) into commit-view
+--- rows (compose-style `{ text, highlight }`), replacing the raw `Subproject
+--- commit` pair. `result` may be nil (not yet fetched) — then the raw hashes are
+--- shown, upgraded in place once the fetch resolves (§11.7.4).
+---@param opts GraphOptions
+---@param change { path: string, old: string, new: string }
+---@param result table?
+---@return table[]
+local function submodule_block(opts, change, result)
+    local palette = opts.palette or {}
+    local diffp = palette.diff or {}
+    local rows = {}
+    local function short(h) return (h or ""):sub(1, 8) end
+
+    -- Gate failed or not yet fetched: the raw hashes, with a dim reason (§11.7.1).
+    if not result or not result.available then
+        rows[#rows + 1] = compose({
+            highlight_text("  submodule ", palette.author),
+            highlight_text(change.path, diffp.header),
+            highlight_text(("  %s → %s"):format(short(change.old), short(change.new)), palette.date),
+        })
+        if result and result.reason then
+            rows[#rows + 1] = highlight_text("  (" .. result.reason .. ")", DIM_FALLBACK)
+        end
+        return rows
+    end
+
+    -- Header: path, old → new, and the direction/counts.
+    local dir
+    if result.class == "ff" then
+        dir = ("+%d"):format(result.ahead)
+    elseif result.class == "rewind" then
+        dir = ("−%d"):format(result.behind)
+    else
+        dir = ("diverged +%d / −%d"):format(result.ahead, result.behind)
+    end
+    rows[#rows + 1] = compose({
+        highlight_text("  submodule ", palette.author),
+        highlight_text(change.path, diffp.header),
+        highlight_text(("  %s → %s  "):format(short(change.old), short(change.new)), palette.date),
+        highlight_text("(" .. dir .. ")", palette.branch),
+    })
+
+    if result.class == "diverged" then
+        local function endpoint(label, c, hl)
+            rows[#rows + 1] = compose({
+                highlight_text("    " .. label .. " ", hl),
+                highlight_text(c and short(c.hash) or "", palette.date),
+                highlight_text(c and c.message and ("  " .. c.message) or "", palette.message),
+            })
+        end
+        endpoint("new ", result.new_commit, palette.branch)
+        endpoint("base", result.base_commit, palette.author)
+        endpoint("old ", result.old_commit, palette.remote)
+        return rows
+    end
+
+    -- ff / rewind: lay the first-parent commits out (the same Phase 1 the main
+    -- graph uses) and draw the glyph gutter. The commits are newest-first with the
+    -- fork-point anchor last; when there are too many, keep the newest
+    -- SUBMODULE_MAX-1 plus the anchor (pane.cap keeps the last row) and note the
+    -- commits elided between (§11.7.3).
+    local pane = require("gitloom.pane")
+    local laid = build_graph(opts, result.items or {})
+    local shown = pane.cap(laid, SUBMODULE_MAX)
+    local dropped = #laid - #shown
+    -- The pointer tag for a row: "new"/"old" when it is the new/old pointer (§11.7.3).
+    local function ptr_tag(hash)
+        if hash == change.new then return "new" end
+        if hash == change.old then return "old" end
+        return nil
+    end
+    for i, item in ipairs(shown) do
+        -- The elision falls between the newest kept rows and the anchor (last).
+        if dropped > 0 and i == #shown then
+            rows[#rows + 1] = highlight_text(("    … +%d more"):format(dropped), DIM_FALLBACK)
+        end
+        local c = item.commit
+        if c then
+            local segs = {
+                highlight_text("    ", nil),
+                get_column_chars(opts, item.columns, false),
+                highlight_text("  " .. short(c.hash), palette.date),
+            }
+            local tag = ptr_tag(c.hash)
+            if tag then segs[#segs + 1] = highlight_text(" ◀ " .. tag, palette.head) end
+            if c.deco and c.deco ~= "" then segs[#segs + 1] = highlight_text(" " .. c.deco, palette.branch) end
+            if c.message and c.message ~= "" then segs[#segs + 1] = highlight_text("  " .. c.message, palette.message) end
+            rows[#rows + 1] = compose(segs)
+        end
+    end
+    return rows
+end
+
 local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 
 --- Open the commit view (specification.md §11) for `commit`: a read-only snacks
@@ -2261,6 +2498,15 @@ local function open_commit_view(opts, commit)
     -- governing file/hunk (diff_contexts) and the buffer line where the patch
     -- begins, so a buffer line L maps to patch index L - diff_start + 1.
     local diff_ctx, diff_start = nil, nil
+    -- Buffer line -> patch line index, set by render() only when a submodule
+    -- block (§11.7) was spliced in (which breaks the 1:1 patch↔buffer mapping
+    -- the line `L - diff_start + 1` assumes); nil otherwise, so the common
+    -- no-submodule path is unchanged.
+    local diff_buf_to_patch = nil
+    -- Submodule change view (§11.7): the fetched result per submodule path,
+    -- filled asynchronously after the first render and triggering an in-place
+    -- re-render. Read by render() when it splices each change block.
+    local sub_results = {}
 
     local function set_lines(lines)
         if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -2329,7 +2575,11 @@ local function open_commit_view(opts, commit)
     -- visible below the overlay (§11.6).
     local function ctx_rows_for(eff_top)
         if not diff_ctx then return {} end
-        local c = diff_ctx[eff_top - diff_start + 1]
+        -- Buffer line -> patch index: the spliced map when a submodule block
+        -- shifted lines (§11.7), else the plain 1:1 offset from diff_start.
+        local pidx = diff_buf_to_patch and diff_buf_to_patch[eff_top]
+            or (eff_top - diff_start + 1)
+        local c = diff_ctx[pidx]
         if not c then return {} end
         local rows = {}
         if c.file and c.file_line < eff_top then
@@ -2427,11 +2677,16 @@ local function open_commit_view(opts, commit)
     -- + namespaced extmarks (the diff is highlighted this way, not via
     -- filetype=diff, so the metadata header stays clean §11.3). While laying out
     -- the rows, record each diffstat file row -> its diff section line (§11.4).
-    local function render(meta_output, diff_output)
+    local function render(meta_output, diff_output, keep_view)
         if not vim.api.nvim_buf_is_valid(buf) then return end
+        -- On an in-place re-render (the submodule upgrade, §11.7.4) preserve the
+        -- user's scroll/cursor; the first render parks on the action label.
+        local saved_view = keep_view and vim.api.nvim_win_is_valid(w.win)
+            and vim.api.nvim_win_call(w.win, vim.fn.winsaveview) or nil
         file_jumps = {}
         action_line = nil
         diff_ctx, diff_start = nil, nil
+        diff_buf_to_patch = nil
         local detail = parse_show(meta_output)
 
         local rows = {}
@@ -2459,16 +2714,49 @@ local function open_commit_view(opts, commit)
             end
             rows[#rows + 1] = highlight_text("")
             diff_start = #rows + 1 -- buffer line of the first patch line
-            for _, r in ipairs(format_diff(patch, opts.palette)) do
-                rows[#rows + 1] = r
+
+            -- Submodule change blocks (§11.7): replace each `Subproject commit`
+            -- pair with its change graph. Splicing shifts buffer lines, so build
+            -- patch<->buffer maps for the file-jump and context-header lookups
+            -- rather than the plain 1:1 offset (which holds only with no splice).
+            local diff_rows = format_diff(patch, opts.palette)
+            local repl = {} -- from_line -> { to_line, rows }
+            for _, ch in ipairs(submodule.parse_changes(patch)) do
+                repl[ch.from_line] = {
+                    to_line = ch.to_line,
+                    rows = submodule_block(opts, ch, sub_results[ch.path]),
+                }
             end
+            local patch_to_buf, buf_to_patch = {}, {}
+            local pi = 1
+            while pi <= #diff_rows do
+                local r = repl[pi]
+                if r then
+                    local at = #rows + 1 -- buffer line of the block's first row
+                    for _, br in ipairs(r.rows) do
+                        rows[#rows + 1] = br
+                        buf_to_patch[#rows] = pi -- block lines govern by the file's region
+                    end
+                    for k = pi, r.to_line do patch_to_buf[k] = at end
+                    pi = r.to_line + 1
+                else
+                    rows[#rows + 1] = diff_rows[pi]
+                    patch_to_buf[pi], buf_to_patch[#rows] = #rows, pi
+                    pi = pi + 1
+                end
+            end
+
             -- Summary sits at stat_start; file j at stat_start + j. Its diff
-            -- section starts at diff_start + (start - 1).
+            -- section starts where its `diff --git` line landed (identity when
+            -- nothing was spliced).
             for j, f in ipairs(files) do
-                file_jumps[stat_start + j] = diff_start + f.start - 1
+                file_jumps[stat_start + j] = patch_to_buf[f.start] or (diff_start + f.start - 1)
             end
-            -- Context-header lookup over the same patch (§11.6).
+            -- Context-header lookup over the same patch (§11.6); when a block was
+            -- spliced the buffer is no longer 1:1 with the patch, so hand
+            -- ctx_rows_for the inverse map.
             diff_ctx = diff_contexts(patch)
+            if next(repl) then diff_buf_to_patch = buf_to_patch end
         end
 
         local lines = {}
@@ -2488,8 +2776,11 @@ local function open_commit_view(opts, commit)
             end
         end
 
-        -- Park the cursor on the action label so <CR><CR> opens the diff (§11.2).
-        if action_line and vim.api.nvim_win_is_valid(w.win) then
+        if saved_view then
+            -- In-place re-render: keep the user where they were (§11.7.4).
+            pcall(vim.api.nvim_win_call, w.win, function() vim.fn.winrestview(saved_view) end)
+        elseif action_line and vim.api.nvim_win_is_valid(w.win) then
+            -- Park the cursor on the action label so <CR><CR> opens the diff (§11.2).
             pcall(vim.api.nvim_win_set_cursor, w.win, { action_line, 0 })
         end
 
@@ -2504,6 +2795,16 @@ local function open_commit_view(opts, commit)
         end)
     end).next(function(res)
         render(res.meta, res.diff)
+        -- Submodule change graphs (§11.7): fetch each asynchronously (gated,
+        -- never fetching) and re-render in place as they resolve, so a slow or
+        -- large submodule never blocks the diff.
+        local patch = (res.diff or ""):gsub("^%s+", "")
+        for _, ch in ipairs(submodule.parse_changes(patch)) do
+            fetch_submodule_graph(opts, ch).next(function(result)
+                sub_results[ch.path] = result
+                render(res.meta, res.diff, true)
+            end)
+        end
     end)
 end
 

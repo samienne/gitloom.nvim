@@ -654,6 +654,61 @@ its real header has scrolled above that effective top — closing the overlay wh
 nothing sticks. It is decoration only; a `WinClosed` autocmd tears it down with
 the view.
 
+### Submodule change view
+
+A commit that bumps a submodule pointer renders in the diff as an opaque
+`160000`-mode hunk — an old/new `Subproject commit <hash>` pair. When the
+submodule is checked out and both commits are present locally, the commit view
+replaces that pair with a small change graph of the submodule's own history
+(specification.md §11.7). The split mirrors the rest of the commit view: a pure,
+unit-tested core in **`submodule.lua`** plus async git I/O and the render splice
+in graph.lua.
+
+`submodule.lua` (git-agnostic, no I/O):
+
+- `parse_changes(patch)` scans the rendered patch for submodule bumps — a
+  `diff --git` file whose body is a `-Subproject commit` / `+Subproject commit`
+  pair — and returns one entry per changed submodule with its `path`, `old`/`new`
+  hashes, and the 1-based patch-line indices of the two `Subproject` lines (the
+  splice target) and the file's `diff --git` line. One-sided changes (a newly
+  added or removed submodule) are skipped — there is no relationship to draw.
+- `classify(old, new, base)` maps the merge-base `base` to the relationship:
+  `base == old` → `ff` (forward bump), `base == new` → `rewind`, a `base` but
+  neither → `diverged`, no `base` → `unrelated`.
+- `link(commits)` resolves a flat, newest-first commit list (parents as hash
+  strings) into layout-ready `{ type = "commit", commit }` OrderItems: it
+  resolves in-list parent hashes to their Commit objects, sets child back-links,
+  and drops out-of-list parents so the cone's boundary commits read as roots.
+  The result feeds `columns.layout` unchanged (the same Phase 1 the main graph
+  uses), so the mini-graph is the real lane layout, not a bespoke renderer.
+
+graph.lua glue (gated, async — never fetches; §11.7.1/§11.7.4):
+
+- `git_output(args, cwd?)` is a thin future over `jobstart` (used for the
+  submodule queries; the submodule is addressed with `git -C <path>` so a missing
+  checkout fails the query rather than throwing on an invalid `cwd`).
+- `fetch_submodule_graph(opts, change)` chains the gated queries — presence
+  (`cat-file -e <hash>^{commit}` for both), `merge-base`, `rev-list --count` for
+  ahead/behind, and a `log --first-parent base..tip` (ff/rewind) or one-line
+  `log` of each endpoint (diverged) — and resolves a structured result
+  (`available`/`reason`, `class`, `ahead`/`behind`, the linked `items` or the
+  endpoint commits). For ff/rewind the fork-point commit is fetched and appended
+  as the bottom anchor, so the old/new pointer there is shown. The log format
+  matches `parse_commit_line` with a trailing `%d` decoration field; `--first-
+  parent` keeps a mainline merge a single node and avoids dragging a merged-in
+  side branch in (no lane dangling at the range boundary — the §10.7 focus).
+- The render builds the change block: a header line (`+N` / `−N` /
+  `diverged +X / −Y`), then for ff/rewind the first-parent commits laid out by
+  `columns.layout` and drawn by `get_column_chars` (the same glyph gutter as the
+  footer pane), with the **old/new pointer rows tagged** (`◀ new` / `◀ old`) and
+  the list capped via `pane.cap` (newest rows plus the always-kept fork-point
+  anchor) with a "+K more" note for the commits elided between (shown in full,
+  not condensed — see specification.md §11.7.3); for diverged a glanceable
+  endpoint summary (the two tips and the merge-base, no paths drawn); for
+  unavailable the raw two hashes plus a dim reason. The commit view fetches the
+  submodule graphs after the patch renders and re-renders in place once they
+  resolve (progressive enhancement — the diff never blocks on a slow submodule).
+
 ### External diff
 
 gitloom delegates rich diffs to an external plugin via a pluggable provider
@@ -808,8 +863,10 @@ gitloom.nvim/
 │   ├── init.lua
 │   ├── graph.lua
 │   ├── view.lua           View builder: projection under view state (§10)
+│   ├── pane.lua           Context-pane layout core (§6.2)
 │   ├── columns.lua        Phase 1 lane layout
 │   ├── color.lua          OKLCH colour generation (§5.5)
+│   ├── submodule.lua      Submodule change view: pure core (§11.7)
 │   └── listview.lua
 ├── tests/
 │   ├── minimal_init.lua
