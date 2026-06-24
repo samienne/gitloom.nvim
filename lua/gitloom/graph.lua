@@ -35,6 +35,13 @@ local label_mode_index = 1
 -- Hidden by default; toggled with `i` in the graph window (see M.open).
 local show_lane_ids = false
 
+-- Remembered cursor position per repository, keyed by Neovim's cwd (which is the
+-- repo the graph reflects — git runs in cwd). The value is the hash of the commit
+-- under the cursor when the window last closed, so reopening the graph restores
+-- the cursor to the same commit instead of re-focusing HEAD (spec §2). In-memory
+-- for the Neovim session; not persisted to disk.
+local saved_positions = {}
+
 -- Index of the flex (message) column in a row's `line` field: date, author,
 -- graph, message. The message fills the remaining width and refs are pinned to
 -- the right edge of the row (specification.md §6; see listview's build_line).
@@ -3053,6 +3060,18 @@ function M.open(folder, opts)
     -- collapse/expand reflow, so the toggle stays under the cursor). Assigned in
     -- the window block; forward-declared for the key handlers.
     local goto_hash = function(_) end
+    -- Centers the view vertically on the cursor's row (like `zz`, clamped at the
+    -- graph edges). Assigned in the window block; forward-declared so the stream
+    -- handler can focus HEAD on open (§2).
+    local center_view = function() end
+    -- The hash of the commit under the cursor at a buffer line, or nil on a row
+    -- with no single commit. Used to remember the cursor position across
+    -- close/reopen (§2). Assigned in the window block; forward-declared.
+    local cursor_hash = function(_) return nil end
+
+    -- The repository the graph reflects, identified by Neovim's cwd (git runs in
+    -- cwd). Keys the remembered cursor position so reopening restores it (§2).
+    local repo_key = vim.fn.getcwd()
 
     -- The listview instance. Forward-declared so the on_controller/stream
     -- callbacks below close over this local (not a stray global) and see it once
@@ -3290,7 +3309,24 @@ function M.open(folder, opts)
                 -- swaps in the projected graph, recomputes the cone, and refreshes.
                 reflow()
                 update_footer()
+                -- Focus the remembered position for this repo if we have one,
+                -- else HEAD; center the view on it (§2). goto_hash resolves a
+                -- folded commit to its collapsed head; if the target is gone it
+                -- leaves the cursor at the top. The HEAD ref (§3.2) is absent on a
+                -- detached HEAD, so that case keeps the top of the graph.
+                local target = saved_positions[repo_key]
+                if not (target and goto_hash(target)) then
+                    local headref = repo.refs["HEAD"]
+                    if headref and headref.commit then goto_hash(headref.commit.hash) end
+                end
+                center_view()
                 place_cursor()
+                -- Focusing HEAD moved the pivot and scrolled the viewport, so the
+                -- cone reflow ran for the wrong (top) range — recompute it for the
+                -- new pivot/viewport and redraw (§12).
+                update_cone()
+                if lv and lv.controller then lv.controller.refresh() end
+                update_panes()
             end)
         end,
     }
@@ -3551,9 +3587,11 @@ function M.open(folder, opts)
 
         -- Move the cursor onto the display row that now represents `hash` — a real
         -- commit row, the marker (head/packed) whose region contains it, or a
-        -- junction. Used after a collapse/expand reflow so the toggle stays put.
+        -- junction. Used after a collapse/expand reflow so the toggle stays put,
+        -- and to focus HEAD / the remembered position on open (§2). Returns true
+        -- when a row was found and the cursor moved, false otherwise.
         goto_hash = function(hash)
-            if not hash then return end
+            if not hash then return false end
             for i, it in ipairs(repo.display or {}) do
                 local found = it.commit and it.commit.hash == hash
                 if not found and it.commit and it.commit.collapsed and it.commit.region then
@@ -3573,9 +3611,10 @@ function M.open(folder, opts)
                 if found then
                     local lnum = (lv.controller.item_start and lv.controller.item_start(i)) or i
                     pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
-                    return
+                    return true
                 end
             end
+            return false
         end
 
         place_cursor = function()
@@ -3616,6 +3655,29 @@ function M.open(folder, opts)
                 col = lv.controller.col_offset(line, "line", FLEX_COL)
             end
             pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
+        end
+
+        -- Center the view vertically on the cursor's row when there is room,
+        -- clamped at the top/bottom of the graph (exactly `zz`'s behaviour). Used
+        -- to focus HEAD / the remembered position on open (§2).
+        center_view = function()
+            pcall(vim.api.nvim_win_call, win, function() vim.cmd("normal! zz") end)
+        end
+
+        -- The hash of the commit under the cursor at `line`: a real commit row
+        -- yields its hash; a packed marker line (§10.4) yields the selected (or
+        -- first) marker's tip; any other row yields nil. Drives the remembered
+        -- position (§2).
+        cursor_hash = function(line)
+            local item = order_at(line)
+            if not item then return nil end
+            if item.commit then return item.commit.hash end
+            if item.type == "markers" then
+                local units = marker_units(item)
+                local u = units[selection_state.index] or units[1]
+                if u and u.marker and u.marker.tip then return u.marker.tip.hash end
+            end
+            return nil
         end
 
         -- Recompute the pivot's cone over the visible rows and re-mark track
@@ -3687,6 +3749,11 @@ function M.open(folder, opts)
                 local line = vim.api.nvim_win_get_cursor(win)[1]
                 if line == last_line then return end
                 last_line = line
+                -- Remember the commit under the cursor for this repo so reopening
+                -- the graph restores the position (§2). Skip rows with no commit so
+                -- a marker-less line never clobbers a good remembered position.
+                local h = cursor_hash(line)
+                if h then saved_positions[repo_key] = h end
                 local item, _, sub = order_at(line)
                 -- Landing on a packed marker line pre-selects its first marker
                 -- (§10.4), so h/l and <CR> act on a marker right away.

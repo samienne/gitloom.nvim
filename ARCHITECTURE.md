@@ -606,6 +606,20 @@ hidden in the `+N` overflow can be selected but parks at the message until
 visible. This is the selection substrate for the §10 per-branch actions;
 nothing acts on it yet.
 
+**Initial focus and position retention** (specification.md §2). When the stream
+completes, after the final `reflow` the window focuses a target commit via
+`goto_hash` (which resolves a folded commit to its collapsed head and returns
+whether it landed), then centers on it with `center_view` (a window-local
+`normal! zz`, so it clamps at the graph edges) and re-parks with `place_cursor`.
+The cone is then recomputed for the new pivot/viewport. The target is the
+**remembered position** for the repo if there is one, else **HEAD**
+(`repo.refs["HEAD"]`; absent on a detached HEAD, which falls back to the top).
+The remembered position is a module-level `saved_positions` table keyed by
+Neovim's cwd (the repo git runs in); the `CursorMoved` handler records the hash
+under the cursor (`cursor_hash`) on every row change, so it is always current
+without a close hook. It is in-memory for the Neovim session — not persisted to
+disk.
+
 ### Commit view
 
 `<CR>` opens the commit view (specification.md §11) for the commit on the

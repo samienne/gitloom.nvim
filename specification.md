@@ -74,6 +74,17 @@ collapsed heads onto shared lines, or one per line.
   (ancestors and descendants) is emphasised while everything else dims (§12).
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
+- **Initial focus and position retention.** When the graph finishes loading it
+  moves the cursor to **HEAD** (the current branch's commit, §3.2) and **centers**
+  the view on that row when possible — clamped at the top/bottom of the graph
+  (like `zz`). On a detached HEAD (no current branch) there is nothing to focus,
+  so the cursor stays at the top. The cursor's row is then **remembered per
+  repository** (keyed by Neovim's working directory) for the duration of the
+  Neovim session: closing and reopening the graph restores the cursor to the same
+  commit (re-centered) instead of re-focusing HEAD. The remembered target is the
+  **commit under the cursor by hash**, so it survives reflow (§10.5) and resolves
+  to the commit's collapsed head (§10.3) when its branch is folded; if that commit
+  is no longer present, focus falls back to HEAD.
 
 ## 3. Data source
 
