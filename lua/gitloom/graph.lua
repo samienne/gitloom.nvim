@@ -4340,8 +4340,12 @@ function M.open(folder, opts)
                                 ids[#ids + 1] = ("%s%s%s%s%s"):format(tostring(s.id),
                                     c.up and "^" or "", c.down and "v" or "", c.left and "<" or "", c.right and ">" or "")
                             end
-                            local node = cell.has_commit and (cell.commit and cell.commit.refs and #cell.commit.refs > 0 and "HEAD" or "head") or ""
-                            if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node ~= "" and ("[" .. node .. "]") or "") end
+                            local node = ""
+                            if cell.has_commit and cell.commit then
+                                local nm = cell.commit.refs and cell.commit.refs[1] and cell.commit.refs[1].name
+                                node = ("[%s gcol=%s]"):format(tostring(nm or "head"), tostring(col_of(cell.commit)))
+                            end
+                            if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node) end
                         end
                         out[#out + 1] = ("  R%02d %s"):format(ri, table.concat(parts, "  "))
                     end
