@@ -607,8 +607,13 @@ Details not covered by the spec or architecture:
   date (the spaghetti fix). Date only orders the independent tips. Verified 100%
   commit-for-commit vs `git rev-list --topo-order` on a real (257) and a synthetic
   (15) repo, which is why there is no separate raw-git sort mode. `ordering_spec`
-  locks the lineage-grouping on a merge fixture; `commit_spec` covers the `%ct`
-  parse.
+  locks the lineage-grouping on a merge fixture and the committer-date seeding;
+  `commit_spec` covers the `%ct` parse. **Gotcha:** `integrate_commit` MUST copy
+  `cepoch` when filling a placeholder — `fetch_refs` pre-creates every ref *tip*
+  as a placeholder, and the tips are exactly what `order_commits` seeds by, so
+  dropping `cepoch` silently falls back to author-date seeding and scrambles the
+  order on squash-merge repos (author ≠ committer date — a 39%-match regression on
+  a 638-commit repo).
 - **Owned ordering + resync** (specification.md §3.1/§3.4): `order_commits`
   produces the authoritative `repo.order` for the default `gitloom`
   sort mode (via `reorder_repo`, which reuses the existing OrderItem objects).

@@ -4211,9 +4211,14 @@ function M.open(folder, opts)
         local existing = repo.commits[item.hash]
         if existing then
             if existing.loaded then return nil end -- already a row; don't re-link
-            -- Fill the placeholder; keep its resolved refs and children.
+            -- Fill the placeholder; keep its resolved refs and children. cepoch
+            -- (committer date) MUST be copied: ref tips are pre-created as
+            -- placeholders by fetch_refs, and order_commits seeds tips by cepoch
+            -- (§3.1) — dropping it falls back to author date and breaks the order
+            -- on squash-merge repos (author ≠ committer date).
             existing.author = item.author
             existing.date = item.date
+            existing.cepoch = item.cepoch
             existing.parents = item.parents
             existing.message = item.message
             existing.loaded = true

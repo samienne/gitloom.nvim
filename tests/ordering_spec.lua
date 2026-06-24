@@ -154,7 +154,18 @@ describe("order_commits — lineage grouping (§3.1, git's --topo-order DFS)", f
 end)
 
 describe("order_commits — tiebreak + determinism (§3.1)", function()
-    it("orders independent tips newest author-date first", function()
+    it("seeds independent tips by committer date (%ct), newest first", function()
+        -- git's --topo-order seeds the walk by committer date. By author date A
+        -- (110) is newest; by committer date B (60 > 50) is — so B comes first.
+        -- Regression: the streaming path dropped cepoch and fell back to author
+        -- date, which scrambles squash-merge repos (author ≠ committer date).
+        local commits, by = build({ { "A", {}, 110 }, { "B", {}, 90 } })
+        by["A"].cepoch = 50
+        by["B"].cepoch = 60
+        assert.same({ "B", "A" }, hashes(order_commits(commits)))
+    end)
+
+    it("falls back to author date when committer date is absent", function()
         local commits = build({
             { "older", {}, 100 },
             { "newer", {}, 200 },
