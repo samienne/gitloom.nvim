@@ -402,7 +402,14 @@ Details not covered by the spec or architecture:
   listview stays 1-item-per-line (a group is one item). The marker labels render
   via `line_right` with `line_right_align = "left"` (left-aligned after the graph)
   so they get the windowed `+N` overflow (§6) around the selected marker instead of
-  truncating the row with `…`.
+  truncating the row with `…`. Selecting a marker drives the §12 reachability
+  cone (not a flat `palette.selected` repaint): `update_cone` seeds it from the
+  selected head via `mark_node_cone` (walking the DisplayNode `.parents`/
+  `.children` and lighting each lane via its shared edge object by `node_loc`, like
+  `mark_path`), so the selected branch (its `◍` node, label, and lane) stays its
+  normal colour and the sibling heads/branches on the row dim — exactly like
+  moving onto a normal head (§12). `h`/`l` calls `update_cone` before the redraw so
+  the dimming follows the selection; no selection ⇒ the line is neutral (all lit).
 - **Collapse interaction** (spec §10.4): acts on the *region under the cursor*,
   not a ref — `branch_under_cursor(line)` resolves the selection (ref/marker) or
   the commit's signature (`collapse_owners`) into `{state, owners, follow,

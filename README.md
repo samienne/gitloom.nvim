@@ -98,7 +98,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `<CR>` | Action menu for the row — examine commit, open diff, collapse / expand / hide the branch |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
-| `h` / `l` | Select the previous / next ref decoration on the current row (switch the followed branch while selecting) |
+| `h` / `l` | Select the previous / next ref decoration on the current row — on a packed marker line, the previous / next collapsed head, with the reachability emphasis following it (switch the followed branch while selecting) |
 | `V` | Start / end **commit selection** — pick a range of commits along one branch |
 | `H` | Toggle reachability highlighting (dimming) off / on |
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
