@@ -191,6 +191,14 @@ Coverage:
   date formatters (`format_absolute`, `format_relative`), and `make_line_buffer`
   (the unbuffered-stdout de-chunker: whole lines vs. the held trailing partial,
   cross-chunk stitching, byte-by-byte reassembly, blank lines; spec §3 streaming)
+- `tests/ordering_spec.lua` — gitloom's owned row order + the resync pure pieces
+  (spec §3.1/§3.4): `order_commits` (the topological sort that replaced `git log
+  --topo-order` — child-before-parent validity is the hard invariant, plus
+  first-parent clustering keeping a branch contiguous, the author-date tiebreak
+  among independent tips, determinism, identity-preservation, and ordering only
+  the given set so out-of-set relationships are ignored), `diff_ref_tips` (the
+  added/removed/moved ref classification) and `reachable_hashes` (the orphan-prune
+  reachability walk; parents as Commit objects or raw hash strings)
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
   `parse_show` (git-show field splitting, multi-line body, empty parents),
   `format_commit_detail` (committer-differs branch, refs line, body indent),
@@ -298,7 +306,10 @@ only** (not the public API): `classify_ref`, `group_refs`, `bump_recent` /
 `display_item` (the per-row renderer — exposed for the §6 ref-window integration
 test), `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`
-(the streaming-stdout line de-chunker; §3), `parse_timestamp`,
+(the streaming-stdout line de-chunker; §3), `order_commits` (the owned
+topological row sort that replaced `git log --topo-order`; §3.1),
+`diff_ref_tips` / `reachable_hashes` (the resync ref-diff + orphan-prune pure
+helpers; §3.4), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` /
@@ -557,6 +568,22 @@ Details not covered by the spec or architecture:
   turns (the per-column cap is 1 otherwise).
 - **git runs in Neovim's cwd** — `jobstart` is called without an explicit
   `cwd`, so the graph reflects the current working directory's repo.
+- **Owned ordering + resync** (specification.md §3.1/§3.4): gitloom no longer
+  passes an ordering flag to `git log` — git's emission is only the *arrival*
+  order for progressive streaming, and `order_commits` (a pure, child-first
+  topological sort with first-parent clustering + author-date tiebreak) produces
+  the authoritative `repo.order` at stream completion (via `reorder_repo`, which
+  reuses the existing OrderItem objects). `resync` (the `R` key) is the in-place
+  history refresh: snapshot the old ref tips → `fetch_ref_entries` (non-mutating)
+  → `reconcile_refs` (`diff_ref_tips`-driven add/move/remove) → `fetch_new_commits`
+  (`git log <new tips> --not <old tips>`, only the newly-reachable) →
+  `integrate_commit` (the shared stream/resync per-commit linker, extracted from
+  `on_batch`) → `prune_to_reachable` (`reachable_hashes` orphan prune) →
+  `reorder_repo` → `refresh_worktree` + `reflow`, restoring the hash-keyed
+  cursor/scroll. The pure pieces (`order_commits`, `diff_ref_tips`,
+  `reachable_hashes`) are tested; the window glue is not (like the other glue).
+  NB: the `order_commits` heap uses sequential `hpop` assignment — a multi-assign
+  `heap[1], heap[n] = heap[n], nil` aliases when `n == 1` and spins forever.
 - **External diff is a pluggable provider** (specification.md §11.5): the
   `diff.open` callback takes a **`DiffRange`** (`{ rev, from, to }`), not a
   commit, so graph range-selection reuses it. `commit_range(commit)` builds a

@@ -108,7 +108,7 @@ Opens the graph for the repository at Neovim's current working directory.
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
-| `R` | Refresh the working-tree state — re-read the uncommitted changes (`◌` nodes) and rebuild them |
+| `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
@@ -351,9 +351,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   HEAD (default `true`): a *staged* node (index vs HEAD) and an *unstaged* node
   (working tree vs index, plus untracked files as additions), each shown only when
   it has content. They open in the commit view / external diff like any commit, and
-  refresh live as you edit or stage (`BufWritePost` / focus) or on `R`. Read-only —
-  gitloom never stages or commits. See [specification.md](specification.md)
-  §3.3 / §4.2.
+  refresh live as you edit or stage (`BufWritePost` / focus), or as part of the full
+  `R` resync. gitloom never stages or commits. See
+  [specification.md](specification.md) §3.3 / §4.2.
 
 > **Note:** `require("gitloom").setup(opts)` currently stores config but does
 > not yet forward it to `:GitloomGraph` — the command uses the defaults above.
