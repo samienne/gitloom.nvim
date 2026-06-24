@@ -1178,7 +1178,8 @@ commits.
   branch**, skipping intervening other-branch rows; the view scrolls to keep it
   visible. The cursor parks **on the graph lane column** of the followed branch
   (the §2 cursor-on-decoration behavior), so the lit lane shows which branch is
-  selected.
+  selected — or, when the moving end is a collapsed head packed onto a shared
+  line (§10.4), on that head's label (§13.4).
 - `<C-d>` / `<C-u>` move by roughly a half-viewport's worth of **branch** commits
   (not buffer lines), so the jump stays on the branch even when its next commit is
   off the current page.
@@ -1219,6 +1220,13 @@ commits and lanes stay full-colour and everything else dims, reusing the §12
 machinery. This **replaces** the cursor-pivot cone for the duration; the pivot
 cone returns when selection mode exits. `H` (§12) still toggles dimming off and
 on.
+
+A **collapsed head** (§10.3) on the path is emphasised like any other path
+member — its marker and the lane joining it to the path light. On a **packed
+marker line** (§10.4), which carries several concurrent heads, only the path's
+head is lit and it is drawn with `palette.selected` (and the cursor parks on its
+label); the other heads on that line dim. So the right head on a shared line is
+unambiguous even though the line holds many.
 
 ### 13.5 Range and the commit view
 

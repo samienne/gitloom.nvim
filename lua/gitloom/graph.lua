@@ -1767,8 +1767,10 @@ end
 ---@param item OrderItem
 ---@param selection_state SelectionState
 ---@param cone table<Commit, boolean>|nil  the pivot's reachability cone (§12), or nil
+---@param sel_cursor? table  the commit-selection moving end (§13.4), so a packed
+---  marker row can mark the selected head; nil when not selecting
 ---@return DisplayElement
-local function display_item(opts, item, selection_state, cone)
+local function display_item(opts, item, selection_state, cone, sel_cursor)
     local palette = opts.palette
 
     -- The 1-based decoration index selected on this row, or nil. Selection is
@@ -1860,8 +1862,17 @@ local function display_item(opts, item, selection_state, cone)
         local parts = {}
         for i, u in ipairs(marker_units(item)) do
             if i > 1 then parts[#parts + 1] = " " end
-            parts[#parts + 1] = (i == sel) and highlight_text(u.text, palette.selected)
-                or rh(u.text, palette.branch)
+            -- The commit-selection cursor head, or an h/l-selected marker, draws
+            -- with palette.selected; an in-cone head (a path member, §13.4) stays
+            -- lit; everything else dims with emphasis. Per-marker because a packed
+            -- line holds several heads, only the selected branch's being relevant.
+            if u.marker == sel_cursor or i == sel then
+                parts[#parts + 1] = highlight_text(u.text, palette.selected)
+            elseif emphasis and not (cone and cone[u.marker]) then
+                parts[#parts + 1] = highlight_text(u.text, dim_hl(opts, palette.branch))
+            else
+                parts[#parts + 1] = highlight_text(u.text, palette.branch)
+            end
         end
         return { line = { "", "", graph_item, compose(parts) } }
     end
@@ -3178,10 +3189,29 @@ function M.open(folder, opts)
     ---@type { active: boolean, path?: table[], anchor?: table, cursor?: table, dparent: table<string,integer>, dchild: table<string,integer> }
     local sel = { active = false, path = nil, anchor = nil, cursor = nil, dparent = {}, dchild = {} }
     local display_index = {}
+    -- node hash → { item, col }: the OrderItem holding the node and the index of
+    -- the column carrying its marker. Covers both a node on its own row and a
+    -- collapsed head packed into a marker group (§10.4) — which has no `.commit`,
+    -- so display_index alone can't reach it. Lets the selection emphasis light a
+    -- head's lane/marker even when packed (§13.4).
+    local node_loc = {}
     local function build_display_index()
-        display_index = {}
+        display_index, node_loc = {}, {}
+        local function locate(it, node)
+            for c, cell in ipairs(it.columns or {}) do
+                if cell.has_commit and cell.commit == node then
+                    node_loc[node.hash] = { item = it, col = c }
+                    return
+                end
+            end
+        end
         for i, it in ipairs(repo.display or {}) do
-            if it.commit then display_index[it.commit.hash] = i end
+            if it.commit then
+                display_index[it.commit.hash] = i
+                locate(it, it.commit)
+            elseif it.type == "markers" then
+                for _, m in ipairs(it.markers or {}) do locate(it, m) end
+            end
         end
     end
 
@@ -3462,15 +3492,32 @@ function M.open(folder, opts)
         local cone = {}
         local p = sel.path or {}
         for _, node in ipairs(p) do cone[node] = true end
-        for i = 1, #p - 1 do -- light the lane each pair shares (newer p[i] → older p[i+1])
-            local it = node_item(p[i])
+        -- Light the lane each consecutive pair shares (newer p[i] = child → older
+        -- p[i+1] = parent). For a node on its own row use its parent_lanes; for a
+        -- packed head (no parent_lanes) match the shared Lane object by edge
+        -- identity in its marker column — it is the same object the child's row
+        -- draws, so lighting it lights both.
+        for i = 1, #p - 1 do
+            local a, b = p[i], p[i + 1]
+            local it = node_item(a)
             if it then
                 for _, lane in ipairs(it.parent_lanes or {}) do
-                    if lane.parent == p[i + 1] then lane.highlighted = true end
+                    if lane.parent == b then lane.highlighted = true end
+                end
+            else
+                local loc = node_loc[a.hash] or node_loc[b.hash]
+                if loc then
+                    for _, s in ipairs(loc.item.columns[loc.col].lanes or {}) do
+                        for _, e in ipairs(s.edges or {}) do
+                            if e.begin == a and e.parent == b then e.highlighted = true end
+                        end
+                    end
                 end
             end
         end
-        for _, node in ipairs(p) do -- light the path commits' markers
+        -- Light each path node's marker cell (its own row, or its column in a
+        -- packed marker group).
+        for _, node in ipairs(p) do
             local it = node_item(node)
             if it then
                 for _, line in ipairs(item_lines(it)) do
@@ -3478,6 +3525,9 @@ function M.open(folder, opts)
                         if t.has_commit and t.commit == node then t.active = true end
                     end
                 end
+            else
+                local loc = node_loc[node.hash]
+                if loc then loc.item.columns[loc.col].active = true end
             end
         end
         return cone
@@ -3563,7 +3613,8 @@ function M.open(folder, opts)
             return dual_two_line(opts, item and item.commit) and 2 or 1
         end,
         display = function(item)
-            return display_item(opts, item, selection_state, view_state.cone)
+            return display_item(opts, item, selection_state, view_state.cone,
+                sel.active and sel.cursor or nil)
         end,
         on_controller = function(controller)
             -- Refs first: they create sparse Commit placeholders with refs
@@ -3989,9 +4040,25 @@ function M.open(folder, opts)
 
         place_cursor = function()
             local line = vim.api.nvim_win_get_cursor(win)[1]
-            -- Commit selection (§13.2): park on the graph lane column so the lit
-            -- lane marks the followed branch (cursor row is set by selection_redraw).
+            -- Commit selection (§13.2): on a packed marker line park on the
+            -- selected head's label so the right head is unmistakable; otherwise
+            -- park on the graph lane column so the lit lane marks the branch (the
+            -- cursor row is already set by selection_redraw).
             if sel.active then
+                local item = order_at(line)
+                if item and item.type == "markers" and sel.cursor then
+                    for _, u in ipairs(marker_units(item)) do
+                        if u.marker == sel.cursor then
+                            local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
+                            local mcol = ref_byte_col(text, u.text)
+                            if mcol then
+                                pcall(vim.api.nvim_win_set_cursor, win, { line, mcol })
+                                return
+                            end
+                            break
+                        end
+                    end
+                end
                 local col = lv and lv.controller and lv.controller.col_offset
                     and lv.controller.col_offset(line, "line", GRAPH_COL) or 0
                 pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })

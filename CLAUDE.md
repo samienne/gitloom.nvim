@@ -468,10 +468,14 @@ Details not covered by the spec or architecture:
   active (else the §2 ref selection); `<CR>`/`D` open the range in the diff
   provider (**phase 1** — the in-view range mode of §13.5 is the planned phase-2
   follow-up). A `reflow()` recreates DisplayNodes, so it drops any live selection
-  (stale references). Selection isn't started on a packed-marker line, and the
-  walk clamps where a node has no own row (a head packed into a marker group); see
-  §13.6. The pure helpers are tested; the window glue is not (like the other
-  window glue).
+  (stale references). Navigation walks the DisplayNode edges directly, so it
+  passes *through* collapsed heads (including packed ones); a `node_loc` index
+  (hash → {item, col}, built with `display_index`) lets `mark_path` light a head's
+  lane (the Lane object is shared with the child's row via `seg.edges`) and marker
+  even when packed, and `display_item` draws the selected head with
+  `palette.selected` and dims the other heads on the shared line (§13.4).
+  Selection isn't started *on* a packed-marker line. The pure helpers are tested;
+  the window glue is not (like the other window glue).
 - **Reachability dimming = Lane model + walk** (specification.md §5, §12):
   Phase 1 (`columns.layout`) makes one **Lane** (edge `{id, begin, parent,
   highlighted}`) per parent/child edge, wires `OrderItem.parent_lanes`/
