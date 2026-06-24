@@ -23,5 +23,7 @@ reexport(require("gitloom.git.parse"))
 reexport(require("gitloom.git.refs"))
 reexport(require("gitloom.git.range"))
 reexport(require("gitloom.git.format"))
+-- The I/O layer (jobstart-backed) — the only Neovim-coupled part of the library.
+reexport(require("gitloom.git.fetch"))
 
 return M
