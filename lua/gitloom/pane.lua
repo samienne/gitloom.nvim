@@ -578,6 +578,34 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     for _, s in ipairs(seeds) do
         if useful[s.node.hash] then induct(s.node) end
     end
+    -- Connect each pinned anchor DOWN to the already-seeded part along its own
+    -- first-parent spine. The up-walk below climbs ONE first-parent chain from each
+    -- boundary lane and can dead-end at a collapsed node before it reaches a pinned
+    -- anchor that sits on a folded branch — the anchor is then inducted (Pass 2 marks it
+    -- useful) but left DISCONNECTED, so M.header renders it as a lone head on a fresh id,
+    -- severed from its crossing lane (the merge-at-cutoff anchor-severing bug: HEAD jumps to id 39).
+    -- Walking the anchor's spine down until it meets a seed (or crosses the seam) keeps
+    -- the anchor on its real lane. Every spliced spine node is `useful`, so condense
+    -- collapses the linear run back to a single edge — the header does not grow.
+    for _, s in ipairs(seeds) do
+        if s.pinned and inducted[s.node.hash] then
+            local c = s.node
+            while c do
+                local p = c.parents and c.parents[1]
+                if not (p and above(p) and useful[p.hash]) then break end
+                local met = inducted[p.hash]
+                -- Induct for EDGES only — do NOT feed the spine node back into the up-walk
+                -- (stack3). Both boundary lanes start at the same merge, so every commit
+                -- above it is a confluence; letting the up-walk's else-branch process a
+                -- non-confluence spine node would pull in every collapsed fork off the
+                -- trunk as a stray head and balloon the header. The spine's only relevant
+                -- up-child is the next spine node, already inducted here.
+                inducted[p.hash] = inducted[p.hash] or p
+                if met then break end -- reached the connected part — done
+                c = p
+            end
+        end
+    end
     while #stack3 > 0 do
         local c = stack3[#stack3]; stack3[#stack3] = nil
         -- Follow each lane's OWN continuation, not the whole shared future.
@@ -588,7 +616,7 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
         --   * AT/above a confluence the lanes have already merged into one, so follow a
         --     SINGLE continuation (its first-parent child) up to the tip — the shared
         --     future may itself fork into dozens of branches, but none of them relate to
-        --     the crossing lanes, so they are dropped. (This is the line-122 blowup:
+        --     the crossing lanes, so they are dropped. (This is the shared-future blowup:
         --     every branch of the shared future was being pulled in as its own head.)
         if is_confluence(c.hash) then
             for _, ch in ipairs(c.children or {}) do
@@ -971,7 +999,7 @@ function M.header(items, boundary, node_of, lane_of, col_of)
                 -- whose tip's main-view lane was recycled to a different id still has the merge
                 -- N as its first parent, so it IS the trunk continuing. Without it the lane
                 -- switches to a fresh id at the merge — the trunk "terminates" and HEAD gets a
-                -- brand-new id (the line-119 bug). Only a genuine FAN-OUT (N is not this
+                -- brand-new id (the merge-at-cutoff bug). Only a genuine FAN-OUT (N is not this
                 -- child's first parent and the lanes differ) switches.
                 local first_parent = upkids[1].parents and upkids[1].parents[1] == N
                 if mv1 == plane.id or (first_parent and upkids[1].collapsed) then

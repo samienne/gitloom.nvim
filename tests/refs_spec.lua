@@ -110,13 +110,13 @@ describe("pane_labels (header/footer §6.2)", function()
     local function kinds(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.kind end return t end
 
     it("shows ONLY HEAD, dropping the branch HEAD points at on the same commit", function()
-        -- The report: HEAD points at `enne/backport-cmake-fixes`, both on the same commit.
+        -- The report: HEAD points at `feature/topic`, both on the same commit.
         -- HEAD already represents that branch, so the pane shows just HEAD — not the branch
         -- (passed as head_branch = repo.head) that merely co-locates with it.
         local segs = pane_labels({ refs = {
-            ref("local", "enne/backport-cmake-fixes"),
+            ref("local", "feature/topic"),
             ref("head", "HEAD"),
-        } }, "enne/backport-cmake-fixes")
+        } }, "feature/topic")
         assert.same({ "HEAD" }, texts(segs))
         assert.same({ "head" }, kinds(segs)) -- coloured as HEAD
     end)

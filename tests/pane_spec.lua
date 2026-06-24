@@ -427,7 +427,7 @@ end
 -- crossing lane's own terminus (its `begin` — an isolated seam lane ending at its
 -- tip, drawn continuously up from the seam), or a confluence output (a junction's
 -- merged lane that dead-ends). Anything else is an irrelevant head the minimal header
--- must not introduce (the gpu regression: an unpinned branch that connects to nothing).
+-- must not introduce (the stray-fork regression: an unpinned branch that connects to nothing).
 local function assert_no_irrelevant_heads(rows, conf, boundary, ctx)
     local begin_hash = {}
     for _, l in pairs(boundary or {}) do if l.begin then begin_hash[l.begin.hash] = true end end
@@ -493,13 +493,13 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
 
     it("prunes an unpinned branch forking off a pinned anchor's mainline; anchors junction", function()
         -- HEAD (pinned) runs h1->h2->ca; a busy common ancestor `ca` is on HEAD's spine,
-        -- and a feature `gpu` plus another pinned branch `dev` both fork off `ca`. With
-        -- the cutoff BELOW ca only ca's lane crosses. In the minimal model gpu connects
+        -- and a feature `feat` plus another pinned branch `dev` both fork off `ca`. With
+        -- the cutoff BELOW ca only ca's lane crosses. In the minimal model feat connects
         -- to nothing (its own tip only) → PRUNED; the two anchors (HEAD, dev) and their
         -- meeting at `ca` are what the header shows — `ca` is a confluence/junction.
         local items = h.dag({
             { "h1", { "h2" } },   -- HEAD tip
-            { "gpu", { "ca" } },  -- feature forks off ca (unpinned, connects to nothing)
+            { "feat", { "ca" } },  -- feature forks off ca (unpinned, connects to nothing)
             { "dev", { "ca" } },  -- another pinned branch forks off ca
             { "h2", { "ca" } },
             { "ca", { "x" } },    -- common ancestor, on HEAD's first-parent spine
@@ -514,7 +514,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert.equals(1, nb) -- exactly one lane crosses the seam (ca's mainline)
         local present = {}
         for _, it in ipairs(cond.items) do present[it.commit.hash] = true end
-        assert.is_nil(present.gpu, "gpu connects to nothing and must be pruned")
+        assert.is_nil(present.feat, "feat connects to nothing and must be pruned")
         assert.is_true(present.h1, "the HEAD anchor tip must be shown")
         assert.is_true(present.dev, "the dev anchor tip must be shown")
         -- ca carries two useful up-children (the HEAD and dev spines), so it is kept as
@@ -611,7 +611,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         -- Two crossing lanes a, b meet at the confluence M; ABOVE M their shared future
         -- forks into many branches (t1..t5). Those forks don't relate to a or b, so the
         -- minimal header must collapse them — the merged lane shows ONE continuation, not
-        -- five heads. heads must not exceed the crossing lanes (the line-122 blowup).
+        -- five heads. heads must not exceed the crossing lanes (the shared-future blowup).
         local items = h.dag({
             { "t1", { "u" } }, { "t2", { "u" } }, { "t3", { "u" } },
             { "u", { "M" } }, { "t4", { "M" } }, { "t5", { "M" } },
@@ -820,7 +820,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
     end)
 
     it("shows a DISCONNECTED pinned anchor as a lone labelled head (§6.2)", function()
-        -- The live line-119 bug: at a deep cutoff the lanes crossing the seam lead UP into a
+        -- The live merge-at-cutoff bug: at a deep cutoff the lanes crossing the seam lead UP into a
         -- collapsed branch (B), not to the pinned anchor; HEAD is seeded but disconnected
         -- from the boundary, so the boundary-driven sweep never reaches it. A pinned anchor
         -- must ALWAYS be visible, so it renders as a lone labelled ◍ head even with nothing
@@ -966,7 +966,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
     end)
 
     it("keeps a merge at the cutoff as a junction, connecting crossing lanes to the anchor (§6.2)", function()
-        -- The line-119 bug: a merge M sits just ABOVE the cutoff; its two parents are the
+        -- The merge-at-cutoff bug: a merge M sits just ABOVE the cutoff; its two parents are the
         -- two crossing lanes, BELOW the cutoff. In the above-cutoff induced graph M's
         -- parents are gone so it looks linear and was SPLICED — dropping the whole
         -- connection up to HEAD (which then rendered as a disconnected floating head). The
@@ -1039,8 +1039,8 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert_continuous(res.rows)
     end)
 
-    it("keeps the trunk id through a COLLAPSED continuation at a merge (line-119) (§6.2)", function()
-        -- The lumets2 384eda8c bug: a merge M just above the cutoff continues up to HEAD
+    it("keeps the trunk id through a COLLAPSED continuation at a merge (merge-at-cutoff) (§6.2)", function()
+        -- The merge-at-cutoff anchor-severing bug: a merge M just above the cutoff continues up to HEAD
         -- through a COLLAPSED node whose tip's main-view lane was RECYCLED to a different id
         -- (99). The old logic saw mv ≠ the seam id and switched the trunk to a fresh id —
         -- lane 1 "terminated" at the merge and HEAD got a brand-new id, so dev had no lane 1
@@ -1174,14 +1174,14 @@ describe("pane.cap — header keeps a continuous seam-adjacent slice (§6.2)", f
     it("names the elided pinned anchors so off-screen branches stay visible (§6.2)", function()
         -- A tall header whose far tips are pinned anchors (HEAD, dev). Capping keeps the
         -- continuous seam-adjacent slice and drops the tip ROWS — but their anchor names
-        -- must be reported so the `+N above` marker can name them. This is the line-277
+        -- must be reported so the `+N above` marker can name them. This is the elided-anchor
         -- bug: HEAD/dev were elided into a bare `+N above` with no indication they were up
         -- there.
         local rows = {}
         -- Row 1's anchor commit carries BOTH a branch and the HEAD marker (HEAD points at
         -- that branch) — the name surfaced must be HEAD, not the branch sharing the commit.
         rows[1] = { columns = {}, n = 1, pinned = true, commit = { refs = {
-            { name = "enne/backport-cmake-fixes", kind = "local" }, { name = "HEAD", kind = "head" } } } }
+            { name = "feature/topic", kind = "local" }, { name = "HEAD", kind = "head" } } } }
         rows[2] = { columns = {}, n = 2, pinned = true, commit = { refs = { { name = "dev", kind = "local" } } } }
         for i = 3, 10 do rows[i] = { columns = {}, n = i } end
         local capped, elided, names = pane.cap(rows, 4, true)

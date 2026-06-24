@@ -178,10 +178,19 @@ to each other and to the lanes crossing the cutoff:
      **not** useful becomes a **seam head** (a childless node → it terminates at the
      seam). The induced node's restricted `children`/`parents` then drive `condense`'s
      role: ≥2 kept children → junction, 1 → collapse, 0 → head (so a confluence whose
-     merged output dead-ends caps with a head).
+     merged output dead-ends caps with a head). Each pinned anchor is then connected
+     **down** its own first-parent spine to the already-seeded part (induct for *edges
+     only* — the spine nodes are not re-walked up, or the up-walk would pull in every
+     collapsed fork off the trunk and balloon the header). When both boundary lanes begin
+     at one merge sitting at the cutoff, the up-walk's single first-parent chain can
+     dead-end at a collapsed node before it reaches an anchor on a folded branch; without
+     this step the anchor is inducted but **disconnected**, and `M.header` renders it as a
+     lone head on a fresh lane id, severed from its crossing lane (the merge-at-cutoff
+     bug — HEAD jumped to id 39). Every spliced spine node is `useful`, so `condense`
+     collapses the linear run back to one edge and the header does not grow.
 
    So an unpinned branch that forks off the trunk and reconnects to nothing is
-   **pruned** (the gpu regression — no stray feature heads); a branch that only merges
+   **pruned** (the stray-fork regression — no stray feature heads); a branch that only merges
    back condenses to a node-less junction. **Invariant:** every above-seam boundary
    `begin` ends up in the node set handed to `condense` (a useful node or a seam head),
    so no seam lane is dropped and the header's bottom row matches the main view's top

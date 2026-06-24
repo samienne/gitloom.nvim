@@ -240,7 +240,7 @@ Coverage:
   cutoff — an isolated crossing lane terminates at a **seam head**, two crossing lanes
   meeting at a **confluence** render a junction (incl. a confluence dead-end head and
   nested confluences), an unpinned branch forking off the trunk/an anchor that
-  reconnects to nothing is **pruned** (the gpu regression), a bubble on a pinned spine
+  reconnects to nothing is **pruned** (the stray-fork regression), a bubble on a pinned spine
   → node-less junction but an unrelated bubble is pruned, a pinned anchor a labelled
   `◍` even when isolated, isolated seam heads packed onto a shared row — laid out by the
   direct seam-up grid with the seam as the bottom row matching the main view's top
@@ -253,7 +253,7 @@ Coverage:
   `assert_no_irrelevant_heads`: every ◍ is a pinned anchor, a crossing-lane begin, or a
   confluence — never an unrelated head) over a **fuzz sweep** of LARGE random DAGs ×
   cutoffs (8–20 commits, uncapped so tall headers are stressed), and replayed against
-  the **real lumets2 topology** (all 637 cutoffs, 0 problems) during verification, the
+  a large real-world topology (every cutoff, 0 problems) during verification, the
   header `cap`
   (`keep_first`: keep the tip + seam-nearest rows, report the elided `+N above`
   count), `condense` (the topological condensed graph, both down and `up` modes:
@@ -264,6 +264,14 @@ Coverage:
   lanes' first-parent chains to a root: both lanes converge at their meeting
   junction and reach the root, every node's chain terminates at a root — never cut
   off — and no non-active branch is introduced)
+- `tests/header_replay_spec.lua` + `tests/large_topo.lua` — the header replayed end
+  to end over a **large real-world repository's full (`--all`) topology** (anonymised to
+  synthetic ids — topology only, no hashes/names/messages), driven through the **full
+  projection** (`view.owners` → `view.project` → `columns.layout`, first-parent focus,
+  HEAD + dev pinned) and `continue_up`/`header` at **every** display cutoff: asserts the
+  pinned anchors HEAD and dev keep their **graph lane id** throughout — they never sever
+  onto a fresh synthetic id when a merge sits at the cutoff (the merge-at-cutoff
+  anchor-severing regression)
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -456,9 +464,17 @@ Details not covered by the spec or architecture:
   `children`; a node reached by ≥2 distinct seeds is a **confluence**), **Pass 2**
   `useful` (walk down from confluences + pinned tips, marking ancestors that lead up to
   one), **Pass 3** induce (walk up from useful seeds keeping only useful children; a
-  non-useful seed → a **seam head** that terminates at the seam). So an unpinned branch
+  non-useful seed → a **seam head** that terminates at the seam; then each pinned anchor
+  is connected **down** its own first-parent spine to the seeded part — induct for
+  *edges only*, NOT re-walked up, or the up-walk pulls in every collapsed fork off the
+  trunk and balloons the header. That down-connect fixes the merge-at-cutoff anchor-severing bug:
+  when both boundary lanes begin at one merge at the cutoff, the up-walk's single
+  first-parent chain dead-ends at a collapsed node before reaching an anchor on a folded
+  branch, leaving it inducted-but-disconnected and rendered as a lone head on a fresh
+  lane id (HEAD jumped to id 39); the spine nodes are all `useful` so `condense` splices
+  them and the header stays minimal. So an unpinned branch
   forking off the trunk that reconnects to nothing is **pruned** (no stray feature
-  heads — the gpu regression); a branch that only merges back condenses to a node-less
+  heads — the stray-fork regression); a branch that only merges back condenses to a node-less
   junction; ≥2 useful children → junction, 1 → collapse, 0 → head (a dead-ending
   confluence caps). Invariant: every above-seam boundary `begin` is in the node set
   (useful node or seam head) so no seam lane drops; `condense(up)`; the **direct seam-up
