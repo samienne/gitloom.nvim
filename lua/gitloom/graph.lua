@@ -5336,7 +5336,9 @@ function M.open(folder, opts)
                             if cell.has_commit and cell.commit then
                                 local nm = cell.commit.refs and cell.commit.refs[1] and cell.commit.refs[1].name
                                 local mv = lane_of(cell.commit)
-                                node = ("[%s gcol=%s mv=%s/%s]"):format(tostring(nm or "head"),
+                                local hh = cell.commit.hash
+                                node = ("[%s hash=%s disp=%s gcol=%s mv=%s/%s]"):format(tostring(nm or "head"),
+                                    tostring(hh and hh:sub(1, 8)), tostring(hh and didx[hh]),
                                     tostring(col_of(cell.commit)), tostring(mv and mv.id), tostring(mv and mv.color))
                             end
                             if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node) end
