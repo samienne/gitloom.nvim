@@ -48,12 +48,16 @@ local columns = require("gitloom.columns")
 ---@param up boolean?  -- header orientation (keep tips, splice seam pass-throughs)
 ---@return table  -- { items = OrderItem[], node_of_hash = table<string, table> }
 function M.condense(nodes, anchor_names, up)
-    -- Refs on a node that count as markers (anchor refs, or all when unfiltered).
+    -- Refs on a node that count as markers (anchor refs, or all when unfiltered). The
+    -- HEAD marker (kind == "head") is ALWAYS kept: the pinned set is keyed by the BRANCH
+    -- name HEAD points at (repo.head), not "HEAD", so filtering by anchor_names alone
+    -- would drop HEAD and leave only the branch sharing its commit — the header must show
+    -- HEAD, not just that branch.
     local function marker_refs(n)
         if not anchor_names then return n.refs or {} end
         local out = {}
         for _, r in ipairs(n.refs or {}) do
-            if r.name and anchor_names[r.name] then out[#out + 1] = r end
+            if (r.name and anchor_names[r.name]) or r.kind == "head" then out[#out + 1] = r end
         end
         return out
     end

@@ -542,6 +542,21 @@ local function decoration_texts(commit)
     return out
 end
 
+--- The labels to draw for a commit in a topology PANE (header/footer): the same
+--- branch/tag decorations as the main view, but with a leading "HEAD" marker when the
+--- commit carries one. `decoration_texts` omits HEAD (the main view draws it as a
+--- separate pinned marker, and it must stay out of the cursor-target list), so a pinned
+--- anchor that is HEAD would otherwise read as just the branch sharing its commit.
+---@param commit { refs: Ref[] }?
+---@return string[]
+local function pane_labels(commit)
+    local labels = decoration_texts(commit)
+    if commit and group_refs(commit.refs or {}).head then
+        table.insert(labels, 1, "HEAD")
+    end
+    return labels
+end
+
 --- The selectable units of a packed marker-group row (spec §10.4): one per
 --- marker, its text being the marker's ref decoration(s) or a "(N)" count when
 --- it carries no ref. Used for rendering, `h`/`l` selection, and `<CR>` expand.
@@ -3978,10 +3993,7 @@ function M.open(folder, opts)
             local function body_line(row)
                 local text = glyph_line(row.columns)
                 local c = row.commit
-                local labels = c and decoration_texts(c) or {}
-                -- Show the HEAD marker (as the main view does) so a pinned anchor that is
-                -- HEAD reads as HEAD, not just the branch that happens to share its commit.
-                if c and group_refs(c.refs or {}).head then table.insert(labels, 1, "HEAD") end
+                local labels = c and pane_labels(c) or {}
                 if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.
@@ -4419,6 +4431,7 @@ M._internal = {
     classify_ref = classify_ref,
     group_refs = group_refs,
     decoration_texts = decoration_texts,
+    pane_labels = pane_labels,
     move_selection = move_selection,
     ref_byte_col = ref_byte_col,
     parse_commit_line = parse_commit_line,

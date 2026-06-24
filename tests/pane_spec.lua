@@ -1038,6 +1038,27 @@ describe("pane.condense (§6.2)", function()
         assert.is_nil(n.K)
     end)
 
+    it("keeps the HEAD marker even when HEAD isn't the anchor name (§6.2)", function()
+        -- HEAD points at branch `feat`; the pinned set is keyed by the BRANCH name (`feat`,
+        -- = repo.head), NOT "HEAD". Condensing with anchor_names = { feat } must still keep
+        -- the HEAD marker ref, or the header shows only `feat` and loses HEAD entirely.
+        local A = { hash = "A", region = { "A" }, refs = {
+            { name = "feat", kind = "local" }, { name = "HEAD", kind = "head" } } }
+        local R = { hash = "R", region = { "R" }, refs = {} }
+        A.parents, A.children = { R }, {}
+        R.parents, R.children = {}, { A }
+        local c = pane.condense({ A, R }, { feat = true }, true)
+        local n = by_hash(c.items)
+        assert.is_not_nil(n.A, "the anchor tip must be kept")
+        local has_head, has_branch = false, false
+        for _, rf in ipairs(n.A.refs or {}) do
+            if rf.kind == "head" then has_head = true end
+            if rf.name == "feat" then has_branch = true end
+        end
+        assert.is_true(has_head, "the HEAD marker must survive condense")
+        assert.is_true(has_branch, "the branch it points at is kept too")
+    end)
+
     it("re-points edges across the spliced runs", function()
         local c = pane.condense(graph())
         local n = by_hash(c.items)

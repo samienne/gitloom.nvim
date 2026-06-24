@@ -101,6 +101,32 @@ describe("group_refs", function()
     end)
 end)
 
+describe("pane_labels (header/footer §6.2)", function()
+    local pane_labels = internal.pane_labels
+    local function ref(kind, name) return { kind = kind, name = name } end
+
+    it("shows HEAD FIRST when HEAD shares a commit with a branch", function()
+        -- The line-277/-14 report: HEAD points at `enne/backport-cmake-fixes`, both on the
+        -- same commit. The pane must read as HEAD, not just the branch — HEAD leads.
+        local labels = pane_labels({ refs = {
+            ref("local", "enne/backport-cmake-fixes"),
+            ref("head", "HEAD"),
+        } })
+        assert.equals("HEAD", labels[1])
+        assert.equals("(enne/backport-cmake-fixes)", labels[2])
+    end)
+
+    it("shows a detached HEAD as HEAD even with no branch on the commit", function()
+        local labels = pane_labels({ refs = { ref("head", "HEAD") } })
+        assert.same({ "HEAD" }, labels)
+    end)
+
+    it("omits HEAD when the commit has no HEAD marker (just branches/tags)", function()
+        local labels = pane_labels({ refs = { ref("local", "feat"), ref("tag", "v1.0") } })
+        assert.same({ "(feat)", "[v1.0]" }, labels) -- identical to decoration_texts
+    end)
+end)
+
 describe("owners_from_refs", function()
     -- The view builder's owner list (spec §10): one owner per ref, keyed by ref
     -- name, carrying its current mode; the HEAD symref is skipped.
