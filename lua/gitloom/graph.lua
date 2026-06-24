@@ -542,32 +542,34 @@ local function decoration_texts(commit)
     return out
 end
 
---- The labels to draw for a commit in a topology PANE (header/footer): the pinned
---- anchors, with a leading "HEAD" marker when the commit carries one. `decoration_texts`
---- omits HEAD (the main view draws it as a separate pinned marker, kept out of the
---- cursor-target list), so a pinned anchor that is HEAD would otherwise read as just the
---- branch sharing its commit. When HEAD is present, the branch it points at
---- (`head_branch`, = repo.head) is DROPPED — HEAD already represents it, so the pane
---- shows only the pinned heads (HEAD, plus any OTHER pinned anchor on the same commit),
---- not the branch that merely co-locates with HEAD.
+--- The labels to draw for a commit in a topology PANE (header/footer), as
+--- `{ text, kind }` segments so each can be coloured by kind ("head"|"branch"|"remote"|
+--- "tag") the same way the main view colours them. The pinned anchors, with a leading
+--- HEAD marker when the commit carries one (decoration_texts omits HEAD — the main view
+--- draws it as a separate pinned marker, kept out of the cursor-target list — so a pinned
+--- anchor that is HEAD would otherwise read as just the branch sharing its commit). When
+--- HEAD is present, the branch it points at (`head_branch`, = repo.head) is DROPPED:
+--- HEAD already represents it, so the pane shows only the pinned heads (HEAD plus any
+--- OTHER pinned anchor on the same commit), not the branch that merely co-locates.
 ---@param commit { refs: Ref[] }?
 ---@param head_branch string?  -- the branch HEAD points at (suppressed in favour of HEAD)
----@return string[]
+---@return { text: string, kind: string }[]
 local function pane_labels(commit, head_branch)
-    local refs = (commit and commit.refs) or {}
-    local has_head = group_refs(refs).head
-    if has_head and head_branch then
-        local kept = {}
-        for _, r in ipairs(refs) do
-            local short = r.name
-            if r.kind == "remote" then short = r.name:match("^[^/]+/(.+)$") or r.name end
-            if r.kind == "head" or short ~= head_branch then kept[#kept + 1] = r end
+    local g = group_refs(commit and commit.refs or {})
+    local out = {}
+    if g.head then out[#out + 1] = { text = "HEAD", kind = "head" } end
+    for _, b in ipairs(g.branches) do
+        -- Skip the branch HEAD points at (HEAD already stands for it).
+        if not (g.head and head_branch and b.name == head_branch) then
+            local t = "(" .. b.name
+            if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
+            out[#out + 1] = { text = t .. ")", kind = b.has_local and "branch" or "remote" }
         end
-        refs = kept
     end
-    local labels = decoration_texts({ refs = refs })
-    if has_head then table.insert(labels, 1, "HEAD") end
-    return labels
+    for _, tag in ipairs(g.tags) do
+        out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag" }
+    end
+    return out
 end
 
 --- The selectable units of a packed marker-group row (spec §10.4): one per
@@ -3978,8 +3980,11 @@ function M.open(folder, opts)
         -- straight lane bars so growth/shrink happens at the bottom and the tip
         -- never bounces (§6.2). `overflow` (header) renders a leading `+N above`;
         -- `height` (header) is the exact overlay height the seam was sized for.
-        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names)
+        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names, above_count)
             local lines, marks = {}, {}
+            local pal = opts.palette or {}
+            -- Ref-label highlight by kind, matching the main view's ref colours.
+            local label_hl = { head = pal.head, branch = pal.branch, remote = pal.remote, tag = pal.tags }
             -- Render one columns array (graph glyphs) into a padded, aligned line,
             -- recording highlight extmarks; returns the line text for suffixing.
             local function glyph_line(columns)
@@ -4004,10 +4009,16 @@ function M.open(folder, opts)
             end
 
             local function body_line(row)
+                local li = #lines -- 0-based index this line will occupy (for label marks)
                 local text = glyph_line(row.columns)
                 local c = row.commit
-                local labels = c and pane_labels(c, repo.head) or {}
-                if #labels > 0 then text = text .. " " .. table.concat(labels, " ") end
+                -- Ref labels in the SAME colours as the main view (HEAD, branches, tags).
+                for _, seg in ipairs(c and pane_labels(c, repo.head) or {}) do
+                    text = text .. " "
+                    local s = #text
+                    text = text .. seg.text
+                    if label_hl[seg.kind] then marks[#marks + 1] = { li, s, #text, label_hl[seg.kind] } end
+                end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.
                 if show_lane_ids then
@@ -4039,7 +4050,19 @@ function M.open(folder, opts)
                 local seams = math.max(1, (height or (#rows + 1)) - ovfrow - #rows)
                 if rows[#rows] then
                     local sep = sep_row(rows[#rows], "down")
-                    for _ = 1, seams do lines[#lines + 1] = glyph_line(sep) end
+                    for k = 1, seams do
+                        local li = #lines
+                        local sline = glyph_line(sep)
+                        -- Annotate the very bottom seam row with how many off-screen
+                        -- commits the header summarises (a comment-style note).
+                        if k == seams and above_count and above_count > 0 then
+                            local note = ("   … %d commits above …"):format(above_count)
+                            local s = #sline
+                            sline = sline .. note
+                            marks[#marks + 1] = { li, s, #sline, "Comment" }
+                        end
+                        lines[#lines + 1] = sline
+                    end
                 end
             else
                 if rows[1] then lines[#lines + 1] = glyph_line(sep_row(rows[1], "up")) end
@@ -4245,7 +4268,7 @@ function M.open(folder, opts)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
                 local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
-                return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover
+                return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover, seam.idx
             end
 
             -- The footer overlay is the separator row + the footer rows, so its
@@ -4283,13 +4306,22 @@ function M.open(folder, opts)
                     local di = ref and ref.commit and didx[ref.commit.hash]
                     if di and di < (w0disp or 1) then P = P + 1 end
                 end
-                local rows, seam_tag, height
+                local rows, seam_tag, height, sidx
+                -- The number of off-screen-newer commits the header summarises: the raw
+                -- commits above the seam = the seam commit's repo.order index − 1 (order is
+                -- 1:1 with commits, newest-first), so collapsed regions are counted in full.
+                local function above_count()
+                    local it = sidx and repo.display[sidx]
+                    local c = it and it.commit
+                    local oi = c and idx[(c.tip and c.tip.hash) or c.hash]
+                    return oi and (oi - 1) or nil
+                end
                 -- Clamp the guess to the cap so the loop always runs at least once.
                 for cover = math.min(math.max(2, P + 1), HEADER_MAX), HEADER_MAX do
-                    local r, tag, actual = build_header(cover)
+                    local r, tag, actual, si = build_header(cover)
                     if not r then return nil, tag end
-                    rows, seam_tag, height = r, tag, actual
-                    if #r + 1 <= actual then return r, tag, actual, 0 end -- fits the overlay
+                    rows, seam_tag, height, sidx = r, tag, actual, si
+                    if #r + 1 <= actual then return r, tag, actual, 0, nil, above_count() end -- fits
                 end
                 if not rows then return nil, "no rows" end
                 -- Didn't fit: clip to the overlay height while **preserving continuity**
@@ -4297,7 +4329,7 @@ function M.open(folder, opts)
                 -- `+N above` (room for the +N line and the seam separator). Eliding the
                 -- middle instead would tear every lane at the gap (the old bug).
                 local kept, ovf, ovf_names = pane.cap(rows, math.max(1, height - 2), true)
-                return kept, seam_tag, height, ovf, ovf_names
+                return kept, seam_tag, height, ovf, ovf_names, above_count()
             end
 
             -- Offsets of the main graph column so the pane lanes line up: `goff` =
@@ -4328,13 +4360,13 @@ function M.open(folder, opts)
             -- HEADER (off-screen-newer topology, above). The overlay is exactly `H`
             -- tall (the height the seam was sized at), padded at the bottom so the
             -- seam butts the main view's top edge.
-            local hrows, htag, H, ovf, ovf_names = converge_header()
+            local hrows, htag, H, ovf, ovf_names, habove = converge_header()
             if not hrows or #hrows == 0 then
                 header_dbg = htag or "no rows"; close_pane(header); header_seam, header_height = nil, nil
             else
                 header_seam, header_height, header_dbg = htag, H, nil
                 ensure_pane_win(header, true, H)
-                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names)
+                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names, habove)
             end
 
             -- Topology-only debug dump (set `vim.g.gitloom_pane_debug` to a file path):
