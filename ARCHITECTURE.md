@@ -109,7 +109,7 @@ Consequences for the build:
   position.
 
 **Ordering ownership** is now in place: commits are read without an ordering
-flag and `order_commits` (graph.lua) runs the topological sort that produces
+flag and `order_commits` (`gitloom.git.order`) runs the topological sort that produces
 `repo.order` (spec §3.1). This also underpins **resync** (§3.4): an in-place
 history refresh appends new commits, prunes unreachable ones, and re-sorts.
 
@@ -122,7 +122,7 @@ pinned anchors), never the whole off-screen graph. The **footer** continues the
 seam lanes **down** their first-parent chains to the roots and lays them out with
 `columns.layout`; the **header** mirrors it **up** and lays the result out with a
 bespoke seam-up grid. `pane.lua` is the pure, window-agnostic core; `update_panes`
-in graph.lua does the windowing.
+in `gitloom.window` does the windowing.
 
 **The footer pipeline** (`update_panes`, gated by `opts.panes`), per scroll:
 
@@ -226,35 +226,68 @@ the remaining refinements.
 
 ## Layers
 
+The code is layered: a **git data library**, a pure **graph engine**, a
+**window controller** that drives them, and a couple of standalone helpers.
+Dependencies point strictly downward — `window → graph → git`, and neither the
+engine nor the library has any window/buffer coupling.
+
 ```
 lua/gitloom/
-  init.lua       Thin facade: setup() + :GitloomGraph command registration
-  graph.lua      Git I/O, DAG construction, Phase 2 render, reachability, commit view
-  view.lua       View builder: commit DAG + view state → OrderItem graph (spec §10)
-  columns.lua    Phase 1: lane layout (lanes → columns + per-segment connectivity)
-  pane.lua       Context-pane layout core: boundary extraction + focused-rebuild footer (continue/condense/footer) and header (continue_up/condense/seam-up grid) builders (spec §6.2)
-  color.lua      OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
-  listview.lua   Reusable virtualized list widget (snacks.win)
+  init.lua        Thin facade: setup() + :GitloomGraph command registration
+  window.lua      The graph window CONTROLLER (gitloom.window): floating window,
+                  keymaps, autocmds, streaming/resync, the reachability debounce,
+                  context panes, the commit view, external-diff glue — M.open
+  util.lua        Vendored helpers: make_future (promise), compose/highlight_text
+                  (highlight builders), trim_ws
+  git/            The git DATA LIBRARY (gitloom.git)
+    init.lua        Public aggregator (re-exports the submodules)
+    model.lua       Commit/Ref types + sparse placeholder constructors
+    parse.lua       git log/show/diff/status parsers (incl. the stream de-chunker)
+    format.lua      Commit-detail / diff / diffstat / range / worktree formatters
+    refs.lua        classify/group refs, ref-picker model, resync ref-diff (§2/§3.4)
+    range.lua       DiffRange builders (§11.5/§13.5)
+    order.lua       order_commits — gitloom's owned topo-sort (§3.1)
+    date.lua        Timestamp parse + date formatters (§4/§6)
+    fetch.lua       The async git I/O (jobstart) — the only Neovim-coupled corner
+  graph/          The graph ENGINE (gitloom.graph): commits + view state → rows
+    init.lua        Engine entry: data-model types (Lane/Segment/GraphColumn/
+                    OrderItem/…) + layout orchestration (build_graph,
+                    refresh_columns, pack_markers, owners_from_refs) + the
+                    `_internal` test seam (re-exports the pure surface)
+    view.lua        View builder: commit DAG + view state → OrderItem graph (§10)
+    columns.lua     Phase 1: lane layout (lanes → columns + per-segment connectivity)
+    render.lua      Phase 2: glyphs, colour, reachability dimming, row rendering
+    reach.lua       Reachability cone + the Lane-graph emphasis walk (§12)
+    select.lua      Selection / branch-mode pure helpers (§2/§10/§13)
+    pane.lua        Context-pane layout core (§6.2)
+    color.lua       OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
+  listview.lua    Reusable virtualized list widget (snacks.win)
+  submodule.lua   Submodule change classification + linking (§11.7)
 ```
 
-- **init.lua** — registers the `:GitloomGraph` user command (bound directly
-  to `graph.open`) and exposes `setup(opts)`, which merges options into
-  `M.config`. It is intentionally minimal.
-- **graph.lua** — the bulk of the plugin: git I/O, DAG construction, the
-  window/keymap glue, Phase 2 rendering (`get_column_chars`), reachability, and
-  the commit view.
-- **columns.lua** — Phase 1, the lane-layout algorithm (`columns.layout`). Pure
-  and git-agnostic; takes the ordered, DAG-wired commits and returns the rendered
-  lines with per-segment connectivity.
-- **color.lua** — pure colour maths: sRGB↔OKLab/OKLCH conversion and
-  golden-angle colour generation for overflow lane colours (§5.5). No Neovim
-  dependency; graph.lua realises its output into highlight groups.
+- **init.lua** — registers the `:GitloomGraph` user command (bound directly to
+  `window.open`) and exposes `setup(opts)`. Intentionally minimal.
+- **gitloom.window (window.lua)** — the controller: the floating window, the
+  keymaps and autocmds, the commit stream + resync, the reachability debounce,
+  the context panes, the commit view, and the external-diff glue. It is the only
+  Neovim-window-coupled layer; it drives the engine and the data library.
+- **gitloom.git** — the data library: the immutable commit model, the parsers
+  and formatters that turn raw `git` output into structured data, the owned
+  topo-sort, and the `jobstart` I/O (`fetch.lua`, its sole Neovim coupling).
+  Pure everywhere else.
+- **gitloom.graph** — the engine: a pure function of (commits, view state,
+  options) → renderable rows. `view.lua` projects modes (§10), `columns.lua` is
+  Phase 1 (lane layout), `render.lua` is Phase 2 (glyphs/colour), `reach.lua` the
+  §12 emphasis, `select.lua` the selection walks. `graph/init.lua` owns the
+  layout orchestration and the `_internal` test seam.
+- **color.lua** — pure colour maths (no Neovim dependency); `render.lua` realises
+  its output into highlight groups.
 - **listview.lua** — a generic, incrementally-rendered list view. It knows
-  nothing about git; it renders rows produced by a `display` callback and
-  only materializes the visible range.
+  nothing about git; it renders rows produced by a `display` callback and only
+  materializes the visible range.
 
-graph.lua is the only consumer of columns.lua and listview.lua; both are
-written to be reusable in isolation.
+`gitloom.window` is the consumer of the engine and `listview`; both the engine
+and `gitloom.git` are written to be reusable in isolation.
 
 ## Data flow
 
@@ -308,7 +341,14 @@ on_redraw(top, bottom)
    └─ display()           write real lines + extmark highlights + virt_lines
 ```
 
-## graph.lua internals
+## Internals
+
+> Note: this section predates the library/engine/controller split. The pieces it
+> describes now live in their split homes — Git I/O in `gitloom.git.fetch`, the
+> parsers/formatters across `gitloom.git.*`, Phase 2 render in
+> `gitloom.graph.render`, reachability in `gitloom.graph.reach`, and the window
+> glue (streaming, panes, commit view, keymaps) in `gitloom.window`. The
+> behaviour is unchanged; only the file boundaries moved.
 
 ### Git I/O
 
@@ -492,8 +532,8 @@ The graph is built as a **two-phase pipeline**:
   lanes to columns and emits, per rendered line, the connectivity of every
   **Segment** in every **GraphColumn** — one Segment per drawn edge, each with
   its own connectivity. It does *not* pick glyphs or colours.
-- **Phase 2** (`get_column_chars`, in graph.lua) renders glyphs and colour from
-  those Segments (below).
+- **Phase 2** (`get_column_chars`, in `gitloom.graph.render`) renders glyphs and
+  colour from those Segments (below).
 
 The model:
 
@@ -1051,12 +1091,23 @@ that order index, so the navigation/cone math keeps working in order-index space
 ```
 gitloom.nvim/
 ├── lua/gitloom/
-│   ├── init.lua
-│   ├── graph.lua
-│   ├── view.lua           View builder: projection under view state (§10)
-│   ├── pane.lua           Context-pane layout core (§6.2)
-│   ├── columns.lua        Phase 1 lane layout
-│   ├── color.lua          OKLCH colour generation (§5.5)
+│   ├── init.lua           Thin facade (setup + :GitloomGraph)
+│   ├── window.lua         The window controller (gitloom.window): M.open
+│   ├── util.lua           Vendored helpers (make_future/compose/highlight_text/trim_ws)
+│   ├── git/               The git data library (gitloom.git)
+│   │   ├── init.lua       Aggregator
+│   │   ├── model.lua / parse.lua / format.lua / refs.lua
+│   │   ├── range.lua / order.lua / date.lua
+│   │   └── fetch.lua      Async git I/O (jobstart) — the only Neovim coupling
+│   ├── graph/             The graph engine (gitloom.graph)
+│   │   ├── init.lua       Engine entry: types + layout glue + _internal seam
+│   │   ├── view.lua       View builder: projection under view state (§10)
+│   │   ├── columns.lua    Phase 1 lane layout
+│   │   ├── render.lua     Phase 2 render (glyphs/colour/dimming/rows)
+│   │   ├── reach.lua      Reachability cone + emphasis walk (§12)
+│   │   ├── select.lua     Selection/branch-mode pure helpers (§2/§10/§13)
+│   │   ├── pane.lua       Context-pane layout core (§6.2)
+│   │   └── color.lua      OKLCH colour generation (§5.5)
 │   ├── submodule.lua      Submodule change view: pure core (§11.7)
 │   └── listview.lua
 ├── tests/

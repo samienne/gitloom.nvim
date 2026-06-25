@@ -338,8 +338,8 @@ virtual-commit pure helpers; §3.3/§4.2/§11.8),
 helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
 marker-packing pass; §10.4), and `collapse_owners` (the region's collapsible
 owners under the cursor; §10.4). `columns.layout` is reached via
-`require("gitloom.columns")`; the view builder `view.project` / `view.signatures`
-/ `view.owners` via `require("gitloom.view")` (§10).
+`require("gitloom.graph.columns")`; the view builder `view.project` /
+`view.signatures` / `view.owners` via `require("gitloom.graph.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
 `window_right` (the selection-windowed overflow packer — window + left/right `+N`
 counts; §6), `refresh_columns` (the column-width packer), and
@@ -494,9 +494,26 @@ Details not covered by the spec or architecture:
   of a commit node, and `display_item` blanks date/author/message (keeps refs +
   the split/merge fan lines). So the split topology shows without the commit's
   weight. Topology model/invariants are unchanged (it stays a real node).
-- **init.lua is a thin facade**; graph.lua holds git I/O + the window/keymap
-  glue + Phase 2 render + reachability + the commit view; columns.lua is Phase 1;
-  view.lua is the pre-Phase-1 projection (§10); pane.lua is the context-pane
+- **Module layout (post-split)**: the code is layered into a **git data
+  library** (`gitloom.git`), a pure **graph engine** (`gitloom.graph`), a
+  **window controller** (`gitloom.window`), and helpers — dependencies point
+  downward (`window → graph → git`). `init.lua` is a thin facade binding
+  `:GitloomGraph` to `gitloom.window.open`. **gitloom.git** (`git/`): `model`
+  (Commit/Ref types), `parse` (log/show/diff/status parsers), `format`
+  (commit-detail/diff/diffstat/range/worktree formatters), `refs`, `range`
+  (DiffRange), `order` (`order_commits`, §3.1), `date`, and `fetch` (the async
+  `jobstart` I/O — its only Neovim coupling), behind a `git/init.lua` aggregator.
+  **gitloom.graph** (`graph/`): `view` (the pre-Phase-1 projection §10),
+  `columns` (Phase 1 lane layout), `render` (Phase 2 glyphs/colour/dimming +
+  `display_item`), `reach` (§12 reachability), `select` (selection/branch-mode
+  helpers §2/§10/§13), `pane` (context-pane core), `color`; `graph/init.lua` is
+  the engine entry (data-model types + the layout glue `build_graph`/
+  `refresh_columns`/`pack_markers`/`owners_from_refs` + the `_internal` test
+  seam). **gitloom.window** (`window.lua`) holds the window/keymap glue, the
+  streaming/resync, the reachability debounce, the context panes, the commit
+  view, and the external-diff glue (`M.open`). **gitloom.util** vendors
+  `make_future`/`compose`/`highlight_text`/`trim_ws`. (Still pending: a finer
+  window→commitview→panes split.) pane.lua is the context-pane
   layout core (boundary-line extraction; `continue`/`condense`/`footer` = the
   footer's down-rebuild; `continue_up` = the header's **minimal connecting subgraph**
   (only how the pinned anchors relate to each other + the lanes crossing the cutoff —
