@@ -162,27 +162,26 @@ end
 
 --- The labels to draw for a commit in a topology PANE (header/footer), as
 --- `{ text, kind }` segments so each can be coloured by kind ("head"|"branch"|"remote"|
---- "tag") the same way the main view colours them. The pinned anchors, with a leading
---- HEAD marker when the commit carries one (decoration_texts omits HEAD — the main view
---- draws it as a separate pinned marker, kept out of the cursor-target list — so a pinned
---- anchor that is HEAD would otherwise read as just the branch sharing its commit). When
---- HEAD is present, the branch it points at (`head_branch`, = repo.head) is DROPPED:
---- HEAD already represents it, so the pane shows only the pinned heads (HEAD plus any
---- OTHER pinned anchor on the same commit), not the branch that merely co-locates.
+--- "tag") the same way the main view colours them (§6). The **current branch** carries
+--- no separate marker: it is emitted as its own branch group but with kind "head", so it
+--- renders in the HEAD colour ("you are here"). `head_branch` (= repo.head) identifies it.
+--- A literal `HEAD` marker is emitted only on a **detached HEAD** — a head marker present
+--- (`g.head`) with no current branch (`head_branch == nil`) — since there is no branch
+--- name to colour.
 ---@param commit { refs: Ref[] }?
----@param head_branch string?  -- the branch HEAD points at (suppressed in favour of HEAD)
+---@param head_branch string?  -- the current branch (coloured as HEAD); nil when detached
 ---@return { text: string, kind: string }[]
 function M.pane_labels(commit, head_branch)
     local g = git.group_refs(commit and commit.refs or {})
     local out = {}
-    if g.head then out[#out + 1] = { text = "HEAD", kind = "head" } end
+    -- Detached HEAD: no branch to colour, so show the bare HEAD marker.
+    if g.head and not head_branch then out[#out + 1] = { text = "HEAD", kind = "head" } end
     for _, b in ipairs(g.branches) do
-        -- Skip the branch HEAD points at (HEAD already stands for it).
-        if not (g.head and head_branch and b.name == head_branch) then
-            local t = "(" .. b.name
-            if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
-            out[#out + 1] = { text = t .. ")", kind = b.has_local and "branch" or "remote" }
-        end
+        local t = "(" .. b.name
+        if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
+        -- The current branch takes the HEAD colour; others their own kind.
+        local is_head = g.head and head_branch and b.name == head_branch
+        out[#out + 1] = { text = t .. ")", kind = is_head and "head" or (b.has_local and "branch" or "remote") }
     end
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag" }
@@ -599,8 +598,10 @@ end
 ---@param cone table<Commit, boolean>|nil  the pivot's reachability cone (§12), or nil
 ---@param sel_cursor? table  the commit-selection moving end (§13.4), so a packed
 ---  marker row can mark the selected head; nil when not selecting
+---@param head_branch? string  the current branch (= repo.head); its label is drawn in
+---  the HEAD colour (§6), and the bare `HEAD` marker shows only when this is nil (detached)
 ---@return DisplayElement
-function M.display_item(opts, item, selection_state, cone, sel_cursor)
+function M.display_item(opts, item, selection_state, cone, sel_cursor, head_branch)
     local palette = opts.palette
 
     -- The 1-based decoration index selected on this row, or nil. Selection is
@@ -628,10 +629,13 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor)
         return highlight_text(text, M.dim_hl(opts, group or "Normal"))
     end
 
-    -- Refs (§6) as a list of right-pinned items: a HEAD marker, then branch
-    -- groups, then tags. Branch refs sharing a short name collapse to
-    -- "(name ↑remote1,remote2)" — the name once (highlighted if a local exists,
-    -- dimmed if remote-only) plus the remotes that also point here (group_refs).
+    -- Refs (§6) as a list of right-pinned items: branch groups, then tags. Branch
+    -- refs sharing a short name collapse to "(name ↑remote1,remote2)" — the name
+    -- once (highlighted if a local exists, dimmed if remote-only) plus the remotes
+    -- that also point here (group_refs). The **current branch** carries no separate
+    -- marker: its name is drawn in the HEAD colour (palette.head) instead of the
+    -- branch colour ("you are here", §6); the bare `HEAD` marker shows only on a
+    -- detached HEAD (head marker present, no current branch).
     -- A tracked local branch appends its upstream divergence "⇡N⇣M"/"gone" (§6.3),
     -- each token coloured by palette.track.
     -- The `selected`-th decoration (branches then tags) is drawn with
@@ -641,16 +645,17 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor)
         local g = git.group_refs(commit.refs)
         local texts = M.decoration_texts(commit) -- same order; shared with the cursor target
         local items = {}
-        if g.head then
+        if g.head and not head_branch then
             items[#items + 1] = rh("HEAD", palette.head)
         end
         local di = 0
         for _, b in ipairs(g.branches) do
             di = di + 1
+            local is_head = g.head and head_branch and b.name == head_branch
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                local name_hl = b.has_local and palette.branch or palette.remote
+                local name_hl = is_head and palette.head or (b.has_local and palette.branch or palette.remote)
                 local segs = { rh("(" .. b.name, name_hl) }
                 if #b.remotes > 0 then
                     segs[#segs + 1] = rh(" ↑" .. table.concat(b.remotes, ","), palette.remote)

@@ -1486,7 +1486,8 @@ function M.open(folder, opts)
     -- fills it. Mutates repo.refs / repo.commits.
     ---@param entries { name: string, kind: string, hash: string, upstream?: Upstream }[]
     ---@param head string?
-    local function reconcile_refs(entries, head)
+    ---@param detached string?  the checked-out commit hash when detached (§3.2)
+    local function reconcile_refs(entries, head, detached)
         local newmap, by_key = {}, {}
         for _, e in ipairs(entries) do
             newmap[e.name] = e.hash
@@ -1520,11 +1521,14 @@ function M.open(folder, opts)
         end
 
         -- HEAD always re-points to the current branch's (possibly new) commit; a
-        -- detached or vanished branch drops it.
+        -- detached HEAD re-points to the checked-out commit directly (§3.2); a
+        -- vanished branch drops it.
         unlink_ref("HEAD")
         repo.head = head
         if head and repo.refs[head] and repo.refs[head].commit then
             add_ref(repo, "HEAD", "head", repo.refs[head].commit.hash)
+        elseif not head and detached then
+            add_ref(repo, "HEAD", "head", detached)
         end
     end
 
@@ -2201,7 +2205,7 @@ function M.open(folder, opts)
         end,
         display = function(item)
             return display_item(opts, item, selection_state, view_state.cone,
-                sel.active and sel.cursor or nil)
+                sel.active and sel.cursor or nil, repo.head)
         end,
         on_controller = function(controller)
             -- Refs first: they create sparse Commit placeholders with refs
@@ -2263,11 +2267,12 @@ function M.open(folder, opts)
                 -- Focus the remembered position for this repo if we have one,
                 -- else HEAD; center the view on it (§2). goto_hash resolves a
                 -- folded commit to its collapsed head; if the target is gone it
-                -- leaves the cursor at the top. The HEAD ref (§3.2) is absent on a
-                -- detached HEAD, so that case keeps the top of the graph.
+                -- leaves the cursor at the top. Only focus HEAD when on a branch:
+                -- a detached HEAD now carries a marker (§3.2) but there is nothing
+                -- to focus, so that case keeps the top of the graph.
                 local target = saved_positions[repo_key]
                 if not (target and goto_hash(target)) then
-                    local headref = repo.refs["HEAD"]
+                    local headref = repo.head and repo.refs["HEAD"]
                     if headref and headref.commit then goto_hash(headref.commit.hash) end
                 end
                 center_view()
@@ -2988,9 +2993,12 @@ function M.open(folder, opts)
             clear_worktree_nodes()
 
             fetch_ref_entries().next(function(res)
-                reconcile_refs(res.entries, res.head)
+                reconcile_refs(res.entries, res.head, res.detached)
                 local new_tips, old_list = {}, {}
                 for _, e in ipairs(res.entries) do new_tips[e.hash] = true end
+                -- A detached HEAD's commit may be on no branch; seed it so it is
+                -- fetched/kept (§3.2).
+                if res.detached then new_tips[res.detached] = true end
                 local new_list = {}
                 for h in pairs(new_tips) do new_list[#new_list + 1] = h end
                 for h in pairs(old_tips) do old_list[#old_list + 1] = h end
