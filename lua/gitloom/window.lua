@@ -985,6 +985,22 @@ end
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
+    -- Resolve the repository this graph targets (spec §2.1) up front, so the
+    -- window title can show it and the I/O layer is retargeted before any fetch.
+    -- Inlined (not the module-scope resolve_root used by M.pick) to keep M.open
+    -- under LuaJIT's 60-upvalue ceiling — it must not add a new upvalue.
+    local root
+    do
+        local base = folder or vim.fn.getcwd()
+        local top = vim.fn.systemlist({ "git", "-C", base, "rev-parse", "--show-toplevel" })[1]
+        top = top and top:gsub("%s+$", "") -- strip a trailing CR/newline (Windows)
+        root = (vim.v.shell_error == 0 and top and top ~= "") and top or base
+    end
+    git.set_cwd(root)
+    -- The window title identifies the repo (§2.1): its leaf dir name, plus the
+    -- current branch once HEAD loads (filled in live by update_footer/graph_title).
+    local repo_name = vim.fn.fnamemodify(root, ":t")
+
     ---@type GraphOptions
     local defaults = {
         win = {
@@ -994,7 +1010,7 @@ function M.open(folder, opts)
             -- resize.
             width = function() return math.max(vim.o.columns - 4, 1) end,
             height = function() return math.max(vim.o.lines - 4, 1) end,
-            title = "GraphView",
+            title = (" %s "):format(repo_name),
             footer = footer_text(),
         },
         palette = {
@@ -1099,6 +1115,9 @@ function M.open(folder, opts)
     -- The default footer is computed before opts.mirror is resolved; unless the
     -- caller set its own footer, recompute it so the initial mirror state shows.
     local user_footer = opts and opts.win and opts.win.footer
+    -- Likewise the default title shows the repo (§2.1); leave a caller-supplied
+    -- win.title untouched (graph_title/update_footer also skip it).
+    local user_title = opts and opts.win and opts.win.title
     ---@type GraphOptions
     opts = vim.tbl_deep_extend("force", defaults, opts or {})
     if not user_footer then
@@ -1124,20 +1143,6 @@ function M.open(folder, opts)
     ---@field display? OrderItem[]           the projected OrderItem graph the view renders (§10; set at init)
     ---@field refs table<string, Ref>        name → Ref ("HEAD" for the head)
     ---@field head? string                   current branch name
-
-    -- The repository this graph targets (spec §2.1): the `folder` (or cwd)
-    -- normalized to its git top level. `git.set_cwd` retargets the I/O layer to
-    -- it; the per-session view state (saved_positions / recent_refs) is keyed by
-    -- it. Inlined (not the module-scope resolve_root used by M.pick) to keep
-    -- M.open under LuaJIT's 60-upvalue ceiling — it must not add an upvalue.
-    local root
-    do
-        local base = folder or vim.fn.getcwd()
-        local top = vim.fn.systemlist({ "git", "-C", base, "rev-parse", "--show-toplevel" })[1]
-        top = top and top:gsub("%s+$", "") -- strip a trailing CR/newline (Windows)
-        root = (vim.v.shell_error == 0 and top and top ~= "") and top or base
-    end
-    git.set_cwd(root)
 
     ---@type Repo
     local repo = {
@@ -1696,6 +1701,14 @@ function M.open(folder, opts)
     -- Recompute the footer (active modes + the branch-mode summary, §10) and
     -- apply it to the floating window. Centralised so every state change updates
     -- it the same way.
+    --
+    -- The window title identifies the repository (§2.1): its name, plus the
+    -- current branch once HEAD is known. Recomputed alongside the footer (cheap;
+    -- it only changes when the branch resolves) and applied in the same config.
+    local function graph_title()
+        local b = repo.head
+        return b and (" %s · %s "):format(repo_name, b) or (" %s "):format(repo_name)
+    end
     local function update_footer()
         if lv and lv.win and lv.win.win then
             local nanchors = 0
@@ -1721,10 +1734,14 @@ function M.open(folder, opts)
                 end
             end
             lv.win.opts.footer = status
-            pcall(vim.api.nvim_win_set_config, lv.win.win, {
-                footer = lv.win.opts.footer,
-                footer_pos = "center",
-            })
+            local cfg = { footer = lv.win.opts.footer, footer_pos = "center" }
+            -- Refresh the repo title too (unless the caller pinned its own).
+            if not user_title then
+                lv.win.opts.title = graph_title()
+                cfg.title = lv.win.opts.title
+                cfg.title_pos = "center"
+            end
+            pcall(vim.api.nvim_win_set_config, lv.win.win, cfg)
         end
     end
 

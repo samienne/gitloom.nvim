@@ -76,9 +76,11 @@ mode.
   it; §6), so `<CR>` / the action menu act on that branch with no further
   navigation. Picking HEAD — which has no own label — just centers, cursor at the
   message.
-  `?` opens a float listing all keybindings. The footer shows live status
-  (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
-  when any branch modes are set, and `(mirrored)` when mirroring is on).
+  `?` opens a float listing all keybindings. The window **title** identifies the
+  repository the graph is for (§2.1): its name, plus the current branch once HEAD
+  is known (a caller-supplied `win.title` is left untouched). The footer shows
+  live status (the active merge mode and ref label mode, a `N collapsed, M hidden`
+  summary when any branch modes are set, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
   rows), with `cursorline` marking the current row (§7). The cursor is parked at
   the **commit message** rather than left at column 0. `h`/`l` move a selection
