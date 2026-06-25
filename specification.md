@@ -125,7 +125,9 @@ need not be the repository at the editor's cwd.
   disabled — there is no local repository to open. Like the graph itself, the
   picker **opens immediately** with the entries whose paths are known up front
   and **fills each entry's branch / commit summary asynchronously** as git
-  resolves it, so a slow or large submodule never blocks the list.
+  resolves it, so a slow or large submodule never blocks the list. `setup()`
+  binds the picker to **`<leader>wG`** by default (a normal-mode mapping;
+  configurable via the `pick_key` option, `false` to disable).
 - gitloom retains view state — the remembered cursor position (§2) and the
   ref-picker session MRU (§2 `<leader>b`) — **per repository** for the Neovim
   session, keyed by repository root. Switching repositories and returning
@@ -876,6 +878,13 @@ Endpoint     = Commit | "index" | "worktree"
 where it is merged over the built-in defaults (read at invocation time, so a
 later `setup()` still applies). Programmatic callers may also pass options
 directly to the open function.
+
+`setup()` also installs the **repository-picker mapping** (§2.1): a normal-mode
+map of `pick_key` (default `<leader>wG`) to the picker. This is a setup-level
+option (not a `GraphOptions` field) — installed by `setup()` rather than at
+plugin load so `<leader>` resolves against the user's `mapleader`. Set
+`pick_key = false` to install no mapping, or a string to choose the LHS.
+`:GitloomPick` invokes the picker regardless.
 
 ## 9. Non-goals
 

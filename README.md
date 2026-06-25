@@ -101,11 +101,15 @@ remembered per repository for the session.
 `:GitloomPick` opens a picker listing the **main module** and its **direct
 submodules**; choosing one opens the graph for that repository. The picker
 opens immediately and fills each entry's current branch and commit summary as
-git resolves it; a submodule that is not checked out is shown disabled. Bind it
-to a key of your choosing, e.g.:
+git resolves it; a submodule that is not checked out is shown disabled.
+
+`setup()` binds the picker to **`<leader>wG`** by default. Remap or disable it
+with the `pick_key` option:
 
 ```lua
-vim.keymap.set("n", "<leader>wG", "<cmd>GitloomPick<cr>", { desc = "Gitloom: pick repo/submodule" })
+require("gitloom").setup({
+  pick_key = "<leader>gp", -- a string to remap, or false to disable
+})
 ```
 
 | Key | Action |
@@ -393,6 +397,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   Set explicitly so the windows don't inherit your global value. A non-zero value
   interacts with the context-pane overlays (§6.2); set `0` to restore the prior
   always-zero behaviour if the panes' scrolling misbehaves.
+- **`pick_key`** — the normal-mode mapping `setup()` installs for the repository
+  picker (`:GitloomPick`, §2.1; default `<leader>wG`). Set to a string to remap,
+  or `false` to install no mapping. A setup-level option, not a graph option.
 
 > **Note:** `require("gitloom").setup(opts)` stores config and `:GitloomGraph`
 > now forwards it to the graph (merged over the defaults above, read at invocation
