@@ -36,13 +36,17 @@ exists primarily to exercise and validate the graph algorithm.
   default). It accepts an optional repository path so the graph can be opened
   on a **specific repository** — a submodule of the cwd repo, or the main
   module (§2.1).
-- The window is a floating window. `q` closes it; `m` cycles the merge/split
-  rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
+- The window is a floating window — the per-repository **host window** (§14).
+  `q` **hides** it (its navigation stack and view state are retained; `<C-w>q`
+  destroys it, and `<C-o>` / `<C-i>` walk its navigation history — §14.1, §14.3);
+  `m` cycles the merge/split rendering style (§5.2) so the styles can be compared
+  at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
-  placements can be compared at a glance. `<Tab>` is the quick **collapse ⇄
+  placements can be compared at a glance. `<Space>` is the quick **collapse ⇄
   expand toggle** for the branch under the cursor (§10.4): it collapses an
   expanded branch or expands a marker, in place, and the cursor follows so
-  repeated `<Tab>` flips it open/closed. `<CR>` opens the **commit view** (§11)
+  repeated `<Space>` flips it open/closed. (`<Tab>` is `<C-i>`, the navigation
+  *forward* key — §14.3.) `<CR>` opens the **commit view** (§11)
   for the commit under the cursor when the cursor is on the message (no ref
   selected); when a ref is selected with `h`/`l`, or on a collapsed head or a
   packed-marker line, it instead opens an **action menu** (§10.4) — collapse /
@@ -134,17 +138,19 @@ need not be the repository at the editor's cwd.
   ref-picker session MRU (§2 `<leader>b`) — **per repository** for the Neovim
   session, keyed by repository root. Reopening a repository restores where you
   were in it.
-- **Opening a repository while a graph is already open stacks a new graph
-  window over the current one** (each open is an independent floating window);
-  closing it with `q` returns to the graph beneath. There is no separate
-  switch-in-place mechanism — repositories simply stack, and the per-repository
-  remembered position (above) restores each one's cursor on open. The **active
-  repository follows the focused graph**: returning to an underlying stacked
-  graph re-targets git queries to its repository, so each graph always reads its
-  own repo.
+- **Each repository has one host window; opening a repository shows that window
+  rather than stacking a new one** (§14.1). `<leader>wG` opens the picker to
+  switch to another (sub)repository (creating its window on first entry); `q`
+  hides the current window and `<leader>wg` returns to it (the most-recently-open
+  stack), restoring where you were, keyed by the per-repository remembered
+  position (above). The **active repository follows the visible host window**, so
+  git queries always target the repository whose window is shown. (This
+  supersedes the earlier model in which each open stacked an independent floating
+  window — §14.)
 - A repository may be opened **focused on a specific commit** rather than HEAD —
   used by the commit-view submodule link (§11.7.6), which opens a submodule's
-  repository on the commit under the cursor.
+  repository on the commit under the cursor as a navigation-stack entry with the
+  update's commits pinned (§14.7).
 
 ## 3. Data source
 
@@ -1091,12 +1097,13 @@ through each commit's signature (§10.2) — not through a ref — so it works f
 collapsed region, including ref-less ones (first-parent-merged, squashed). A
 commit the trunk reaches (the mainline) is not collapsible.
 
-- `<Tab>` — the quick **collapse ⇄ expand toggle**: collapse the expanded branch
-  under the cursor (set its non-trunk owners collapsed), or expand the marker
-  under the cursor (set its owners normal). Two-state — *hidden* is not in this
-  cycle, so the toggled thing never vanishes from under the cursor. After the
+- `<Space>` — the quick **collapse ⇄ expand toggle**: collapse the expanded
+  branch under the cursor (set its non-trunk owners collapsed), or expand the
+  marker under the cursor (set its owners normal). Two-state — *hidden* is not in
+  this cycle, so the toggled thing never vanishes from under the cursor. After the
   reflow the cursor is repositioned onto the resulting node (the new marker, or
-  the expanded region's tip), so repeated `<Tab>` flips it open/closed in place.
+  the expanded region's tip), so repeated `<Space>` flips it open/closed in place.
+  (`<Tab>` / `<C-i>` is reserved for forward navigation, §14.3.)
 - `<CR>` — opens the **commit view** (§11) directly when the cursor is on a
   normal commit's message (no ref selected). When a ref is selected with `h`/`l`,
   or the row is a **collapsed head** or a **packed-marker line**, it instead opens
@@ -1104,10 +1111,10 @@ commit the trunk reaches (the mainline) is not collapsible.
   (collapse, expand, **hide**, examine commit, open diff). The menu is where
   hidden and full mode control live, and it is the overflow-proof way to reach
   any marker on a packed line even when not all labels fit. (Collapse/expand are
-  also on `<Tab>`; diff is also on `D`.)
+  also on `<Space>`; diff is also on `D`.)
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
-which labels fit); `<Tab>` and the menu act on the selected marker. Reachability
+which labels fit); `<Space>` and the menu act on the selected marker. Reachability
 emphasis (§12) **follows the selection**: the selected head's branch — its `◍`
 node, label, and lane — stays its normal colour while the sibling heads/branches
 sharing the row dim, exactly as moving onto a normal head dims everything outside
@@ -1233,8 +1240,9 @@ all-normal.
 ## 11. Commit view
 
 Pressing `<CR>` on a commit row — with the cursor on the message (no ref
-selected; §10.4) — opens the **commit view**: a separate read-only floating
-window showing the full details of that one commit. `q` closes it. Like the
+selected; §10.4) — opens the **commit view**: a read-only view pushed onto the host
+window's navigation stack (§14), showing the full details of that one commit.
+`<C-o>` returns to the graph; `q` hides the host window (§14.1). Like the
 graph, it is a viewer — it never mutates the repository (§9).
 
 ### 11.1 Data source
@@ -1306,12 +1314,12 @@ diff all come from one source.
 
 Pressing `<CR>` on a changed-file line **jumps** the cursor to that file's
 section in the diff below (scrolling it to the top of the view). This makes the
-diffstat a table of contents for the diff. The jump is recorded in the
-jumplist, so `<C-o>` / `<C-i>` move back to the diffstat and forward to the diff
-section as usual. When `<C-o>` would step back *out* of the commit view (its
-next jump target is another buffer, or there is none left), it **closes the
-commit view** instead of leaving its buffer — so `<C-o>` backs all the way out.
-`<CR>` elsewhere in the view does nothing.
+diffstat a table of contents for the diff. The jump is recorded so `<C-o>` /
+`<C-i>` move back to the diffstat and forward to the diff section as a
+table-of-contents affordance **within** the view. When `<C-o>` would step back
+*past* the view's own jumps, it pops the **navigation stack** (§14.3) —
+returning to the graph (or whichever view pushed this one) rather than leaving a
+dangling buffer. `<CR>` elsewhere in the view does nothing.
 
 ### 11.5 External diff
 
@@ -1519,8 +1527,11 @@ submodule's own repository**: pressing `<CR>` on a submodule commit line opens
 the graph for that submodule (§2.1), **focused on the commit under the cursor**
 — the new-pointer side, the old-pointer side, or the shared ancestor, whichever
 row the cursor is on. The submodule repository is opened by its path (the change
-graph's `path`, resolved to the submodule's git top level); like any open, it
-**stacks** over the commit view (§2.1), so `q` returns to it.
+graph's `path`, resolved to the submodule's git top level); the open **pushes a
+navigation-stack entry** in the current host window (§14.7), so `<C-o>` returns
+to the commit view. Because it crosses into another repository, the entry seeds
+from the submodule's own view state with the pointers injected as anchors
+(§14.4, and below) — it is not the submodule's own host window (§14.5).
 
 **Bump context — the old and new pointers are virtual refs.** However the link
 is entered, the opened submodule graph marks both pointers as **synthetic refs**:
@@ -1738,7 +1749,7 @@ head is lit and it is drawn with `palette.selected` (and the cursor parks on its
 label); the other heads on that line dim. So the right head on a shared line is
 unambiguous even though the line holds many.
 
-`<Tab>` while selecting **folds / unfolds the head under the cursor in place**
+`<Space>` while selecting **folds / unfolds the head under the cursor in place**
 (the §10.4 collapse⇄expand toggle, scoped to the selection): it expands the
 collapsed head the cursor sits on (or collapses the cursor's region) **without
 changing what is selected**. An unfolded head expands into its **whole region**,
@@ -1776,3 +1787,197 @@ range while selection is active.
   hidden-connectivity open question.
 - **`<C-d>` / `<C-u>` step count** — the exact "half-viewport of branch commits"
   count is a tuning point, expected to need iteration.
+
+## 14. Windows, views, and navigation
+
+gitloom presents **one host window per repository**, and you navigate **within**
+it rather than between stacked windows. This supersedes the earlier model (§2.1)
+in which opening a repository pushed an independent floating window over the
+previous one. The benefits: `<C-o>` / `<C-i>` history lives inside a single
+window (no hopping between windows, no z-order juggling), and the context panes
+(§6.2) attach to whichever view is shown rather than fighting modal windows for
+stacking order.
+
+Two tiers, with two different kinds of identity:
+
+- **Host windows** (tier 1) are keyed by **repository root** (§2.1) — one per
+  repository you have explicitly entered.
+- **Views** (tier 2) are what you navigate to *inside* a host window — the
+  graph, a commit view (§11), a filtered graph, a range view (§13.5). They are
+  identified by their **position in the window's navigation stack**, never by
+  content.
+
+### 14.1 The host window (per repository)
+
+- A host window is a single floating window bound to one repository root. The
+  first time a repository is opened it is created; thereafter it is **hidden and
+  re-shown**, never duplicated. Its navigation stack (§14.3) and per-repository
+  view state (§2) persist while it is hidden.
+- **`q`** **hides** the current host window: it leaves the screen but its
+  navigation stack (§14.3) and view state are retained. **`<C-w>q`** instead
+  **destroys** the window and **clears its stack** (wiping the views' buffers,
+  §14.5) — the explicit teardown; hiding is the cheap default.
+- **`<leader>wg`** **returns** to the most-recently-open host window, re-showing
+  the stack you last left at exactly where you were. It is the counterpart to
+  `q` — `q` closes, `<leader>wg` reopens. With no hidden window to return to it
+  opens the repository at Neovim's cwd (the default entry point, §2).
+- **`<leader>wG`** opens the **repository picker** to choose *another*
+  (sub)repository (§2.1) — the main module and its submodules — and shows its
+  host window, creating it on first entry (re-showing it if already open). This
+  is the explicit cross-repository switcher (replacing the old
+  picker-stacks-a-window behaviour, §2.1).
+- **`<C-o>` / `<C-i>`** are **purely** for moving between breadcrumbs along the
+  current window's stack (§14.3); they do not switch windows or repositories.
+- Window count is bounded by the repositories you **explicitly enter**, not by
+  the repositories you glance at: following a submodule link (§14.7) pushes a
+  *view* in the current window (tier 2); it does **not** create that submodule's
+  host window. A submodule gets its own host window only via `<leader>wG`.
+
+### 14.2 Views and modifiers
+
+A **view** is a pure projection of the repository's immutable commit DAG (§3,
+§4) together with:
+
+- **Intrinsic modifiers** — what *defines* this view: its **scope** (the full
+  graph; a commit, §11; a branch; a range, §13) and any **filters** (e.g. a file
+  filter — only the commits touching a given path). Modifiers belong to the entry
+  that introduced them.
+- **View state** — the per-owner mode / pin overrides (§10) resolved against the
+  defaults. View state is *not* part of a view's identity (§14.5); it is carried
+  per entry and forked on push (§14.4).
+
+A modifier that changes **which commits are laid out** (a filter, a different
+scope) defines a **distinct view** — navigating to it pushes a new stack entry
+(§14.3). A change that only **refocuses** the same content (centering on a
+commit, moving the cursor) is navigation *within* the current view, not a new
+entry.
+
+The **file filter** is the canonical view-local modifier: it changes content for
+one view only, may be applied from any context, and never leaks to any other
+view — because it lives on the entry, not the repository.
+
+### 14.3 The navigation stack
+
+Each host window owns one **navigation stack** — an ordered trail of view
+entries, the tier-2 unit.
+
+- **Identity is positional.** Each entry is a distinct instance
+  (`{ scope, modifiers, view-state, buffer }`); two entries with identical
+  modifiers are still distinct. There is **no content-addressed dedup** at this
+  tier (cf. §14.5).
+- **Push.** Content-changing navigation (open a commit, apply / clear a filter,
+  follow a submodule link, change scope) pushes a new entry on top of the
+  current one.
+- **`<C-o>` / `<C-i>`** walk back / forward along the stack. They operate within
+  the host window and do **not** use Neovim's jumplist (whose
+  position-in-buffer model is the wrong shape for this drill-down-and-return
+  navigation).
+- **Truncate on branch.** Going back and then navigating somewhere new
+  **discards the forward tail** and wipes those entries' buffers (§14.5). The
+  trail always reflects a single path from its root to the current entry.
+- A **depth cap** bounds memory as a backstop; entries beyond it are wiped when
+  nothing in the live stack references them.
+
+### 14.4 Fork-on-push (state inheritance)
+
+When an entry is pushed it inherits a **copy** of its parent entry's current view
+state and then **diverges**:
+
+- State present at fork time crosses to the child (pin a branch in the graph,
+  *then* apply a filter → the filtered view starts with that pin).
+- Nothing flows **back**: edits in the child never reach the parent.
+- The fork is taken **at push time only**: the parent's *later* edits do not
+  propagate to an already-open child (pure fork, not live sharing).
+
+**Fork stops at the repository boundary.** When a push crosses into a different
+repository (a submodule drill-in, §14.7), the parent's view state — keyed by the
+parent repo's ref names — is meaningless in the child. The child instead seeds
+from **its own repository's view state** (§2, and the durable state of §14.8 when
+present) plus the **injected modifiers** the link supplies (e.g. the pinned
+old / new submodule commits).
+
+### 14.5 Identity, dedup, and lifetime
+
+The two tiers dedup differently, and that difference is load-bearing:
+
+- **Host windows dedup by repository root.** `<leader>wG` to an already-open
+  repository re-shows its window; it does not create a second one.
+- **Stack entries never dedup.** A view reached by *clearing* a filter is a
+  **new** entry, distinct from a lower entry that merely happens to have no
+  filter; a submodule drilled into from a commit (§14.7) is a **different
+  instance** from the same submodule opened as its own host window. Positional
+  identity is exactly what lets the same repository content appear both as a
+  tier-2 entry (with injected context) and as a tier-1 window (without), with no
+  special-casing.
+
+Lifetime follows the stack:
+
+- An entry's buffer lives as long as the entry is in a stack. It is wiped when
+  the entry is truncated (§14.3) or its host window is destroyed (`<C-w>q`,
+  §14.1).
+- Hiding a host window (`q`) wipes nothing — the stack and its buffers are
+  retained for re-show.
+
+### 14.6 Breadcrumbs
+
+Navigation here is **drill-down-and-return**, not the forward-dominant motion of
+ordinary buffer editing. To keep the trail legible the host window shows a
+**breadcrumb** of the current path — root → … → current entry (e.g.
+`graph › commit a1b2c3d › graph · file:foo.lua`):
+
+- The breadcrumb shows the **back-trail only**; forward history (`<C-i>`
+  targets) is hidden, so the display stays minimal.
+- Jumping to a crumb moves back to that entry and **truncates** the trail beyond
+  it (§14.3), wiping the abandoned tail. This is the cheap way to collapse a deep
+  excursion.
+- For the graph view the breadcrumb shares the header with the context-pane seam
+  (§6.2); the header is the view's "where am I" surface generally.
+
+### 14.7 Submodule drill-in (worked example)
+
+The commit-view submodule link (§11.7.6) is a tier-2 push that crosses a
+repository boundary, and it exercises every part of this model:
+
+1. In the **main** repository's host window: graph → open a commit carrying a
+   submodule update → follow the submodule link.
+2. This **pushes a stack entry** in the main window whose content is the
+   **submodule's** graph, scoped / anchored by **injected modifiers** — the
+   submodule's old and new commits pinned (§10.6) so the update is framed. It
+   seeds from the submodule's own view state, not the main repo's (§14.4), and is
+   **not** that submodule's host window.
+3. `<C-o>` returns to the main repo's commit view; the drilled-in submodule entry
+   stays in the main window's stack and is restored on return.
+4. Opening the **same submodule** via `<leader>wG` creates its **own host
+   window** with a fresh stack and **no injected context** — a deliberately
+   distinct instance (§14.5).
+
+A drilled-in submodule view requires the injected commits to be present locally;
+if the submodule is not checked out / fetched, the view degrades gracefully (an
+operational concern, not a model rule).
+
+### 14.8 Durable state ownership
+
+When per-repository view state is persisted (disk persistence itself is
+deferred — see §14.9), only a repository's **own host window** writes it, and only
+from that window's **root (canonical) entry**. A drilled-in instance of a
+repository (§14.7) **reads** the durable state as a seed but never writes back —
+it is mid-stack in another repository's window, not canonical. So exploring a
+submodule update can never quietly mutate the submodule's saved layout.
+
+### 14.9 Open / deferred
+
+- **Disk persistence** of durable view state (collapse / pin, keyed by ref name,
+  per repository, under `stdpath("state")`, one file per repository) is a
+  separate amendment. The ownership rule (§14.8) is stated now so the in-memory
+  model already reflects it.
+- **Cold rebuild.** Hiding (`q`) retains buffers, so re-show is instant.
+  Rebuilding a destroyed entry from a serialized descriptor (scope + modifiers +
+  state snapshot) — to survive a full teardown or a Neovim restart — would reuse
+  the same descriptor used for breadcrumb labels (§14.6); not yet specified.
+- **Live parent→child propagation.** Fork-on-push (§14.4) is deliberately a
+  one-time copy; a model where a parent's later edits flow into already-open
+  children (copy-on-write sharing) is materially more complex and is not adopted
+  unless a concrete case demands it.
+- **Modifier surface.** The concrete set of filters / scopes (file, path glob,
+  author, …) and the keys that apply / clear them are enumerated as they are
+  built; the machinery (§14.2–§14.5) is independent of which modifiers exist.

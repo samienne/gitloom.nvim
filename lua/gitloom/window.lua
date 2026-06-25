@@ -13,6 +13,7 @@ local graph = require("gitloom.graph")
 local selectm = require("gitloom.graph.select")
 local reach = require("gitloom.graph.reach")
 local render = require("gitloom.graph.render")
+local navstack = require("gitloom.navstack")
 
 -- Layout orchestration lives in the engine (gitloom.graph); the controller drives it.
 local refresh_columns = graph.refresh_columns
@@ -64,16 +65,226 @@ local saved_positions = {}
 -- saved_positions). Surfaced at the top of the picker. In-memory for the session.
 local recent_refs = {}
 
--- Index of the flex (message) column in a row's `line` field: date, author,
--- graph, message. The message fills the remaining width and refs are pinned to
--- the right edge of the row (specification.md §6; see listview's build_line).
-local FLEX_COL = 4
--- The author column (index 2). It is given a sticky cap so it only grows up to
--- a max width and doesn't bounce as different-length names scroll past.
-local AUTHOR_COL, AUTHOR_MAX = 2, 25
--- The graph column (index 3). Under mirroring it is sticky (only grows) so the
+-- Tier-1 host-window registry (§14): one **host window** per repository root.
+-- `sessions[root]` holds that repo's snacks window (`host`) and the closure that
+-- re-establishes its view after a hide/return (`on_show`); `mru` orders the roots
+-- most-recently-shown first (the `<leader>wg` return target). Opening a repo
+-- already in the registry re-shows its window rather than stacking a new one.
+-- A single module-level table so `M.open` references just one upvalue (it sits at
+-- LuaJIT's 60-upvalue ceiling — see open_graph).
+local nav = { sessions = {}, mru = {} }
+
+function nav.valid(sess)
+    return sess ~= nil and sess.host ~= nil and sess.host.buf ~= nil
+        and vim.api.nvim_buf_is_valid(sess.host.buf)
+end
+
+-- The live host window id for a repo root, or nil when there is no session or it
+-- is currently hidden/gone. A frame reads it (through its own `vwin()`) to act on
+-- the host only while it is actually showing that frame's buffer (§14.3).
+function nav.host_win(root)
+    local sess = nav.sessions[root]
+    local win = sess and sess.host and sess.host.win
+    if win and vim.api.nvim_win_is_valid(win) then return win end
+    return nil
+end
+
+-- Hide a session's host window **safely** (§14). snacks' `hide()` is
+-- `close({ buf = false })`, which deletes its scratch buffer whenever the shown
+-- buffer differs from it (win.lua) — and our root (graph) frame's buffer IS that
+-- scratch buffer. So while a sub-frame (a commit view) is showing, a plain hide
+-- would wipe the graph buffer, fire its BufWipeout, and tear the whole session
+-- down. Swap the window back to the root buffer first (a no-op when already
+-- there): nothing gets wiped, and the active frame index is left untouched so the
+-- return re-enters wherever the stack was (e.g. back into the commit view).
+local function host_hide(sess)
+    if not (sess and sess.host and sess.host.valid and sess.host:valid()) then return end
+    local root_frame = sess.stack and sess.stack.frames[1]
+    if root_frame and root_frame.buf and vim.api.nvim_buf_is_valid(root_frame.buf)
+        and sess.host.win and vim.api.nvim_win_get_buf(sess.host.win) ~= root_frame.buf then
+        pcall(function() sess.host:set_buf(root_frame.buf) end)
+    end
+    sess.host:hide()
+end
+
+-- Hide a repo's host window — the commit frame's `q`, mirroring the graph's `q`
+-- (§14): the buffer stays in the stack for a later `<leader>wg` return.
+function nav.hide(root)
+    host_hide(nav.sessions[root])
+end
+
+-- Destroy a repo's host window and clear its stack (`<C-w>q`, §14.1): snacks
+-- close() shuts the window and wipes the root (scratch) buffer, whose BufWipeout
+-- runs nav_drop to wipe the other frame buffers and drop the session. The explicit
+-- teardown vs. q's hide-and-keep.
+function nav.destroy(root)
+    local sess = nav.sessions[root]
+    if sess and sess.host and sess.host.valid and sess.host:valid() then
+        sess.host:close()
+    end
+end
+
+function nav.record_mru(root)
+    for i, r in ipairs(nav.mru) do
+        if r == root then table.remove(nav.mru, i); break end
+    end
+    table.insert(nav.mru, 1, root)
+end
+
+-- Keep one host window visible at a time (§14): hide every currently-shown
+-- session except `except_root` (the rest stay hidden, ready for `<leader>wg`).
+function nav.hide_others(except_root)
+    for r, s in pairs(nav.sessions) do
+        if r ~= except_root and s.host and s.host:valid() then
+            host_hide(s)
+        end
+    end
+end
+
+local function nav_drop(root)
+    -- Wipe the non-root frame buffers (the commit views, §14.3) — the root frame
+    -- IS the host buffer being destroyed, so skip it. Their own BufWipeout
+    -- autocmds then tear down each frame's context overlay.
+    local sess = nav.sessions[root]
+    if sess and sess.stack then
+        for i, f in ipairs(sess.stack.frames) do
+            if i > 1 and f.buf and vim.api.nvim_buf_is_valid(f.buf) then
+                pcall(vim.api.nvim_buf_delete, f.buf, { force = true })
+            end
+        end
+    end
+    nav.sessions[root] = nil
+    for i, r in ipairs(nav.mru) do
+        if r == root then table.remove(nav.mru, i); break end
+    end
+end
+
+-- Render the breadcrumb back-trail into the host float's title (§14.6): the
+-- frames root → current joined with " › ". At the root (just the graph) restore
+-- the graph's own title — kept current in `sess.host.opts.title` by its status
+-- machinery — rather than overwriting it with a bare repo crumb.
+function nav.render_crumbs(sess)
+    if not (sess and sess.stack and sess.host) then return end
+    local win = sess.host.win
+    if not (win and vim.api.nvim_win_is_valid(win)) then return end
+    local title
+    if sess.stack.idx <= 1 then
+        title = (sess.host.opts and sess.host.opts.title) or ""
+    else
+        local crumbs = navstack.crumbs(sess.stack, function(f) return f.label or f.kind or "?" end)
+        title = " " .. table.concat(crumbs, " › ") .. " "
+    end
+    pcall(vim.api.nvim_win_set_config, win, { title = title, title_pos = "center" })
+end
+
+-- Show `frame` in the host window (the tier-2 navigation primitive, §14.3):
+-- swap the host's buffer to the frame's (snacks set_buf updates self.buf first,
+-- so its fixbuf autocmd no-ops), run the frame's on_enter, refresh the trail.
+local function nav_enter(sess, frame)
+    if not (frame and frame.buf and vim.api.nvim_buf_is_valid(frame.buf)) then return end
+    if sess.host and sess.host.valid and sess.host:valid() then
+        sess.host:set_buf(frame.buf)
+    end
+    if frame.on_enter then pcall(frame.on_enter) end
+    nav.render_crumbs(sess)
+end
+
+-- Re-show a hidden (or already-shown) session at **exactly where you were**
+-- (§14.1): hide any other visible session, re-open the host (snacks show() picks
+-- a fresh window id — caught by the graph's on_win hook), then re-enter the frame
+-- that was active when it was hidden. nav_enter runs that frame's on_enter — the
+-- graph root's IS the graph on_show (goto_hash/cone/pane rebuild), a sub-frame's
+-- restores its own buffer — so `q` then `<leader>wg` lands back in the commit
+-- view, not the graph. Falls back to on_show if the active frame's buffer is gone.
+function nav.show(sess)
+    nav.hide_others(sess.root)
+    sess.host:show()
+    nav.record_mru(sess.root)
+    local frame = sess.stack and navstack.current(sess.stack)
+    if frame and frame.buf and vim.api.nvim_buf_is_valid(frame.buf) then
+        nav_enter(sess, frame)
+    elseif sess.on_show then
+        pcall(sess.on_show)
+    end
+end
+
+--- Step back along the trail (`<C-o>`, §14.3); no-op at the root.
+function nav.back(root)
+    local sess = nav.sessions[root]
+    if not (sess and sess.stack) then return end
+    local f = navstack.back(sess.stack)
+    if f then nav_enter(sess, f) end
+end
+
+--- Step forward along the trail (`<C-i>`, §14.3); no-op at the tip.
+function nav.forward(root)
+    local sess = nav.sessions[root]
+    if not (sess and sess.stack) then return end
+    local f = navstack.forward(sess.stack)
+    if f then nav_enter(sess, f) end
+end
+
+--- Push a new frame (open a commit / filter / submodule, §14.3), discarding the
+--- forward tail and wiping the dropped frames' buffers (the root is never
+--- dropped). `frame` = `{ kind, buf, on_enter? }`.
+function nav.push_frame(root, frame)
+    local sess = nav.sessions[root]
+    if not (sess and sess.stack) then return end
+    local dropped = navstack.push(sess.stack, frame)
+    for _, d in ipairs(dropped) do
+        if d.buf and vim.api.nvim_buf_is_valid(d.buf) then
+            pcall(vim.api.nvim_buf_delete, d.buf, { force = true })
+        end
+    end
+    nav_enter(sess, frame)
+end
+
+-- Install the tier-2 navigation keys on a frame's buffer (§14.3): `<C-o>` steps
+-- back along the trail, `<C-i>` steps forward. `<C-i>` is `<Tab>` in a terminal,
+-- which used to be the collapse/expand toggle (§10.4) — that moved to `<Space>`
+-- precisely to free `<C-i>` for forward navigation everywhere.
+function nav.install_nav_keys(buf, root)
+    if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
+    vim.keymap.set("n", "<C-o>", function() nav.back(root) end,
+        { buffer = buf, nowait = true, silent = true, desc = "Gitloom: back (§14)" })
+    vim.keymap.set("n", "<C-i>", function() nav.forward(root) end,
+        { buffer = buf, nowait = true, silent = true, desc = "Gitloom: forward (§14)" })
+end
+
+function nav.register(root, host, on_show)
+    nav.sessions[root] = {
+        host = host,
+        root = root,
+        on_show = on_show,
+        -- The view stack (§14.3), seeded with the graph as its root frame (its
+        -- crumb is the repo name; its on_enter is the graph's on_show, so a
+        -- `<C-o>` / `<leader>wg` return to it rebuilds the cursor/cone/panes).
+        stack = navstack.new({ kind = "graph", buf = host.buf,
+            label = vim.fn.fnamemodify(root, ":t"), on_enter = on_show }),
+    }
+    nav.record_mru(root)
+    nav.install_nav_keys(host.buf, root)
+    -- `<C-w>q` destroys the window via snacks close(), which wipes the scratch
+    -- buffer; drop the session then so the next open rebuilds rather than
+    -- re-showing a dead window. hide() keeps the buffer, so this only fires on a
+    -- real close/wipe, not on a hide/return.
+    if host.buf then
+        vim.api.nvim_create_autocmd("BufWipeout", {
+            buffer = host.buf,
+            once = true,
+            callback = function() nav_drop(root) end,
+        })
+    end
+end
+
+-- Column indices in a row's `line` field: date, author, graph, message
+-- (specification.md §6; see listview's build_line). Grouped into one table so the
+-- big open_graph closure captures a single upvalue rather than four (LuaJIT's
+-- 60-upvalue ceiling — see open_graph). `flex` (message) fills the remaining width
+-- with refs pinned right; `author` gets a sticky `author_max` cap so it only grows
+-- and doesn't bounce as names scroll past; `graph` is sticky under mirroring so the
 -- right-aligned graph + message don't shift as the lane width changes.
-local GRAPH_COL = 3
+local COL = { flex = 4, author = 2, author_max = 25, graph = 3 }
 
 -- Floating-window stacking (spec §2.1). Rather than a hand-tuned ladder, the
 -- newest **primary** float (a graph window, the commit view, the `?`/`K` help)
@@ -106,11 +317,12 @@ end
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
 local KEYBINDS = {
-    { "q", "Close the graph" },
+    { "q", "Hide the graph (<leader>wg returns; <C-w>q destroys)" },
+    { "<C-o> / <C-i>", "Navigate back / forward through the view history" },
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
-    { "<Tab>", "Collapse / expand the branch under the cursor (toggle)" },
+    { "<Space>", "Collapse / expand the branch under the cursor (toggle)" },
     { "<CR>", "Open the commit view (on the message); action menu when a ref is selected / on a head" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
@@ -536,12 +748,6 @@ local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 ---@param range? { range: DiffRange, commits: Commit[], title: string }
 ---@param root? string  -- the graph's repo root, to resolve submodule link paths (§11.7.6)
 local function open_commit_view(opts, commit, range, root)
-    local ok, snacks = pcall(require, "snacks.win")
-    if not ok then
-        vim.notify("snacks.win not found. Install snacks.nvim", vim.log.levels.ERROR)
-        return
-    end
-
     local title
     if range then
         title = range.title
@@ -550,26 +756,20 @@ local function open_commit_view(opts, commit, range, root)
         title = "Commit " .. commit.hash:sub(1, 7)
     end
 
-    -- Stack the commit view above the graph it was opened from and its panes
-    -- (§2.1); its sticky context header (cv_z + Z_OVERLAY) sits just above it.
-    local cv_z = next_zindex()
-    -- Match the graph window's geometry so the commit view is the same size.
-    local w = snacks.new({
-        border = opts.win.border or "rounded",
-        width = opts.win.width,
-        height = opts.win.height,
-        title = title,
-        footer = "q: close",
-        keys = { q = "close" },
-        zindex = cv_z,
-    })
-    local buf = w.buf
+    -- The commit view is a navigation-stack **frame** in the repo's single host
+    -- window (§14.3), not its own float: a scratch buffer the host swaps in. It
+    -- stays alive while off-screen (kept by the view stack) so `<C-o>`/`<C-i>`
+    -- can revisit it; the frame is pushed at the end, once its keymaps are bound.
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].bufhidden = "hide"
 
-    -- Window-local scrolloff (opts.scrolloff, default 10; §8): keep context rows
-    -- around the cursor when paging through a long diff.
-    if w.win and vim.api.nvim_win_is_valid(w.win) then
-        pcall(vim.api.nvim_set_option_value, "scrolloff", opts.scrolloff or 0,
-            { scope = "local", win = w.win })
+    -- The host window IFF it is currently showing this frame's buffer (§14.3):
+    -- nil when the user has navigated to another frame or hidden the host, so the
+    -- window ops below no-op cleanly instead of touching the wrong buffer.
+    local function vwin()
+        local win = nav.host_win(root)
+        if win and vim.api.nvim_win_get_buf(win) == buf then return win end
+        return nil
     end
 
     -- Maps a diffstat file row's buffer line -> the buffer line where that
@@ -613,8 +813,9 @@ local function open_commit_view(opts, commit, range, root)
     -- jumplist — `<C-o>` / `<C-i>` then move back and forth between the diffstat
     -- and the file's diff.
     vim.keymap.set("n", "<CR>", function()
-        if not vim.api.nvim_win_is_valid(w.win) then return end
-        local line = vim.api.nvim_win_get_cursor(w.win)[1]
+        local vw = vwin()
+        if not vw then return end
+        local line = vim.api.nvim_win_get_cursor(vw)[1]
         if action_line and line == action_line then
             if range then
                 if opts.diff and opts.diff.open then opts.diff.open(range.range) end
@@ -624,19 +825,13 @@ local function open_commit_view(opts, commit, range, root)
             end
             return
         end
-        -- A submodule change-graph commit row: open that submodule's graph
-        -- focused on the commit under the cursor (§11.7.6). Stacks over this view.
+        -- A submodule change-graph commit row: drill into that submodule's graph
+        -- focused on the commit under the cursor (§11.7.6) — a navigation-stack
+        -- frame in THIS host window (§14.7), so <C-o> returns here. `root` is the
+        -- parent repo whose host window holds this commit frame.
         local jump = sub_jumps[line]
         if jump then
-            -- Strip the inherited window title/footer: this `opts` is the parent
-            -- graph's *merged* opts (carrying its own title/footer), and M.open
-            -- would treat them as caller-pinned. A fresh copy lets the submodule
-            -- graph compute its own title (§2.1) — the rest of the config (palette,
-            -- diff provider, geometry) is inherited.
-            local sub_win = vim.tbl_extend("force", opts.win or {}, {})
-            sub_win.title, sub_win.footer = nil, nil
-            local sub_opts = vim.tbl_extend("force", opts, { win = sub_win })
-            -- Mark both bump pointers in the opened submodule graph (§11.7.6) as
+            -- Mark both bump pointers in the drilled-in submodule graph (§11.7.6) as
             -- synthetic pinned `new`/`old` refs — the new pointer green, the old
             -- red (the change view's colours) — revealed + labelled in the panes,
             -- focused on the clicked commit.
@@ -648,12 +843,16 @@ local function open_commit_view(opts, commit, range, root)
             if jump.old then
                 seed[#seed + 1] = { hash = jump.old, name = "old", hl = subp.old or "GitloomSubmoduleDel" }
             end
-            M.open(jump.repo, sub_opts, jump.hash, seed)
+            if root then
+                M.drill_submodule(root, jump.repo, opts, jump.hash, seed)
+            else
+                M.open(jump.repo, opts, jump.hash, seed)
+            end
             return
         end
         local target = file_jumps[line]
         if target then
-            vim.api.nvim_win_call(w.win, function()
+            vim.api.nvim_win_call(vw, function()
                 vim.cmd("normal! " .. target .. "Gzt")
             end)
         end
@@ -672,9 +871,30 @@ local function open_commit_view(opts, commit, range, root)
             vim.api.nvim_feedkeys(
                 vim.api.nvim_replace_termcodes("<C-o>", true, false, true), "n", false)
         else
-            w:close()
+            nav.back(root)
         end
     end, { buffer = buf, nowait = true, silent = true })
+
+    -- <C-i> mirrors it forward: walk the jumplist forward through the view's own
+    -- jumps, then — once the next forward target would leave the commit view
+    -- (another buffer, or none) — step forward along the view stack (§14.3).
+    -- `<C-i>` is `<Tab>`; collapse/expand moved to `<Space>` (§10.4) to free it.
+    vim.keymap.set("n", "<C-i>", function()
+        local jl = vim.fn.getjumplist()
+        local list, curidx = jl[1], jl[2]
+        local target = list[curidx + 1]
+        if target and target.bufnr == buf then
+            vim.api.nvim_feedkeys(
+                vim.api.nvim_replace_termcodes("<C-i>", true, false, true), "n", false)
+        else
+            nav.forward(root)
+        end
+    end, { buffer = buf, nowait = true, silent = true })
+
+    -- q hides the host window (mirroring the graph's q, §14); the frame's buffer
+    -- stays in the stack for a later `<leader>wg` return.
+    vim.keymap.set("n", "q", function() nav.hide(root) end,
+        { buffer = buf, nowait = true, silent = true })
 
     -- Diff context header (§11.6): a borderless overlay pinned to the top of the
     -- view showing the governing file / hunk while the diff is scrolled past
@@ -682,12 +902,18 @@ local function open_commit_view(opts, commit, range, root)
     -- materializes only when there is something to stick (else it is closed).
     local diff_pal = (opts.palette or {}).diff or {}
     local ctx_win, ctx_buf = nil, nil
-    -- The commit-view window id, captured stably at open. snacks clears `w.win`
-    -- to nil on close, and its own WinClosed cleanup can run before ours, so
-    -- matching the close event against the live `w.win` may miss and orphan the
-    -- overlay float. The captured id stays valid for the match (and goes invalid
-    -- once the window is gone), so the teardown below always fires.
-    local view_win = w.win
+    -- The view's scroll/cursor, saved when the frame is navigated away from so a
+    -- later return restores it (§14.3); nil until first left.
+    local saved_pos = nil
+
+    -- The context overlay sits just above the host window. Read the host's live
+    -- zindex each time, since it can re-open with a new one after a hide/return
+    -- (§14) — not a fixed float constant any more.
+    local function overlay_zindex()
+        local vw = vwin()
+        local z = vw and vim.api.nvim_win_get_config(vw).zindex
+        return (z or 50) + Z_OVERLAY
+    end
 
     local function close_ctx()
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
@@ -719,7 +945,8 @@ local function open_commit_view(opts, commit, range, root)
     end
 
     local function update_ctx()
-        if not (diff_ctx and vim.api.nvim_win_is_valid(w.win)) then
+        local vw = vwin()
+        if not (diff_ctx and vw) then
             close_ctx()
             return
         end
@@ -727,7 +954,7 @@ local function open_commit_view(opts, commit, range, root)
         -- actually reads is the window top advanced past it (§11.6). That offset
         -- depends on the count we are computing, so settle it with a short
         -- fixpoint (the height is 0–2; this converges in a step or two).
-        local top = vim.fn.line("w0", w.win)
+        local top = vim.fn.line("w0", vw)
         local rows = ctx_rows_for(top)
         for _ = 1, 2 do
             local next_rows = ctx_rows_for(top + #rows)
@@ -747,14 +974,14 @@ local function open_commit_view(opts, commit, range, root)
             ctx_buf = vim.api.nvim_create_buf(false, true)
         end
         local cfg = {
-            relative = "win", win = w.win,
+            relative = "win", win = vw,
             row = 0, col = 0,
-            width = vim.api.nvim_win_get_width(w.win),
+            width = vim.api.nvim_win_get_width(vw),
             height = #rows,
             style = "minimal",
             focusable = false,
-            -- Just above the commit view itself (its sticky-scroll header).
-            zindex = cv_z + Z_OVERLAY,
+            -- Just above the host window itself (its sticky-scroll header).
+            zindex = overlay_zindex(),
         }
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
             pcall(vim.api.nvim_win_set_config, ctx_win, cfg)
@@ -784,36 +1011,68 @@ local function open_commit_view(opts, commit, range, root)
         end
     end
 
+    -- The overlay's lifetime follows the buffer's presence in the host window now,
+    -- not a float closing (§14.3). WinScrolled/WinResized refresh it while the host
+    -- shows this frame; BufWinEnter/BufWinLeave rebuild it / tear it down as the
+    -- frame is shown/hidden by navigation (BufWinLeave also stashes the scroll for
+    -- a later return); BufWipeout (the frame dropped from the stack) drops the
+    -- group entirely.
     local ctx_group = vim.api.nvim_create_augroup("GitloomCommitCtx_" .. buf, { clear = true })
     vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized" }, {
         group = ctx_group,
         callback = function()
-            -- This autocmd is global (it must catch scrolls in the commit view),
-            -- so once that window has closed a later scroll in any other window
-            -- would call nvim_win_is_valid(nil) and error. Guard on the captured
-            -- id; when the window is gone, close the overlay (in case WinClosed
-            -- missed it) and tear the group down.
-            if view_win and vim.api.nvim_win_is_valid(view_win) then
-                update_ctx()
-            else
-                close_ctx()
-                pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
-            end
+            -- Global (it must catch scrolls in the host window); when the host is
+            -- not showing this frame, vwin() is nil and update_ctx closes the
+            -- overlay instead of touching the wrong window.
+            if vwin() then update_ctx() else close_ctx() end
         end,
     })
-    vim.api.nvim_create_autocmd("WinClosed", {
+    vim.api.nvim_create_autocmd("BufWinEnter", {
         group = ctx_group,
-        callback = function(ev)
-            -- Match the captured id, not the live `w.win` (which snacks may have
-            -- already cleared), so closing the view always closes the overlay.
-            if view_win and tonumber(ev.match) == view_win then
-                close_ctx()
-                pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
-            end
+        buffer = buf,
+        callback = function() update_ctx() end,
+    })
+    vim.api.nvim_create_autocmd("BufWinLeave", {
+        group = ctx_group,
+        buffer = buf,
+        callback = function()
+            local vw = vwin()
+            if vw then saved_pos = vim.api.nvim_win_call(vw, vim.fn.winsaveview) end
+            close_ctx()
+        end,
+    })
+    vim.api.nvim_create_autocmd("BufWipeout", {
+        group = ctx_group,
+        buffer = buf,
+        callback = function()
+            close_ctx()
+            pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
         end,
     })
 
     set_lines({ "Loading…" })
+
+    -- Entering this frame (the push, or a `<C-o>`/`<C-i>` step back to it, §14.3):
+    -- apply window-local scrolloff (opts.scrolloff, §8), restore the saved
+    -- scroll/cursor (else let render() park on the action label on first show),
+    -- and re-seed the context header for the now-visible viewport.
+    local function on_enter()
+        local vw = vwin()
+        if not vw then return end
+        pcall(vim.api.nvim_set_option_value, "scrolloff", opts.scrolloff or 0,
+            { scope = "local", win = vw })
+        if saved_pos then
+            pcall(vim.api.nvim_win_call, vw, function() vim.fn.winrestview(saved_pos) end)
+        elseif action_line then
+            pcall(vim.api.nvim_win_set_cursor, vw, { action_line, 0 })
+        end
+        update_ctx()
+    end
+
+    -- Show the frame in the host window, pushing it onto the view stack (§14.3);
+    -- this swaps the host's buffer and runs on_enter. The async render below then
+    -- fills the buffer in place once git returns.
+    nav.push_frame(root, { kind = "commit", buf = buf, label = title, on_enter = on_enter })
 
     -- Render the metadata (format_commit_detail), then the diffstat
     -- (format_diffstat), then the diff (format_diff) into one buffer: real lines
@@ -822,10 +1081,11 @@ local function open_commit_view(opts, commit, range, root)
     -- the rows, record each diffstat file row -> its diff section line (§11.4).
     local function render(meta_output, diff_output, keep_view)
         if not vim.api.nvim_buf_is_valid(buf) then return end
+        local vw = vwin()
         -- On an in-place re-render (the submodule upgrade, §11.7.4) preserve the
         -- user's scroll/cursor; the first render parks on the action label.
-        local saved_view = keep_view and vim.api.nvim_win_is_valid(w.win)
-            and vim.api.nvim_win_call(w.win, vim.fn.winsaveview) or nil
+        local saved_view = keep_view and vw
+            and vim.api.nvim_win_call(vw, vim.fn.winsaveview) or nil
         file_jumps = {}
         sub_jumps = {}
         action_line = nil
@@ -944,10 +1204,10 @@ local function open_commit_view(opts, commit, range, root)
 
         if saved_view then
             -- In-place re-render: keep the user where they were (§11.7.4).
-            pcall(vim.api.nvim_win_call, w.win, function() vim.fn.winrestview(saved_view) end)
-        elseif action_line and vim.api.nvim_win_is_valid(w.win) then
+            if vw then pcall(vim.api.nvim_win_call, vw, function() vim.fn.winrestview(saved_view) end) end
+        elseif action_line and vw then
             -- Park the cursor on the action label so <CR><CR> opens the diff (§11.2).
-            pcall(vim.api.nvim_win_set_cursor, w.win, { action_line, 0 })
+            pcall(vim.api.nvim_win_set_cursor, vw, { action_line, 0 })
         end
 
         -- Seed the context header for the initial viewport (§11.6).
@@ -1000,6 +1260,7 @@ end
 ---@field title string
 ---@field footer string
 ---@field zindex? integer  stacking order, assigned per-open so the newest graph is on top (§2.1)
+---@field on_win? fun(w: table)  snacks calls this on every (re)show; refreshes the live window id (§14)
 ---@field keys? table  keymaps installed on the graph window (snacks.win keys)
 
 ---@class GraphPalette
@@ -1056,11 +1317,22 @@ end
 ---@param opts GraphOptions
 ---@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
 ---@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
-function M.open(folder, opts, focus_hash, seed_refs)
+---@class GraphAttach : ListViewAttach
+---@field host_root string  the parent repo whose host window/session receives the frame (§14)
+---
+---@param attach? GraphAttach  -- build into an existing host window+buffer (a drilled-in graph frame, §14) instead of creating a window
+-- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
+-- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
+-- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
+-- Returns the listview instance and an `on_show` closure that re-establishes the
+-- view after a hide/return (also the frame on-enter for an attached graph); the
+-- wrapper registers them. With `attach`, no window is created — the graph renders
+-- into the given host window + buffer as a navigation frame (§14 uniform frames).
+local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- Resolve the repository this graph targets (spec §2.1) up front, so the
     -- window title can show it and the I/O layer is retargeted before any fetch.
-    -- Inlined (not the module-scope resolve_root used by M.pick) to keep M.open
-    -- under LuaJIT's 60-upvalue ceiling — it must not add a new upvalue.
+    -- Inlined (not the module-scope resolve_root used by M.pick) to keep this
+    -- function under LuaJIT's 60-upvalue ceiling — it must not add a new upvalue.
     local root
     do
         local base = folder or vim.fn.getcwd()
@@ -1069,6 +1341,12 @@ function M.open(folder, opts, focus_hash, seed_refs)
         root = (vim.v.shell_error == 0 and top and top ~= "") and top or base
     end
     git.set_cwd(root)
+    -- The repo root that keys the SESSION / host window (§14). For the root graph
+    -- it is `root` itself; for a drilled-in submodule frame it is the PARENT repo
+    -- whose host window we render into (attach.host_root) — `root` there is the
+    -- submodule, which has no session. The window-lifecycle keys (q / <C-w>q) act
+    -- on this, while git I/O still targets `root` (the submodule).
+    local host_root = (attach and attach.host_root) or root
     -- The window title identifies the repo (§2.1): its leaf dir name, plus the
     -- current branch once HEAD loads (filled in live by update_footer/graph_title).
     local repo_name = vim.fn.fnamemodify(root, ":t")
@@ -1412,6 +1690,26 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- callbacks below close over this local (not a stray global) and see it once
     -- it is assigned after the window opens.
     local lv
+
+    -- The graph's window and buffer ids. `buf` is stable for the session; `win`
+    -- changes whenever the host window is hidden and re-shown — snacks reopens
+    -- with a NEW window id (§14). Declared at function scope (not inside the
+    -- open block below) so the `win.on_win` hook — set before the window opens —
+    -- and every in-block closure share one upvalue; the hook refreshes it on
+    -- each (re)show so all closures read the live window.
+    local win, buf
+
+    -- The live host window id, or nil. The graph reads it through here so the same
+    -- body works whether it OWNS the window (create mode: lv.winid() is the snacks
+    -- window id) or is an ATTACHED frame in a shared host (lv.winid() is the live
+    -- host getter, §14 uniform frames). nil before the listview exists or once the
+    -- window is gone — callers that pass it to the nvim API must nil-check.
+    local function gwin()
+        if not (lv and lv.winid) then return nil end
+        local w = lv.winid()
+        if w and vim.api.nvim_win_is_valid(w) then return w end
+        return nil
+    end
 
     -- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
     -- sub-row within the item. In dual mode a labelled commit spans two buffer
@@ -1759,7 +2057,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
         repo.display = (opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
         -- A reflow recreates the DisplayNodes, so any in-flight commit selection
         -- (§13) holds stale node references — drop it. (Pure selection movement
-        -- never reflows; this guards m/<Tab>/c/p/P etc. taken mid-selection.)
+        -- never reflows; this guards m/<Space>/c/p/P etc. taken mid-selection.)
         sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
         if lv and lv.controller and lv.controller.set_items then
             lv.controller.set_items(repo.display)
@@ -2149,8 +2447,9 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- <C-d>/<C-u>: a half-viewport of branch commits, stopping at a tip/root
     -- (§13.2; the exact count is a tuning point, §13.6).
     local function selection_page(dir)
-        if not (sel.active and lv and lv.win and lv.win.win) then return end
-        local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(lv.win.win) / 2))
+        local hw = gwin()
+        if not (sel.active and hw) then return end
+        local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(hw) / 2))
         for _ = 1, steps do
             local before = sel.cursor
             sel_step(sel, dir)
@@ -2174,7 +2473,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
         sel.anchor, sel.cursor = sel.cursor, sel.anchor
         selection_redraw()
     end
-    -- <Tab> while selecting (§13.4): fold/unfold the head under the cursor in
+    -- <Space> while selecting (§13.4): fold/unfold the head under the cursor in
     -- place. Expand the cursor's collapsed head (or collapse its region), then
     -- re-resolve the selection against the new projection **by hash** so it covers
     -- the same commits: an unfolded head expands into its whole region (so the
@@ -2185,7 +2484,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- commit (nothing collapsible there).
     local function selection_toggle()
         local node = sel.active and sel.cursor
-        if not node or not (lv and lv.win and lv.win.win) then return end
+        if not node or not gwin() then return end
         local owners, mode = {}, nil
         if node.collapsed then -- a head: expand its still-collapsed owners
             for oid in pairs(node.signature or {}) do
@@ -2203,7 +2502,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
         -- recreates the DisplayNodes. A collapsed head stands in for its whole
         -- region, so expand it to its region member hashes; a normal node is
         -- itself. Remember which end holds the anchor so we can restore both ends.
-        local w = lv.win.win
+        local w = gwin() --[[@as integer]] -- guarded non-nil above
         local view = vim.api.nvim_win_call(w, function() return vim.fn.winsaveview() end)
         local anchor_is_top = (sel.path or {})[1] == sel.anchor
         local function members(n) return n.collapsed and (n.region or {}) or { n.hash } end
@@ -2278,19 +2577,28 @@ function M.open(folder, opts, focus_hash, seed_refs)
     end
     opts.win.zindex = graph_z
 
+    -- Refresh the live window/buffer ids on every (re)open. snacks calls on_win
+    -- after open_win on each show() — including after a hide()/return (§14) — with
+    -- a fresh window id, so this keeps the function-scoped `win` current for all
+    -- the closures below without re-creating them.
+    opts.win.on_win = function(w) win, buf = w.win, w.buf end
+
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
-        -- The message (FLEX_COL) fills the row; refs (line_right) pin to the
+        -- Attach into the host window+buffer when drilling in (§14); nil = create
+        -- a window (the repo's root graph). on_win above is then unused.
+        attach = attach,
+        -- The message (COL.flex) fills the row; refs (line_right) pin to the
         -- right edge, using the free width down to message_min (§6).
-        flex = FLEX_COL,
+        flex = COL.flex,
         message_min = opts.message_min,
         overflow_hl = opts.palette.remote,
         -- Sticky cap on the author column so it only grows (no scroll bounce).
-        col_max = { [AUTHOR_COL] = AUTHOR_MAX },
+        col_max = { [COL.author] = COL.author_max },
         -- Under mirroring, make the graph column sticky too (only grow) so the
         -- right-aligned graph + message don't bounce as the lane width changes.
-        col_sticky = function() return opts.mirror and { GRAPH_COL } or {} end,
+        col_sticky = function() return opts.mirror and { COL.graph } or {} end,
         -- Real buffer lines per item: a dual-mode labelled commit is two rows
         -- (label row + message row), everything else one. Cheap — reads only the
         -- commit's refs + mode — so the listview's buffer-line map needs no layout.
@@ -2415,6 +2723,15 @@ function M.open(folder, opts, focus_hash, seed_refs)
     }
 
     opts.win.keys = opts.win.keys or {}
+    -- q: HIDE the host window (§14), not destroy it — the navigation stack and
+    -- view state survive so `<leader>wg` can return to exactly here. snacks
+    -- hide() = close({buf=false}), so the buffer (and this closure) live on.
+    opts.win.keys.q = function() nav.hide(host_root) end
+    -- <C-w>q: DESTROY the host window and clear its state (§14). snacks close()
+    -- wipes the scratch buffer, so the session's BufWipeout cleanup drops it and a
+    -- later open rebuilds — vs. q's hide-and-keep. Acts on the host session
+    -- (host_root), so it tears down the whole window from a drilled-in frame too.
+    opts.win.keys["<C-w>q"] = function() nav.destroy(host_root) end
     -- m: cycle the merge/split style. A full reflow (re-layout from the raw order
     -- then re-pack) — the packed display can't be relaid in place (its marker
     -- groups aren't single commits).
@@ -2452,15 +2769,16 @@ function M.open(folder, opts, focus_hash, seed_refs)
         update_cone() -- buffer lines shifted; recompute the cone over the new map
         place_cursor()
     end
-    -- <Tab>: the quick collapse ⇄ expand toggle for the branch under the cursor
+    -- <Space>: the quick collapse ⇄ expand toggle for the branch under the cursor
     -- (§10.4). Collapse an expanded branch or expand a marker; the cursor follows
-    -- the result (set_branch → goto_hash) so repeated <Tab> flips it in place.
+    -- the result (set_branch → goto_hash) so repeated <Space> flips it in place.
     -- Two-state — hidden is the menu's job, so nothing vanishes under the cursor.
-    opts.win.keys["<Tab>"] = function(self)
-        -- While selecting (§13.4), <Tab> folds/unfolds the head under the cursor
+    -- (Was <Tab>; freed for <C-i> forward navigation, §14.3.)
+    opts.win.keys["<Space>"] = function()
+        -- While selecting (§13.4), <Space> folds/unfolds the head under the cursor
         -- in place, keeping the selection and the screen position.
         if sel.active then selection_toggle(); return end
-        local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
+        local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
         local b = branch_under_cursor(line)
         if not b or not b.owners or #b.owners == 0 then return end
         if b.state == "collapsed" then
@@ -2476,12 +2794,12 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- most-relevant first. On a packed line it lists every marker by name, so any
     -- branch is reachable even when not all labels fit. (Collapse/expand are also
     -- on <Tab>; diff is also on D.)
-    opts.win.keys["<CR>"] = function(self)
+    opts.win.keys["<CR>"] = function()
         -- In commit selection (§13.5) <CR> opens the commit view in range mode
         -- (the selected-commit list + combined range diff); D opens the range in
         -- the external viewer.
         if sel.active then open_selection_view(); return end
-        local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
+        local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
         local item = order_at(line)
         if not item then return end
         -- Direct commit view: a normal (non-collapsed) commit row with no ref
@@ -2535,9 +2853,9 @@ function M.open(folder, opts, focus_hash, seed_refs)
     end
     -- D: open the commit's diff in the external diff viewer (§11.5), or — while
     -- selecting (§13.5) — the selected range.
-    opts.win.keys.D = function(self)
+    opts.win.keys.D = function()
         if sel.active then open_selection_diff(); return end
-        local w = self and self.win
+        local w = win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
         local item = order_at(line)
@@ -2547,8 +2865,8 @@ function M.open(folder, opts, focus_hash, seed_refs)
         open_diff(opts, item.commit)
     end
     -- K: float with the full lane breakdown for the commit under the cursor.
-    opts.win.keys.K = function(self)
-        local w = self and self.win
+    opts.win.keys.K = function()
+        local w = win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
         local item = order_at(line)
@@ -2592,7 +2910,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- in place (no re-stream) and reflows, keeping the cursor on its commit.
     opts.win.keys.S = function()
         local keep
-        local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv and lv.win and lv.win.win)
+        local ok, pos = pcall(vim.api.nvim_win_get_cursor, gwin())
         if ok then keep = cursor_hash(pos[1]) end
         sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
         apply_sort().next(function()
@@ -2626,8 +2944,8 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- centers the view on its commit. The jump (goto_hash) resolves a folded
     -- commit to its collapsed head and re-runs the open-time focus steps (cone +
     -- panes) so dimming/footer follow the new pivot; a hidden ref is a no-op.
-    opts.win.keys["<leader>b"] = function(self)
-        local gwin = self and self.win -- the graph float to refocus / move
+    opts.win.keys["<leader>b"] = function()
+        local gwin = win -- the graph float to refocus / move
         local picker_ok, picker = pcall(require, "snacks.picker")
         if not picker_ok then
             vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
@@ -2728,8 +3046,8 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- Anchors stay normal under focus; everything else collapses. HEAD is pinned
     -- by default. Acts on the selected ref (or the region under the cursor),
     -- restricted to real refs; changes the focus default, so reflow.
-    opts.win.keys.P = function(self)
-        local w = self and self.win
+    opts.win.keys.P = function()
+        local w = win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
         local b = branch_under_cursor(line)
@@ -2777,11 +3095,11 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- across reflow; the cursor is moved onto the selected ref (or the message).
     local selection_visible = false -- a decoration (not the message) is selected
     local function move_ref(dir)
-        return function(self)
+        return function()
             -- While selecting (§13.3) h/l switch the followed branch instead of
             -- cycling ref decorations.
             if sel.active then selection_switch(dir); return end
-            local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
+            local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
             local item, _, sub = order_at(line)
             -- On a packed marker line, selection moves among the markers (§10.4).
             if item and item.type == "markers" then
@@ -2835,8 +3153,8 @@ function M.open(folder, opts, focus_hash, seed_refs)
     local function feed(keys)
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "n", false)
     end
-    opts.win.keys.V = function(self)
-        local w = self and self.win
+    opts.win.keys.V = function()
+        local w = win
         if not w then return end
         if sel.active then exit_selection() else enter_selection(vim.api.nvim_win_get_cursor(w)[1]) end
     end
@@ -2859,14 +3177,37 @@ function M.open(folder, opts, focus_hash, seed_refs)
         if sel.active then selection_swap() end
     end
 
+    -- Bind the graph keymaps OURSELVES, buffer-local, rather than via snacks window
+    -- keys (snacks binds them on its own buffer only). Buffer-local binding is what
+    -- lets the same handlers drive any frame buffer the host swaps in — the uniform
+    -- frames model (§14): every graph (root or a drilled-in submodule) is a frame
+    -- buffer in the one host window. Lift them out so snacks doesn't double-bind.
+    local graph_keys = opts.win.keys or {}
+    opts.win.keys = nil
+
     lv = listview.open(listview_options)
 
     -- Cursor parking (§2/§7): cursorline marks the row; the cursor rests at the
     -- commit message, or on the selected ref. place_cursor reads the rendered
     -- buffer line and positions the cursor accordingly.
-    if lv and lv.win and lv.win.win then
-        local win, buf = lv.win.win, lv.win.buf
+    if gwin() then
+        -- on_win (create mode) already set these during listview.open; assign the
+        -- function-scoped upvalues here too so the block reads them directly. In
+        -- attach mode there is no on_win, so this is where the sub-frame graph first
+        -- gets its window/buffer (refreshed thereafter by its frame on_enter, §14).
+        win, buf = gwin() --[[@as integer]], lv.buf
         pcall(vim.api.nvim_set_option_value, "cursorline", true, { win = win })
+
+        -- Bind each graph key buffer-local on the graph buffer. The handlers take
+        -- no argument now — they read the live host window through the `win` upvalue
+        -- (refreshed by on_win / on_enter) and act on the session via `root`, so the
+        -- same handlers drive the graph whether it owns the window or is an attached
+        -- frame in a shared host (§14 uniform frames).
+        for key, handler in pairs(graph_keys) do
+            if type(handler) == "function" then
+                vim.keymap.set("n", key, handler, { buffer = buf, nowait = true })
+            end
+        end
 
         -- Move the cursor onto the display row that now represents `hash` — a real
         -- commit row, the marker (head/packed) whose region contains it, or a
@@ -2922,7 +3263,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
                     end
                 end
                 local col = lv and lv.controller and lv.controller.col_offset
-                    and lv.controller.col_offset(line, "line", GRAPH_COL) or 0
+                    and lv.controller.col_offset(line, "line", COL.graph) or 0
                 pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
                 return
             end
@@ -2938,7 +3279,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
                     end
                 end
                 if not col and lv and lv.controller and lv.controller.col_offset then
-                    col = lv.controller.col_offset(line, "line", FLEX_COL)
+                    col = lv.controller.col_offset(line, "line", COL.flex)
                 end
                 pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
                 return
@@ -2959,7 +3300,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
             end
             -- Otherwise park at the start of the flex column (message / labels).
             if not col and lv and lv.controller and lv.controller.col_offset then
-                col = lv.controller.col_offset(line, "line", FLEX_COL)
+                col = lv.controller.col_offset(line, "line", COL.flex)
             end
             pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
         end
@@ -3048,6 +3389,9 @@ function M.open(folder, opts, focus_hash, seed_refs)
             local gen = cone_gen
             vim.defer_fn(function()
                 if gen ~= cone_gen or not vim.api.nvim_win_is_valid(win) then return end
+                -- Skip if a sub-frame took over the host window since this was
+                -- scheduled (§14): don't recompute/redraw the graph onto a commit view.
+                if vim.api.nvim_win_get_buf(win) ~= buf then return end
                 update_cone()
                 applying = true
                 if lv and lv.controller then lv.controller.refresh() end
@@ -3066,11 +3410,10 @@ function M.open(folder, opts, focus_hash, seed_refs)
         refresh_worktree = function(silent)
             if opts.working_tree == false then return end
             fetch_worktree_state().next(function(state)
-                if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
-                    return
-                end
+                local hw = gwin()
+                if not hw then return end
                 local keep
-                local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv.win.win)
+                local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
                 if ok then keep = cursor_hash(pos[1]) end
                 local res = apply_worktree(state)
                 reflow()
@@ -3097,7 +3440,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
         -- are dropped up front and re-applied at the end. `silent` suppresses the
         -- completion notice (reserved for future automatic triggers).
         resync = function(silent)
-            if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+            if not gwin() then
                 return
             end
 
@@ -3138,7 +3481,7 @@ function M.open(folder, opts, focus_hash, seed_refs)
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
             end).next(function(state)
-                if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+                if not gwin() then
                     return
                 end
                 if state then apply_worktree(state) end
@@ -3188,6 +3531,9 @@ function M.open(folder, opts, focus_hash, seed_refs)
             local gen = wt_gen
             vim.defer_fn(function()
                 if gen ~= wt_gen or not vim.api.nvim_win_is_valid(win) then return end
+                -- Not while a sub-frame (a commit view, §14) owns the host window —
+                -- a background write/focus must not reflow the graph onto it.
+                if vim.api.nvim_win_get_buf(win) ~= buf then return end
                 if sel.active then return end
                 refresh_worktree(true) -- silent: no "history moved" notice on auto-refresh
             end, WT_DEBOUNCE_MS)
@@ -3265,9 +3611,19 @@ function M.open(folder, opts, focus_hash, seed_refs)
         -- Scoped to this window; a guard prevents re-entry from the refresh.
         vim.api.nvim_create_autocmd("WinScrolled", {
             group = group,
-            pattern = tostring(win),
+            -- No window pattern: `win` changes across hide/show (§14), so this is
+            -- registered window-agnostic and filtered by v:event, whose keys are
+            -- the ids of the windows that actually scrolled. Bail unless this
+            -- graph's (live) window is among them.
             callback = function()
                 if not vim.api.nvim_win_is_valid(win) then return end
+                -- The host window may be showing a sub-frame (a commit view, §14):
+                -- only react while it is showing THIS graph's buffer, else a scroll
+                -- in the commit view would drag the graph's cone/refresh/panes onto
+                -- it (the buffer would visibly flip back to the graph).
+                if vim.api.nvim_win_get_buf(win) ~= buf then return end
+                local ev = vim.v.event
+                if not (ev and ev[tostring(win)]) then return end
                 if applying then pending = true; return end -- replayed after the refresh
                 -- The view actually moved: abandon any in-flight pane build (its
                 -- seam is now stale) at once; the debounced pass below starts a
@@ -3593,8 +3949,8 @@ function M.open(folder, opts, focus_hash, seed_refs)
             end
             local refl = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
             local ltext = vim.api.nvim_buf_get_lines(buf, refl - 1, refl, false)[1] or ""
-            local gb = lv.controller.col_offset(refl, "line", GRAPH_COL) or 0
-            local fb = lv.controller.col_offset(refl, "line", FLEX_COL) or 0
+            local gb = lv.controller.col_offset(refl, "line", COL.graph) or 0
+            local fb = lv.controller.col_offset(refl, "line", COL.flex) or 0
             local goff = vim.fn.strdisplaywidth(ltext:sub(1, gb))
             local foff = vim.fn.strdisplaywidth(ltext:sub(1, fb))
             if foff <= 0 then return last_goff, last_foff end
@@ -4157,11 +4513,26 @@ function M.open(folder, opts, focus_hash, seed_refs)
         -- (The cursor is kept away from the window edges by the window-local
         -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
 
-        -- Tear the panes down with the main window.
+        -- Close the panes when THIS graph's window closes — including a hide()
+        -- (§14). Matched against the live `win` via ev.match rather than a baked-in
+        -- pattern, since `win` changes across hide/show (the panes are rebuilt on
+        -- the next show by on_show → update_panes).
         vim.api.nvim_create_autocmd("WinClosed", {
             group = group,
-            pattern = tostring(win),
-            callback = close_panes,
+            callback = function(ev)
+                if tonumber(ev.match) == win then close_panes() end
+            end,
+        })
+        -- Also close them when the graph buffer is swapped OUT of the host window
+        -- by a navigation push (a commit view becomes the active frame, §14.3) —
+        -- a buffer swap fires BufWinLeave but not WinClosed, so without this the
+        -- panes would float over the sub-frame. Buffer-scoped to the graph buffer
+        -- (stable across hide/show; only the window id changes). on_show rebuilds
+        -- them when the graph frame is re-entered.
+        vim.api.nvim_create_autocmd("BufWinLeave", {
+            group = group,
+            buffer = buf,
+            callback = function() close_panes() end,
         })
 
         -- No initial cone/refresh here: the fetch is async, so no commits are
@@ -4169,7 +4540,115 @@ function M.open(folder, opts, focus_hash, seed_refs)
         place_cursor()
     end
 
+    -- Re-establish this view when the host window is shown again after a hide
+    -- (§14): the buffer (rendered graph) survives, so just restore the remembered
+    -- position, recenter, and rebuild the cone + panes (both torn down on hide).
+    -- Mirrors the open-time focus sequence (sans focus_hash, which is one-shot).
+    -- Also serves as the frame on-enter: an attached graph (§14) has no on_win
+    -- hook, so this is where it re-acquires the live host window id on every entry
+    -- (the host re-opens with a new id across hide/show). In create mode this just
+    -- matches what on_win already set.
+    local function on_show()
+        local hw = gwin()
+        if hw then win = hw end
+        if lv and lv.buf then buf = lv.buf end
+        local target = saved_positions[repo_key]
+        if not (target and goto_hash(target)) then
+            local headref = repo.head and repo.refs["HEAD"]
+            if headref and headref.commit then goto_hash(headref.commit.hash) end
+        end
+        center_view()
+        place_cursor()
+        update_cone()
+        if lv and lv.controller then lv.controller.refresh() end
+        update_panes()
+    end
+
+    return lv, on_show
+end
+
+--- Drill into a submodule as a navigation FRAME in the current host window
+--- (§14.7): push a graph frame for `sub_folder`, focused on `focus_hash` with the
+--- `seed_refs` synthetic pointer refs, onto `host_root`'s view stack — NOT the
+--- submodule's own host window (that is `<leader>wG`, §14.5). `<C-o>` returns to
+--- the commit view it was opened from; the frame stays in the stack and is
+--- restored on return. The frame's per-buffer BufEnter hook retargets the git
+--- active root to the submodule so its fetches read the submodule, and navigating
+--- back retargets to the parent (so each repo's on-demand I/O stays correct).
+---@param host_root string  the repo root whose host window receives the frame
+---@param sub_folder string  the submodule's path
+---@param opts GraphOptions
+---@param focus_hash string?
+---@param seed_refs? { hash: string, name: string, hl: string }[]
+function M.drill_submodule(host_root, sub_folder, opts, focus_hash, seed_refs)
+    -- No live host to attach to (shouldn't happen from a commit frame): fall back
+    -- to opening the submodule in its own window so the link still works.
+    if not (nav.sessions[host_root] and nav.sessions[host_root].stack and nav.host_win(host_root)) then
+        return M.open(sub_folder, opts, focus_hash, seed_refs)
+    end
+    -- Copy opts (and opts.win) so open_graph's in-place mutations (keys/zindex/
+    -- on_win) don't touch the parent graph's config; palette / diff provider /
+    -- geometry are inherited.
+    local sub_opts = vim.tbl_extend("force", opts, { win = vim.tbl_extend("force", opts.win or {}, {}) })
+    -- A fresh scratch buffer for the frame; it lives in the stack until dropped.
+    local frame_buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[frame_buf].bufhidden = "hide"
+    local attach = { winid = function() return nav.host_win(host_root) end, buf = frame_buf, host_root = host_root }
+    local lv, on_show = open_graph(sub_folder, sub_opts, focus_hash, seed_refs, attach)
+    if not lv then
+        pcall(vim.api.nvim_buf_delete, frame_buf, { force = true })
+        return
+    end
+    -- A graph frame has no intra-view jumplist (unlike the commit view), so it just
+    -- needs the plain back/forward keys — the root graph gets these from
+    -- nav.register on the host buffer; a drilled-in frame's own buffer needs them
+    -- too, else <C-o> falls through to Vim's native jumplist (§14.3).
+    nav.install_nav_keys(frame_buf, host_root)
+    nav.push_frame(host_root, {
+        kind = "graph",
+        buf = frame_buf,
+        on_enter = on_show,
+        label = vim.fn.fnamemodify(sub_folder, ":t"),
+    })
     return lv
+end
+
+--- Open the graph for a repository, or **re-show** its host window if one is
+--- already open (§14): one host window per repository root, never stacked.
+--- `<leader>wG`'s picker and `:GitloomGraph` both route here. `focus_hash` /
+--- `seed_refs` (the submodule deep-link, §11.7.6) apply only when the window is
+--- built fresh; re-showing an open repo restores where you were.
+---@param folder string|nil
+---@param opts GraphOptions
+---@param focus_hash string|nil
+---@param seed_refs table|nil
+function M.open(folder, opts, focus_hash, seed_refs)
+    local root = resolve_root(folder)
+    local sess = nav.sessions[root]
+    if nav.valid(sess) then
+        git.set_cwd(root)
+        nav.show(sess)
+        return sess.host
+    end
+    nav.hide_others(root)
+    local lv, on_show = open_graph(folder, opts, focus_hash, seed_refs)
+    if lv and lv.win then nav.register(root, lv.win, on_show) end
+    return lv
+end
+
+--- Return to the most-recently-shown host window (`<leader>wg`, §14) — the
+--- counterpart to `q`: re-show the stack you last left, where you left it. With
+--- no session to return to, open the repository at Neovim's cwd (cold start).
+---@param opts GraphOptions
+function M.return_last(opts)
+    local root = nav.mru[1]
+    local sess = root and nav.sessions[root]
+    if nav.valid(sess) then
+        git.set_cwd(sess.root)
+        nav.show(sess)
+        return sess.host
+    end
+    return M.open(nil, opts)
 end
 
 --- Repository picker (spec §2.1): pick the main module or one of its direct

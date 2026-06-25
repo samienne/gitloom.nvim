@@ -112,20 +112,24 @@ require("gitloom").setup({
 })
 ```
 
-**Switching repositories.** Opening a repository while a graph is already open
-(via the picker or `:GitloomGraph`) **stacks** a new graph window over the
-current one; press `q` to close it and return to the graph underneath. Each
-repository's cursor position is remembered for the session, so reopening one
-lands where you left it.
+**One window per repository.** A repository's graph lives in a single **host
+window**: opening the same repository again (via the picker or `:GitloomGraph`)
+**re-shows** that window where you left it rather than stacking a second one.
+`q` **hides** it (its place and history are kept), `<leader>wg` **returns** to
+the most-recently-open one, and `<C-w>q` **destroys** it. Within a window,
+`<C-o>` / `<C-i>` walk a **navigation history** of views — the graph, commit
+views, and drilled-in submodules (below). Each repository's cursor position is
+remembered for the session.
 
 | Key | Action |
 |-----|--------|
-| `q` | Close the graph |
+| `q` | Hide the graph window (`<leader>wg` returns to it, `<C-w>q` destroys it) |
+| `<C-o>` / `<C-i>` | Navigate back / forward through the view history (graph ⇄ commit view ⇄ drilled-in submodule) |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
-| `<Tab>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Tab>` flips it in place) |
-| `<CR>` | Action menu for the row — examine commit, open diff, collapse / expand / hide the branch |
+| `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
+| `<CR>` | Open the commit view (cursor on the message); action menu (examine / diff / collapse / expand / hide) when a ref is selected, on a collapsed head, or a packed marker line |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row — on a packed marker line, the previous / next collapsed head, with the reachability emphasis following it (switch the followed branch while selecting) |
@@ -148,11 +152,13 @@ collapse interactions act on the **branch under the cursor**, found from the
 commit's history — no ref needed, so they work for ref-less regions too
 (first-parent-merged, squashed):
 
-- `<Tab>` toggles **collapse ⇄ expand** in place; the cursor follows the result,
-  so holding `<Tab>` flips a branch open and closed.
-- `<CR>` opens an **action menu** for the row — examine commit, open diff,
-  collapse, expand, **hide** — most-relevant first. On a packed line it lists
-  every marker by name, so any branch is reachable even when labels overflow.
+- `<Space>` toggles **collapse ⇄ expand** in place; the cursor follows the
+  result, so holding `<Space>` flips a branch open and closed.
+- `<CR>` on the message opens the commit view directly; with a ref selected, on a
+  collapsed head, or a packed marker line it opens an **action menu** for the row
+  — examine commit, open diff, collapse, expand, **hide** — most-relevant first.
+  On a packed line it lists every marker by name, so any branch is reachable even
+  when labels overflow.
 - `h`/`l` selects a ref (or a marker on a packed line) for the toggle/menu to
   act on.
 
@@ -243,13 +249,15 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
-Pressing `<CR>` on a commit opens the **commit view** — a read-only float with
-that commit's full details (hash, refs, author, committer when it differs,
-parents, the full message, a diffstat, and the diff), fetched on demand. The
-diff is colored line-by-line (added / removed / hunk / file headers). The
-diffstat lists the changed files; pressing `<CR>` on a file line jumps to that
-file's section in the diff below (`<C-o>` / `<C-i>` jump back and forth, and
-`<C-o>` closes the view once it would step back out). `q` closes it. As you
+Pressing `<CR>` on a commit's message opens the **commit view** — a read-only
+view of that commit's full details (hash, refs, author, committer when it
+differs, parents, the full message, a diffstat, and the diff), fetched on demand.
+It opens **in the host window** as a navigation step, not a separate float: `q`
+hides the window and `<C-o>` returns to the graph. The diff is colored
+line-by-line (added / removed / hunk / file headers). The diffstat lists the
+changed files; pressing `<CR>` on a file line jumps to that file's section in the
+diff below (`<C-o>` / `<C-i>` jump back and forth between the diffstat and the
+file, then step out to the graph once the jumplist is exhausted). As you
 scroll the diff, a small **context header** sticks to the top of the view,
 showing the current file and `@@ … @@` hunk once their real headers have
 scrolled off — so you never lose track of where you are.
@@ -268,14 +276,15 @@ if the submodule isn't checked out, the commits aren't present, or the two
 histories are unrelated, it falls back to the plain hashes with a short reason.
 
 Each **commit row** in that change graph is a **link into the submodule's own
-repository**: pressing `<CR>` on it opens the graph for the submodule, focused
-on the commit under the cursor. The opened graph marks both pointers as
+repository**: pressing `<CR>` on it **drills into** the submodule's graph,
+focused on the commit under the cursor. It opens as a **navigation step in the
+current window** (not the submodule's own window — that's the picker), so `<C-o>`
+returns to the commit view. The drilled-in graph marks both pointers as
 **virtual refs** — a green **`new`** ref on the new commit and a red **`old`**
 ref on the old one. Being refs, they render as labels in the graph **and the
 context panes**, are **pinned** (so the new/old branches are revealed and stay
 named in the header/footer as you scroll), and show in the `<leader>b` ref
-picker. They're transient — a resync (`R`) drops them. Like any open it stacks
-(§ Switching repositories), so `q` returns to the commit view.
+picker. They're transient — a resync (`R`) drops them.
 
 The first line of the commit view is an **action label** (`▶ Open diff
 (diffview)`) and the cursor parks on it when the view opens, so `<CR>` then
