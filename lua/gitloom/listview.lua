@@ -27,42 +27,39 @@ local function create_win(opts)
         footer = "Press 'q' to quit",
     }, opts.win or {})
 
-    local w = snacks.new(win_opts)
+    return snacks.new(win_opts)
+end
 
-    -- The redraw gate keys off the BUFFER, not the window id: a snacks `hide()`
-    -- keeps the buffer but `show()` re-opens with a *new* window id, and the
-    -- single-host-window model (§14) swaps several frame buffers through one
-    -- window. The buffer is the stable identity across both; the live `winid`
-    -- the provider hands us is the window currently showing it.
-    local state = {
-        namespace = opts.namespace,
-        buf = w.buf,
-        top = 0,
-        bottom = 0,
-    }
+-- Register a decoration provider that fires `on_redraw(winid, bufnr, top, bottom)`
+-- whenever `buf` is (re)drawn — used to lay out + draw only the visible range on
+-- scroll. The redraw gate keys off the BUFFER, not the window id: a snacks `hide()`
+-- keeps the buffer but `show()` re-opens with a *new* window id, and the
+-- single-host-window model (§14) swaps several frame buffers through one window.
+-- The buffer is the stable identity; the live `winid` the provider hands us is the
+-- window currently showing it. A UNIQUE (anonymous) provider namespace per listview
+-- so the host's several frames (§14) each keep a live provider — a shared namespace
+-- would have each new listview's provider replace the previous one.
+local function setup_decoration(buf, on_redraw)
+    if not on_redraw then return end
+    local state = { buf = buf, top = 0, bottom = 0 }
+    vim.api.nvim_set_decoration_provider(vim.api.nvim_create_namespace(""), {
+        on_win = function(win, winid, bufnr, topline, botline)
+            if not win == "win" then
+                return
+            end
 
-    if opts.on_redraw then
-        vim.api.nvim_set_decoration_provider(state.namespace, {
-            on_win = function(win, winid, bufnr, topline, botline)
-                if not win == "win" then
-                    return
+            if state.buf == bufnr then
+                if topline ~= 0 and botline ~= 0 and topline ~= state.top or botline ~= state.bottom then
+                    state.top = topline
+                    state.bottom = botline
+                    vim.schedule(function()
+                        -- Convert from 0-based indexing
+                        on_redraw(winid, bufnr, topline + 1, botline + 1)
+                    end)
                 end
-
-                if state.buf == bufnr then
-                    if topline ~= 0 and botline ~= 0 and topline ~= state.top or botline ~= state.bottom then
-                        state.top = topline
-                        state.bottom = botline
-                        vim.schedule(function()
-                            -- Convert from 0-based indexing
-                            opts.on_redraw(winid, bufnr, topline + 1, botline + 1)
-                        end)
-                    end
-                end
-            end,
-        })
-    end
-
-    return w
+            end
+        end,
+    })
 end
 
 --- The column-array rows of a DisplayElement field. `line`/`text` are a single
@@ -719,12 +716,12 @@ local function preserve_cursor_visual_pos(win, buf, fn)
     fn()
 end
 
----@param win any
----@param buf integer  the listview's stable buffer (NOT win.buf, which the host swaps; §14)
+---@param winid integer  the live host window id (for cursor preservation; sizing)
+---@param buf integer  the listview's stable buffer (NOT the window's shown buffer; §14)
 ---@param model ListViewModel
 ---@param items DisplayItem[]
 ---@param pos integer
-local function insert(win, buf, model, items, pos)
+local function insert(winid, buf, model, items, pos)
     local old_count = #model.items
     pos = pos or (old_count + 1)
 
@@ -745,7 +742,7 @@ local function insert(win, buf, model, items, pos)
 
     rebuild_starts(model, pos)
 
-    preserve_cursor_visual_pos(win.win, buf, function()
+    preserve_cursor_visual_pos(winid, buf, function()
         vim.bo[buf].modifiable = true
         vim.bo[buf].readonly = false
         if old_count == 0 then
@@ -793,8 +790,13 @@ end
 ---@field col_max? table<integer, integer>  per-column cap; a capped column is sticky (only grows)
 ---@field col_sticky? integer[]|fun(): integer[]  no-cap sticky columns (only grow)
 
+---@class ListViewAttach
+---@field winid fun(): integer  the live host window id (changes across the host's hide/show)
+---@field buf integer  the frame buffer to render into
+---
 ---@class ListViewOptions
 ---@field namespace? integer
+---@field attach? ListViewAttach  render into an existing host window+buffer instead of creating one (§14 uniform frames)
 ---@field display DisplayFunction
 ---@field on_redraw? OnRedrawFunction
 ---@field on_controller OnControllerFunction
@@ -823,24 +825,38 @@ function M.open(opts)
     }
 
     opts = opts or {}
-    opts.namespace = namespace
     -- The decoration provider hands us a *buffer* line range; map it to the item
     -- range (items can span several real lines) before laying out / drawing.
-    opts.on_redraw = function(winid, bufnr, top, bottom)
+    local on_redraw = function(winid, bufnr, top, bottom)
         local first, last = item_index_at(model, top), item_index_at(model, bottom)
         refresh_columns(winid, model, first, last)
         display(winid, bufnr, model, first, last)
     end
 
-    local win = create_win(opts or {})
+    -- Two ways to acquire the render target (§14 uniform frames):
+    -- * create mode (the default, e.g. a repo's root graph): make a snacks window;
+    --   it becomes the host. `win` is the snacks object, returned for the caller's
+    --   window ops (hide/show/valid/opts).
+    -- * attach mode (`opts.attach = { winid = fn, buf }`, a drilled-in graph frame):
+    --   render into an EXISTING host window + buffer — no window is created. `win`
+    --   is nil; the caller drives the shared host. `winid()` yields the live host
+    --   window id (it changes across the host's hide/show).
+    local win, lv_buf, host_winid
+    if opts.attach then
+        win = nil
+        lv_buf = opts.attach.buf
+        host_winid = opts.attach.winid
+    else
+        win = create_win(opts or {})
+        lv_buf = win.buf
+        host_winid = function() return win.win end
+    end
 
-    -- The listview always renders into the buffer it was CREATED with — its stable
-    -- identity. In the single-host-window model (§14) the window's shown buffer is
-    -- swapped to other frames (a commit view), so `win.buf` no longer tracks the
-    -- list; reading it at render time would write the graph into whatever frame is
-    -- on screen. Capture it once (the same reason the decoration gate keys off
-    -- `state.buf`). Sizing still reads the live `win.win`.
-    local lv_buf = win.buf
+    -- The listview always renders into `lv_buf` — its stable identity. In the
+    -- single-host-window model (§14) the window's shown buffer is swapped to other
+    -- frames, so reading the window's live buffer at render time would write the
+    -- list into whatever frame is on screen. Sizing still reads the live winid.
+    setup_decoration(lv_buf, on_redraw)
 
     -- Re-render after a change that alters per-item line counts (the B label-mode
     -- cycle, or a reflow that swaps the item list). Rebuilds the buffer-line map,
@@ -859,17 +875,17 @@ function M.open(opts)
         vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
         vim.bo[buf].modifiable = false
         vim.bo[buf].readonly = true
-        local bf, bl = get_visible_range(win.win)
+        local bf, bl = get_visible_range(host_winid())
         local first, last = item_index_at(model, bf), item_index_at(model, bl)
-        refresh_columns(win.win, model, first, last)
-        display(win.win, lv_buf, model, first, last)
+        refresh_columns(host_winid(), model, first, last)
+        display(host_winid(), lv_buf, model, first, last)
     end
 
     ---@type ListViewController
     local controller = {
         -- 1-based indexing
         insert = function(items, pos)
-            insert(win, lv_buf, model, items, pos)
+            insert(host_winid(), lv_buf, model, items, pos)
         end,
         remove = function(pos)
             local item = model.items[pos]
@@ -904,10 +920,10 @@ function M.open(opts)
             for _, item in ipairs(model.items) do
                 item.columns = nil
             end
-            local bf, bl = get_visible_range(win.win)
+            local bf, bl = get_visible_range(host_winid())
             local first, last = item_index_at(model, bf), item_index_at(model, bl)
-            refresh_columns(win.win, model, first, last)
-            display(win.win, lv_buf, model, first, last)
+            refresh_columns(host_winid(), model, first, last)
+            display(host_winid(), lv_buf, model, first, last)
         end,
         -- Re-render after a change that alters per-item line counts (e.g. the B
         -- label-mode cycle turning labelled commits into two rows).
@@ -956,7 +972,11 @@ function M.open(opts)
     vim.bo[lv_buf].modifiable = false
     vim.bo[lv_buf].readonly = true
 
-    return { win = win, controller = controller }
+    -- `win` is the snacks host object in create mode (nil when attached); `buf` is
+    -- the stable render buffer and `winid` the live-host-window getter — both valid
+    -- in either mode, so attached callers (drilled-in frames, §14) drive the shared
+    -- host without a snacks object of their own.
+    return { win = win, buf = lv_buf, winid = host_winid, controller = controller }
 end
 
 -- Exposed for testing only. Not part of the public API.
