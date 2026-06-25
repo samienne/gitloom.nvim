@@ -162,15 +162,16 @@ function nav.push_frame(root, frame)
     nav_enter(sess, frame)
 end
 
--- Install the tier-2 navigation keys on a frame's buffer (§14.3). `<C-o>` steps
--- back along the trail. `<C-i>` (forward) is intentionally NOT bound on the graph
--- buffer: in a terminal it is indistinguishable from `<Tab>`, which is the
--- collapse/expand toggle (§10.4). Forward navigation is wired per-frame where it
--- does not collide (resolved in Phase C).
+-- Install the tier-2 navigation keys on a frame's buffer (§14.3): `<C-o>` steps
+-- back along the trail, `<C-i>` steps forward. `<C-i>` is `<Tab>` in a terminal,
+-- which used to be the collapse/expand toggle (§10.4) — that moved to `<Space>`
+-- precisely to free `<C-i>` for forward navigation everywhere.
 function nav.install_nav_keys(buf, root)
     if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
     vim.keymap.set("n", "<C-o>", function() nav.back(root) end,
         { buffer = buf, nowait = true, silent = true, desc = "Gitloom: back (§14)" })
+    vim.keymap.set("n", "<C-i>", function() nav.forward(root) end,
+        { buffer = buf, nowait = true, silent = true, desc = "Gitloom: forward (§14)" })
 end
 
 function nav.register(root, host, on_show)
@@ -238,11 +239,12 @@ end
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
 local KEYBINDS = {
-    { "q", "Close the graph" },
+    { "q", "Hide the graph (<leader>wg returns; <C-w>q destroys)" },
+    { "<C-o> / <C-i>", "Navigate back / forward through the view history" },
     { "m", "Cycle the merge/split rendering style" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
-    { "<Tab>", "Collapse / expand the branch under the cursor (toggle)" },
+    { "<Space>", "Collapse / expand the branch under the cursor (toggle)" },
     { "<CR>", "Open the commit view (on the message); action menu when a ref is selected / on a head" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
@@ -1905,7 +1907,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         repo.display = (opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
         -- A reflow recreates the DisplayNodes, so any in-flight commit selection
         -- (§13) holds stale node references — drop it. (Pure selection movement
-        -- never reflows; this guards m/<Tab>/c/p/P etc. taken mid-selection.)
+        -- never reflows; this guards m/<Space>/c/p/P etc. taken mid-selection.)
         sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
         if lv and lv.controller and lv.controller.set_items then
             lv.controller.set_items(repo.display)
@@ -2320,7 +2322,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         sel.anchor, sel.cursor = sel.cursor, sel.anchor
         selection_redraw()
     end
-    -- <Tab> while selecting (§13.4): fold/unfold the head under the cursor in
+    -- <Space> while selecting (§13.4): fold/unfold the head under the cursor in
     -- place. Expand the cursor's collapsed head (or collapse its region), then
     -- re-resolve the selection against the new projection **by hash** so it covers
     -- the same commits: an unfolded head expands into its whole region (so the
@@ -2612,12 +2614,13 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         update_cone() -- buffer lines shifted; recompute the cone over the new map
         place_cursor()
     end
-    -- <Tab>: the quick collapse ⇄ expand toggle for the branch under the cursor
+    -- <Space>: the quick collapse ⇄ expand toggle for the branch under the cursor
     -- (§10.4). Collapse an expanded branch or expand a marker; the cursor follows
-    -- the result (set_branch → goto_hash) so repeated <Tab> flips it in place.
+    -- the result (set_branch → goto_hash) so repeated <Space> flips it in place.
     -- Two-state — hidden is the menu's job, so nothing vanishes under the cursor.
-    opts.win.keys["<Tab>"] = function(self)
-        -- While selecting (§13.4), <Tab> folds/unfolds the head under the cursor
+    -- (Was <Tab>; freed for <C-i> forward navigation, §14.3.)
+    opts.win.keys["<Space>"] = function(self)
+        -- While selecting (§13.4), <Space> folds/unfolds the head under the cursor
         -- in place, keeping the selection and the screen position.
         if sel.active then selection_toggle(); return end
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]

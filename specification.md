@@ -42,10 +42,11 @@ exists primarily to exercise and validate the graph algorithm.
   `m` cycles the merge/split rendering style (§5.2) so the styles can be compared
   at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
-  placements can be compared at a glance. `<Tab>` is the quick **collapse ⇄
+  placements can be compared at a glance. `<Space>` is the quick **collapse ⇄
   expand toggle** for the branch under the cursor (§10.4): it collapses an
   expanded branch or expands a marker, in place, and the cursor follows so
-  repeated `<Tab>` flips it open/closed. `<CR>` opens the **commit view** (§11)
+  repeated `<Space>` flips it open/closed. (`<Tab>` is `<C-i>`, the navigation
+  *forward* key — §14.3.) `<CR>` opens the **commit view** (§11)
   for the commit under the cursor when the cursor is on the message (no ref
   selected); when a ref is selected with `h`/`l`, or on a collapsed head or a
   packed-marker line, it instead opens an **action menu** (§10.4) — collapse /
@@ -1096,12 +1097,13 @@ through each commit's signature (§10.2) — not through a ref — so it works f
 collapsed region, including ref-less ones (first-parent-merged, squashed). A
 commit the trunk reaches (the mainline) is not collapsible.
 
-- `<Tab>` — the quick **collapse ⇄ expand toggle**: collapse the expanded branch
-  under the cursor (set its non-trunk owners collapsed), or expand the marker
-  under the cursor (set its owners normal). Two-state — *hidden* is not in this
-  cycle, so the toggled thing never vanishes from under the cursor. After the
+- `<Space>` — the quick **collapse ⇄ expand toggle**: collapse the expanded
+  branch under the cursor (set its non-trunk owners collapsed), or expand the
+  marker under the cursor (set its owners normal). Two-state — *hidden* is not in
+  this cycle, so the toggled thing never vanishes from under the cursor. After the
   reflow the cursor is repositioned onto the resulting node (the new marker, or
-  the expanded region's tip), so repeated `<Tab>` flips it open/closed in place.
+  the expanded region's tip), so repeated `<Space>` flips it open/closed in place.
+  (`<Tab>` / `<C-i>` is reserved for forward navigation, §14.3.)
 - `<CR>` — opens the **commit view** (§11) directly when the cursor is on a
   normal commit's message (no ref selected). When a ref is selected with `h`/`l`,
   or the row is a **collapsed head** or a **packed-marker line**, it instead opens
@@ -1109,10 +1111,10 @@ commit the trunk reaches (the mainline) is not collapsible.
   (collapse, expand, **hide**, examine commit, open diff). The menu is where
   hidden and full mode control live, and it is the overflow-proof way to reach
   any marker on a packed line even when not all labels fit. (Collapse/expand are
-  also on `<Tab>`; diff is also on `D`.)
+  also on `<Space>`; diff is also on `D`.)
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
-which labels fit); `<Tab>` and the menu act on the selected marker. Reachability
+which labels fit); `<Space>` and the menu act on the selected marker. Reachability
 emphasis (§12) **follows the selection**: the selected head's branch — its `◍`
 node, label, and lane — stays its normal colour while the sibling heads/branches
 sharing the row dim, exactly as moving onto a normal head dims everything outside
@@ -1747,7 +1749,7 @@ head is lit and it is drawn with `palette.selected` (and the cursor parks on its
 label); the other heads on that line dim. So the right head on a shared line is
 unambiguous even though the line holds many.
 
-`<Tab>` while selecting **folds / unfolds the head under the cursor in place**
+`<Space>` while selecting **folds / unfolds the head under the cursor in place**
 (the §10.4 collapse⇄expand toggle, scoped to the selection): it expands the
 collapsed head the cursor sits on (or collapses the cursor's region) **without
 changing what is selected**. An unfolded head expands into its **whole region**,
