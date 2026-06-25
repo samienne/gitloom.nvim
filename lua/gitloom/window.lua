@@ -52,15 +52,15 @@ local LABEL_MODES = {
 local label_mode_index = 1
 
 
--- Remembered cursor position per repository, keyed by Neovim's cwd (which is the
--- repo the graph reflects — git runs in cwd). The value is the hash of the commit
--- under the cursor when the window last closed, so reopening the graph restores
--- the cursor to the same commit instead of re-focusing HEAD (spec §2). In-memory
--- for the Neovim session; not persisted to disk.
+-- Remembered cursor position per repository, keyed by the repository root
+-- (repo.root, §2.1 — the repo the graph reflects). The value is the hash of the
+-- commit under the cursor when the window last closed, so reopening the graph
+-- restores the cursor to the same commit instead of re-focusing HEAD (spec §2).
+-- In-memory for the Neovim session; not persisted to disk.
 local saved_positions = {}
 
 -- Per-repository session MRU for the ref picker (`<leader>b`, §2): the ref names
--- jumped to this session, newest first, keyed by Neovim's cwd (the repo, like
+-- jumped to this session, newest first, keyed by the repository root (like
 -- saved_positions). Surfaced at the top of the picker. In-memory for the session.
 local recent_refs = {}
 

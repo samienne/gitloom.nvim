@@ -622,8 +622,17 @@ Details not covered by the spec or architecture:
   test (`random_dag(7, 108)`) locks the current look. The other four styles pass
   the full suite incl. grid colour. This is the one place a cell may have two
   turns (the per-column cap is 1 otherwise).
-- **git runs in Neovim's cwd** — `jobstart` is called without an explicit
-  `cwd`, so the graph reflects the current working directory's repo.
+- **git runs in the active repository root** (spec §2.1) — every `jobstart`
+  goes through fetch.lua's `js` wrapper, which pins `cwd` to a module-level
+  active root set by `git.set_cwd`. `window.open` resolves it (the given
+  `folder` or Neovim's cwd → `git rev-parse --show-toplevel`), stores it on
+  `repo.root`, and keys the per-session view state by it. So the graph can
+  target a **submodule** or the **main module**, not just the cwd repo. The
+  repository picker (`:GitloomPick` / `window.pick`, default `<leader>wG`) lists
+  the main module + direct submodules (`git.fetch_submodules` +
+  `submodule.parse_submodules`) and opens the graph on the chosen repo; its
+  discovery queries take an explicit `cwd` so they don't disturb the active
+  root. `nil` active root = Neovim's cwd (the original behaviour).
 - **Sort modes** (specification.md §3.1, cycled by `S`): gitloom owns the
   row-order *pipeline* (records, decides when to order, reflows), but each
   **sort mode** sources its sequence differently. `SORT_MODES`: `topo`

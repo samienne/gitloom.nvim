@@ -613,8 +613,9 @@ end
 ---@return table  -- a future
 function M.fetch_submodule_graph(opts, change)
     local p, old, new = change.path, change.old, change.new
-    -- `git -C <submodule path> …` (path is relative to Neovim's cwd, where the
-    -- job runs), so an absent checkout simply errors rather than throwing.
+    -- `git -C <submodule path> …` (path is relative to the active repository
+    -- root, §2.1, where the job runs), so an absent checkout simply errors
+    -- rather than throwing.
     local function gc(args)
         local full = { "git", "-C", p }
         for _, a in ipairs(args) do full[#full + 1] = a end
