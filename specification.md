@@ -31,8 +31,11 @@ exists primarily to exercise and validate the graph algorithm.
 
 ## 2. Entry point
 
-- `:GitloomGraph` opens the graph for the repository at Neovim's current
-  working directory.
+- `:GitloomGraph` opens the graph for a **repository root**. With no argument
+  it targets the repository at Neovim's current working directory (the
+  default). It accepts an optional repository path so the graph can be opened
+  on a **specific repository** — a submodule of the cwd repo, or the main
+  module (§2.1).
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
@@ -101,12 +104,33 @@ mode.
   the view on that row when possible — clamped at the top/bottom of the graph
   (like `zz`). On a detached HEAD (no current branch) there is nothing to focus,
   so the cursor stays at the top. The cursor's row is then **remembered per
-  repository** (keyed by Neovim's working directory) for the duration of the
+  repository** (keyed by repository root, §2.1) for the duration of the
   Neovim session: closing and reopening the graph restores the cursor to the same
   commit (re-centered) instead of re-focusing HEAD. The remembered target is the
   **commit under the cursor by hash**, so it survives reflow (§10.5) and resolves
   to the commit's collapsed head (§10.3) when its branch is folded; if that commit
   is no longer present, focus falls back to HEAD.
+
+### 2.1 Repository selection
+
+The graph is bound to a **repository root** — an absolute path resolved once
+when the graph opens (from the given path, or Neovim's cwd, via git's
+top-level). All of gitloom's git queries run against that root, so the graph
+need not be the repository at the editor's cwd.
+
+- A **picker** entry point lists the **main module** (the cwd repo's top
+  level) and its **direct submodules**; choosing one opens the graph for that
+  repository. Nested submodules are out of scope for the first cut (cf.
+  §11.7.5). A submodule that is **not initialized / checked out** is shown but
+  disabled — there is no local repository to open.
+- gitloom retains view state — the remembered cursor position (§2) and the
+  ref-picker session MRU (§2 `<leader>b`) — **per repository** for the Neovim
+  session, keyed by repository root. Switching repositories and returning
+  restores where you were in each.
+- Switching the active repository **while the graph is open**, and a link from
+  the commit view into a submodule's own repository (§11.7), are planned but
+  not in this first cut. The entry points accept an explicit repository so
+  those workflows reuse them.
 
 ## 3. Data source
 

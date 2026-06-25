@@ -88,9 +88,14 @@ suite. With lazy.nvim:
 
 ```vim
 :GitloomGraph
+:GitloomGraph path/to/submodule
 ```
 
-Opens the graph for the repository at Neovim's current working directory.
+Opens the graph for the repository at Neovim's current working directory. With
+an optional path argument it opens the graph for that repository instead — a
+submodule of the current repo, or any other repo root (the path is resolved to
+its git top level). View state (cursor position, ref-picker history) is
+remembered per repository for the session.
 
 | Key | Action |
 |-----|--------|

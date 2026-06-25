@@ -1100,14 +1100,30 @@ function M.open(folder, opts)
     local listview = require("gitloom.listview")
 
     ---@class Repo
+    ---@field root string                    the repository root all git queries run in (§2.1)
     ---@field commits table<string, Commit>  hash → Commit (the resolution table)
     ---@field order OrderItem[]              raw commit items, 1:1 with commits (projection input)
     ---@field display? OrderItem[]           the projected OrderItem graph the view renders (§10; set at init)
     ---@field refs table<string, Ref>        name → Ref ("HEAD" for the head)
     ---@field head? string                   current branch name
 
+    -- The repository this graph targets (spec §2.1): the given `folder` or
+    -- Neovim's cwd, normalized to the repo top level so opening from a subdir
+    -- keys the session state consistently. Falls back to the raw path when not
+    -- inside a git repo. `git.set_cwd` retargets the I/O layer to it; the
+    -- per-session view state (saved_positions / recent_refs) is keyed by it.
+    local root
+    do
+        local base = folder or vim.fn.getcwd()
+        local top = vim.fn.systemlist({ "git", "-C", base, "rev-parse", "--show-toplevel" })[1]
+        top = top and top:gsub("%s+$", "") -- strip a trailing CR/newline (Windows)
+        root = (vim.v.shell_error == 0 and top and top ~= "") and top or base
+    end
+    git.set_cwd(root)
+
     ---@type Repo
     local repo = {
+        root = root,
         commits = {},
         order = {},
         refs = {},
@@ -1255,9 +1271,10 @@ function M.open(folder, opts)
     -- for the `R` key.
     local resync = function(_) end
 
-    -- The repository the graph reflects, identified by Neovim's cwd (git runs in
-    -- cwd). Keys the remembered cursor position so reopening restores it (§2).
-    local repo_key = vim.fn.getcwd()
+    -- The repository the graph reflects, identified by its root (git runs in
+    -- repo.root, §2.1). Keys the remembered cursor position and the ref-picker
+    -- MRU so reopening restores them per repository (§2/§2.1).
+    local repo_key = repo.root
 
     -- The listview instance. Forward-declared so the on_controller/stream
     -- callbacks below close over this local (not a stray global) and see it once

@@ -12,10 +12,13 @@ local window = require("gitloom.window")
 
 -- Forward the stored setup() config to the graph so :GitloomGraph honours it
 -- (spec §8). Read at invocation time so a later setup() still applies. M.open
--- merges it over the built-in defaults.
-vim.api.nvim_create_user_command("GitloomGraph", function()
-    window.open(nil, M.config)
-end, {})
+-- merges it over the built-in defaults. An optional argument targets a specific
+-- repository root (a submodule or the main module, §2.1); with none it uses
+-- Neovim's cwd.
+vim.api.nvim_create_user_command("GitloomGraph", function(cmd)
+    local folder = cmd.fargs[1]
+    window.open(folder, M.config)
+end, { nargs = "?", complete = "dir" })
 
 if vim.g.loaded_gitloom then
     M.setup()
