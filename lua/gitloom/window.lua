@@ -825,19 +825,13 @@ local function open_commit_view(opts, commit, range, root)
             end
             return
         end
-        -- A submodule change-graph commit row: open that submodule's graph
-        -- focused on the commit under the cursor (§11.7.6). Stacks over this view.
+        -- A submodule change-graph commit row: drill into that submodule's graph
+        -- focused on the commit under the cursor (§11.7.6) — a navigation-stack
+        -- frame in THIS host window (§14.7), so <C-o> returns here. `root` is the
+        -- parent repo whose host window holds this commit frame.
         local jump = sub_jumps[line]
         if jump then
-            -- Strip the inherited window title/footer: this `opts` is the parent
-            -- graph's *merged* opts (carrying its own title/footer), and M.open
-            -- would treat them as caller-pinned. A fresh copy lets the submodule
-            -- graph compute its own title (§2.1) — the rest of the config (palette,
-            -- diff provider, geometry) is inherited.
-            local sub_win = vim.tbl_extend("force", opts.win or {}, {})
-            sub_win.title, sub_win.footer = nil, nil
-            local sub_opts = vim.tbl_extend("force", opts, { win = sub_win })
-            -- Mark both bump pointers in the opened submodule graph (§11.7.6) as
+            -- Mark both bump pointers in the drilled-in submodule graph (§11.7.6) as
             -- synthetic pinned `new`/`old` refs — the new pointer green, the old
             -- red (the change view's colours) — revealed + labelled in the panes,
             -- focused on the clicked commit.
@@ -849,7 +843,11 @@ local function open_commit_view(opts, commit, range, root)
             if jump.old then
                 seed[#seed + 1] = { hash = jump.old, name = "old", hl = subp.old or "GitloomSubmoduleDel" }
             end
-            M.open(jump.repo, sub_opts, jump.hash, seed)
+            if root then
+                M.drill_submodule(root, jump.repo, opts, jump.hash, seed)
+            else
+                M.open(jump.repo, opts, jump.hash, seed)
+            end
             return
         end
         local target = file_jumps[line]
@@ -1319,7 +1317,10 @@ end
 ---@param opts GraphOptions
 ---@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
 ---@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
----@param attach? ListViewAttach  -- build into an existing host window+buffer (a drilled-in graph frame, §14) instead of creating a window
+---@class GraphAttach : ListViewAttach
+---@field host_root string  the parent repo whose host window/session receives the frame (§14)
+---
+---@param attach? GraphAttach  -- build into an existing host window+buffer (a drilled-in graph frame, §14) instead of creating a window
 -- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
 -- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
 -- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
@@ -1340,6 +1341,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         root = (vim.v.shell_error == 0 and top and top ~= "") and top or base
     end
     git.set_cwd(root)
+    -- The repo root that keys the SESSION / host window (§14). For the root graph
+    -- it is `root` itself; for a drilled-in submodule frame it is the PARENT repo
+    -- whose host window we render into (attach.host_root) — `root` there is the
+    -- submodule, which has no session. The window-lifecycle keys (q / <C-w>q) act
+    -- on this, while git I/O still targets `root` (the submodule).
+    local host_root = (attach and attach.host_root) or root
     -- The window title identifies the repo (§2.1): its leaf dir name, plus the
     -- current branch once HEAD loads (filled in live by update_footer/graph_title).
     local repo_name = vim.fn.fnamemodify(root, ":t")
@@ -2719,11 +2726,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- q: HIDE the host window (§14), not destroy it — the navigation stack and
     -- view state survive so `<leader>wg` can return to exactly here. snacks
     -- hide() = close({buf=false}), so the buffer (and this closure) live on.
-    opts.win.keys.q = function() nav.hide(root) end
+    opts.win.keys.q = function() nav.hide(host_root) end
     -- <C-w>q: DESTROY the host window and clear its state (§14). snacks close()
     -- wipes the scratch buffer, so the session's BufWipeout cleanup drops it and a
-    -- later open rebuilds — vs. q's hide-and-keep.
-    opts.win.keys["<C-w>q"] = function() nav.destroy(root) end
+    -- later open rebuilds — vs. q's hide-and-keep. Acts on the host session
+    -- (host_root), so it tears down the whole window from a drilled-in frame too.
+    opts.win.keys["<C-w>q"] = function() nav.destroy(host_root) end
     -- m: cycle the merge/split style. A full reflow (re-layout from the raw order
     -- then re-pack) — the packed display can't be relaid in place (its marker
     -- groups aren't single commits).
@@ -4531,12 +4539,57 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     return lv, on_show
 end
 
+--- Drill into a submodule as a navigation FRAME in the current host window
+--- (§14.7): push a graph frame for `sub_folder`, focused on `focus_hash` with the
+--- `seed_refs` synthetic pointer refs, onto `host_root`'s view stack — NOT the
+--- submodule's own host window (that is `<leader>wG`, §14.5). `<C-o>` returns to
+--- the commit view it was opened from; the frame stays in the stack and is
+--- restored on return. The frame's per-buffer BufEnter hook retargets the git
+--- active root to the submodule so its fetches read the submodule, and navigating
+--- back retargets to the parent (so each repo's on-demand I/O stays correct).
+---@param host_root string  the repo root whose host window receives the frame
+---@param sub_folder string  the submodule's path
+---@param opts GraphOptions
+---@param focus_hash string?
+---@param seed_refs? { hash: string, name: string, hl: string }[]
+function M.drill_submodule(host_root, sub_folder, opts, focus_hash, seed_refs)
+    -- No live host to attach to (shouldn't happen from a commit frame): fall back
+    -- to opening the submodule in its own window so the link still works.
+    if not (nav.sessions[host_root] and nav.sessions[host_root].stack and nav.host_win(host_root)) then
+        return M.open(sub_folder, opts, focus_hash, seed_refs)
+    end
+    -- Copy opts (and opts.win) so open_graph's in-place mutations (keys/zindex/
+    -- on_win) don't touch the parent graph's config; palette / diff provider /
+    -- geometry are inherited.
+    local sub_opts = vim.tbl_extend("force", opts, { win = vim.tbl_extend("force", opts.win or {}, {}) })
+    -- A fresh scratch buffer for the frame; it lives in the stack until dropped.
+    local frame_buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[frame_buf].bufhidden = "hide"
+    local attach = { winid = function() return nav.host_win(host_root) end, buf = frame_buf, host_root = host_root }
+    local lv, on_show = open_graph(sub_folder, sub_opts, focus_hash, seed_refs, attach)
+    if not lv then
+        pcall(vim.api.nvim_buf_delete, frame_buf, { force = true })
+        return
+    end
+    -- A graph frame has no intra-view jumplist (unlike the commit view), so it just
+    -- needs the plain back/forward keys — the root graph gets these from
+    -- nav.register on the host buffer; a drilled-in frame's own buffer needs them
+    -- too, else <C-o> falls through to Vim's native jumplist (§14.3).
+    nav.install_nav_keys(frame_buf, host_root)
+    nav.push_frame(host_root, {
+        kind = "graph",
+        buf = frame_buf,
+        on_enter = on_show,
+        label = vim.fn.fnamemodify(sub_folder, ":t"),
+    })
+    return lv
+end
+
 --- Open the graph for a repository, or **re-show** its host window if one is
 --- already open (§14): one host window per repository root, never stacked.
 --- `<leader>wG`'s picker and `:GitloomGraph` both route here. `focus_hash` /
 --- `seed_refs` (the submodule deep-link, §11.7.6) apply only when the window is
---- built fresh; re-showing an open repo restores where you were (Phase E will
---- generalise the deep-link to a navigation-stack push).
+--- built fresh; re-showing an open repo restores where you were.
 ---@param folder string|nil
 ---@param opts GraphOptions
 ---@param focus_hash string|nil
