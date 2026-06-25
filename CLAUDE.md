@@ -254,7 +254,10 @@ Coverage:
   reserved so a pane-born lane never reuses it
 - `tests/pane_spec.lua` — the context-pane layout core (`gitloom.pane`, spec
   §6.2): `boundary_below`/`boundary_above` (the lanes crossing a row's edge, by
-  column), `split_boundary` (continue vs terminate via `node_of`), `footer`
+  column), `split_boundary` (continue vs terminate via `node_of`), `mark_pane_cone`
+  (the reachability-emphasis propagation: down `.parents` = ancestors, up
+  `.children` = descendants, a confluence in-cone from the join, empty seeds → empty
+  cone; §6.2), `footer`
   (the continuing lane seeds the layout so the footer's top seam matches the main
   view exactly, with the seam parent translated through `node_of` into a
   collapsed lane), `continue_up` + `header` (the **minimal-connecting-subgraph**
@@ -725,5 +728,18 @@ Details not covered by the spec or architecture:
   after the cursor settles, walks); `m` reflow / `H` toggle / stream completion
   recompute immediately. `emphasis` is false (all lit) on `H` off or no pivot.
   `reachable_cone` stays a pure, tested helper; production uses `mark_reachable`.
+  The **context panes dim with the cone too** (§6.2), without walking the
+  off-screen graph: cone-membership inside a pane is fixed by which seam-crossing
+  lanes are in-cone, propagated over the pane's *own* condensed graph by
+  `pane.mark_pane_cone(seeds, dir)` — `.parents` down (footer = pivot-ancestors),
+  `.children` up (header = pivot-descendants), `O(pane)`. The build stashes a
+  repaint state on `footer.state`/`header.state` (rows, `node_of_hash`, the seam
+  crossing-lanes whose `edges` are **live** refs into the main view's segments, the
+  dir + offsets); `paint_pane` reads the live seam highlights, seeds, walks, writes
+  `highlighted` onto the stored rows (footer via per-edge `Lane`, header via each
+  segment's `cone` node tag — `seg_hl` now also honours a segment-level
+  `highlighted`), and re-renders. A cursor move that doesn't scroll takes the cheap
+  `repaint_panes` path (no rebuild); `maybe_update_panes` rebuilds only on a real
+  scroll. `H` re-dims via the same path.
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.

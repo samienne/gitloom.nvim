@@ -390,8 +390,12 @@ function M.boundary_of(line, up)
     for col, cell in ipairs(line or {}) do
         for _, s in ipairs(cell.lanes or {}) do
             if s.connectivity[dir] then
+                -- `edges` is a *live* reference to the source segment's edges, so a
+                -- pane repaint can read the crossing lane's current cone state
+                -- (`highlighted`, set by the main view's reachability walk) without
+                -- rebuilding the pane (spec §6.2 reachability emphasis).
                 out[col] = { id = s.id, color = s.color, parent = s.parent,
-                    begin = s.begin, highlighted = false }
+                    begin = s.begin, highlighted = false, edges = s.edges }
             end
         end
     end
@@ -451,6 +455,42 @@ function M.split_boundary(boundary, node_of)
         end
     end
     return cont, term
+end
+
+--- The in-cone node set for a pane, propagated from its in-cone seam-crossing
+--- lanes over the pane's **own** condensed graph (spec §6.2 reachability
+--- emphasis). The cone is monotone (every parent of an in-cone commit is in-cone,
+--- every child of an in-cone commit is in-cone; §12.1), so cone membership inside
+--- a pane is exactly the directed reachability from the in-cone crossing lanes'
+--- entry nodes: **down** (`.parents`) for the footer — everything below an in-cone
+--- crossing lane is a pivot-ancestor — and **up** (`.children`) for the header —
+--- everything above is a pivot-descendant. A confluence joining an out-of-cone
+--- lane is in-cone from the join on (the meeting node is a parent/child of an
+--- in-cone node), which the walk captures for free. `O(pane)`: the condensed
+--- nodes only link to one another, so the walk stays within the small pane and
+--- never touches the off-screen graph.
+---@param seeds table[]            -- entry nodes (in-cone crossing lanes' pane nodes)
+---@param dir "down"|"up"          -- footer follows .parents, header .children
+---@return table<string, boolean>  -- set of in-cone node hashes
+function M.mark_pane_cone(seeds, dir)
+    local field = (dir == "up") and "children" or "parents"
+    local incone, stack = {}, {}
+    for _, n in ipairs(seeds or {}) do
+        if n and n.hash and not incone[n.hash] then
+            incone[n.hash] = true
+            stack[#stack + 1] = n
+        end
+    end
+    while #stack > 0 do
+        local n = table.remove(stack)
+        for _, m in ipairs(n[field] or {}) do
+            if m and m.hash and not incone[m.hash] then
+                incone[m.hash] = true
+                stack[#stack + 1] = m
+            end
+        end
+    end
+    return incone
 end
 
 --- Build the **footer** pane below the main view (spec §6.2). `pane_items` is the
@@ -530,7 +570,12 @@ end
 function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     local step = chunker(yield)
     local function above(n)
-        local i = n and order_of and order_of(n)
+        -- Working-tree virtual commits (§4.2) are the live state, not topology, so
+        -- they never appear in a context pane (§6.2): treat a virtual node as
+        -- not-above so the up-walk stops before it and the header's highest head is
+        -- the topmost REAL commit (typically HEAD).
+        if not n or n.virtual then return false end
+        local i = order_of and order_of(n)
         return i ~= nil and i < seam_idx
     end
     local function pos_of(n) return (order_of and order_of(n)) or 0 end
@@ -542,7 +587,9 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     local seeds = {}
     local seed_floor = {} -- hash → true
     for col, lane in pairs(boundary) do
-        if lane.begin then
+        -- Skip a crossing lane that begins on a virtual commit (§4.2): its only
+        -- above-seam content is the live working-tree state, which the header omits.
+        if lane.begin and not lane.begin.virtual then
             seeds[#seeds + 1] = { id = "c" .. tostring(col), node = lane.begin }
             seed_floor[lane.begin.hash] = true
         end
@@ -843,7 +890,7 @@ local function overlay_rows(group)
         local lanes = {}
         if seg then
             lanes[1] = { id = seg.id, color = seg.color, connectivity = cn,
-                edges = seg.edges, begin = seg.begin, parent = seg.parent }
+                edges = seg.edges, begin = seg.begin, parent = seg.parent, cone = seg.cone }
         end
         cols[c] = {
             connectivity = cn, lanes = lanes,
@@ -1067,9 +1114,16 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             for _, c in ipairs(upcols) do if c > width then width = c end end
 
             local cells = {}
-            local function add(col, c, id, color)
+            -- `cone` tags each segment with the node whose cone-membership governs
+            -- its dimming (spec §6.2): the lane's lower (older/parent) endpoint, so a
+            -- header segment lights iff that node is in the pivot's descendant cone.
+            -- Every segment incident to this row's pivot has parent N (arms into N,
+            -- the fork fan out of N, N's own verticals), so N.hash is the default; a
+            -- passing bar carries its own lane's node instead.
+            local function add(col, c, id, color, cone)
                 cells[col] = cells[col] or {}
-                cells[col][#cells[col] + 1] = { id = id, color = color, connectivity = conn(c) }
+                cells[col][#cells[col] + 1] =
+                    { id = id, color = color, connectivity = conn(c), cone = cone or N.hash }
             end
             -- A lane's horizontal arm from `from` to `to`, `down` at `from`, in the
             -- lane's OWN colour (so a crossed passing bar stays its own colour and the
@@ -1088,7 +1142,9 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             --    crossing cell is coloured by the bar (vertical colour continuity).
             for col = 1, width do
                 local a = active[col]
-                if a and not arr_set[col] then add(col, { up = true, down = true }, a.id, a.color) end
+                if a and not arr_set[col] then
+                    add(col, { up = true, down = true }, a.id, a.color, a.node and a.node.hash)
+                end
             end
             -- 2. Each arriving non-pivot lane turns into the pivot, keeping its OWN
             --    id/colour on the `down` arm (so the seam matches the main view).
@@ -1169,7 +1225,8 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             while blocked(col) do col = col + 1 end
             if col > maxcol then maxcol = col end
             local mvid, color = lane(N)
-            local cells = { [col] = { { id = pick_id(mvid), color = color or 1, connectivity = conn({}) } } }
+            local cells = { [col] = { { id = pick_id(mvid), color = color or 1,
+                connectivity = conn({}), cone = N.hash } } }
             local node_commit = { hash = N.hash, collapsed = true,
                 parents = N.parents, children = N.children, refs = N.refs }
             lines[#lines + 1] = {

@@ -100,7 +100,7 @@ local KEYBINDS = {
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
     { "<Tab>", "Collapse / expand the branch under the cursor (toggle)" },
-    { "<CR>", "Action menu for the row (examine · diff · collapse/expand/hide)" },
+    { "<CR>", "Open the commit view (on the message); action menu when a ref is selected / on a head" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref (switch branch while selecting)" },
@@ -2238,9 +2238,13 @@ function M.open(folder, opts)
             set_branch(b, "collapsed", b.follow)
         end
     end
-    -- <CR>: an action menu for the row (§10.4) — examine / diff / collapse /
-    -- expand / hide, most-relevant first. On a packed line it lists every marker
-    -- by name, so any branch is reachable even when not all labels fit.
+    -- <CR>: on a normal commit row with the cursor on the message (no ref
+    -- selected) open the commit view directly — the common case (§11.1).
+    -- Otherwise — a ref selected with h/l, or a collapsed head / packed-marker row
+    -- — open the action menu (§10.4): collapse / expand / hide / examine / diff,
+    -- most-relevant first. On a packed line it lists every marker by name, so any
+    -- branch is reachable even when not all labels fit. (Collapse/expand are also
+    -- on <Tab>; diff is also on D.)
     opts.win.keys["<CR>"] = function(self)
         -- In commit selection (§13.5) <CR> opens the commit view in range mode
         -- (the selected-commit list + combined range diff); D opens the range in
@@ -2249,6 +2253,15 @@ function M.open(folder, opts)
         local line = vim.api.nvim_win_get_cursor(self.win --[[@as integer]])[1]
         local item = order_at(line)
         if not item then return end
+        -- Direct commit view: a normal (non-collapsed) commit row with no ref
+        -- selected. The branch action menu is reserved for an h/l-selected ref, a
+        -- collapsed head, or a packed-marker row (§10.4).
+        local ref_selected = selection_state.commit == item.commit and selection_state.index ~= nil
+        if item.type ~= "markers" and item.commit and not item.commit.collapsed
+            and not ref_selected then
+            open_commit_view(opts, item.commit)
+            return
+        end
         local actions = {}
         local function add(label, run) actions[#actions + 1] = { label = label, run = run } end
 
@@ -2333,6 +2346,7 @@ function M.open(folder, opts)
         if lv and lv.controller then
             lv.controller.refresh()
         end
+        maybe_update_panes() -- the panes dim with the cone too (§6.2); re-dim (no scroll ⇒ repaint)
         place_cursor()
     end
     -- R: resync with the repository (§3.4) — re-read refs, pull newly-reachable
@@ -3073,6 +3087,7 @@ function M.open(folder, opts)
                 pcall(vim.api.nvim_win_close, p.win, true)
             end
             p.win = nil
+            p.state = nil -- drop the stashed cone-repaint state (§6.2)
         end
         -- The buffer line a seam tag (e.g. "12s"/"12c") points at.
         local function seam_line(tag) return tag and tonumber(tostring(tag):match("^(%d+)")) end
@@ -3178,15 +3193,24 @@ function M.open(folder, opts)
         -- straight lane bars so growth/shrink happens at the bottom and the tip
         -- never bounces (§6.2). `overflow` (header) renders a leading `+N above`;
         -- `height` (header) is the exact overlay height the seam was sized for.
-        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names, clipped)
+        local function render_pane(buf, rows, goff, foff, is_header, overflow, height, overflow_names, clipped,
+                                   emphasis, incone)
             local lines, marks = {}, {}
             local pal = opts.palette or {}
             -- Ref-label highlight by kind, matching the main view's ref colours.
             local label_hl = { head = pal.head, branch = pal.branch, remote = pal.remote, tag = pal.tags }
+            -- Reachability emphasis (§6.2): when on, a row whose node is outside the
+            -- pivot's cone renders its labels/count dimmed (the graph glyphs dim per
+            -- cell inside get_column_chars). `incone` is the propagated in-cone node
+            -- set; nil/off ⇒ everything lit.
+            local function node_lit(c)
+                if not emphasis then return true end
+                return (c ~= nil and incone ~= nil and incone[c.hash] == true)
+            end
             -- Render one columns array (graph glyphs) into a padded, aligned line,
             -- recording highlight extmarks; returns the line text for suffixing.
             local function glyph_line(columns)
-                local g = get_column_chars(opts, columns, false)
+                local g = get_column_chars(opts, columns, emphasis)
                 -- Dash every straight run so the pane reads as a sketch/summary:
                 -- vertical │ → ┊ (quadruple), horizontal ─ → ╌ (double — lighter
                 -- horizontally). Both 3-byte, so highlight byte offsets are
@@ -3210,14 +3234,23 @@ function M.open(folder, opts)
                 local li = #lines -- 0-based index this line will occupy (for label marks)
                 local text = glyph_line(row.columns)
                 local c = row.commit
-                -- Ref labels in the SAME colours as the main view (HEAD, branches, tags).
+                local lit = node_lit(c)
+                -- Ref labels in the SAME colours as the main view (HEAD, branches, tags);
+                -- dimmed toward the background on an out-of-cone row (§6.2).
                 for _, seg in ipairs(c and pane_labels(c, repo.head) or {}) do
                     text = text .. " "
                     local s = #text
                     text = text .. seg.text
-                    if label_hl[seg.kind] then marks[#marks + 1] = { li, s, #text, label_hl[seg.kind] } end
+                    local g = label_hl[seg.kind]
+                    if g then
+                        marks[#marks + 1] = { li, s, #text, lit and g or render.dim_hl(opts, g) }
+                    end
                 end
-                if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
+                if c and c.collapsed and c.count then
+                    local s = #text
+                    text = text .. (" (%d)"):format(c.count)
+                    if not lit then marks[#marks + 1] = { li, s, #text, render.dim_hl(opts, "Normal") } end
+                end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.
                 if opts.show_lane_ids then
                     local ids, seen = {}, {}
@@ -3273,6 +3306,68 @@ function M.open(folder, opts)
                 pcall(vim.api.nvim_buf_set_extmark, buf, pane_ns, m[1], m[2],
                     { end_col = m[3], hl_group = m[4] })
             end
+        end
+
+        -- Apply the reachability cone to a built pane and (re)render it (spec §6.2).
+        -- Cheap and rebuild-free: the in-cone node set is propagated over the pane's
+        -- OWN condensed graph from the seam crossing-lanes that are currently in the
+        -- cone (read live off their `edges`), then written onto the stored rows — the
+        -- footer via its per-edge Lane objects, the header via each segment's `cone`
+        -- tag (its governing node). Called once at build time and again on every cone
+        -- change (cursor settle) WITHOUT relaying out. Emphasis off ⇒ plain render.
+        local function paint_pane(p)
+            if not (p and p.buf and vim.api.nvim_buf_is_valid(p.buf) and p.rows) then return end
+            local emphasis = (opts.highlight ~= false) and (view_state.cone ~= nil)
+            local incone
+            if emphasis then
+                -- In-cone seam crossing-lanes → their pane entry nodes (the seeds).
+                local seeds, seam_lit = {}, {}
+                for _, lane in pairs(p.boundary or {}) do
+                    local lit = false
+                    for _, e in ipairs(lane.edges or {}) do
+                        if e.highlighted then lit = true; break end
+                    end
+                    if lit then
+                        if lane.id ~= nil then seam_lit[lane.id] = true end
+                        -- header (up): the crossing lane's child end is its pane node;
+                        -- footer (down): its parent end.
+                        local key = (p.dir == "up") and (lane.begin and lane.begin.hash)
+                            or (lane.parent and lane.parent.hash)
+                        local n = key and p.node_of and p.node_of[key]
+                        if n then seeds[#seeds + 1] = n end
+                    end
+                end
+                incone = pane.mark_pane_cone(seeds, p.dir)
+                for _, row in ipairs(p.rows) do
+                    for _, cell in ipairs(row.columns or {}) do
+                        if cell.has_commit and cell.commit then
+                            cell.active = incone[cell.commit.hash] == true
+                        end
+                        for _, seg in ipairs(cell.lanes or {}) do
+                            if p.dir == "up" then
+                                seg.highlighted = (seg.cone ~= nil and incone[seg.cone] == true)
+                            else
+                                -- footer: a wire lights when its child (begin) is in-cone,
+                                -- or it IS an in-cone seam crossing (begin off-pane).
+                                for _, e in ipairs(seg.edges or {}) do
+                                    e.highlighted = (e.begin ~= nil and incone[e.begin.hash] == true)
+                                        or (e.id ~= nil and seam_lit[e.id] == true) or false
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            render_pane(p.buf, p.rows, p.goff, p.foff, p.is_header, p.ovf, p.H, p.ovf_names, p.hclipped,
+                emphasis, incone)
+        end
+
+        -- Re-dim both panes for the current cone without a rebuild (spec §6.2). Runs
+        -- on cursor settle (the cone follows the cursor, but the panes' topology does
+        -- not), so it must stay cheap — it only re-walks each pane's own small graph.
+        local function repaint_panes()
+            if footer.state then pcall(paint_pane, footer.state) end
+            if header.state then pcall(paint_pane, header.state) end
         end
 
         -- Hide both panes and record why (surfaced in the `i` status).
@@ -3450,7 +3545,7 @@ function M.open(folder, opts)
                     function(n) return idx[n.hash] end, coroutine.yield)
                 if #cond.items == 0 then return nil, "empty graph@" .. target end
                 local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
-                return res.rows, tag
+                return res.rows, tag, cond, boundary
             end
 
             -- Build the HEADER for an overlay covering at least `cover` screen rows
@@ -3482,7 +3577,8 @@ function M.open(folder, opts)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
                 local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
-                return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover, seam.idx
+                return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover, seam.idx,
+                    cond, boundary
             end
 
             -- The footer overlay is the separator row + the footer rows, so its
@@ -3490,17 +3586,17 @@ function M.open(folder, opts)
             -- (§6.2 sizing), bounded by PANE_MAX. The final rows + seam come from the
             -- SAME build so the overlay height and the boundary line up.
             local function converge_footer()
-                local R, rows, seam_tag = 0, nil, nil
+                local R, rows, seam_tag, cond, boundary = 0, nil, nil, nil, nil
                 for i = 1, PANE_MAX do
                     if i > 1 then py() end -- yield between sizing passes (each re-walks)
-                    local r, tag = build_footer(seam_for(R + 1))
+                    local r, tag, c, b = build_footer(seam_for(R + 1))
                     if not r then return nil, tag end
-                    rows, seam_tag = r, tag
+                    rows, seam_tag, cond, boundary = r, tag, c, b
                     local nr = math.min(#r, PANE_MAX)
                     if nr == R then break end -- converged
                     R = nr
                 end
-                return rows, seam_tag
+                return rows, seam_tag, cond, boundary
             end
 
             -- Size the HEADER by a **min-fit search** (spec §6.2): start at the
@@ -3535,12 +3631,15 @@ function M.open(folder, opts)
                 end
                 -- Clamp the guess to the cap so the loop always runs at least once.
                 local _hi = 0
+                local cond, boundary
                 for cover = math.min(math.max(2, P + 1), HEADER_MAX), HEADER_MAX do
                     _hi = _hi + 1; if _hi > 1 then py() end -- yield between sizing passes
-                    local r, tag, actual, si = build_header(cover)
+                    local r, tag, actual, si, c, b = build_header(cover)
                     if not r then return nil, tag end
-                    rows, seam_tag, height, sidx = r, tag, actual, si
-                    if #r + 1 <= actual then return r, tag, actual, 0, nil, clipped_lines() end -- fits
+                    rows, seam_tag, height, sidx, cond, boundary = r, tag, actual, si, c, b
+                    if #r + 1 <= actual then
+                        return r, tag, actual, 0, nil, clipped_lines(), cond, boundary
+                    end -- fits
                 end
                 if not rows then return nil, "no rows" end
                 -- Didn't fit: clip to the overlay height while **preserving continuity**
@@ -3548,15 +3647,15 @@ function M.open(folder, opts)
                 -- `+N above` (room for the +N line and the seam separator). Eliding the
                 -- middle instead would tear every lane at the gap (the old bug).
                 local kept, ovf, ovf_names = pane.cap(rows, math.max(1, height - 2), true)
-                return kept, seam_tag, height, ovf, ovf_names, clipped_lines()
+                return kept, seam_tag, height, ovf, ovf_names, clipped_lines(), cond, boundary
             end
 
             -- COMPUTE both panes first (the heavy, yielding part). Do this before
             -- any editor-state mutation so a build abandoned mid-walk (the view
             -- scrolled — `pane_gen` bumped) leaves BOTH previous overlays intact,
             -- never a new footer beside a stale header.
-            local frows, ftag = converge_footer()
-            local hrows, htag, H, ovf, ovf_names, hclipped = converge_header()
+            local frows, ftag, fcond, fboundary = converge_footer()
+            local hrows, htag, H, ovf, ovf_names, hclipped, hcond, hboundary = converge_header()
 
             -- ===== no-yield tail: all editor-state mutation happens below =====
             -- Offsets of the main graph column so the pane lanes line up: `goff` =
@@ -3576,11 +3675,19 @@ function M.open(folder, opts)
             -- FOOTER (off-screen-older topology, below).
             if not frows or #frows == 0 then
                 footer_dbg = ftag or "no rows"; close_pane(footer); footer_seam, footer_height = nil, nil
+                footer.state = nil
             else
                 frows = pane.cap(frows, PANE_MAX) -- keep the seam-nearest rows AND the root
                 footer_seam, footer_height, footer_dbg = ftag, #frows + 1, nil
                 ensure_pane_win(footer, false, #frows + 1)
-                render_pane(footer.buf, frows, goff, foff, false)
+                -- Stash everything a cheap cone repaint needs (spec §6.2): the laid-out
+                -- rows, the condensed node graph, the seam crossing-lanes (with live
+                -- `edges` refs for current cone state), the walk direction and the render
+                -- offsets — so a cursor move re-dims without rebuilding the layout.
+                footer.state = { buf = footer.buf, rows = frows, dir = "down",
+                    node_of = fcond and fcond.node_of_hash,
+                    boundary = fboundary, goff = goff, foff = foff, is_header = false }
+                paint_pane(footer.state)
             end
 
             -- HEADER (off-screen-newer topology, above). The overlay is exactly `H`
@@ -3588,10 +3695,15 @@ function M.open(folder, opts)
             -- seam butts the main view's top edge.
             if not hrows or #hrows == 0 then
                 header_dbg = htag or "no rows"; close_pane(header); header_seam, header_height = nil, nil
+                header.state = nil
             else
                 header_seam, header_height, header_dbg = htag, H, nil
                 ensure_pane_win(header, true, H)
-                render_pane(header.buf, hrows, goff, foff, true, ovf, H, ovf_names, hclipped)
+                header.state = { buf = header.buf, rows = hrows, dir = "up",
+                    node_of = hcond and hcond.node_of_hash,
+                    boundary = hboundary, goff = goff, foff = foff, is_header = true,
+                    ovf = ovf, H = H, ovf_names = ovf_names, hclipped = hclipped }
+                paint_pane(header.state)
             end
 
             -- Topology-only debug dump (set `vim.g.gitloom_pane_debug` to a file path):
@@ -3741,12 +3853,15 @@ function M.open(folder, opts)
             drive_panes(coroutine.create(build_panes), pane_gen)
         end
 
-        -- Gated entry for the cursor/scroll debounce: rebuild only when the scroll
-        -- position changed (the panes are independent of the cursor row).
+        -- Gated entry for the cursor/scroll debounce. The panes' topology is
+        -- independent of the cursor row, so a move that doesn't scroll never rebuilds
+        -- them — but the reachability cone DOES follow the cursor, so the panes still
+        -- need a cheap re-dim (spec §6.2): rebuild on a real scroll, otherwise just
+        -- repaint the existing rows for the new cone.
         maybe_update_panes = function()
             if not vim.api.nvim_win_is_valid(win) then return end
             local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-            if top ~= pane_topline then update_panes() end
+            if top ~= pane_topline then update_panes() else repaint_panes() end
         end
 
         -- (The cursor is kept away from the window edges by the window-local

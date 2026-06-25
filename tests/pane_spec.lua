@@ -136,6 +136,55 @@ describe("pane.footer (§6.2)", function()
     end)
 end)
 
+describe("pane.mark_pane_cone (§6.2 reachability emphasis)", function()
+    -- A diamond of condensed pane nodes: root R <- M <- {A, B} <- T (T merges A,B).
+    -- `.parents` point older (down, toward roots); `.children` point newer (up).
+    local function diamond()
+        local n = {}
+        for _, hh in ipairs({ "R", "M", "A", "B", "T" }) do n[hh] = { hash = hh, parents = {}, children = {} } end
+        local function link(child, parent)
+            table.insert(n[child].parents, n[parent])
+            table.insert(n[parent].children, n[child])
+        end
+        link("M", "R"); link("A", "M"); link("B", "M"); link("T", "A"); link("T", "B")
+        return n
+    end
+
+    it("footer (down) marks an in-cone crossing lane's ancestors, not its siblings", function()
+        local n = diamond()
+        -- Seed at A (an in-cone crossing lane continuing into the footer): everything
+        -- below A is a pivot-ancestor (A, its parent M, the root R); the sibling B and
+        -- the newer T are NOT.
+        local cone = pane.mark_pane_cone({ n.A }, "down")
+        assert.is_true(cone.A and cone.M and cone.R)
+        assert.is_nil(cone.B)
+        assert.is_nil(cone.T)
+    end)
+
+    it("up (header) marks an in-cone crossing lane's descendants, not its ancestors", function()
+        local n = diamond()
+        -- Seed at M (a crossing lane continuing up into the header): everything above M
+        -- is a pivot-descendant (M, both fork children A and B, the merge T); the older
+        -- root R is NOT.
+        local cone = pane.mark_pane_cone({ n.M }, "up")
+        assert.is_true(cone.M and cone.A and cone.B and cone.T)
+        assert.is_nil(cone.R)
+    end)
+
+    it("a confluence below an in-cone lane is in-cone from the join on", function()
+        local n = diamond()
+        -- A is in-cone, B is not. Going down they meet at M: M (and R below it) are in
+        -- the cone via A, even though B — A's sibling that also reaches M — is dimmed.
+        local cone = pane.mark_pane_cone({ n.A }, "down")
+        assert.is_true(cone.M) -- the confluence is lit
+        assert.is_nil(cone.B)  -- the sibling that merges in is not
+    end)
+
+    it("an empty seed set yields an empty cone", function()
+        assert.same({}, pane.mark_pane_cone({}, "down"))
+    end)
+end)
+
 -- The seam separator render_pane draws below the header: a bar per lane leaving
 -- the bottom row downward (into the main view). Including it makes the grid a
 -- closed picture so the wires-connect checker sees the seam-bound tips connect.
@@ -462,6 +511,62 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert_seam_match(res.rows, boundary)
         assert_continuous(res.rows)
         assert.same({}, header_grid_errors(opts, res.rows))
+    end)
+
+    it("never shows working-tree virtual commits — the highest head is the topmost real commit (§4.2/§6.2)", function()
+        -- u (untracked) -> s (staged) -> HEAD stack above HEAD, then real commits.
+        -- The cutoff is at c1, so the virtual stack and HEAD are all above the seam.
+        -- The header must stop at HEAD (the topmost REAL commit) and never draw the
+        -- virtual nodes u/s — they are the live state, not topology.
+        local items = h.dag({
+            { "u", { "s" } },
+            { "s", { "H" } },
+            { "H", { "c1" } },
+            { "c1", { "c2" } },
+            { "c2", {} },
+        })
+        items[1].commit.virtual = "untracked"
+        items[2].commit.virtual = "staged"
+        items[3].commit.refs = { { name = "HEAD" } }
+        local opts = h.big_opts()
+        local res, boundary, cond = header_of(items, opts, 4, { HEAD = true }) -- seam at c1
+        local present = {}
+        for _, it in ipairs(cond.items) do present[it.commit.hash] = true end
+        assert.is_nil(present.u, "the untracked virtual commit must not appear in the header")
+        assert.is_nil(present.s, "the staged virtual commit must not appear in the header")
+        assert.is_nil(cond.node_of_hash.u)
+        assert.is_nil(cond.node_of_hash.s)
+        assert.is_true(present.H, "HEAD (the topmost real commit) must be the highest head")
+        -- And nothing virtual leaks into the rendered rows either.
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                if cell.has_commit and cell.commit then
+                    assert.is_true(cell.commit.hash ~= "u" and cell.commit.hash ~= "s",
+                        "a virtual node was rendered: " .. tostring(cell.commit.hash))
+                end
+            end
+        end
+        assert_seam_match(res.rows, boundary)
+        assert_continuous(res.rows)
+        assert.same({}, header_grid_errors(opts, res.rows))
+    end)
+
+    it("hides the header when the only off-screen-newer content is virtual (§4.2/§6.2)", function()
+        -- Viewport top is HEAD; only the virtual stack (u, s) sits above the seam.
+        -- With virtual commits excluded there is no real topology to show, so the
+        -- focused rebuild is empty (the window glue then renders no header).
+        local items = h.dag({
+            { "u", { "s" } },
+            { "s", { "H" } },
+            { "H", { "c1" } },
+            { "c1", {} },
+        })
+        items[1].commit.virtual = "untracked"
+        items[2].commit.virtual = "staged"
+        items[3].commit.refs = { { name = "HEAD" } }
+        local opts = h.big_opts()
+        local _, _, cond = header_of(items, opts, 3, { HEAD = true }) -- seam at H; only u,s above
+        assert.equals(0, #cond.items, "a virtual-only off-screen region yields no header")
     end)
 
     it("terminates an isolated crossing lane at the seam — its unrelated forks are pruned", function()

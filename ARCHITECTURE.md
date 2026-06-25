@@ -188,7 +188,12 @@ to each other and to the lanes crossing the cutoff:
    the viewport hides every branch that forks from it.
 2. **Rebuild the focused sub-DAG** — `pane.continue_up(boundary, tips, anchors,
    order_of, seam)` runs a three-pass reachability over the **display** DAG (the
-   projected nodes, so `order_of` is always defined), up-only, bounded above the seam:
+   projected nodes, so `order_of` is always defined), up-only, bounded above the seam.
+   **Working-tree virtual commits (§4.2) are excluded:** `above()` treats a virtual
+   node as not-above, and a boundary lane that begins on one is not seeded — so the
+   up-walk stops at the topmost **real** commit (the live state is never drawn in a
+   pane; spec §6.2). A virtual-only off-screen region therefore yields an empty rebuild
+   and the header is hidden.
    - **Pass 1 — `seed_reach`.** Each boundary column is a distinct **seed** (a fork
      seam yields ≥2 columns on one commit — different lanes, so seed identity is the
      *column*, not the begin hash); each pinned tip is a seed too. From every seed walk
@@ -244,6 +249,30 @@ to each other and to the lanes crossing the cutoff:
 
 Full cross-level head packing (lifting *all* unpinned heads onto a single row, vs.
 today's consecutive packing) is the remaining refinement.
+
+### Reachability emphasis in the panes (§6.2 / §12)
+
+The panes dim with the cursor's cone like the main view, but **without** walking
+the off-screen graph. The cone is monotone, so cone-membership inside a pane is
+fully fixed by which seam-crossing lanes are in the cone, propagated over the
+pane's *own* condensed graph: `pane.mark_pane_cone(seeds, dir)` walks `.parents`
+(footer, `down`) or `.children` (header, `up`) from the in-cone entry nodes,
+returning the in-cone node-hash set — `O(pane)`.
+
+The build stashes each pane's repaint state on `footer.state`/`header.state` (the
+laid-out rows, the condensed `node_of_hash`, the seam crossing-lanes — whose
+`edges` are *live* refs into the main view's segments, so their `highlighted`
+state is always current — plus the walk direction and render offsets).
+`paint_pane(state)` reads the live seam highlights, seeds and runs
+`mark_pane_cone`, writes the result onto the stored rows (the footer via its
+per-edge `Lane.highlighted`, the header via each segment's `cone` tag — the
+governing node, since header segments carry no per-edge `edges`), and re-renders
+with emphasis on. `render_pane` dims out-of-cone labels/counts; the glyphs dim
+per-cell in `get_column_chars` (`seg_hl` now also honours a segment-level
+`highlighted`). Because it is a per-row repaint rather than a rebuild, a cursor
+move that doesn't scroll takes the cheap path: `maybe_update_panes` rebuilds only
+on a real scroll, otherwise calls `repaint_panes`. `H` (and the cone-changing
+selection/marker paths via the cursor debounce) re-dim the same way.
 
 ## Layers
 

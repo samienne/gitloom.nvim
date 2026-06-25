@@ -207,10 +207,14 @@ end
 
 -- ── Segment colour + column glyphs (specification.md §5, §12) ───────────────
 
---- Whether a Segment draws any highlighted edge (specification.md §12).
+--- Whether a Segment draws any highlighted edge (specification.md §12). A
+--- segment-level `highlighted` boolean takes precedence when set — the context
+--- panes use it (their header segments carry no per-edge `edges`, so the cone is
+--- propagated onto the segment directly; §6.2 reachability emphasis).
 ---@param seg Segment
 ---@return boolean
 local function seg_hl(seg)
+    if seg.highlighted ~= nil then return seg.highlighted end
     for _, e in ipairs(seg.edges or {}) do
         if e.highlighted then return true end
     end

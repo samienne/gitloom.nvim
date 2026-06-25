@@ -47,6 +47,8 @@ local M = {}
 ---@field begin? Commit
 ---@field parent? Commit
 ---@field edges? Lane[]   the edge(s) this wire draws (§5)
+---@field highlighted? boolean  segment-level cone state — overrides `edges` when set; the context panes use it (§6.2)
+---@field cone? string  hash of the node whose cone-membership governs this segment's dimming in a header pane (§6.2)
 
 ---@class GraphColumn
 ---@field id integer|nil
