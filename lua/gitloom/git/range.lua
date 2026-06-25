@@ -21,11 +21,12 @@ M.EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 function M.commit_range(commit)
     -- Working-tree virtual commits (§4.2): the endpoint is a tree state, not a
     -- commit (§11.5). Staged is the index vs HEAD; unstaged the working tree vs
-    -- HEAD. The exact provider invocation (rev) is a verify-against-diffview
-    -- point (spec §11.5 open).
+    -- HEAD. The untracked node has no git-tracked counterpart, so it reuses the
+    -- unstaged node's working-tree range (§11.8). The exact provider invocation
+    -- (rev) is a verify-against-diffview point (spec §11.5 open).
     if commit.virtual == "staged" then
         return { rev = "--cached", from = (commit.parents or {})[1], to = "index" }
-    elseif commit.virtual == "unstaged" then
+    elseif commit.virtual == "unstaged" or commit.virtual == "untracked" then
         return { rev = "HEAD", from = "index", to = "worktree" }
     end
     local parents = commit.parents or {}

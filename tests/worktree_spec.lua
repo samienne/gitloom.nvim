@@ -1,8 +1,9 @@
 --- Tests for the working-tree virtual-commit pure helpers (spec §3.3/§4.2/§11.8):
 --- parse_status (the `git status --porcelain` counter), commit_range for a virtual
---- commit (the working-tree DiffRange, §11.5), worktree_label (the graph-row
---- subject) and format_worktree_detail (the commit-view metadata header). All pure,
---- no Neovim runtime needed.
+--- commit (the working-tree DiffRange, §11.5; untracked reuses the unstaged range),
+--- worktree_label (the graph-row subject) and format_worktree_detail (the
+--- commit-view metadata header) — for the three nodes staged / unstaged / untracked.
+--- All pure, no Neovim runtime needed.
 
 local internal = require("gitloom.graph")._internal
 local parse_status = internal.parse_status
@@ -93,6 +94,15 @@ describe("commit_range for a virtual commit (§11.5)", function()
         assert.equal("worktree", r.to)
     end)
 
+    it("maps an untracked node to the same working-tree range as unstaged", function()
+        local v = C({ hash = "0000000000000000000000000000000000000002",
+            virtual = "untracked", parents = { C({ hash = "deadbee" }) } })
+        local r = commit_range(v)
+        assert.equal("HEAD", r.rev)
+        assert.equal("index", r.from)
+        assert.equal("worktree", r.to)
+    end)
+
     it("leaves a real commit's range unchanged", function()
         local p = C({ hash = "p" })
         local c = C({ hash = "child", parents = { p } })
@@ -111,11 +121,18 @@ describe("worktree_label (§4.2)", function()
             worktree_label(C({ virtual = "staged", wt = { changed = 3 } })))
     end)
 
-    it("labels an unstaged node and appends the untracked count when present", function()
+    it("labels an unstaged node with its tracked file count", function()
         assert.equal("Unstaged changes · 2 files",
-            worktree_label(C({ virtual = "unstaged", wt = { changed = 2, untracked = 0 } })))
-        assert.equal("Unstaged changes · 2 files, 1 untracked",
-            worktree_label(C({ virtual = "unstaged", wt = { changed = 2, untracked = 1 } })))
+            worktree_label(C({ virtual = "unstaged", wt = { changed = 2 } })))
+        assert.equal("Unstaged changes · 1 file",
+            worktree_label(C({ virtual = "unstaged", wt = { changed = 1 } })))
+    end)
+
+    it("labels an untracked node with its file count (pluralized)", function()
+        assert.equal("Untracked files · 1 file",
+            worktree_label(C({ virtual = "untracked", wt = { changed = 1 } })))
+        assert.equal("Untracked files · 4 files",
+            worktree_label(C({ virtual = "untracked", wt = { changed = 4 } })))
     end)
 end)
 
@@ -133,19 +150,26 @@ describe("format_worktree_detail (§11.8)", function()
         assert.equal("index vs HEAD", rows[2])
     end)
 
-    it("headers an unstaged node and notes untracked additions when present", function()
+    it("headers an unstaged node as working tree vs index (no untracked note)", function()
         local rows = texts(format_worktree_detail(
-            C({ virtual = "unstaged", wt = { changed = 2, untracked = 3 } }), {}))
+            C({ virtual = "unstaged", wt = { changed = 2 } }), {}))
         assert.equal("Unstaged changes", rows[1])
         assert.equal("working tree vs index", rows[2])
-        assert.equal("includes 3 untracked files as additions", rows[3])
-    end)
-
-    it("omits the untracked note when there are none", function()
-        local rows = texts(format_worktree_detail(
-            C({ virtual = "unstaged", wt = { changed = 2, untracked = 0 } }), {}))
         for _, t in ipairs(rows) do
             assert.is_nil(t:match("untracked"))
         end
+    end)
+
+    it("headers an untracked node with its file count, shown as additions", function()
+        local rows = texts(format_worktree_detail(
+            C({ virtual = "untracked", wt = { changed = 3 } }), {}))
+        assert.equal("Untracked files", rows[1])
+        assert.equal("3 files, shown as additions", rows[2])
+    end)
+
+    it("pluralizes a single untracked file", function()
+        local rows = texts(format_worktree_detail(
+            C({ virtual = "untracked", wt = { changed = 1 } }), {}))
+        assert.equal("1 file, shown as additions", rows[2])
     end)
 end)

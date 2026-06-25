@@ -23,8 +23,8 @@ local M = {}
 ---@field cepoch? integer    committer date as Unix time (%ct); seeds order_commits (§3.1)
 ---@field message? string
 ---@field loaded? boolean   true once the commit's own log line has been parsed
----@field virtual? "staged"|"unstaged"   set on a working-tree virtual commit (§4.2)
----@field wt? { changed: integer, untracked?: integer }   working-tree file counts (virtual only)
+---@field virtual? "staged"|"unstaged"|"untracked"   set on a working-tree virtual commit (§4.2)
+---@field wt? { changed: integer }   working-tree changed-file count (virtual only; untracked counts untracked files)
 ---@field deco? string      raw `%d` ref decoration, only on submodule-view commits (§11.7)
 --- View-builder fields, present only on a synthetic **collapsed head** node
 --- (specification.md §10.3); a real commit leaves them nil. The head flows

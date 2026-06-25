@@ -40,8 +40,8 @@ local COMMIT_BATCH = 256
 -- The null device git's `--no-index` understands cross-platform as the empty
 -- side, so an untracked file renders as a whole-file addition (§3.3).
 local NULL_DEVICE = "/dev/null"
--- Cap on untracked files synthesized into the unstaged diff, so a huge untracked
--- tree never floods the commit view (§3.3 / spec open point).
+-- Cap on untracked files synthesized into the untracked node's diff, so a huge
+-- untracked tree never floods the commit view (§3.3 / spec open point).
 local UNTRACKED_DIFF_CAP = 100
 
 -- The `git log` format the submodule view parses: the same fields as the main
@@ -415,23 +415,18 @@ local function fetch_untracked_diff()
 end
 
 --- The patch for a working-tree virtual commit (spec §3.3 / §11.8). Staged is
---- the index vs HEAD (`git diff --cached`); unstaged is the working tree vs the
---- index (`git diff`) plus the untracked additions. On demand, like the rest of
---- the commit view.
----@param kind "staged"|"unstaged"
+--- the index vs HEAD (`git diff --cached`); unstaged is the **tracked** working
+--- tree vs the index (`git diff`); untracked is the synthesized additions for the
+--- untracked files. On demand, like the rest of the commit view.
+---@param kind "staged"|"unstaged"|"untracked"
 ---@return Future
 function M.fetch_worktree_diff(kind)
     if kind == "staged" then
         return git_string({ "diff", "--cached" })
+    elseif kind == "untracked" then
+        return fetch_untracked_diff()
     end
-    return git_string({ "diff" }).next(function(tracked)
-        return fetch_untracked_diff().next(function(untracked)
-            local parts = {}
-            if tracked and tracked ~= "" then parts[#parts + 1] = tracked end
-            if untracked and untracked ~= "" then parts[#parts + 1] = untracked end
-            return table.concat(parts, "\n")
-        end)
-    end)
+    return git_string({ "diff" })
 end
 
 --- Fetch one commit's full detail via `git show -s` (specification.md §11.1).

@@ -392,11 +392,12 @@ on_redraw(top, bottom)
   --porcelain) }`; `parse_status` counts the staged (index, `X`) / unstaged
   (working tree, `Y`) / untracked (`??`) files. The diffs are on demand, like the
   commit view: `fetch_worktree_diff("staged")` is `git diff --cached`;
-  `fetch_worktree_diff("unstaged")` is `git diff` concatenated with the untracked
-  additions (`fetch_untracked_diff`: each `git ls-files --others
-  --exclude-standard` file rendered via `git diff --no-index -- /dev/null <f>`,
-  capped at `UNTRACKED_DIFF_CAP`). `git_lines` / `git_output` are the thin
-  jobstart helpers these share.
+  `fetch_worktree_diff("unstaged")` is `git diff` (tracked only);
+  `fetch_worktree_diff("untracked")` is the synthesized untracked additions
+  (`fetch_untracked_diff`: each `git ls-files --others --exclude-standard` file
+  rendered via `git diff --no-index -- /dev/null <f>`, capped at
+  `UNTRACKED_DIFF_CAP`). `git_lines` / `git_output` are the thin jobstart helpers
+  these share.
 
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
 documented placeholder contract — the de-facto way to script this. The
@@ -496,10 +497,11 @@ reference, and `Commit.refs` is the inverse).
 
 ### Working-tree virtual commits (§3.3 / §4.2)
 
-When the working tree is dirty, up to two **virtual commits** (`Commit.virtual =
-"staged" | "unstaged"`, with reserved sentinel hashes) are spliced into
-`repo.order` just above the HEAD commit — `unstaged → staged → HEAD`, each present
-only when it has content. `apply_worktree(state)` builds them (wiring
+When the working tree is dirty, up to three **virtual commits** (`Commit.virtual =
+"staged" | "unstaged" | "untracked"`, with reserved sentinel hashes) are spliced
+into `repo.order` just above the HEAD commit — `untracked → unstaged → staged →
+HEAD`, each present only when it has content (the untracked node is the untracked
+files; the unstaged node is tracked-only). `apply_worktree(state)` builds them (wiring
 `parents`/`children` like real commits) from the fetched dirty-state counts and
 `clear_worktree_nodes()` removes them; both leave the real DAG untouched. Because
 they sit *above* HEAD, no owner's first-parent reach (§10.2) touches them, so they
