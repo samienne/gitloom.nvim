@@ -1689,6 +1689,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- each (re)show so all closures read the live window.
     local win, buf
 
+    -- The live host window id, or nil. The graph reads it through here so the same
+    -- body works whether it OWNS the window (create mode: lv.winid() is the snacks
+    -- window id) or is an ATTACHED frame in a shared host (lv.winid() is the live
+    -- host getter, §14 uniform frames). nil before the listview exists or once the
+    -- window is gone — callers that pass it to the nvim API must nil-check.
+    local function gwin()
+        if not (lv and lv.winid) then return nil end
+        local w = lv.winid()
+        if w and vim.api.nvim_win_is_valid(w) then return w end
+        return nil
+    end
+
     -- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
     -- sub-row within the item. In dual mode a labelled commit spans two buffer
     -- lines (sub 0 = label row, sub 1 = message row); the buffer line is mapped
@@ -2425,8 +2437,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- <C-d>/<C-u>: a half-viewport of branch commits, stopping at a tip/root
     -- (§13.2; the exact count is a tuning point, §13.6).
     local function selection_page(dir)
-        if not (sel.active and lv and lv.win and lv.win.win) then return end
-        local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(lv.win.win) / 2))
+        local hw = gwin()
+        if not (sel.active and hw) then return end
+        local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(hw) / 2))
         for _ = 1, steps do
             local before = sel.cursor
             sel_step(sel, dir)
@@ -2461,7 +2474,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- commit (nothing collapsible there).
     local function selection_toggle()
         local node = sel.active and sel.cursor
-        if not node or not (lv and lv.win and lv.win.win) then return end
+        if not node or not gwin() then return end
         local owners, mode = {}, nil
         if node.collapsed then -- a head: expand its still-collapsed owners
             for oid in pairs(node.signature or {}) do
@@ -2479,7 +2492,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         -- recreates the DisplayNodes. A collapsed head stands in for its whole
         -- region, so expand it to its region member hashes; a normal node is
         -- itself. Remember which end holds the anchor so we can restore both ends.
-        local w = lv.win.win
+        local w = gwin() --[[@as integer]] -- guarded non-nil above
         local view = vim.api.nvim_win_call(w, function() return vim.fn.winsaveview() end)
         local anchor_is_top = (sel.path or {})[1] == sel.anchor
         local function members(n) return n.collapsed and (n.region or {}) or { n.hash } end
@@ -2883,7 +2896,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- in place (no re-stream) and reflows, keeping the cursor on its commit.
     opts.win.keys.S = function()
         local keep
-        local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv and lv.win and lv.win.win)
+        local ok, pos = pcall(vim.api.nvim_win_get_cursor, gwin())
         if ok then keep = cursor_hash(pos[1]) end
         sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
         apply_sort().next(function()
@@ -3163,10 +3176,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- Cursor parking (§2/§7): cursorline marks the row; the cursor rests at the
     -- commit message, or on the selected ref. place_cursor reads the rendered
     -- buffer line and positions the cursor accordingly.
-    if lv and lv.win and lv.win.win then
-        -- on_win (above) already set these during listview.open; assign the
-        -- function-scoped upvalues here too so the block reads them directly.
-        win, buf = lv.win.win, lv.win.buf
+    if gwin() then
+        -- on_win (create mode) already set these during listview.open; assign the
+        -- function-scoped upvalues here too so the block reads them directly. In
+        -- attach mode there is no on_win, so this is where the sub-frame graph first
+        -- gets its window/buffer (refreshed thereafter by its frame on_enter, §14).
+        win, buf = gwin() --[[@as integer]], lv.buf
         pcall(vim.api.nvim_set_option_value, "cursorline", true, { win = win })
 
         -- Bind each graph key buffer-local on the graph buffer. The handlers take
@@ -3381,11 +3396,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         refresh_worktree = function(silent)
             if opts.working_tree == false then return end
             fetch_worktree_state().next(function(state)
-                if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
-                    return
-                end
+                local hw = gwin()
+                if not hw then return end
                 local keep
-                local ok, pos = pcall(vim.api.nvim_win_get_cursor, lv.win.win)
+                local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
                 if ok then keep = cursor_hash(pos[1]) end
                 local res = apply_worktree(state)
                 reflow()
@@ -3412,7 +3426,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         -- are dropped up front and re-applied at the end. `silent` suppresses the
         -- completion notice (reserved for future automatic triggers).
         resync = function(silent)
-            if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+            if not gwin() then
                 return
             end
 
@@ -3453,7 +3467,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
             end).next(function(state)
-                if not (lv and lv.win and lv.win.win and vim.api.nvim_win_is_valid(lv.win.win)) then
+                if not gwin() then
                     return
                 end
                 if state then apply_worktree(state) end
