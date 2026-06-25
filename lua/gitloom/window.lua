@@ -3570,6 +3570,38 @@ function M.open(folder, opts, focus_hash, seed_refs)
             end
         end
 
+        -- The main view's graph column offsets, measured LIVE off the first visible
+        -- line (spec §6.2): `goff` = the graph's left edge (date+author width),
+        -- `foff` = the message edge (the graph's right side, where the mirrored graph
+        -- right-aligns). The panes only continue the main view's lanes, so they must
+        -- line up with whatever offset the graph shows *right now* — and the shared
+        -- column widths are sticky (they grow as wider lane regions scroll in, and
+        -- the graph column is sticky under mirror). A value frozen at build time
+        -- therefore drifts: once the columns grow past the build-time width the pane
+        -- sits left of the graph — under mirror, dramatically, slamming the
+        -- right-aligned header to the left edge (the flush-left header bug). So we
+        -- recompute on every render (build and cone repaint), not once at build.
+        -- col_offset is in BYTES; convert via the line's own text so multi-byte
+        -- author names don't skew the display columns. A degenerate read (the row's
+        -- item columns transiently nil mid-relayout → col_offset 0) keeps the last
+        -- good alignment rather than collapsing the pane to the left edge.
+        local last_goff, last_foff = 0, 0
+        local function pane_offsets()
+            if not (lv and lv.controller and lv.controller.col_offset
+                    and vim.api.nvim_win_is_valid(win)) then
+                return last_goff, last_foff
+            end
+            local refl = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            local ltext = vim.api.nvim_buf_get_lines(buf, refl - 1, refl, false)[1] or ""
+            local gb = lv.controller.col_offset(refl, "line", GRAPH_COL) or 0
+            local fb = lv.controller.col_offset(refl, "line", FLEX_COL) or 0
+            local goff = vim.fn.strdisplaywidth(ltext:sub(1, gb))
+            local foff = vim.fn.strdisplaywidth(ltext:sub(1, fb))
+            if foff <= 0 then return last_goff, last_foff end
+            last_goff, last_foff = goff, foff
+            return goff, foff
+        end
+
         -- Apply the reachability cone to a built pane and (re)render it (spec §6.2).
         -- Cheap and rebuild-free: the in-cone node set is propagated over the pane's
         -- OWN condensed graph from the seam crossing-lanes that are currently in the
@@ -3620,7 +3652,11 @@ function M.open(folder, opts, focus_hash, seed_refs)
                     end
                 end
             end
-            render_pane(p.buf, p.rows, p.goff, p.foff, p.is_header, p.ovf, p.H, p.ovf_names, p.hclipped,
+            -- Align to the main view's CURRENT graph offset, not the value frozen
+            -- when this pane was built (see pane_offsets), so the lanes stay
+            -- continuous as the sticky columns grow.
+            local goff, foff = pane_offsets()
+            render_pane(p.buf, p.rows, goff, foff, p.is_header, p.ovf, p.H, p.ovf_names, p.hclipped,
                 emphasis, incone)
         end
 
@@ -3920,19 +3956,11 @@ function M.open(folder, opts, focus_hash, seed_refs)
             local hrows, htag, H, ovf, ovf_names, hclipped, hcond, hboundary = converge_header()
 
             -- ===== no-yield tail: all editor-state mutation happens below =====
-            -- Offsets of the main graph column so the pane lanes line up: `goff` =
-            -- its left edge (date+author width), `foff` = the message edge (the
-            -- graph's right side under mirror). The columns are sticky-aligned, so
-            -- any visible commit row measures the same offset; use the first visible
-            -- line. col_offset is in BYTES; convert to display columns via the
-            -- line's text so multi-byte author names don't skew it.
-            local goff, foff = 0, 0
-            local refl = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-            if lv.controller.col_offset then
-                local ltext = vim.api.nvim_buf_get_lines(buf, refl - 1, refl, false)[1] or ""
-                goff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", GRAPH_COL) or 0))
-                foff = vim.fn.strdisplaywidth(ltext:sub(1, lv.controller.col_offset(refl, "line", FLEX_COL) or 0))
-            end
+            -- Seed the pane offsets from the main view's current graph column (see
+            -- pane_offsets). These are stored on the pane state for debug only — the
+            -- actual render recomputes them live (paint_pane) so growth in the sticky
+            -- columns can never strand a pane left of the graph.
+            local goff, foff = pane_offsets()
 
             -- FOOTER (off-screen-older topology, below).
             if not frows or #frows == 0 then
