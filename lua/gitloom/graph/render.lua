@@ -170,9 +170,15 @@ end
 --- name to colour.
 ---@param commit { refs: Ref[] }?
 ---@param head_branch string?  -- the current branch (coloured as HEAD); nil when detached
----@return { text: string, kind: string }[]
+---@return { text: string, kind: string, hl: string? }[]
 function M.pane_labels(commit, head_branch)
     local g = git.group_refs(commit and commit.refs or {})
+    -- Per-ref colour override (§11.7.6): a tag with `hl` (a pointer mark) keeps
+    -- its colour in the panes too, so the new/old labels match the main view.
+    local hl_by_name = {}
+    for _, r in ipairs((commit and commit.refs) or {}) do
+        if r.hl and r.name then hl_by_name[r.name] = r.hl end
+    end
     local out = {}
     -- Detached HEAD: no branch to colour, so show the bare HEAD marker.
     if g.head and not head_branch then out[#out + 1] = { text = "HEAD", kind = "head" } end
@@ -184,7 +190,7 @@ function M.pane_labels(commit, head_branch)
         out[#out + 1] = { text = t .. ")", kind = is_head and "head" or (b.has_local and "branch" or "remote") }
     end
     for _, tag in ipairs(g.tags) do
-        out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag" }
+        out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag", hl = hl_by_name[tag] }
     end
     return out
 end
@@ -645,6 +651,13 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         local g = git.group_refs(commit.refs)
         local texts = M.decoration_texts(commit) -- same order; shared with the cursor target
         local items = {}
+        -- Per-ref colour override (§11.7.6): a tag carrying `hl` — the submodule
+        -- new/old **pointer marks**, injected as refs so they pin / show in the
+        -- panes / picker — renders in that colour instead of the tag default.
+        local hl_by_name = {}
+        for _, r in ipairs(commit.refs or {}) do
+            if r.hl and r.name then hl_by_name[r.name] = r.hl end
+        end
         if g.head and not head_branch then
             items[#items + 1] = rh("HEAD", palette.head)
         end
@@ -676,7 +689,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                items[#items + 1] = rh("[" .. t .. "]", palette.tags)
+                items[#items + 1] = rh("[" .. t .. "]", hl_by_name[t] or palette.tags)
             end
         end
         return items

@@ -75,22 +75,33 @@ local AUTHOR_COL, AUTHOR_MAX = 2, 25
 -- right-aligned graph + message don't shift as the lane width changes.
 local GRAPH_COL = 3
 
--- Floating-window stacking order. Neovim's default float zindex is 50, which is
--- what the snacks graph window and the modal commit view get. The overlays must
--- layer above their own parent, and the modal commit view + the `?` help must
--- sit above the graph's context panes (otherwise the footer pokes through the
--- commit view and the help hides behind the panes). Larger = closer to the user.
---   graph window / commit view base ........ 50  (snacks default)
---   header/footer panes (overlay graph) .... 60
---   commit view (modal, over the graph) .... 100
---   commit view sticky overlay (over it) ... 110
---   `?` help float (topmost) ............... 300
-local ZINDEX = {
-    panes = 60,
-    commit_view = 100,
-    commit_ctx = 110,
-    help = 300,
-}
+-- Floating-window stacking (spec §2.1). Rather than a hand-tuned ladder, the
+-- newest **primary** float (a graph window, the commit view, the `?`/`K` help)
+-- lands on top: each computes its base zindex from the **current top** — the max
+-- over open floats, floored at Neovim's default 50 — plus Z_STEP. Its **overlays**
+-- (the context panes, the commit-view sticky header) sit Z_OVERLAY above their own
+-- primary, which is below the next primary (Z_STEP > Z_OVERLAY). So a submodule
+-- graph opened from the commit-view link, or another repo from the picker, always
+-- stacks in front of what it was opened from, and the order self-corrects as
+-- floats close — no fixed per-window constants. Larger = closer to the user.
+local Z_STEP = 20    -- gap between stack levels (must exceed any overlay offset)
+local Z_OVERLAY = 5  -- a primary's overlay sits this far above it
+
+-- The highest zindex among the currently-open floating windows (the snacks
+-- default 50 is the floor, so the first float still gets a sane base).
+local function max_float_zindex()
+    local m = 50
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+        local cfg = vim.api.nvim_win_get_config(w)
+        if cfg.relative ~= "" and cfg.zindex and cfg.zindex > m then m = cfg.zindex end
+    end
+    return m
+end
+
+-- The base zindex for a new primary float: above every float open right now.
+local function next_zindex()
+    return max_float_zindex() + Z_STEP
+end
 
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
@@ -394,7 +405,8 @@ end
 ---@param opts GraphOptions
 ---@param change { path: string, old: string, new: string }
 ---@param result table?
----@return table[]
+---@return table[] rows
+---@return table<integer, string> row_hashes  -- block-row index -> commit hash (§11.7.6)
 local function submodule_block(opts, change, result)
     local palette = opts.palette or {}
     local diffp = palette.diff or {}
@@ -404,6 +416,10 @@ local function submodule_block(opts, change, result)
     local old_hl = subp.old or "GitloomSubmoduleDel"                       -- removed (dark red fg)
     local base_hl = subp.base or (palette.tracks and palette.tracks[1]) or "Title" -- ancestor (lane 1)
     local rows = {}
+    -- Parallel to `rows`: the **full** commit hash for each commit row (nil for
+    -- header / elision / unavailable rows), so the commit view can make each
+    -- commit line a link into the submodule's repo (§11.7.6).
+    local row_hashes = {}
     local function short(h) return (h or ""):sub(1, 8) end
 
     -- Gate failed or not yet fetched: the raw hashes, with a dim reason (§11.7.1).
@@ -416,7 +432,7 @@ local function submodule_block(opts, change, result)
         if result and result.reason then
             rows[#rows + 1] = highlight_text("  (" .. result.reason .. ")", DIM_FALLBACK)
         end
-        return rows
+        return rows, row_hashes
     end
 
     -- Header: path, old → new, and the direction/counts. The ahead (`+N`) and
@@ -467,6 +483,7 @@ local function submodule_block(opts, change, result)
         if c.deco and c.deco ~= "" then segs[#segs + 1] = highlight_text(" " .. c.deco, palette.branch) end
         if c.message and c.message ~= "" then segs[#segs + 1] = highlight_text("  " .. c.message, palette.message) end
         rows[#rows + 1] = compose(segs)
+        row_hashes[#rows] = c.hash -- this buffer row links to commit c (§11.7.6)
     end
     local function elide(cells, n)
         local segs = { highlight_text("    ", nil) }
@@ -499,7 +516,7 @@ local function submodule_block(opts, change, result)
     -- pointer it coincides with.
     emit(two and { { ch = "●", hl = base_hl }, { ch = "╯", hl = old_hl } }
         or { { ch = "●", hl = base_hl } }, base_commit, base_tag, base_hl)
-    return rows
+    return rows, row_hashes
 end
 
 local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
@@ -517,7 +534,8 @@ local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 ---@param opts GraphOptions
 ---@param commit Commit?
 ---@param range? { range: DiffRange, commits: Commit[], title: string }
-local function open_commit_view(opts, commit, range)
+---@param root? string  -- the graph's repo root, to resolve submodule link paths (§11.7.6)
+local function open_commit_view(opts, commit, range, root)
     local ok, snacks = pcall(require, "snacks.win")
     if not ok then
         vim.notify("snacks.win not found. Install snacks.nvim", vim.log.levels.ERROR)
@@ -532,6 +550,9 @@ local function open_commit_view(opts, commit, range)
         title = "Commit " .. commit.hash:sub(1, 7)
     end
 
+    -- Stack the commit view above the graph it was opened from and its panes
+    -- (§2.1); its sticky context header (cv_z + Z_OVERLAY) sits just above it.
+    local cv_z = next_zindex()
     -- Match the graph window's geometry so the commit view is the same size.
     local w = snacks.new({
         border = opts.win.border or "rounded",
@@ -540,9 +561,7 @@ local function open_commit_view(opts, commit, range)
         title = title,
         footer = "q: close",
         keys = { q = "close" },
-        -- Above the graph window's header/footer panes so they don't poke
-        -- through this modal view.
-        zindex = ZINDEX.commit_view,
+        zindex = cv_z,
     })
     local buf = w.buf
 
@@ -556,6 +575,10 @@ local function open_commit_view(opts, commit, range)
     -- Maps a diffstat file row's buffer line -> the buffer line where that
     -- file's diff section begins. Rebuilt on each render; <CR> jumps by it.
     local file_jumps = {}
+    -- Maps a submodule change-graph commit row's buffer line -> { repo, hash }:
+    -- the submodule's repo path and the commit on that row, so <CR> there opens
+    -- the submodule's graph focused on that commit (§11.7.6). Rebuilt each render.
+    local sub_jumps = {}
     -- Buffer line of the diff action label (§11.5), or nil. <CR> there opens the
     -- external diff; the cursor parks here when the view opens.
     local action_line = nil
@@ -599,6 +622,33 @@ local function open_commit_view(opts, commit, range)
                 ---@cast commit Commit
                 open_diff(opts, commit)
             end
+            return
+        end
+        -- A submodule change-graph commit row: open that submodule's graph
+        -- focused on the commit under the cursor (§11.7.6). Stacks over this view.
+        local jump = sub_jumps[line]
+        if jump then
+            -- Strip the inherited window title/footer: this `opts` is the parent
+            -- graph's *merged* opts (carrying its own title/footer), and M.open
+            -- would treat them as caller-pinned. A fresh copy lets the submodule
+            -- graph compute its own title (§2.1) — the rest of the config (palette,
+            -- diff provider, geometry) is inherited.
+            local sub_win = vim.tbl_extend("force", opts.win or {}, {})
+            sub_win.title, sub_win.footer = nil, nil
+            local sub_opts = vim.tbl_extend("force", opts, { win = sub_win })
+            -- Mark both bump pointers in the opened submodule graph (§11.7.6) as
+            -- synthetic pinned `new`/`old` refs — the new pointer green, the old
+            -- red (the change view's colours) — revealed + labelled in the panes,
+            -- focused on the clicked commit.
+            local subp = (opts.palette or {}).submodule or {}
+            local seed = {}
+            if jump.new then
+                seed[#seed + 1] = { hash = jump.new, name = "new", hl = subp.new or "GitloomSubmoduleAdd" }
+            end
+            if jump.old then
+                seed[#seed + 1] = { hash = jump.old, name = "old", hl = subp.old or "GitloomSubmoduleDel" }
+            end
+            M.open(jump.repo, sub_opts, jump.hash, seed)
             return
         end
         local target = file_jumps[line]
@@ -703,8 +753,8 @@ local function open_commit_view(opts, commit, range)
             height = #rows,
             style = "minimal",
             focusable = false,
-            -- Above the commit view itself (its sticky-scroll header).
-            zindex = ZINDEX.commit_ctx,
+            -- Just above the commit view itself (its sticky-scroll header).
+            zindex = cv_z + Z_OVERLAY,
         }
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
             pcall(vim.api.nvim_win_set_config, ctx_win, cfg)
@@ -777,6 +827,7 @@ local function open_commit_view(opts, commit, range)
         local saved_view = keep_view and vim.api.nvim_win_is_valid(w.win)
             and vim.api.nvim_win_call(w.win, vim.fn.winsaveview) or nil
         file_jumps = {}
+        sub_jumps = {}
         action_line = nil
         diff_ctx, diff_start = nil, nil
         diff_buf_to_patch = nil
@@ -824,11 +875,16 @@ local function open_commit_view(opts, commit, range)
             -- patch<->buffer maps for the file-jump and context-header lookups
             -- rather than the plain 1:1 offset (which holds only with no splice).
             local diff_rows = format_diff(patch, opts.palette)
-            local repl = {} -- from_line -> { to_line, rows }
+            local repl = {} -- from_line -> { to_line, rows, hashes, path }
             for _, ch in ipairs(submodule.parse_changes(patch)) do
+                local block_rows, block_hashes = submodule_block(opts, ch, sub_results[ch.path])
                 repl[ch.from_line] = {
                     to_line = ch.to_line,
-                    rows = submodule_block(opts, ch, sub_results[ch.path]),
+                    rows = block_rows,
+                    hashes = block_hashes, -- block-row index -> commit hash (§11.7.6)
+                    path = ch.path,
+                    old = ch.old, -- the bump's pointers, marked on open (§11.7.6)
+                    new = ch.new,
                 }
             end
             local patch_to_buf, buf_to_patch = {}, {}
@@ -837,9 +893,15 @@ local function open_commit_view(opts, commit, range)
                 local r = repl[pi]
                 if r then
                     local at = #rows + 1 -- buffer line of the block's first row
-                    for _, br in ipairs(r.rows) do
+                    for bi, br in ipairs(r.rows) do
                         rows[#rows + 1] = br
                         buf_to_patch[#rows] = pi -- block lines govern by the file's region
+                        -- A commit row becomes a link to that commit in the
+                        -- submodule's repo (root + the relative path; §11.7.6).
+                        if root and r.hashes[bi] then
+                            sub_jumps[#rows] = { repo = root .. "/" .. r.path,
+                                hash = r.hashes[bi], old = r.old, new = r.new }
+                        end
                     end
                     for k = pi, r.to_line do patch_to_buf[k] = at end
                     pi = r.to_line + 1
@@ -937,6 +999,7 @@ end
 ---@field height number|fun():number
 ---@field title string
 ---@field footer string
+---@field zindex? integer  stacking order, assigned per-open so the newest graph is on top (§2.1)
 ---@field keys? table  keymaps installed on the graph window (snacks.win keys)
 
 ---@class GraphPalette
@@ -991,7 +1054,9 @@ end
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 
 ---@param opts GraphOptions
-function M.open(folder, opts)
+---@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
+---@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
+function M.open(folder, opts, focus_hash, seed_refs)
     -- Resolve the repository this graph targets (spec §2.1) up front, so the
     -- window title can show it and the I/O layer is retargeted before any fetch.
     -- Inlined (not the module-scope resolve_root used by M.pick) to keep M.open
@@ -1007,6 +1072,14 @@ function M.open(folder, opts)
     -- The window title identifies the repo (§2.1): its leaf dir name, plus the
     -- current branch once HEAD loads (filled in live by update_footer/graph_title).
     local repo_name = vim.fn.fnamemodify(root, ":t")
+
+    -- Synthetic pointer refs (§11.7.6): the submodule link seeds `new`/`old`
+    -- tag refs (with a colour `hl`) onto the bump's commits and pins them, so
+    -- they render as refs, reveal via pinning, and show in the panes / ref
+    -- picker. `seed_pin_names` feeds effective_pinned; the refs are injected once
+    -- the commits exist (stream completion). Empty for an ordinary open.
+    local seed_pin_names = {}
+    for _, sr in ipairs(seed_refs or {}) do seed_pin_names[sr.name] = true end
 
     ---@type GraphOptions
     local defaults = {
@@ -1246,6 +1319,11 @@ function M.open(folder, opts)
         local p = {}
         if repo.head and repo.refs[repo.head] then p[repo.head] = true end
         for _, name in ipairs({ "master", "main", "dev" }) do
+            if repo.refs[name] then p[name] = true end
+        end
+        -- The seeded pointer marks (§11.7.6) are pinned by default so the new/old
+        -- branches are revealed and labelled in the panes.
+        for name in pairs(seed_pin_names) do
             if repo.refs[name] then p[name] = true end
         end
         for id, v in pairs(view_state.pinned) do
@@ -1870,7 +1948,7 @@ function M.open(folder, opts)
         local n = #commits
         local title = (n == 1) and ("Commit " .. (commits[1] and commits[1].hash:sub(1, 7) or ""))
             or (("Selection: %d commits"):format(n))
-        open_commit_view(opts, nil, { range = r, commits = commits, title = title })
+        open_commit_view(opts, nil, { range = r, commits = commits, title = title }, repo.root)
     end
 
     -- Emphasis for the selected path (§13.4): light the path's commit markers and
@@ -2184,6 +2262,22 @@ function M.open(folder, opts)
         update_panes()
     end
 
+    -- Stack this graph above whatever it was opened from (§2.1) — e.g. a
+    -- submodule opened from the commit-view link, where the view sits above the
+    -- previous graph. The panes overlay this base; a later modal goes above it.
+    -- Inlined (not the module next_zindex) to keep M.open under LuaJIT's
+    -- 60-upvalue ceiling — uses only `vim`. The 20 / +5 mirror Z_STEP / Z_OVERLAY.
+    local graph_z
+    do
+        local m = 50
+        for _, gw in ipairs(vim.api.nvim_list_wins()) do
+            local c = vim.api.nvim_win_get_config(gw)
+            if c.relative ~= "" and c.zindex and c.zindex > m then m = c.zindex end
+        end
+        graph_z = m + 20
+    end
+    opts.win.zindex = graph_z
+
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
@@ -2259,18 +2353,51 @@ function M.open(folder, opts)
                 return fetch_worktree_state()
             end).next(function(state)
                 if state then apply_worktree(state) end
+                -- Seed the pointer marks (§11.7.6) now that the commits exist:
+                -- inject new/old as `tag` refs carrying their colour, so the
+                -- projection attributes them as owners, the default pin (above)
+                -- reveals their branches, and the panes / ref picker pick them up.
+                -- Only for commits actually present (an absent pointer is left
+                -- unmarked, not synthesized as an empty placeholder).
+                for _, sr in ipairs(seed_refs or {}) do
+                    if repo.commits[sr.hash] then
+                        add_ref(repo, sr.name, "tag", sr.hash)
+                        local ref = repo.refs[sr.name]
+                        if ref then ref.hl = sr.hl end
+                    end
+                end
                 -- Stream done: apply the projection (the first-parent default
                 -- collapse, §10.7) and compute the initial dimming (§12). reflow
                 -- swaps in the projected graph, recomputes the cone, and refreshes.
                 reflow()
                 update_footer()
-                -- Focus the remembered position for this repo if we have one,
-                -- else HEAD; center the view on it (§2). goto_hash resolves a
-                -- folded commit to its collapsed head; if the target is gone it
-                -- leaves the cursor at the top. Only focus HEAD when on a branch:
-                -- a detached HEAD now carries a marker (§3.2) but there is nothing
-                -- to focus, so that case keeps the top of the graph.
-                local target = saved_positions[repo_key]
+                -- Reveal the focus target (§11.7.6) if the first-parent default
+                -- (§10.7) folded its branch into a collapsed head: the clicked
+                -- commit may be an intermediate (not a pinned pointer). Set that
+                -- head's collapsed owners to normal **by hash** (via the
+                -- projection signature) — robust even when the head is packed onto
+                -- a shared marker line (§10.4). Then reflow once if it changed.
+                local revealed = false
+                local function reveal(hash)
+                    local sig = hash and sig_cache.sig and sig_cache.sig[hash]
+                    if not sig then return end
+                    for oid in pairs(sig) do
+                        if (view_state.effective[oid] or "normal") == "collapsed" then
+                            view_state.modes[oid] = "normal"
+                            revealed = true
+                        end
+                    end
+                end
+                reveal(focus_hash)
+                if revealed then reflow() end
+                -- Focus an explicit commit if asked (the submodule link, §11.7.6),
+                -- else the remembered position for this repo, else HEAD; center the
+                -- view on it (§2). goto_hash resolves a folded commit to its
+                -- collapsed head; if the target is gone it leaves the cursor at the
+                -- top. Only focus HEAD when on a branch: a detached HEAD now carries
+                -- a marker (§3.2) but there is nothing to focus, so that case keeps
+                -- the top of the graph.
+                local target = focus_hash or saved_positions[repo_key]
                 if not (target and goto_hash(target)) then
                     local headref = repo.head and repo.refs["HEAD"]
                     if headref and headref.commit then goto_hash(headref.commit.hash) end
@@ -2363,7 +2490,7 @@ function M.open(folder, opts)
         local ref_selected = selection_state.commit == item.commit and selection_state.index ~= nil
         if item.type ~= "markers" and item.commit and not item.commit.collapsed
             and not ref_selected then
-            open_commit_view(opts, item.commit)
+            open_commit_view(opts, item.commit, nil, repo.root)
             return
         end
         local actions = {}
@@ -2390,7 +2517,7 @@ function M.open(folder, opts)
                 end
                 if b.commit then
                     add(b.state == "collapsed" and "Examine tip commit" or "Examine commit",
-                        function() open_commit_view(opts, b.commit) end)
+                        function() open_commit_view(opts, b.commit, nil, repo.root) end)
                     if opts.diff and opts.diff.open then
                         add("Open diff", function() open_diff(opts, b.commit) end)
                     end
@@ -2431,8 +2558,8 @@ function M.open(folder, opts)
         vim.lsp.util.open_floating_preview(format_lane_info(item), "", {
             border = "rounded",
             focusable = true,
-            -- Topmost, like the `?` help, so the panes don't hide it.
-            zindex = ZINDEX.help,
+            -- On top of the current graph + panes (§2.1).
+            zindex = next_zindex(),
         })
     end
     -- d: toggle the date column between absolute and relative. Render-only.
@@ -2640,8 +2767,8 @@ function M.open(folder, opts)
         vim.lsp.util.open_floating_preview(help_lines(), "", {
             border = "rounded",
             focusable = true,
-            -- Topmost, so it isn't hidden behind the header/footer panes.
-            zindex = ZINDEX.help,
+            -- On top of the current graph + panes (§2.1).
+            zindex = next_zindex(),
         })
     end
     -- h / l: move the ref selection on the current row (§2). Positions are the
@@ -3074,6 +3201,17 @@ function M.open(folder, opts)
             callback = schedule_wt_refresh,
         })
 
+        -- Stacking (spec §2.1): the active git root follows the focused graph.
+        -- Graphs stack (a submodule opened from the commit-view link, §11.7.6,
+        -- or another repo from the picker), and the git I/O layer has a single
+        -- active root — so on re-entering this graph, re-target it to this repo's
+        -- root, else its on-demand fetches would read the last-opened repo.
+        vim.api.nvim_create_autocmd("BufEnter", {
+            group = group,
+            buffer = buf,
+            callback = function() git.set_cwd(repo.root) end,
+        })
+
         -- On moving to a different row, reset the selection to the message,
         -- recompute the cone for the new pivot, redraw the dimming, and re-park.
         -- last_line is declared in the outer scope so a programmatic jump can
@@ -3263,9 +3401,10 @@ function M.open(folder, opts)
                 height = height,
                 style = "minimal",
                 focusable = false,
-                -- Above the graph window's content, but below the modal commit
-                -- view / help float so those cover the panes.
-                zindex = ZINDEX.panes,
+                -- Just above this graph's content, but below any later modal
+                -- (commit view / help), which gets a higher base (§2.1). The +5
+                -- is Z_OVERLAY, inlined (M.open upvalue ceiling, like graph_z).
+                zindex = graph_z + 5,
             }
             if p.win and vim.api.nvim_win_is_valid(p.win) then
                 pcall(vim.api.nvim_win_set_config, p.win, cfg)
@@ -3363,7 +3502,8 @@ function M.open(folder, opts)
                     text = text .. " "
                     local s = #text
                     text = text .. seg.text
-                    local g = label_hl[seg.kind]
+                    -- A pointer mark (§11.7.6) carries its own colour; else by kind.
+                    local g = seg.hl or label_hl[seg.kind]
                     if g then
                         marks[#marks + 1] = { li, s, #text, lit and g or render.dim_hl(opts, g) }
                     end

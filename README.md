@@ -112,6 +112,12 @@ require("gitloom").setup({
 })
 ```
 
+**Switching repositories.** Opening a repository while a graph is already open
+(via the picker or `:GitloomGraph`) **stacks** a new graph window over the
+current one; press `q` to close it and return to the graph underneath. Each
+repository's cursor position is remembered for the session, so reopening one
+lands where you left it.
+
 | Key | Action |
 |-----|--------|
 | `q` | Close the graph |
@@ -260,6 +266,16 @@ fast-forward or rewind is just the degenerate case where one side is empty, so
 the whole budget goes to the side that changed. gitloom never fetches for this:
 if the submodule isn't checked out, the commits aren't present, or the two
 histories are unrelated, it falls back to the plain hashes with a short reason.
+
+Each **commit row** in that change graph is a **link into the submodule's own
+repository**: pressing `<CR>` on it opens the graph for the submodule, focused
+on the commit under the cursor. The opened graph marks both pointers as
+**virtual refs** — a green **`new`** ref on the new commit and a red **`old`**
+ref on the old one. Being refs, they render as labels in the graph **and the
+context panes**, are **pinned** (so the new/old branches are revealed and stay
+named in the header/footer as you scroll), and show in the `<leader>b` ref
+picker. They're transient — a resync (`R`) drops them. Like any open it stacks
+(§ Switching repositories), so `q` returns to the commit view.
 
 The first line of the commit view is an **action label** (`▶ Open diff
 (diffview)`) and the cursor parks on it when the view opens, so `<CR>` then
