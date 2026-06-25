@@ -483,8 +483,13 @@ Details not covered by the spec or architecture:
   the commit's signature (`collapse_owners`) into `{state, owners, follow,
   commit}`. `<Tab>` is the 2-state collapse⇄expand toggle (`set_branch` flips the
   owners, reflows, then `goto_hash` repositions the cursor on the result so it is
-  repeatable). `<CR>` opens an action menu (`vim.ui.select`) — examine / diff /
-  collapse / expand / hide, listing every marker by name on a packed line.
+  repeatable). `<CR>` on a normal commit row with **no ref selected** (cursor on
+  the message) opens the commit view directly (`open_commit_view`; the common
+  case, §11.1). When a ref is selected with `h`/`l`, or on a **collapsed head** or
+  a **packed-marker row**, `<CR>` instead opens the action menu (`vim.ui.select`)
+  — collapse / expand / hide / examine / diff, listing every marker by name on a
+  packed line. The direct-vs-menu split keys off `selection_state.index` (the
+  h/l ref selection).
 - **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
   recompute from the visible range each scroll, so a varying column bounces. A
   column can *only grow* (never shrink): `col_max` (a per-column cap, implies
