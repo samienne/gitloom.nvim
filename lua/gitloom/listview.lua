@@ -29,9 +29,13 @@ local function create_win(opts)
 
     local w = snacks.new(win_opts)
 
+    -- The redraw gate keys off the BUFFER, not the window id: a snacks `hide()`
+    -- keeps the buffer but `show()` re-opens with a *new* window id, and the
+    -- single-host-window model (§14) swaps several frame buffers through one
+    -- window. The buffer is the stable identity across both; the live `winid`
+    -- the provider hands us is the window currently showing it.
     local state = {
         namespace = opts.namespace,
-        winid = w.win,
         buf = w.buf,
         top = 0,
         bottom = 0,
@@ -44,7 +48,7 @@ local function create_win(opts)
                     return
                 end
 
-                if state.winid == winid then
+                if state.buf == bufnr then
                     if topline ~= 0 and botline ~= 0 and topline ~= state.top or botline ~= state.bottom then
                         state.top = topline
                         state.bottom = botline
