@@ -291,7 +291,7 @@ lua/gitloom/
                   (highlight builders), trim_ws
   git/            The git DATA LIBRARY (gitloom.git)
     init.lua        Public aggregator (re-exports the submodules)
-    model.lua       Commit/Ref types + sparse placeholder constructors
+    model.lua       Commit/Ref/Upstream types + sparse placeholder constructors
     parse.lua       git log/show/diff/status parsers (incl. the stream de-chunker)
     format.lua      Commit-detail / diff / diffstat / range / worktree formatters
     refs.lua        classify/group refs, ref-picker model, resync ref-diff (§2/§3.4)
@@ -403,8 +403,16 @@ on_redraw(top, bottom)
 ### Git I/O
 
 - `fetch_refs(repo)` — `git for-each-ref --format="%(objectname) %(refname)
-  %(*objectname)" refs/heads refs/remotes refs/tags` (the deref hash resolves
-  annotated tags).
+  %(*objectname) %(upstream:short) %(upstream:track,nobracket)" refs/heads
+  refs/remotes refs/tags` (the deref hash resolves annotated tags). Space-
+  separated, **not** `%x1f` (for-each-ref does not interpret that hex escape); the
+  first four atoms are space-free, so the one field with spaces —
+  `%(upstream:track)`, "ahead N, behind M" — is **last** and parsed from field 5
+  on. `parse_ref_line` turns the upstream atoms into a local branch's
+  `Ref.upstream` (`{ short, ahead, behind, gone }`, §6.3) — only when git reports a
+  tracked upstream, so divergence comes from real tracking config, never a shared
+  short name. `fetch_ref_entries` (the resync read) carries the same upstream so
+  `R` refreshes the indicator.
 - `fetch_head(repo)` — `git symbolic-ref --short --quiet HEAD` for the current
   branch.
 - `fetch_commits(opts)` — `git log --topo-order --parents` (a valid topo base for
@@ -495,8 +503,15 @@ async picker orchestration is window glue (not unit-tested, like the rest).
 - `add_ref` / `get_or_create_commit` — resolve a ref's target hash to a
   `Commit` (placeholder if unseen) and link them by reference.
 - `group_refs(refs)` — for display: collapses branch refs (local + remote) that
-  share a short name into one `RefGroup { name, has_local, remotes }`, keeping
-  HEAD and tags separate. Drives the compact `(name ↑remotes)` rendering (§6).
+  share a short name into one `RefGroup { name, has_local, remotes, track }`,
+  keeping HEAD and tags separate. Drives the compact `(name ↑remotes)` rendering
+  (§6). A local branch's `Ref.upstream` rides along on `track`, so the decoration
+  can append the divergence indicator.
+- `track_segments(track)` / `track_label(track)` — the upstream divergence
+  indicator (§6.3) as coloured `{ text, kind }` segments and, byte-identically,
+  the plain concatenation `track_label` (so the rendered and selection/cursor
+  forms agree). `⇡N` ahead, `⇣N` behind, `⇡N⇣M` diverged, `gone`; empty in sync.
+  Shared by `decoration_texts`, `display_item`'s ref rendering, and the picker.
 - `parse_show(output)` — splits the `fetch_commit_detail` output (`%x1f` fields,
   body last) into a `CommitDetail { hash, author_name, author_email,
   author_date, committer_name, committer_email, committer_date, parents[], body
@@ -548,7 +563,8 @@ async picker orchestration is window glue (not unit-tested, like the rest).
   relationships between on-screen commits.
 
 `parse_commit_line`, `parse_timestamp`, `format_absolute`, `format_relative`,
-`classify_ref`, `group_refs`, `parse_show`, `format_commit_detail`,
+`classify_ref`, `group_refs`, `track_segments`, `track_label`, `parse_show`,
+`format_commit_detail`,
 `format_diff`, `diffstat_files`, `diff_contexts`, `format_diffstat`,
 `commit_range`, `range_endpoints`, `format_range_detail`, `sel_ascend_children`,
 `sel_step`, `sel_switch`, and `reachable_cone` are pure and exposed via

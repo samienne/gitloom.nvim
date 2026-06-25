@@ -28,15 +28,44 @@ function M.classify_ref(refname)
     return nil
 end
 
+--- The divergence indicator's pieces for a tracked branch (§6.3), as
+--- `{ text, kind }` segments whose concatenated `text` is `track_label` and whose
+--- `kind` ("ahead"|"behind"|"gone") selects the colour. Empty for no upstream or
+--- an in-sync branch (no news is good news). Pure.
+---@param track Upstream?
+---@return { text: string, kind: string }[]
+function M.track_segments(track)
+    if not track then return {} end
+    if track.gone then return { { text = " gone", kind = "gone" } } end
+    local a, b = track.ahead or 0, track.behind or 0
+    local segs = {}
+    if a > 0 then segs[#segs + 1] = { text = " ⇡" .. a, kind = "ahead" } end
+    if b > 0 then segs[#segs + 1] = { text = (a > 0 and "⇣" or " ⇣") .. b, kind = "behind" } end
+    return segs
+end
+
+--- The plain-text divergence indicator (§6.3) — the concatenation of
+--- `track_segments`' texts, so the rendered (coloured) and plain (selection/
+--- cursor) forms stay byte-identical. "" when in sync or untracked. Pure.
+---@param track Upstream?
+---@return string
+function M.track_label(track)
+    local s = ""
+    for _, seg in ipairs(M.track_segments(track)) do s = s .. seg.text end
+    return s
+end
+
 --- Group a commit's refs for compact display (specification.md §6). Branch
 --- refs (local + remote) that share a short name collapse into one entry: the
 --- name once, plus the remotes that also point here. A remote ref's name keeps
 --- its `remote/` prefix (classify_ref), so the short name is the part after the
---- first path component. Tags and the HEAD marker stay separate.
+--- first path component. Tags and the HEAD marker stay separate. A local branch
+--- that tracks an upstream carries its `track` (the §6.3 divergence) on the group.
 ---@class RefGroup
 ---@field name string
 ---@field has_local boolean
 ---@field remotes string[]
+---@field track? Upstream   the local branch's upstream divergence, if it tracks one
 ---@param refs Ref[]?
 ---@return { head: boolean, branches: RefGroup[], tags: string[] }
 function M.group_refs(refs)
@@ -59,7 +88,9 @@ function M.group_refs(refs)
         elseif ref.kind == "tag" then
             tags[#tags + 1] = ref.name
         elseif ref.kind == "local" then
-            group(ref.name).has_local = true
+            local g = group(ref.name)
+            g.has_local = true
+            if ref.upstream then g.track = ref.upstream end
         elseif ref.kind == "remote" then
             -- "origin/feature/foo" -> remote "origin", short "feature/foo".
             local remote, short = ref.name:match("^([^/]+)/(.+)$")
@@ -105,7 +136,7 @@ local REF_KIND_RANK = { head = 1, ["local"] = 2, remote = 3, tag = 4 }
 --- searchable). Pure (no I/O) so it is unit-testable via `_internal`.
 ---@param refs table<string, Ref>?   the repo's name → Ref registry
 ---@param recents string[]?          session MRU ref names, newest first
----@return { name: string, kind: string, hash: string, short: string, subject: string, recent: boolean, text: string }[]
+---@return { name: string, kind: string, hash: string, short: string, subject: string, recent: boolean, track?: Upstream, text: string }[]
 function M.ref_picker_items(refs, recents)
     local rank = {} -- ref name -> 1-based MRU position
     for i, n in ipairs(recents or {}) do
@@ -123,6 +154,7 @@ function M.ref_picker_items(refs, recents)
                 short = commit.hash:sub(1, 8),
                 subject = subject,
                 recent = rank[name] ~= nil,
+                track = ref.upstream, -- upstream divergence for the §6.3 indicator
                 text = name .. " " .. subject, -- the picker's fuzzy-match string
             }
         end

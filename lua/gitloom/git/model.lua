@@ -4,10 +4,17 @@
 
 local M = {}
 
+---@class Upstream
+---@field short string    the upstream remote-tracking ref's short name (e.g. "origin/master")
+---@field ahead integer   commits the local branch is ahead of the upstream (vs last fetch; §6.3)
+---@field behind integer  commits the local branch is behind the upstream
+---@field gone boolean     the upstream ref no longer exists (deleted + pruned)
+
 ---@class Ref
 ---@field name string
 ---@field kind "local"|"remote"|"tag"|"head"
 ---@field commit Commit   the commit this ref points at (a direct reference)
+---@field upstream? Upstream   tracking info, only on a local branch that tracks one (§6.3)
 
 --- A node in the commit DAG. `hash`/`parents`/`children`/`refs` exist from the
 --- moment a commit is created (a ref or another commit's parent can create it as
@@ -52,14 +59,17 @@ function M.get_or_create_commit(repo, hash)
 end
 
 --- Resolve a ref to its target Commit and link them (direct references).
+--- `upstream` (a local branch's tracking info, §6.3) is carried through when
+--- present.
 ---@param repo Repo
 ---@param name string
 ---@param kind string
 ---@param hash string
-function M.add_ref(repo, name, kind, hash)
+---@param upstream? Upstream
+function M.add_ref(repo, name, kind, hash, upstream)
     local commit = M.get_or_create_commit(repo, hash)
     ---@type Ref
-    local ref = { name = name, kind = kind, commit = commit }
+    local ref = { name = name, kind = kind, commit = commit, upstream = upstream }
     commit.refs = commit.refs or {}
     table.insert(commit.refs, ref)
     repo.refs[ref.kind == "head" and "HEAD" or name] = ref

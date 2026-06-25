@@ -577,7 +577,9 @@ remotes that also point at this commit, as `(name ↑remote1,remote2)`. The name
 is highlighted when a local branch exists and dimmed when the group is
 remote-only. A local branch with no matching remotes is just `(name)`. This
 keeps the common case (a branch plus its remote-tracking copies all at one
-commit) from repeating the name per remote.
+commit) from repeating the name per remote. A local branch that **tracks an
+upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
+§6.3.
 
 **Ref width budget.** The refs use the row's free width: they may take
 everything the message does not need — its natural width, but never reserving
@@ -786,6 +788,41 @@ is the single viewport as today. (`setup()` config is now forwarded to the
 command, §8, but the `header_max`/`footer_max` caps are still hardcoded — not
 yet read from the options.)
 
+### 6.3 Upstream tracking
+
+A local branch may **track an upstream** — a remote-tracking ref configured as
+its `@{upstream}` (`branch.<name>.remote` / `merge`). gitloom reads this
+relationship from git directly (`for-each-ref %(upstream:short)` and
+`%(upstream:track)`); it does **not** infer it from a shared short name (a branch
+named `x` and a remote `r/x` are not assumed to track unless git says so), which
+keeps it correct under mirrored/many-remote setups where short names collide.
+
+**Divergence indicator.** A tracked local branch carries a terse indicator after
+its name in the ref decoration:
+
+- `⇡N` — **ahead** by N commits (commits the local branch has that the upstream
+  does not).
+- `⇣N` — **behind** by N (commits on the upstream the local branch lacks).
+- `⇡N⇣M` — **diverged** (both).
+- `gone` — the upstream ref no longer exists (it was deleted on the remote and a
+  prune removed the local remote-tracking ref).
+- **in sync** — no indicator (no news is good news).
+
+So `master` two ahead and three behind renders `(master ⇡2⇣3)`; with other
+remotes also at this commit, `(master ↑fork ⇡2⇣3)`. The `⇡`/`⇣`/`gone` tokens are
+colored by `palette.track` (§8). The indicator is part of the branch decoration
+(it is not separately selectable), so the rendered text and the selection/cursor
+target stay byte-identical (§2).
+
+**Computed against the last fetch.** The ahead/behind counts are git's own,
+computed against the **local remote-tracking ref** — i.e. the remote's state *as
+of your last `git fetch`*, not the live remote. gitloom is read-only and never
+fetches (§9), so the indicator reflects what is already on disk; a `git fetch`
+outside gitloom followed by `R` (resync, §3.4) refreshes it.
+
+The same tracking data drives **pin-the-pair** (§10.6) and a current-branch
+status in the window footer.
+
 ## 7. Rendering behavior
 
 - Rendering is **viewport-driven**: only rows within the visible range are
@@ -831,9 +868,11 @@ Endpoint     = Commit | "index" | "worktree"
   darker, muted green/red — `GitloomSubmoduleAdd` / `GitloomSubmoduleDel`, defined
   with `default = true` so a colorscheme can override — and the first lane colour
   `palette.tracks[1]`; foreground only, so only the graph markers/lanes are
-  tinted, not the commit rows); and `action`, the
+  tinted, not the commit rows); `action`, the
   highlight for the commit view's diff action label (default `Special`; §11.5);
-  and `dim`, the
+  `track`, a sub-table of highlight groups for the upstream divergence indicator
+  (§6.3): `ahead`, `behind`, `gone` — the `⇡N` / `⇣N` / `gone` tokens (defaults
+  `Added`, `WarningMsg`, `Comment`); and `dim`, the
   blend factor (`0`–`1`) toward the window background used to de-emphasise
   out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
   terminals without true colour, dimming falls back to a flat `NonText`
@@ -872,6 +911,9 @@ Endpoint     = Commit | "index" | "worktree"
   `10`**). Set explicitly so the windows don't inherit the global value. Note: a
   non-zero value interacts with the context-pane overlays (§6.2); set `0` to
   restore the prior always-zero behaviour if the panes' scrolling misbehaves.
+- `pin_upstream` — when pinning a local branch, also pin its tracked upstream
+  remote-tracking ref as an anchor (§6.3, §10.6). **Default true.** Set false to
+  pin only the local branch.
 
 ### setup() wiring
 
@@ -1083,6 +1125,16 @@ toward; pinning lets the user name *several* anchors — e.g. `master`, `dev`, a
 release branch, a few personal branches. **HEAD (the current branch) is pinned
 by default, along with the common trunks `master` / `main` / `dev` when they
 exist**; the user may pin or unpin any ref.
+
+**Pin the pair.** Pinning a local branch that **tracks an upstream** (§6.3) also
+pins that upstream remote-tracking ref as an anchor (config `pin_upstream`,
+default on). A logical branch is the local *and* where the remote thinks it is,
+so anchoring the pair keeps **both** lanes in full under focus — and when they
+have diverged the fork between them is drawn instead of the upstream collapsing
+to a `◍` head. The upstream is resolved from git's tracking config (not a shared
+short name), so it pins the *correct* remote ref even when branch names collide
+across remotes (§6.3). Unpinning the local branch drops the auto-pinned upstream
+too (an explicit pin/unpin on the upstream ref itself still wins).
 
 Anchors drive two things:
 
