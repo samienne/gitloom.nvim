@@ -3141,6 +3141,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         if sel.active then selection_swap() end
     end
 
+    -- Bind the graph keymaps OURSELVES, buffer-local, rather than via snacks window
+    -- keys (snacks binds them on its own buffer only). Buffer-local binding is what
+    -- lets the same handlers drive any frame buffer the host swaps in — the uniform
+    -- frames model (§14): every graph (root or a drilled-in submodule) is a frame
+    -- buffer in the one host window. Lift them out so snacks doesn't double-bind.
+    local graph_keys = opts.win.keys or {}
+    opts.win.keys = nil
+
     lv = listview.open(listview_options)
 
     -- Cursor parking (§2/§7): cursorline marks the row; the cursor rests at the
@@ -3151,6 +3159,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
         -- function-scoped upvalues here too so the block reads them directly.
         win, buf = lv.win.win, lv.win.buf
         pcall(vim.api.nvim_set_option_value, "cursorline", true, { win = win })
+
+        -- Dispatch each graph key to its handler with the host window object as
+        -- `self` (so handlers' `self.win` / `self:hide()` still resolve), bound
+        -- buffer-local on the graph buffer. `lv.win` is the stable snacks host
+        -- object (its `.win` field follows hide/show), so the live window is always
+        -- read. The same routine re-binds these onto a drilled-in graph frame (§14).
+        for key, handler in pairs(graph_keys) do
+            if type(handler) == "function" then
+                vim.keymap.set("n", key, function() return handler(lv.win) end,
+                    { buffer = buf, nowait = true })
+            end
+        end
 
         -- Move the cursor onto the display row that now represents `hash` — a real
         -- commit row, the marker (head/packed) whose region contains it, or a
