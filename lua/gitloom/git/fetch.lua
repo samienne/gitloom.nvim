@@ -45,8 +45,10 @@ local NULL_DEVICE = "/dev/null"
 local UNTRACKED_DIFF_CAP = 100
 
 -- The `git log` format the submodule view parses: the same fields as the main
--- stream (so parse_commit_line handles it) plus a trailing `%d` decoration field.
-local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%s%x1f%d"
+-- stream (COMMIT_LOG_FMT, so parse_commit_line handles it — including the `%ct`
+-- committer epoch at field 6, without which the subject shifts and is lost) plus
+-- a trailing `%d` decoration field (field 8, read by parse_log below).
+local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s%x1f%d"
 
 --- Read all refs via `git for-each-ref` and resolve each to its commit.
 --- Output line: "<objectname> <refname> [<*objectname>]" — the dereferenced
@@ -538,10 +540,12 @@ end
 --- asynchronous — it **never fetches**. Resolves a result table consumed by
 --- `submodule_block`:
 ---   `{ path, available, reason? }`                              -- gate failed
----   `{ path, available, class, ahead, behind, base, items }`   -- ff / rewind
 ---   `{ path, available, class, ahead, behind, base,
----      new_commit, old_commit, base_commit }`                  -- diverged
---- `items` are linked OrderItems (the commits the bump brings in / rolls back).
+---      new_commits, old_commits, base_commit }`                 -- ff/rewind/diverged
+--- The two sides are the first-parent lines `base..new` (added, `new_commits`,
+--- newest-first with `B` first) and `base..old` (removed, `old_commits`, with `A`
+--- first); a degenerate fast-forward/rewind leaves one list empty (the merge-base
+--- *is* that pointer). `base_commit` is the shared ancestor the two lines meet at.
 ---@param opts GraphOptions
 ---@param change { path: string, old: string, new: string }
 ---@return table  -- a future
@@ -560,7 +564,7 @@ function M.fetch_submodule_graph(opts, change)
             if line ~= "" then
                 local c = parse_commit_line(line)
                 if c then
-                    c.deco = trim_ws((vim.split(line, "\x1f"))[7] or "")
+                    c.deco = trim_ws((vim.split(line, "\x1f"))[8] or "")
                     commits[#commits + 1] = c
                 end
             end
@@ -593,42 +597,34 @@ function M.fetch_submodule_graph(opts, change)
                 if class == "unrelated" then
                     return { path = p, available = false, reason = "unrelated histories" }
                 end
+                -- Both sides (§11.7.3): the first-parent line each pointer adds
+                -- over the merge-base. `--first-parent` keeps a mainline merge a
+                -- single node without dragging its side branch in (no lane "from
+                -- nowhere" at the range boundary — the §10.7 focus). A degenerate
+                -- fast-forward (base == old) / rewind (base == new) leaves one
+                -- range empty, so that side's list comes back empty.
+                local function side(tip)
+                    return gc({ "log", "--first-parent",
+                        "--format=" .. SUBMODULE_LOG_FMT, base .. ".." .. tip })
+                        .next(function(rl) return parse_log(rl.out) end)
+                end
+                -- ahead/behind are the *total* commit counts (merges included) for
+                -- the header `+N` / `−N`; the drawn rows are the first-parent lines.
                 return gc({ "rev-list", "--count", base .. ".." .. new }).next(function(ra)
                     return gc({ "rev-list", "--count", base .. ".." .. old }).next(function(rbh)
-                        local res = {
-                            path = p, available = true, class = class, base = base,
-                            ahead = tonumber(trim_ws(ra.out)) or 0,
-                            behind = tonumber(trim_ws(rbh.out)) or 0,
-                        }
-                        if class == "diverged" then
-                            -- Glanceable only (§11.7.2): the two tips + the fork
-                            -- point, no paths drawn.
-                            return one(new).next(function(nc)
-                                return one(old).next(function(oc)
-                                    return one(base).next(function(bc)
-                                        res.new_commit, res.old_commit, res.base_commit = nc, oc, bc
-                                        return res
-                                    end)
-                                end)
-                            end)
-                        end
-                        -- ff / rewind: the moving tip's first-parent line down to
-                        -- the fork point (§11.7.3) — `--first-parent` so a merge
-                        -- stays a mainline node without dragging its side branch
-                        -- in (no lane "from nowhere" at the range boundary). The
-                        -- fork point itself is appended as the bottom anchor so
-                        -- the old/new pointer there is shown and marked.
-                        local tip = (class == "ff") and new or old
-                        return gc({ "log", "--first-parent",
-                            "--format=" .. SUBMODULE_LOG_FMT, base .. ".." .. tip })
-                            .next(function(rl)
+                        return side(new).next(function(new_commits)
+                            return side(old).next(function(old_commits)
                                 return one(base).next(function(bc)
-                                    local commits = parse_log(rl.out)
-                                    if bc then commits[#commits + 1] = bc end
-                                    res.items = submodule.link(commits)
-                                    return res
+                                    return {
+                                        path = p, available = true, class = class, base = base,
+                                        ahead = tonumber(trim_ws(ra.out)) or 0,
+                                        behind = tonumber(trim_ws(rbh.out)) or 0,
+                                        new_commits = new_commits, old_commits = old_commits,
+                                        base_commit = bc,
+                                    }
                                 end)
                             end)
+                        end)
                     end)
                 end)
             end)

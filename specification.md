@@ -758,8 +758,15 @@ Endpoint     = Commit | "index" | "worktree"
   Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
   (§2; default `Visual`); `diff`, a sub-table of highlight groups for the
   commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,
-  `DiffDelete`, `Title`, `Comment`; §11.3); and `action`, the highlight for the
-  commit view's diff action label (default `Special`; §11.5); and `dim`, the
+  `DiffDelete`, `Title`, `Comment`; §11.3); `submodule`, a sub-table of highlight
+  groups for the submodule change view (§11.7): `new`, `old`, `base` — the added
+  (green), removed (red), and common-ancestor **marker** colours (defaults a
+  darker, muted green/red — `GitloomSubmoduleAdd` / `GitloomSubmoduleDel`, defined
+  with `default = true` so a colorscheme can override — and the first lane colour
+  `palette.tracks[1]`; foreground only, so only the graph markers/lanes are
+  tinted, not the commit rows); and `action`, the
+  highlight for the commit view's diff action label (default `Special`; §11.5);
+  and `dim`, the
   blend factor (`0`–`1`) toward the window background used to de-emphasise
   out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
   terminals without true colour, dimming falls back to a flat `NonText`
@@ -1237,9 +1244,10 @@ A commit that bumps a submodule pointer changes only an opaque value: the diff
 (§11.3) carries the change as a `160000`-mode hunk whose body is the old and new
 `Subproject commit <hash>` lines. Two hashes say *that* the submodule moved but
 nothing about *how*. When the submodule's history is available locally, gitloom
-replaces (or augments) that pair with a **small change graph** — the same
-graph model (§4, §5) applied to the submodule's own repository — visualizing the
-relationship between the old commit `A` and the new commit `B`.
+replaces (or augments) that pair with a **small two-sided change graph** — drawn
+from the submodule's own repository — visualizing the relationship between the
+old commit `A` and the new commit `B`: the commits the bump **added** (green),
+the commits it **removed** (red), and the **common ancestor** they descend to.
 
 This is a graph-viewer feature, not general submodule support: gitloom reads the
 already-checked-out submodule and **never fetches**. It is strictly read-only
@@ -1263,60 +1271,79 @@ commit is an expected, non-error state — the raw hashes remain, annotated
 #### 11.7.2 Classification — the relationship
 
 When the gate passes, the old/new pair is classified by their relationship in the
-submodule's DAG, computed from the **merge-base** of `A` and `B`:
+submodule's DAG, computed from the **merge-base** of `A` (old) and `B` (new):
 
-- **Fast-forward** (`A` is an ancestor of `B`) — the common case, a forward bump.
-  The graph shows the range `A..B` — the commits the bump brings in — condensed
-  (§11.7.3), labelled `+N` (N commits ahead).
-- **Rewind** (`B` is an ancestor of `A`) — the pointer moved backward. Same as
-  fast-forward over `B..A`, labelled `−N`.
-- **Diverged** (a merge-base exists but neither reaches the other) — there is no
-  single line between them. The graph is **glanceable only**: the fork-point
-  (the merge-base) and the two tips `A`/`B`, with the ahead/behind counts
-  (`+X / −Y`). The two divergent paths are **not** drawn — the point is to show
-  *that* and *where* they split, not to read either side commit-by-commit.
+- **Fast-forward** (`A` is an ancestor of `B`, so `base == A`) — a forward bump.
+- **Rewind** (`B` is an ancestor of `A`, so `base == B`) — the pointer moved
+  backward.
+- **Diverged** (a merge-base exists but neither reaches the other) — the two
+  pointers sit on branches that forked at the merge-base.
 - **Unrelated** (no merge-base — disjoint histories) — falls back to the raw
   hashes (§11.7.1), noting the histories are unrelated.
 
-Direction is intrinsic: `A` is always the old pointer and `B` the new, so a
-fast-forward and a rewind are distinguished by which one is the ancestor, not by
-any heuristic.
+The first three (**fast-forward, rewind, diverged**) share **one renderer**
+(§11.7.3): a two-sided change graph descending to the shared merge-base.
+Fast-forward and rewind are its degenerate cases — one side is empty because the
+merge-base *is* the old (resp. new) pointer. Only **unrelated** is special,
+falling back to the raw hashes. Direction is intrinsic: `A` is always the old
+pointer and `B` the new, so a fast-forward and a rewind are told apart by which
+one is the ancestor, never by a heuristic.
 
-#### 11.7.3 What is shown — bound, decorate, mark, truncate
+#### 11.7.3 What is shown — both sides, marked, evenly truncated
 
-For a fast-forward or rewind the change graph is the commits the bump moved
-through, run through the existing graph pipeline (§4, §5):
+When a merge-base exists the change graph draws **both first-parent lines** that
+meet at it as a small two-lane graph (a Y) descending to the shared ancestor:
 
-1. **Bound — first-parent.** The graph follows the moving tip's **first-parent**
-   line down to the fork point (`git log --first-parent base..tip`), and includes
-   the fork point itself as the bottom anchor. This is the same first-parent
-   focus the main graph uses (§10.7): a merge on this mainline stays a single node
-   (its subject still shown) but the **merged-in side branch is not pulled in** —
-   so the change graph never sprouts a lane that "comes from nowhere" because the
-   range boundary cut a side branch's root off. The full-merge traversal
-   (`base..tip` with every parent) is a possible later option (§11.7.5).
-2. **Decorate.** The commits carry the submodule repository's **own ref
-   decorations** (§6) where refs actually point — gathered the stable way (refs
-   *pointing at* a commit, via git's own `%d` decoration), **never** by walking
-   forward toward children (an unstable, child-derived direction). gitloom does
-   **not** guess a "current branch" for the range; meaningful tips appear only
-   because a ref genuinely lands on them.
-3. **Mark the pointers.** The **old** and **new** pointer commits (`A` and `B`)
-   are labelled in the graph, so it is clear which row the submodule moved *from*
-   and *to*. For a fast-forward the new pointer is the tip (top) and the old
-   pointer the bottom anchor; for a rewind they swap.
-4. **Truncate.** The commits are newest-first; when there are more than fit, only
-   the **newest** are kept — plus the bottom anchor (the old/new pointer at the
-   fork point, never elided) — with a "+K more" indicator for the commits dropped
-   between. The commits are *not* condensed: collapsing the linear stretches away
-   would hide the very commits the bump introduced; the point here is to show
-   them. The diverged case (§11.7.2) is inherently already minimal — the two tips
-   and the fork point only.
+1. **The new side** — `git log --first-parent base..B`, the commits the bump
+   **brings in**. Its markers/lane are the **added** colour
+   (`palette.submodule.new`, green by default); its top row is the **new pointer
+   `B`**, marked.
+2. **The old side** — `git log --first-parent base..A`, the commits the bump
+   **rolls back**. Its markers/lane are the **removed** colour
+   (`palette.submodule.old`, red by default); its top row is the **old pointer
+   `A`**, marked.
+3. **The common ancestor** — the merge-base, a single shared node at the bottom
+   where the two lines converge, in the **ancestor** colour
+   (`palette.submodule.base`, the first lane colour — `palette.tracks[1]` — by
+   default).
+
+The **graph markers/lanes** and the commit **hash** carry these colours
+(foreground only); the commit **subject** stays in the view's neutral colour, so
+the message reads normally rather than tinted like a diff.
+
+Each side is **first-parent**, so it is a linear line: a merge on it stays one
+node and its merged-in side branch is not pulled in (the same first-parent focus
+the main graph uses, §10.7 — no lane that "comes from nowhere" because the range
+boundary cut a side branch off). The full-merge traversal (`base..tip` with every
+parent) is a possible later option (§11.7.5).
+
+The commits carry the submodule repository's **own ref decorations** (§6) where
+refs actually point — gathered the stable way (refs *pointing at* a commit, via
+git's own `%d` decoration), **never** by walking forward toward children. gitloom
+does **not** guess a "current branch" for either side; a label appears only
+because a ref genuinely lands on that commit.
+
+**Mark the pointers.** `B` is the top of the new (green) side and `A` the top of
+the old (red) side; both are labelled so it is clear which row the submodule moved
+*from* and *to*. In the degenerate cases one side is empty and its pointer
+coincides with the ancestor: a **fast-forward** marks the ancestor row as the
+**old** pointer (the new side carries the bump's commits up to `B`); a **rewind**
+marks it as the **new** pointer.
+
+**Even truncation.** The graph is bounded by a fixed height (`SUBMODULE_MAX`).
+One row is reserved for the shared ancestor; the remaining budget is split
+**evenly** between the two sides. Each side is truncated **newest-first**, so its
+pointer head is always kept, with a "+K more" marker for the commits elided
+between the kept newest and the ancestor. When **one side is empty** (a
+fast-forward or rewind) the other side takes the **whole** budget; likewise any
+share a short side does not use **spills** to the other. The commits are shown in
+full (not condensed): collapsing the linear stretches would hide the very commits
+the bump moved through, which is the point.
 
 The **detail level** of a kept commit — topology-only (graph + ref labels, like
 the panes) versus showing the subject — is an open point expected to iterate
-(§11.7.5); the structure above (gate, classification, bound/decorate/mark/
-truncate) is the stable contract.
+(§11.7.5); the structure above (gate, classification, both-sides / mark /
+even-truncate) is the stable contract.
 
 #### 11.7.4 Fetching and rendering
 
@@ -1330,10 +1357,10 @@ bumping several submodules gets one change graph per submodule.
 
 #### 11.7.5 Open points
 
-- **Detail level** (§11.7.3): the fast-forward / rewind range currently shows the
-  first-parent lane graph with per-commit subjects; a topology-only or condensed
-  rendering (collapsing the linear stretches between junctions) is a likely
-  configurable refinement, defaulting conservatively.
+- **Detail level** (§11.7.3): the change graph currently shows both first-parent
+  sides with per-commit subjects; a topology-only or condensed rendering
+  (collapsing the linear stretches between junctions) is a likely configurable
+  refinement, defaulting conservatively.
 - **Full-merge traversal** (§11.7.3): an option to walk *all* parents
   (`base..tip` instead of `--first-parent`) so merged-in side branches show — at
   the cost of lanes that dangle where the range boundary cuts a side branch off.

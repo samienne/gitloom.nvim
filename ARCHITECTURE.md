@@ -283,7 +283,7 @@ lua/gitloom/
     pane.lua        Context-pane layout core (§6.2)
     color.lua       OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua    Reusable virtualized list widget (snacks.win)
-  submodule.lua   Submodule change classification + linking (§11.7)
+  submodule.lua   Submodule change classification + budget/truncate (§11.7)
 ```
 
 - **init.lua** — registers the `:GitloomGraph` user command (bound directly to
@@ -922,12 +922,13 @@ in graph.lua.
 - `classify(old, new, base)` maps the merge-base `base` to the relationship:
   `base == old` → `ff` (forward bump), `base == new` → `rewind`, a `base` but
   neither → `diverged`, no `base` → `unrelated`.
-- `link(commits)` resolves a flat, newest-first commit list (parents as hash
-  strings) into layout-ready `{ type = "commit", commit }` OrderItems: it
-  resolves in-list parent hashes to their Commit objects, sets child back-links,
-  and drops out-of-list parents so the cone's boundary commits read as roots.
-  The result feeds `columns.layout` unchanged (the same Phase 1 the main graph
-  uses), so the mini-graph is the real lane layout, not a bespoke renderer.
+- `split_budget(max, n_new, n_old)` distributes the bounded height (`max`, one row
+  reserved for the shared ancestor) **evenly** between the two sides, **spilling**
+  any unused share (a short or empty side) to the other — so a fast-forward/rewind
+  (one empty side) hands the whole budget to the side that changed (§11.7.3).
+- `truncate(commits, keep)` keeps the newest `keep` of a newest-first list and
+  reports how many were dropped, so the pointer head is always shown with a
+  "+K more" marker for the elided middle.
 
 graph.lua glue (gated, async — never fetches; §11.7.1/§11.7.4):
 
@@ -936,23 +937,27 @@ graph.lua glue (gated, async — never fetches; §11.7.1/§11.7.4):
   checkout fails the query rather than throwing on an invalid `cwd`).
 - `fetch_submodule_graph(opts, change)` chains the gated queries — presence
   (`cat-file -e <hash>^{commit}` for both), `merge-base`, `rev-list --count` for
-  ahead/behind, and a `log --first-parent base..tip` (ff/rewind) or one-line
-  `log` of each endpoint (diverged) — and resolves a structured result
-  (`available`/`reason`, `class`, `ahead`/`behind`, the linked `items` or the
-  endpoint commits). For ff/rewind the fork-point commit is fetched and appended
-  as the bottom anchor, so the old/new pointer there is shown. The log format
-  matches `parse_commit_line` with a trailing `%d` decoration field; `--first-
-  parent` keeps a mainline merge a single node and avoids dragging a merged-in
-  side branch in (no lane dangling at the range boundary — the §10.7 focus).
-- The render builds the change block: a header line (`+N` / `−N` /
-  `diverged +X / −Y`), then for ff/rewind the first-parent commits laid out by
-  `columns.layout` and drawn by `get_column_chars` (the same glyph gutter as the
-  footer pane), with the **old/new pointer rows tagged** (`◀ new` / `◀ old`) and
-  the list capped via `pane.cap` (newest rows plus the always-kept fork-point
-  anchor) with a "+K more" note for the commits elided between (shown in full,
-  not condensed — see specification.md §11.7.3); for diverged a glanceable
-  endpoint summary (the two tips and the merge-base, no paths drawn); for
-  unavailable the raw two hashes plus a dim reason. The commit view fetches the
+  ahead/behind, and **two** `log --first-parent base..tip` runs (one for
+  `base..new`, one for `base..old`) plus the merge-base commit — and resolves a
+  structured result (`available`/`reason`, `class`, `ahead`/`behind`, the
+  `new_commits`/`old_commits` lists, and `base_commit`). The log format matches
+  `parse_commit_line` with a trailing `%d` decoration field; `--first-parent`
+  keeps a mainline merge a single node and avoids dragging a merged-in side branch
+  in (no lane dangling at the range boundary — the §10.7 focus).
+- The render (`submodule_block`) builds the change block: a header line (`+N` /
+  `−N` / `diverged +X / −Y`), then a **hand-drawn two-lane Y** — because each
+  side is a *linear* first-parent line, the topology is fixed, and the lanes carry
+  *semantic* colour (added/removed/ancestor) rather than the free-list lane
+  palette, so the dedicated renderer is simpler and more robust than the main
+  `columns.layout` engine. The **new side** (green, `palette.submodule.new`)
+  descends from the new pointer `B`; the **old side** (red,
+  `palette.submodule.old`) from the old pointer `A`; both converge at the shared
+  **ancestor** node (`palette.submodule.base`, the first lane colour). The pointer
+  rows are tagged (`◀ new` / `◀ old`), each side is truncated via `split_budget` +
+  `truncate` with a "+K more" note for the elided middle (shown in full, not
+  condensed — §11.7.3), and a fast-forward/rewind degenerates to a single side
+  with the ancestor marked as the coinciding pointer; an unavailable submodule
+  shows the raw two hashes plus a dim reason. The commit view fetches the
   submodule graphs after the patch renders and re-renders in place once they
   resolve (progressive enhancement — the diff never blocks on a slow submodule).
 

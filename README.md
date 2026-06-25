@@ -214,12 +214,16 @@ scrolled off — so you never lose track of where you are.
 
 When a commit **bumps a submodule**, the diff would normally show just the old
 and new `Subproject commit` hashes. If that submodule is checked out and both
-commits are present locally, gitloom replaces the pair with a **small change
-graph** of the submodule's own history — the commits the bump brought in (`+N`)
-or rolled back (`−N`), or, when the two pointers have diverged, a glanceable
-summary of the fork point and how far each side is ahead/behind. gitloom never
-fetches for this: if the submodule isn't checked out or the commits aren't
-present, it falls back to the plain hashes with a short reason.
+commits are present locally, gitloom replaces the pair with a **small two-sided
+change graph** of the submodule's own history: the commits the bump **added**
+(green) above the new pointer, the commits it **removed** (red) above the old
+pointer, both descending to their **common ancestor** at the bottom. The old and
+new heads are marked, and the graph is truncated to a fixed height with the
+budget split evenly between the two sides (`+K more` where commits are elided). A
+fast-forward or rewind is just the degenerate case where one side is empty, so
+the whole budget goes to the side that changed. gitloom never fetches for this:
+if the submodule isn't checked out, the commits aren't present, or the two
+histories are unrelated, it falls back to the plain hashes with a short reason.
 
 The first line of the commit view is an **action label** (`▶ Open diff
 (diffview)`) and the cursor parks on it when the view opens, so `<CR>` then
@@ -274,6 +278,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
+        -- submodule change view (§11.7): added / removed / common-ancestor marker
+        -- colours (foreground only; darker muted green/red by default). base = nil
+        -- means "use lane 1's colour" (tracks[1]).
+        submodule = { new = "GitloomSubmoduleAdd", old = "GitloomSubmoduleDel", base = nil },
 
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },
     },
