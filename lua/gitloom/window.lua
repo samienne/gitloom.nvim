@@ -1157,9 +1157,16 @@ function M.open(folder, opts)
     -- Recomputes the pivot's cone + re-marks track activeness (§12). Assigned
     -- after the listview opens; forward-declared for the key handlers.
     local update_cone = function() end
-    -- Rebuilds the context panes (§6.2) for the current viewport. Assigned after
-    -- the listview opens; forward-declared so reflow/scroll can trigger it.
+    -- Rebuilds the context panes (§6.2) for the current viewport, asynchronously
+    -- (chunked + cancellable). Assigned after the listview opens; forward-declared
+    -- so reflow/scroll can trigger it. Forced callers (reflow / toggles) use this
+    -- directly; the scroll/cursor debounce uses the gated `maybe_update_panes`.
     local update_panes = function() end
+    -- Rebuilds the panes only when the viewport has actually scrolled. The panes
+    -- show the topology *outside* the window, so a cursor move that doesn't scroll
+    -- leaves them unchanged — this keeps the (chunked) pane walk off the common
+    -- navigation path entirely. Assigned in the window block. §6.2.
+    local maybe_update_panes = function() end
     -- Pane debug state (the seam buffer line + height; or, when nothing showed,
     -- why), surfaced in the footer status when lane ids are on (`i`). Set by
     -- update_panes — one set per pane (footer below, header above).
@@ -1870,7 +1877,7 @@ function M.open(folder, opts)
         if lv and lv.controller then lv.controller.refresh() end
         place_cursor()
         update_footer()
-        update_panes()
+        maybe_update_panes()
     end
     -- V: start selection on the row's commit (a normal commit or a collapsed head;
     -- a packed marker line is not a start point in v1). anchor = cursor = it.
@@ -2704,6 +2711,14 @@ function M.open(folder, opts)
             view_state.cone = mark_reachable(repo.display, cur, top, bottom)
         end
 
+        -- Async-pane-build state (assigned/used by update_panes, below). `pane_gen`
+        -- is the cancellation token: bumping it abandons any in-flight chunked
+        -- build (so a scroll mid-calculation drops the stale panes). `pane_topline`
+        -- is the scroll position the panes were last built for, the gate for
+        -- `maybe_update_panes`. Declared here so the scroll autocmd can cancel.
+        local pane_gen = 0
+        local pane_topline = nil
+
         -- Recomputing the cone and redrawing on *every* CursorMoved makes held
         -- j/k feel sluggish on large graphs, so debounce it: each move re-arms a
         -- short timer and only the last one — once the cursor settles — does the
@@ -2723,7 +2738,7 @@ function M.open(folder, opts)
                 applying = true
                 if lv and lv.controller then lv.controller.refresh() end
                 applying = false
-                update_panes()
+                maybe_update_panes()
                 if pending then pending = false; schedule_cone_update() end
             end, CONE_DEBOUNCE_MS)
         end
@@ -2926,6 +2941,10 @@ function M.open(folder, opts)
             callback = function()
                 if not vim.api.nvim_win_is_valid(win) then return end
                 if applying then pending = true; return end -- replayed after the refresh
+                -- The view actually moved: abandon any in-flight pane build (its
+                -- seam is now stale) at once; the debounced pass below starts a
+                -- fresh one once scrolling settles.
+                pane_gen = pane_gen + 1
                 schedule_cone_update()
             end,
         })
@@ -2937,7 +2956,9 @@ function M.open(folder, opts)
         -- compaction of the already-laid-out projection slice above the cutoff
         -- (`pane.header`): linear runs drop, junctions go node-less, heads become ◍,
         -- pinned anchors keep a labelled row. Both seed/match the seam so lanes meet
-        -- the main view. (Sizing hysteresis and the async rebuild are still to come.)
+        -- the main view. The rebuild is async — chunked across event-loop ticks and
+        -- cancellable (see update_panes/drive_panes) — and scroll-gated, so a deep
+        -- history walk never blocks navigation.
         local pane = require("gitloom.graph.pane")
         local pane_ns = vim.api.nvim_create_namespace("gitloom_pane")
         -- Debug overlay (toggled with `i`): a full-line highlight on the buffer line the
@@ -2959,6 +2980,20 @@ function M.open(folder, opts)
         local footer = { win = nil, buf = nil }
         local header = { win = nil, buf = nil }
         local last_pane_err -- throttle repeated pane-error notifications
+        -- Cached repo.order index (hash → position) for the footer's "below the
+        -- cutoff" tests. repo.order only grows while streaming and is stable after,
+        -- so rebuild it only when its length changes rather than on every build.
+        ---@type table<string, integer>
+        local pane_idx = {}
+        local pane_idx_n = nil
+        ---@return table<string, integer>
+        local function order_idx()
+            if pane_idx_n ~= #repo.order then
+                pane_idx, pane_idx_n = {}, #repo.order
+                for i, it in ipairs(repo.order) do pane_idx[it.commit.hash] = i end
+            end
+            return pane_idx
+        end
         -- Window-local scrolloff (opts.scrolloff, default 10; §8). Set explicitly so
         -- the graph window doesn't inherit the global value, which interacts badly
         -- with the context-pane overlays (§6.2). Set opts.scrolloff = 0 to restore
@@ -3190,6 +3225,13 @@ function M.open(folder, opts)
 
         -- The pane build, wrapped so any error is fully contained — it runs inside
         -- the scroll/cone path, and must never break the main view's scrolling.
+        -- The pane build. Runs as a coroutine body driven by `update_panes`, so it
+        -- yields (`py`) periodically to keep its O(N) passes and the heavy
+        -- first-parent walks off a single event-loop tick, and an in-flight build is
+        -- abandoned by bumping `pane_gen` when the view moves. All editor-state
+        -- *mutation* (the overlay windows + buffers) happens in the no-yield tail,
+        -- so an abandoned build leaves the previous panes intact. `coroutine.yield`
+        -- is valid because the driver always resumes this inside a coroutine.
         local function build_panes()
             if opts.panes == false then return hide_all("off") end
             if not vim.api.nvim_win_is_valid(win) then return end
@@ -3197,10 +3239,16 @@ function M.open(folder, opts)
             if not (repo.head and repo.refs[repo.head]) then return hide_all("no HEAD") end
             if not repo.display or #repo.display == 0 then return hide_all("no display") end
 
+            -- `py` yields to the driver every YIELD_EVERY units so build_panes' own
+            -- O(N) index passes don't block; pane.continue/continue_up self-chunk via
+            -- the raw `coroutine.yield` hook passed to them.
+            local YIELD_EVERY = 2048
+            local _yn = 0
+            local function py() _yn = _yn + 1; if _yn % YIELD_EVERY == 0 then coroutine.yield() end end
+
             local pinned = effective_pinned()
-            -- repo.order index per commit hash, for "below the cutoff" tests (footer).
-            local idx = {}
-            for i, it in ipairs(repo.order) do idx[it.commit.hash] = i end
+            -- repo.order index per commit hash, for "below the cutoff" tests (cached).
+            local idx = order_idx()
             local function item_order(item)
                 local c = item and item.commit
                 if c then return idx[(c.tip and c.tip.hash) or c.hash] end
@@ -3210,6 +3258,7 @@ function M.open(folder, opts)
             -- repo.display index per commit hash, for "above the cutoff" (header).
             local didx = {}
             for i, it in ipairs(repo.display) do
+                py()
                 local c = it.commit
                 if c then didx[(c.tip and c.tip.hash) or c.hash] = i end
                 for _, m in ipairs(it.markers or {}) do didx[(m.tip and m.tip.hash) or m.hash] = i end
@@ -3224,6 +3273,7 @@ function M.open(folder, opts)
             -- position in the graph) so the header can order forks to match the graph.
             local dnode, lane_main, node_col = {}, {}, {}
             for _, it in ipairs(repo.display) do
+                py()
                 local pl = it.parent_lanes
                 local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color }
                 local hcol = {} -- this row's rendered nodes → their column
@@ -3337,7 +3387,8 @@ function M.open(folder, opts)
                         end
                     end
                 end
-                local cond = pane.continue(boundary, pinned, extra, function(n) return idx[n.hash] end)
+                local cond = pane.continue(boundary, pinned, extra,
+                    function(n) return idx[n.hash] end, coroutine.yield)
                 if #cond.items == 0 then return nil, "empty graph@" .. target end
                 local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
                 return res.rows, tag
@@ -3368,7 +3419,7 @@ function M.open(folder, opts)
                     local dn = ref and ref.commit and dnode[ref.commit.hash]
                     if dn and (order_of(dn) or math.huge) < seam.idx then tips[#tips + 1] = dn end
                 end
-                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx)
+                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx, coroutine.yield)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
                 local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
@@ -3381,7 +3432,8 @@ function M.open(folder, opts)
             -- SAME build so the overlay height and the boundary line up.
             local function converge_footer()
                 local R, rows, seam_tag = 0, nil, nil
-                for _ = 1, PANE_MAX do
+                for i = 1, PANE_MAX do
+                    if i > 1 then py() end -- yield between sizing passes (each re-walks)
                     local r, tag = build_footer(seam_for(R + 1))
                     if not r then return nil, tag end
                     rows, seam_tag = r, tag
@@ -3423,7 +3475,9 @@ function M.open(folder, opts)
                     return (start and start > 1 and (start - 1)) or (sidx - 1)
                 end
                 -- Clamp the guess to the cap so the loop always runs at least once.
+                local _hi = 0
                 for cover = math.min(math.max(2, P + 1), HEADER_MAX), HEADER_MAX do
+                    _hi = _hi + 1; if _hi > 1 then py() end -- yield between sizing passes
                     local r, tag, actual, si = build_header(cover)
                     if not r then return nil, tag end
                     rows, seam_tag, height, sidx = r, tag, actual, si
@@ -3438,6 +3492,14 @@ function M.open(folder, opts)
                 return kept, seam_tag, height, ovf, ovf_names, clipped_lines()
             end
 
+            -- COMPUTE both panes first (the heavy, yielding part). Do this before
+            -- any editor-state mutation so a build abandoned mid-walk (the view
+            -- scrolled — `pane_gen` bumped) leaves BOTH previous overlays intact,
+            -- never a new footer beside a stale header.
+            local frows, ftag = converge_footer()
+            local hrows, htag, H, ovf, ovf_names, hclipped = converge_header()
+
+            -- ===== no-yield tail: all editor-state mutation happens below =====
             -- Offsets of the main graph column so the pane lanes line up: `goff` =
             -- its left edge (date+author width), `foff` = the message edge (the
             -- graph's right side under mirror). The columns are sticky-aligned, so
@@ -3453,7 +3515,6 @@ function M.open(folder, opts)
             end
 
             -- FOOTER (off-screen-older topology, below).
-            local frows, ftag = converge_footer()
             if not frows or #frows == 0 then
                 footer_dbg = ftag or "no rows"; close_pane(footer); footer_seam, footer_height = nil, nil
             else
@@ -3466,7 +3527,6 @@ function M.open(folder, opts)
             -- HEADER (off-screen-newer topology, above). The overlay is exactly `H`
             -- tall (the height the seam was sized at), padded at the bottom so the
             -- seam butts the main view's top edge.
-            local hrows, htag, H, ovf, ovf_names, hclipped = converge_header()
             if not hrows or #hrows == 0 then
                 header_dbg = htag or "no rows"; close_pane(header); header_seam, header_height = nil, nil
             else
@@ -3583,8 +3643,18 @@ function M.open(folder, opts)
             update_footer() -- refresh the debug readout (cutoff lines) if `i` is on
         end
 
-        update_panes = function()
-            local ok, err = pcall(build_panes)
+        -- Drive a chunked pane-build coroutine: resume it for one chunk, and if it
+        -- yielded (more work to do) reschedule the next chunk on the event loop.
+        -- `gen` is captured at scheduling time; a newer build or a scroll bumps
+        -- `pane_gen` and this driver abandons the stale coroutine — checked both
+        -- before resuming (so no stale work runs) and after (so a result computed
+        -- against a now-moved viewport is dropped before it renders). `coroutine.resume`
+        -- contains any error in the build (returns false), so a broken build never
+        -- wedges the main view — the same guarantee the old pcall gave.
+        local function drive_panes(co, gen)
+            if gen ~= pane_gen or not vim.api.nvim_win_is_valid(win) then return end
+            local ok, err = coroutine.resume(co)
+            if gen ~= pane_gen then return end -- superseded mid-resume; drop the result
             if not ok then
                 close_panes() -- on any pane error, hide rather than leave a bad state
                 err = tostring(err)
@@ -3592,7 +3662,32 @@ function M.open(folder, opts)
                     last_pane_err = err
                     vim.notify("gitloom pane error: " .. err, vim.log.levels.WARN)
                 end
+                return
             end
+            if coroutine.status(co) ~= "dead" then
+                vim.schedule(function() drive_panes(co, gen) end)
+            end
+        end
+
+        -- Start an async pane rebuild for the current viewport, superseding any
+        -- in-flight one. The first chunk runs synchronously, so small panes (the
+        -- common case) still complete in this tick with no visible delay; only a
+        -- long history-walk spills onto later ticks.
+        update_panes = function()
+            if not vim.api.nvim_win_is_valid(win) then return end
+            -- Record the scroll this build targets so maybe_update_panes can skip a
+            -- rebuild while the view only moves the cursor.
+            pane_topline = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            pane_gen = pane_gen + 1
+            drive_panes(coroutine.create(build_panes), pane_gen)
+        end
+
+        -- Gated entry for the cursor/scroll debounce: rebuild only when the scroll
+        -- position changed (the panes are independent of the cursor row).
+        maybe_update_panes = function()
+            if not vim.api.nvim_win_is_valid(win) then return end
+            local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            if top ~= pane_topline then update_panes() end
         end
 
         -- (The cursor is kept away from the window edges by the window-local

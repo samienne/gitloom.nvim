@@ -281,10 +281,13 @@ Coverage:
   fork/merge junctions, roots/tips and anchor-ref heads kept, linear pass-throughs
   spliced into edges, edges re-pointed across them, spliced hashes mapped to the
   next kept node toward the root/tip, the anchor-ref filter, false junctions
-  spliced, root rendered as a real node), and `continue` (follow the active seam
+  spliced, root rendered as a real node), `continue` (follow the active seam
   lanes' first-parent chains to a root: both lanes converge at their meeting
   junction and reach the root, every node's chain terminates at a root — never cut
-  off — and no non-active branch is introduced)
+  off — and no non-active branch is introduced), and the **chunking hook** (the
+  async pane build, §6.2): a deep first-parent chain invokes `continue`/
+  `continue_up`/`condense`'s optional `yield`, and the chunked output is identical
+  to the synchronous (no-yield) path
 - `tests/header_replay_spec.lua` + `tests/large_topo.lua` — the header replayed end
   to end over a **large real-world repository's full (`--all`) topology** (anonymised to
   synthetic ids — topology only, no hashes/names/messages), driven through the **full
@@ -556,9 +559,20 @@ Details not covered by the spec or architecture:
   capping over-tall headers with `+N above`, and **hides the header at the top**
   (`w0` display index ≤ 1). HEAD plus `master`/`main`/`dev` are pinned by default
   (`effective_pinned`, so they get their own labelled lines); `P` toggles others.
-  Full cross-level head packing (all unpinned heads on ONE row, vs. today's
-  consecutive packing) and moving the rebuild off the cone-debounce are pending.
-  listview.lua is a git-agnostic reusable widget.
+  The rebuild is **async and cancellable**: `update_panes` runs `build_panes` as a
+  coroutine driven across event-loop ticks (`drive_panes`); `pane.continue`/
+  `pane.continue_up`/`pane.condense` take an optional `yield` hook they call every
+  `YIELD_EVERY` steps, so the deep first-parent walks (and the O(N) index passes,
+  via `py`) are chunked and never block a keypress. A scroll (or a newer build)
+  bumps `pane_gen` to abandon the in-flight coroutine; both panes are computed
+  before any overlay mutation (a no-yield tail), so a cancelled build leaves the
+  previous panes intact. The rebuild is also **scroll-gated**: the cursor/scroll
+  debounce calls `maybe_update_panes`, which rebuilds only when `line("w0")`
+  changed (the panes are independent of the cursor row); forced callers (reflow /
+  `M`/`B`/`F`/… toggles) call `update_panes` directly. The repo.order hash→index
+  map is cached (`order_idx`), rebuilt only when the order length changes. Full
+  cross-level head packing (all unpinned heads on ONE row, vs. today's consecutive
+  packing) is pending. listview.lua is a git-agnostic reusable widget.
 - **`graph._internal`** exists solely for tests (pure parsers + the
   `build_graph`/`get_column_chars` seam). Do not route production code through it.
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua

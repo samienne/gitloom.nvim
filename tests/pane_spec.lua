@@ -1549,3 +1549,50 @@ describe("pane.header — fuzz invariants (§6.2)", function()
         end
     end)
 end)
+
+describe("pane.continue / condense — chunking hook (async pane build, §6.2)", function()
+    -- A long linear first-parent chain c1 (tip) -> ... -> cN (root), with one
+    -- boundary lane entering at the tip. Deep enough to cross the internal
+    -- YIELD_EVERY threshold several times so the yield hook is exercised.
+    local DEPTH = 6000
+    local function deep_chain()
+        local spec = {}
+        for i = 1, DEPTH - 1 do spec[i] = { "c" .. i, { "c" .. (i + 1) } } end
+        spec[DEPTH] = { "c" .. DEPTH, {} }
+        local items = h.dag(spec)
+        local map = {}
+        for _, it in ipairs(items) do map[it.commit.hash] = it.commit end
+        return map
+    end
+    local function boundary(map)
+        return { [1] = { id = 1, color = 1, parent = map.c1, begin = map.c1 } }
+    end
+    local function hashes(cond)
+        local hs = {}
+        for _, it in ipairs(cond.items) do hs[#hs + 1] = it.commit.hash end
+        table.sort(hs)
+        return hs
+    end
+
+    it("invokes the yield hook on a deep walk", function()
+        local map = deep_chain()
+        local ticks = 0
+        pane.continue(boundary(map), nil, nil, nil, function() ticks = ticks + 1 end)
+        assert.is_true(ticks > 0, "yield hook was never called on a deep chain")
+    end)
+
+    it("produces output identical to the synchronous (no-yield) path", function()
+        local map = deep_chain()
+        local sync = pane.continue(boundary(map))
+        local async = pane.continue(boundary(map), nil, nil, nil, function() end)
+        assert.same(hashes(sync), hashes(async)) -- same kept nodes
+        -- Same hash → node mapping for every member hash.
+        local sn, an = 0, 0
+        for _ in pairs(sync.node_of_hash) do sn = sn + 1 end
+        for _ in pairs(async.node_of_hash) do an = an + 1 end
+        assert.equals(sn, an)
+        for hsh, node in pairs(sync.node_of_hash) do
+            assert.equals(node.hash, async.node_of_hash[hsh].hash)
+        end
+    end)
+end)
