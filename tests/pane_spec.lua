@@ -464,6 +464,62 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert.same({}, header_grid_errors(opts, res.rows))
     end)
 
+    it("never shows working-tree virtual commits — the highest head is the topmost real commit (§4.2/§6.2)", function()
+        -- u (untracked) -> s (staged) -> HEAD stack above HEAD, then real commits.
+        -- The cutoff is at c1, so the virtual stack and HEAD are all above the seam.
+        -- The header must stop at HEAD (the topmost REAL commit) and never draw the
+        -- virtual nodes u/s — they are the live state, not topology.
+        local items = h.dag({
+            { "u", { "s" } },
+            { "s", { "H" } },
+            { "H", { "c1" } },
+            { "c1", { "c2" } },
+            { "c2", {} },
+        })
+        items[1].commit.virtual = "untracked"
+        items[2].commit.virtual = "staged"
+        items[3].commit.refs = { { name = "HEAD" } }
+        local opts = h.big_opts()
+        local res, boundary, cond = header_of(items, opts, 4, { HEAD = true }) -- seam at c1
+        local present = {}
+        for _, it in ipairs(cond.items) do present[it.commit.hash] = true end
+        assert.is_nil(present.u, "the untracked virtual commit must not appear in the header")
+        assert.is_nil(present.s, "the staged virtual commit must not appear in the header")
+        assert.is_nil(cond.node_of_hash.u)
+        assert.is_nil(cond.node_of_hash.s)
+        assert.is_true(present.H, "HEAD (the topmost real commit) must be the highest head")
+        -- And nothing virtual leaks into the rendered rows either.
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns or {}) do
+                if cell.has_commit and cell.commit then
+                    assert.is_true(cell.commit.hash ~= "u" and cell.commit.hash ~= "s",
+                        "a virtual node was rendered: " .. tostring(cell.commit.hash))
+                end
+            end
+        end
+        assert_seam_match(res.rows, boundary)
+        assert_continuous(res.rows)
+        assert.same({}, header_grid_errors(opts, res.rows))
+    end)
+
+    it("hides the header when the only off-screen-newer content is virtual (§4.2/§6.2)", function()
+        -- Viewport top is HEAD; only the virtual stack (u, s) sits above the seam.
+        -- With virtual commits excluded there is no real topology to show, so the
+        -- focused rebuild is empty (the window glue then renders no header).
+        local items = h.dag({
+            { "u", { "s" } },
+            { "s", { "H" } },
+            { "H", { "c1" } },
+            { "c1", {} },
+        })
+        items[1].commit.virtual = "untracked"
+        items[2].commit.virtual = "staged"
+        items[3].commit.refs = { { name = "HEAD" } }
+        local opts = h.big_opts()
+        local _, _, cond = header_of(items, opts, 3, { HEAD = true }) -- seam at H; only u,s above
+        assert.equals(0, #cond.items, "a virtual-only off-screen region yields no header")
+    end)
+
     it("terminates an isolated crossing lane at the seam — its unrelated forks are pruned", function()
         -- Two real branches feat/topic fork from m1; the cutoff is BELOW m1 (at base),
         -- so only the merged trunk crosses as a SINGLE lane. With nothing pinned, that

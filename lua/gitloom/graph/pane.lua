@@ -530,7 +530,12 @@ end
 function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     local step = chunker(yield)
     local function above(n)
-        local i = n and order_of and order_of(n)
+        -- Working-tree virtual commits (§4.2) are the live state, not topology, so
+        -- they never appear in a context pane (§6.2): treat a virtual node as
+        -- not-above so the up-walk stops before it and the header's highest head is
+        -- the topmost REAL commit (typically HEAD).
+        if not n or n.virtual then return false end
+        local i = order_of and order_of(n)
         return i ~= nil and i < seam_idx
     end
     local function pos_of(n) return (order_of and order_of(n)) or 0 end
@@ -542,7 +547,9 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     local seeds = {}
     local seed_floor = {} -- hash → true
     for col, lane in pairs(boundary) do
-        if lane.begin then
+        -- Skip a crossing lane that begins on a virtual commit (§4.2): its only
+        -- above-seam content is the live working-tree state, which the header omits.
+        if lane.begin and not lane.begin.virtual then
             seeds[#seeds + 1] = { id = "c" .. tostring(col), node = lane.begin }
             seed_floor[lane.begin.hash] = true
         end
