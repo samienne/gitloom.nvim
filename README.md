@@ -88,9 +88,29 @@ suite. With lazy.nvim:
 
 ```vim
 :GitloomGraph
+:GitloomGraph path/to/submodule
+:GitloomPick
 ```
 
-Opens the graph for the repository at Neovim's current working directory.
+Opens the graph for the repository at Neovim's current working directory. With
+an optional path argument it opens the graph for that repository instead — a
+submodule of the current repo, or any other repo root (the path is resolved to
+its git top level). View state (cursor position, ref-picker history) is
+remembered per repository for the session.
+
+`:GitloomPick` opens a picker listing the **main module** and its **direct
+submodules**; choosing one opens the graph for that repository. The picker
+opens immediately and fills each entry's current branch and commit summary as
+git resolves it; a submodule that is not checked out is shown disabled.
+
+`setup()` binds the picker to **`<leader>wG`** by default. Remap or disable it
+with the `pick_key` option:
+
+```lua
+require("gitloom").setup({
+  pick_key = "<leader>gp", -- a string to remap, or false to disable
+})
+```
 
 | Key | Action |
 |-----|--------|
@@ -266,7 +286,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- (0–1) gives a proportional size; a number > 1 is absolute columns/rows.
         width = function() return math.max(vim.o.columns - 4, 1) end,
         height = function() return math.max(vim.o.lines - 4, 1) end,
-        title = "GraphView",
+        -- title defaults to the repository name + current branch (§2.1); set
+        -- win.title here to pin your own.
         footer = "(status + key hints)",
     },
     palette = {
@@ -377,6 +398,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   Set explicitly so the windows don't inherit your global value. A non-zero value
   interacts with the context-pane overlays (§6.2); set `0` to restore the prior
   always-zero behaviour if the panes' scrolling misbehaves.
+- **`pick_key`** — the normal-mode mapping `setup()` installs for the repository
+  picker (`:GitloomPick`, §2.1; default `<leader>wG`). Set to a string to remap,
+  or `false` to install no mapping. A setup-level option, not a graph option.
 
 > **Note:** `require("gitloom").setup(opts)` stores config and `:GitloomGraph`
 > now forwards it to the graph (merged over the defaults above, read at invocation

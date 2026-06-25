@@ -2,7 +2,9 @@
 --- stream, the resync's bounded fetch, the rev-list sort orders, the working-tree
 --- state/diffs, the on-demand commit detail/diff/range patches, and the submodule
 --- change graph. Each returns a `Future` (util.make_future) over `vim.fn.jobstart`
---- run in Neovim's cwd. The one Neovim-coupled corner of gitloom.git; everything
+--- run in the **active repository root** (`M.set_cwd`, spec §2.1 — defaulting to
+--- Neovim's cwd until a graph sets it), so the graph can target a submodule or
+--- the main module. The one Neovim-coupled corner of gitloom.git; everything
 --- else in the library is pure. Parsing/model construction is delegated to the
 --- pure submodules.
 
@@ -24,6 +26,30 @@ local classify_ref = refs.classify_ref
 local EMPTY_TREE = range.EMPTY_TREE
 
 local M = {}
+
+-- The active **repository root** every git query runs in (spec §2.1). Setting it
+-- lets the graph target a submodule or the main module instead of implicitly
+-- following Neovim's cwd. `nil` (the default until a graph sets it) means "run
+-- in Neovim's cwd", preserving the original behaviour. The graph sets this via
+-- M.set_cwd when it opens; the window keys its per-session view state by the
+-- same root.
+local active_cwd = nil
+
+--- Set the repository root all subsequent git queries run in (spec §2.1). Pass
+--- `nil` to fall back to Neovim's cwd.
+---@param path string?
+function M.set_cwd(path)
+    active_cwd = path
+end
+
+-- jobstart wrapper that pins every git job to the active repository root, so a
+-- single setter retargets the whole I/O layer. Drop-in for `vim.fn.jobstart`:
+-- it only fills in `cwd` (when unset). When `active_cwd` is nil the field stays
+-- nil and jobstart observes Neovim's cwd, as before.
+local function js(cmd, o)
+    o.cwd = o.cwd or active_cwd
+    return vim.fn.jobstart(cmd, o)
+end
 
 -- The `%x1f`-delimited `git log` pretty-format shared by the initial stream and
 -- the resync's bounded fetch: %H %P %an %at %ai %ct %s (author epoch + iso feed
@@ -57,7 +83,7 @@ local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s%x1f%d"
 function M.fetch_refs(repo)
     local future, promise = make_future()
 
-    vim.fn.jobstart(
+    js(
         { "git", "for-each-ref", "--format=%(objectname) %(refname) %(*objectname)",
             "refs/heads", "refs/remotes", "refs/tags" },
         {
@@ -88,7 +114,7 @@ end
 function M.fetch_head(repo)
     local future, promise = make_future()
 
-    vim.fn.jobstart(
+    js(
         { "git", "symbolic-ref", "--short", "--quiet", "HEAD" },
         {
             stdout_buffered = true,
@@ -120,7 +146,7 @@ function M.fetch_ref_entries()
     local future, promise = make_future()
     local entries = {}
 
-    vim.fn.jobstart(
+    js(
         { "git", "for-each-ref", "--format=%(objectname) %(refname) %(*objectname)",
             "refs/heads", "refs/remotes", "refs/tags" },
         {
@@ -142,7 +168,7 @@ function M.fetch_ref_entries()
                 -- Chain HEAD's symbolic-ref so the head binding can be reconciled
                 -- in the same pass.
                 local head = nil
-                vim.fn.jobstart({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }, {
+                js({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }, {
                     stdout_buffered = true,
                     on_stdout = function(_, l)
                         if l[1] and l[1] ~= "" then head = l[1] end
@@ -240,7 +266,7 @@ function M.fetch_commits(opts)
         end
     end
 
-    vim.fn.jobstart(
+    js(
         command,
         {
             on_stdout = function(_, data)
@@ -294,7 +320,7 @@ function M.fetch_new_commits(new_tips, old_tips)
     end
 
     local commits = {}
-    vim.fn.jobstart(command, {
+    js(command, {
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, line in ipairs(lines) do
@@ -322,7 +348,7 @@ function M.fetch_rev_order(branch, flag)
     local future, promise = make_future()
     local command = { "git", "rev-list", flag, unpack(branch) }
     local hashes = {}
-    vim.fn.jobstart(command, {
+    js(command, {
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, line in ipairs(lines) do
@@ -338,13 +364,17 @@ end
 
 --- Run a git command and resolve the future with its stdout as a list of
 --- non-empty lines. A small sibling of fetch_commit_diff for the short
---- working-tree queries (§3.3); runs in Neovim's cwd like the rest.
+--- working-tree queries (§3.3); runs in the active repository root like the
+--- rest, unless an explicit `cwd` is given (the repository picker, §2.1, queries
+--- a specific repo without disturbing the active root).
 ---@param args string[]
+---@param cwd string?  -- explicit working directory; nil = the active root
 ---@return Future
-local function git_lines(args)
+local function git_lines(args, cwd)
     local future, promise = make_future()
     local out = {}
-    vim.fn.jobstart(vim.list_extend({ "git" }, args), {
+    js(vim.list_extend({ "git" }, args), {
+        cwd = cwd,
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, l in ipairs(lines) do
@@ -364,7 +394,7 @@ end
 local function git_string(args)
     local future, promise = make_future()
     local out = {}
-    vim.fn.jobstart(vim.list_extend({ "git" }, args), {
+    js(vim.list_extend({ "git" }, args), {
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, l in ipairs(lines) do out[#out + 1] = l end
@@ -372,6 +402,37 @@ local function git_string(args)
         on_exit = function() promise.resolve(table.concat(out, "\n")) end,
     })
     return future
+end
+
+--- List the direct submodules of the repository at `cwd` (the repository
+--- picker, spec §2.1). Runs `git submodule status` in `cwd` explicitly — the
+--- picker is an entry point that must query the cwd's repo without disturbing
+--- any open graph's active root. Resolves the parsed entries (empty when the
+--- repo has no submodules), via the pure submodule.parse_submodules.
+---@param cwd string
+---@return Future
+function M.fetch_submodules(cwd)
+    return git_lines({ "submodule", "status" }, cwd).next(function(lines)
+        return submodule.parse_submodules(lines)
+    end)
+end
+
+--- A one-line summary of the repository at `cwd` for a picker row (spec §2.1):
+--- the current branch (empty on a detached HEAD), the HEAD short hash, and its
+--- subject. Two cheap queries (branch, then `log -1`) run in `cwd`. Resolves
+--- `{ branch, short, subject }`; an empty repo (no HEAD) resolves empty fields.
+---@param cwd string
+---@return Future
+function M.fetch_repo_summary(cwd)
+    return git_lines({ "rev-parse", "--abbrev-ref", "HEAD" }, cwd).next(function(bl)
+        -- `HEAD` means a detached HEAD — report no branch name.
+        local branch = bl[1]
+        if branch == "HEAD" then branch = "" end
+        return git_lines({ "log", "-1", "--format=%h%x1f%s" }, cwd).next(function(ll)
+            local parts = vim.split(ll[1] or "", "\x1f")
+            return { branch = branch or "", short = parts[1] or "", subject = parts[2] or "" }
+        end)
+    end)
 end
 
 --- Read HEAD's hash and the dirty-state counts (spec §3.3). Resolves
@@ -440,7 +501,7 @@ function M.fetch_commit_detail(hash)
     local future, promise = make_future()
     local out = {}
 
-    vim.fn.jobstart(
+    js(
         { "git", "show", "-s", "--date=iso",
             "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%cn%x1f%ce%x1f%cd%x1f%P%x1f%B", hash },
         {
@@ -466,7 +527,7 @@ function M.fetch_commit_diff(hash)
     local future, promise = make_future()
     local out = {}
 
-    vim.fn.jobstart(
+    js(
         { "git", "show", "--format=", "-p", hash },
         {
             stdout_buffered = true,
@@ -493,7 +554,7 @@ function M.fetch_range_diff(range_arg)
     local out = {}
     local base = (range_arg.from and range_arg.from.hash) or EMPTY_TREE
 
-    vim.fn.jobstart(
+    js(
         { "git", "diff", base, range_arg.to.hash },
         {
             stdout_buffered = true,
@@ -512,16 +573,17 @@ end
 
 --- Run a git command and resolve `{ code, out }` (stdout joined with newlines).
 --- A thin future over `jobstart` for the submodule change view (§11.7). The
---- submodule is addressed with `git -C <path>` by the caller rather than
---- jobstart's `cwd`, so a missing checkout fails the command (nonzero exit)
---- instead of throwing on an invalid working directory. Resolves `{ code = -1 }`
---- if the job cannot be spawned.
+--- submodule is addressed with `git -C <path>` by the caller (the path is
+--- relative to the active repository root, §2.1) rather than jobstart's own
+--- `cwd`, so a missing checkout fails the command (nonzero exit) instead of
+--- throwing on an invalid working directory. Resolves `{ code = -1 }` if the
+--- job cannot be spawned.
 ---@param args string[]
 ---@return table  -- future resolving { code: integer, out: string }
 local function git_code(args)
     local future, promise = make_future()
     local out = {}
-    local ok, jid = pcall(vim.fn.jobstart, args, {
+    local ok, jid = pcall(js, args, {
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, l in ipairs(lines) do out[#out + 1] = l end
@@ -551,8 +613,9 @@ end
 ---@return table  -- a future
 function M.fetch_submodule_graph(opts, change)
     local p, old, new = change.path, change.old, change.new
-    -- `git -C <submodule path> …` (path is relative to Neovim's cwd, where the
-    -- job runs), so an absent checkout simply errors rather than throwing.
+    -- `git -C <submodule path> …` (path is relative to the active repository
+    -- root, §2.1, where the job runs), so an absent checkout simply errors
+    -- rather than throwing.
     local function gc(args)
         local full = { "git", "-C", p }
         for _, a in ipairs(args) do full[#full + 1] = a end
