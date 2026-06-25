@@ -391,6 +391,76 @@ on_redraw(top, bottom)
    └─ display()           write real lines + extmark highlights + virt_lines
 ```
 
+## Windows, views, and navigation
+
+> **Target design** (specification.md §14), implemented across Phases A–E on
+> `feature/view-stack`. Replaces the earlier "each open stacks an independent
+> floating window" model. See **Current state** at the end of this section.
+
+The controller layer gains two tiers of structure above the engine.
+
+**Tier 1 — the session registry (per repository).** A module-level table keyed
+by repository root: `sessions[root] = { host, stack, idx, mru }`. `host` is the
+single floating window for that repo (one snacks `win`); `stack` is its
+navigation stack (tier 2). Opening a repository **shows its session** (creating
+it on first entry) rather than stacking a new window:
+
+- `q` → `host:hide()` (snacks `close({buf=false})` — the window closes, the
+  frames' buffers survive); the session is recorded as the MRU top.
+- `<leader>wg` → show the MRU session (cold-start: open the cwd repo).
+- `<leader>wG` → the repository picker; the chosen repo's session is shown.
+- `<C-w>q` → destroy the session: wipe every frame buffer, drop the entry.
+
+`host:hide()` / `:show()` is the toggle substrate; **`host:set_buf(frame.buf)`**
+is the tier-2 navigation primitive (snacks sets `self.buf` before
+`nvim_win_set_buf`, so its `fixbuf` autocmd no-ops — verified against
+snacks.win).
+
+**Tier 2 — the navigation stack (per session).** An ordered list of **Frame**s
+with a current index; `<C-o>` / `<C-i>` move the index, and a content-changing
+navigation pushes (truncating any forward tail and wiping its buffers). A
+**Frame** externalises what `M.open` today traps in its closures:
+
+```
+Frame = {
+  kind,        -- "graph" | "commit" | ...
+  scope,       -- the full graph; a commit; a branch; a range (§14.2)
+  modifiers,   -- filters / injected anchors intrinsic to this entry
+  buf,         -- the frame's own buffer (shown via host:set_buf)
+  view_state,  -- modes / pinned / effective / cone (forked on push, §14.4)
+  controller,  -- the listview controller, for graph frames
+  repo,        -- the repo data model (cross-repo frames carry their own, §14.7)
+}
+```
+
+**Pure navigation logic** lives in a git-agnostic, unit-tested module (the
+`select.lua` / `view.lua` pattern): stack push / pop / truncate, fork-on-push
+state inheritance, the repo-boundary seeding rule (§14.4), breadcrumb-label
+building (§14.6), and modifier resolution. Only the window glue (buffer swap,
+keymaps, panes) stays untested.
+
+**The decoration-provider seam.** listview's provider currently gates on the
+**window id** (`state.winid == winid`). Two facts force a move to **buffer
+keying**: `host:show()` yields a *new* window id (a winid-keyed provider goes
+dark after a hide/return), and multiple graph frames share one window but hold
+distinct buffers. The provider dispatches `bufnr → frame`, so each graph buffer
+renders as its own graph and a commit-frame buffer is left alone.
+
+**Panes and the breadcrumb attach to the active frame.** On a frame switch the
+panes are rebuilt for the newly-shown frame; `pane_gen` is scoped per frame so
+an abandoned async build cannot clobber a sibling. The breadcrumb is the graph
+frame's header (sharing it with the pane seam, §6.2).
+
+**Phasing.** A: tier-1 sessions + hide / return / switch / destroy + the
+buffer-keyed provider. B: Frame externalisation + the stack scaffold (one graph
+frame, no visible change). C: the commit view as a `commit` Frame (`<C-o>`
+returns). E: the submodule deep-link as a cross-repo frame push (§14.7). D:
+filters / modifiers + fork-on-push. F (deferred): durable persistence.
+
+**Current state:** not yet started — `window.lua` still builds per-`M.open`
+closures, and the commit view / panes are separate floats. This section is the
+target the phases converge on; it is updated to match as each phase lands.
+
 ## Internals
 
 > Note: this section predates the library/engine/controller split. The pieces it
