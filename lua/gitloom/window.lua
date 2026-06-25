@@ -2612,6 +2612,11 @@ function M.open(folder, opts)
                 -- deliberate keypress, not debounced cursor drift.
                 update_cone()
                 if lv and lv.controller then lv.controller.refresh() end
+                -- The context panes dim with the cone too (§6.2); selecting a marker
+                -- changes the cone without scrolling, so re-dim them (repaint, no
+                -- rebuild) — otherwise the footer/header keep the pre-selection
+                -- highlight and a selected collapsed branch never lights below/above.
+                maybe_update_panes()
                 place_cursor()
                 return
             end
@@ -3230,9 +3235,14 @@ function M.open(folder, opts)
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.connectivity[dir] then lane = s; break end
                 end
+                -- Carry the chosen lane's cone state onto the synthetic seam segment so
+                -- the seam bars dim with the cone (§6.2); without it the seam row has no
+                -- `highlighted`/`edges` and seg_hl reads every bar as out-of-cone, so the
+                -- footer's top (and header's bottom) seam line dimmed even fully lit lanes.
                 sep[j] = lane
                     and { connectivity = { up = true, down = true },
-                        lanes = { { connectivity = { up = true, down = true }, id = lane.id, color = lane.color } } }
+                        lanes = { { connectivity = { up = true, down = true }, id = lane.id,
+                            color = lane.color, highlighted = render.seg_hl(lane) or false } } }
                     or { connectivity = {}, lanes = {} }
             end
             return sep
