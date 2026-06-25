@@ -457,9 +457,15 @@ frame, no visible change). C: the commit view as a `commit` Frame (`<C-o>`
 returns). E: the submodule deep-link as a cross-repo frame push (§14.7). D:
 filters / modifiers + fork-on-push. F (deferred): durable persistence.
 
-**Current state:** not yet started — `window.lua` still builds per-`M.open`
-closures, and the commit view / panes are separate floats. This section is the
-target the phases converge on; it is updated to match as each phase lands.
+**Current state:** Phases A–E landed (`feature/view-stack`). One host window per
+repo (`nav` session registry, keyed by repo root); the navigation stack
+(`navstack.lua`) holds **frames** (a frame = a buffer the host swaps in). The
+graph builds into a frame via `open_graph` — buffer-local keymaps and a listview
+**attach mode** (`M.open{ attach = { winid, buf } }`) let it render into a shared
+host window, so the commit view (C) and a drilled-in submodule (E,
+`M.drill_submodule`) are frames in the one window, navigated by `<C-o>` / `<C-i>`.
+`q` hides, `<leader>wg` returns, `<C-w>q` destroys. Remaining: D (filters /
+modifiers + fork-on-push) and F (durable persistence, deferred).
 
 ## Internals
 
@@ -555,11 +561,12 @@ known entries (main module first, submodules appended as discovery resolves via
 `picker:find{refresh}`) and fills each row's summary asynchronously
 (`picker:update{force}` after mutating the item), so a slow submodule never
 blocks the list; an uninitialized submodule is shown disabled, and confirming
-opens `M.open` on that repo. Opening a repository while a graph is already open
-**stacks** a new float over it (each `M.open` is an independent snacks window;
-`q` closes the top to reveal the previous, spec §2.1) — there is no
-switch-in-place machinery. The pure `parse_submodules` is unit-tested; the
-async picker orchestration is window glue (not unit-tested, like the rest).
+opens `M.open` on that repo. `M.open` **re-shows** that repo's host window if one
+already exists, or builds it on first entry — one window per repository, never
+stacked (§14.1); the picker is the explicit cross-repository switcher (`q` hides
+the current window, this opens/raises another). The pure `parse_submodules` is
+unit-tested; the async picker orchestration is window glue (not unit-tested, like
+the rest).
 
 ### Parsing / ref resolution
 
