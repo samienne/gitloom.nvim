@@ -720,10 +720,11 @@ local function preserve_cursor_visual_pos(win, buf, fn)
 end
 
 ---@param win any
+---@param buf integer  the listview's stable buffer (NOT win.buf, which the host swaps; §14)
 ---@param model ListViewModel
 ---@param items DisplayItem[]
 ---@param pos integer
-local function insert(win, model, items, pos)
+local function insert(win, buf, model, items, pos)
     local old_count = #model.items
     pos = pos or (old_count + 1)
 
@@ -744,8 +745,7 @@ local function insert(win, model, items, pos)
 
     rebuild_starts(model, pos)
 
-    preserve_cursor_visual_pos(win.win, win.buf, function()
-        local buf = win.buf
+    preserve_cursor_visual_pos(win.win, buf, function()
         vim.bo[buf].modifiable = true
         vim.bo[buf].readonly = false
         if old_count == 0 then
@@ -834,6 +834,14 @@ function M.open(opts)
 
     local win = create_win(opts or {})
 
+    -- The listview always renders into the buffer it was CREATED with — its stable
+    -- identity. In the single-host-window model (§14) the window's shown buffer is
+    -- swapped to other frames (a commit view), so `win.buf` no longer tracks the
+    -- list; reading it at render time would write the graph into whatever frame is
+    -- on screen. Capture it once (the same reason the decoration gate keys off
+    -- `state.buf`). Sizing still reads the live `win.win`.
+    local lv_buf = win.buf
+
     -- Re-render after a change that alters per-item line counts (the B label-mode
     -- cycle, or a reflow that swaps the item list). Rebuilds the buffer-line map,
     -- resizes the buffer to the new total, and redraws the visible range.
@@ -842,7 +850,7 @@ function M.open(opts)
         for _, item in ipairs(model.items) do
             item.columns = nil
         end
-        local buf = win.buf
+        local buf = lv_buf
         local blanks = {}
         for _ = 1, math.max(model.total, 1) do blanks[#blanks + 1] = "" end
         vim.bo[buf].modifiable = true
@@ -854,14 +862,14 @@ function M.open(opts)
         local bf, bl = get_visible_range(win.win)
         local first, last = item_index_at(model, bf), item_index_at(model, bl)
         refresh_columns(win.win, model, first, last)
-        display(win.win, win.buf, model, first, last)
+        display(win.win, lv_buf, model, first, last)
     end
 
     ---@type ListViewController
     local controller = {
         -- 1-based indexing
         insert = function(items, pos)
-            insert(win, model, items, pos)
+            insert(win, lv_buf, model, items, pos)
         end,
         remove = function(pos)
             local item = model.items[pos]
@@ -872,7 +880,7 @@ function M.open(opts)
             local n = item_line_count(model, pos)
             table.remove(model.items, pos)
             rebuild_starts(model, pos)
-            local buf = win.buf
+            local buf = lv_buf
             vim.bo[buf].modifiable = true
             vim.bo[buf].readonly = false
             vim.api.nvim_buf_set_lines(buf, at - 1, at - 1 + n, false, {})
@@ -899,7 +907,7 @@ function M.open(opts)
             local bf, bl = get_visible_range(win.win)
             local first, last = item_index_at(model, bf), item_index_at(model, bl)
             refresh_columns(win.win, model, first, last)
-            display(win.win, win.buf, model, first, last)
+            display(win.win, lv_buf, model, first, last)
         end,
         -- Re-render after a change that alters per-item line counts (e.g. the B
         -- label-mode cycle turning labelled commits into two rows).
@@ -944,9 +952,9 @@ function M.open(opts)
         opts.on_controller(controller)
     end
 
-    vim.bo[win.buf].buftype = "nofile"
-    vim.bo[win.buf].modifiable = false
-    vim.bo[win.buf].readonly = true
+    vim.bo[lv_buf].buftype = "nofile"
+    vim.bo[lv_buf].modifiable = false
+    vim.bo[lv_buf].readonly = true
 
     return { win = win, controller = controller }
 end
