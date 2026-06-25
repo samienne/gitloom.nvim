@@ -13,6 +13,7 @@ local graph = require("gitloom.graph")
 local selectm = require("gitloom.graph.select")
 local reach = require("gitloom.graph.reach")
 local render = require("gitloom.graph.render")
+local navstack = require("gitloom.navstack")
 
 -- Layout orchestration lives in the engine (gitloom.graph); the controller drives it.
 local refresh_columns = graph.refresh_columns
@@ -113,9 +114,75 @@ local function nav_drop(root)
     end
 end
 
+-- Render the breadcrumb back-trail (§14.6). A stub until a multi-frame trail
+-- exists to show (Phase C wires the commit view as a second frame); kept here so
+-- the navigation primitives have a single render seam to call.
+function nav.render_crumbs(_sess) end
+
+-- Show `frame` in the host window (the tier-2 navigation primitive, §14.3):
+-- swap the host's buffer to the frame's (snacks set_buf updates self.buf first,
+-- so its fixbuf autocmd no-ops), run the frame's on_enter, refresh the trail.
+local function nav_enter(sess, frame)
+    if not (frame and frame.buf and vim.api.nvim_buf_is_valid(frame.buf)) then return end
+    if sess.host and sess.host.valid and sess.host:valid() then
+        sess.host:set_buf(frame.buf)
+    end
+    if frame.on_enter then pcall(frame.on_enter) end
+    nav.render_crumbs(sess)
+end
+
+--- Step back along the trail (`<C-o>`, §14.3); no-op at the root.
+function nav.back(root)
+    local sess = nav.sessions[root]
+    if not (sess and sess.stack) then return end
+    local f = navstack.back(sess.stack)
+    if f then nav_enter(sess, f) end
+end
+
+--- Step forward along the trail (`<C-i>`, §14.3); no-op at the tip.
+function nav.forward(root)
+    local sess = nav.sessions[root]
+    if not (sess and sess.stack) then return end
+    local f = navstack.forward(sess.stack)
+    if f then nav_enter(sess, f) end
+end
+
+--- Push a new frame (open a commit / filter / submodule, §14.3), discarding the
+--- forward tail and wiping the dropped frames' buffers (the root is never
+--- dropped). `frame` = `{ kind, buf, on_enter? }`.
+function nav.push_frame(root, frame)
+    local sess = nav.sessions[root]
+    if not (sess and sess.stack) then return end
+    local dropped = navstack.push(sess.stack, frame)
+    for _, d in ipairs(dropped) do
+        if d.buf and vim.api.nvim_buf_is_valid(d.buf) then
+            pcall(vim.api.nvim_buf_delete, d.buf, { force = true })
+        end
+    end
+    nav_enter(sess, frame)
+end
+
+-- Install the tier-2 navigation keys on a frame's buffer (§14.3). `<C-o>` steps
+-- back along the trail. `<C-i>` (forward) is intentionally NOT bound on the graph
+-- buffer: in a terminal it is indistinguishable from `<Tab>`, which is the
+-- collapse/expand toggle (§10.4). Forward navigation is wired per-frame where it
+-- does not collide (resolved in Phase C).
+function nav.install_nav_keys(buf, root)
+    if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
+    vim.keymap.set("n", "<C-o>", function() nav.back(root) end,
+        { buffer = buf, nowait = true, silent = true, desc = "Gitloom: back (§14)" })
+end
+
 function nav.register(root, host, on_show)
-    nav.sessions[root] = { host = host, root = root, on_show = on_show }
+    nav.sessions[root] = {
+        host = host,
+        root = root,
+        on_show = on_show,
+        -- The view stack (§14.3), seeded with the graph as its root frame.
+        stack = navstack.new({ kind = "graph", buf = host.buf }),
+    }
     nav.record_mru(root)
+    nav.install_nav_keys(host.buf, root)
     -- `<C-w>q` destroys the window via snacks close(), which wipes the scratch
     -- buffer; drop the session then so the next open rebuilds rather than
     -- re-showing a dead window. hide() keeps the buffer, so this only fires on a
