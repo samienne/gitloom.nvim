@@ -564,8 +564,10 @@ Details not covered by the spec or architecture:
 - **Vendored duplication is intentional** — `compose` lives in both graph.lua
   and listview.lua, and `make_future` is gitloom's own minimal promise. See
   "Relationship to loomworks" before deduplicating.
-- **setup() config is not yet wired** to `:GitloomGraph` (specification.md
-  §8 "Known gap"). The command uses built-in defaults.
+- **setup() config is wired** to `:GitloomGraph`: `init.lua`'s command callback
+  forwards `M.config` (the stored `setup()` opts) to `window.open`, which merges
+  it over the built-in defaults (read at invocation time). The per-pane
+  `header_max`/`footer_max` caps remain hardcoded (specification.md §6/§8).
 - **Ref label modes** (`opts.label_mode`, cycled by `B`; spec §6.1) are a
   placement choice in `display_item`: `right` puts refs in `line_right`
   (right-pinned, default), `inline` composes them into the flex column before the

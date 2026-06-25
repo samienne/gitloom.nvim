@@ -155,8 +155,11 @@ in `gitloom.window` does the windowing.
    point and is capped (always keeping the root, `pane.cap`).
 
 `pane.continue` errors are contained (`update_panes` pcalls the build and hides
-both panes on failure); `scrolloff` is forced to 0 so `<C-e>`/`<C-y>` and the
-scroll-driven refresh work.
+both panes on failure). The graph window's `scrolloff` is set window-local from
+`opts.scrolloff` (default 10, §8) rather than inherited; a non-zero value
+interacts with the overlays (`<C-e>`/`<C-y>` and the scroll-driven refresh were
+the reason it was historically forced to 0), so `opts.scrolloff = 0` restores
+that behaviour if the panes' scrolling misbehaves.
 
 **The header pipeline** — the **minimal connecting subgraph** (a focused rebuild,
 *not* a reduction of the whole off-screen graph): only how the pinned anchors relate

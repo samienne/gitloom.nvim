@@ -710,8 +710,9 @@ view is not). The boundary lanes the main view already drew are the source of
 truth a pane rebuild must match.
 
 Panes are configurable (on/off, `header_max`, `footer_max`); when off the graph
-is the single viewport as today. (Config wiring shares the §8 "known gap" — the
-options are specified here, not yet read by the command.)
+is the single viewport as today. (`setup()` config is now forwarded to the
+command, §8, but the `header_max`/`footer_max` caps are still hardcoded — not
+yet read from the options.)
 
 ## 7. Rendering behavior
 
@@ -733,7 +734,7 @@ options are specified here, not yet read by the command.)
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, sort_mode, mirror,
                  highlight, date_format, date_mode, message_min, label_mode, diff,
-                 working_tree }
+                 working_tree, scrolloff }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
 DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
@@ -786,15 +787,19 @@ Endpoint     = Commit | "index" | "worktree"
   (§3.3, §4.2). **Default true.** When on, a dirty working tree adds up to two
   `◌` nodes (staged / unstaged) that update on the working-tree refresh (§3.4);
   when off, the working tree is never read and no virtual commits appear.
+- `scrolloff` — window-local `'scrolloff'` applied to the graph and commit-view
+  windows: the number of context rows kept above/below the cursor (**default
+  `10`**). Set explicitly so the windows don't inherit the global value. Note: a
+  non-zero value interacts with the context-pane overlays (§6.2); set `0` to
+  restore the prior always-zero behaviour if the panes' scrolling misbehaves.
 
-### Known gap: setup() wiring
+### setup() wiring
 
-`require("gitloom").setup(opts)` stores `opts` in the module config, but the
-`:GitloomGraph` command currently invokes the graph with built-in defaults
-and does **not** read that stored config. Forwarding `setup()` config to the
-command is unimplemented. Until then, the documented defaults always apply to
-`:GitloomGraph`. (Programmatic callers may pass options directly to the graph
-open function.)
+`require("gitloom").setup(opts)` stores `opts` in the module config, and the
+`:GitloomGraph` command forwards that stored config to the graph open function,
+where it is merged over the built-in defaults (read at invocation time, so a
+later `setup()` still applies). Programmatic callers may also pass options
+directly to the open function.
 
 ## 9. Non-goals
 

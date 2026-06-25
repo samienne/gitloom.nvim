@@ -10,7 +10,12 @@ end
 
 local window = require("gitloom.window")
 
-vim.api.nvim_create_user_command("GitloomGraph", window.open, {})
+-- Forward the stored setup() config to the graph so :GitloomGraph honours it
+-- (spec §8). Read at invocation time so a later setup() still applies. M.open
+-- merges it over the built-in defaults.
+vim.api.nvim_create_user_command("GitloomGraph", function()
+    window.open(nil, M.config)
+end, {})
 
 if vim.g.loaded_gitloom then
     M.setup()
