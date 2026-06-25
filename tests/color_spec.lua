@@ -1,6 +1,6 @@
 --- Tests for gitloom.color (spec §5.5): OKLab/OKLCH conversion and golden-angle
 --- colour generation. Pure maths — no Neovim state needed.
-local color = require("gitloom.color")
+local color = require("gitloom.graph.color")
 
 local function channels(rgb)
     return math.floor(rgb / 65536) % 256, math.floor(rgb / 256) % 256, rgb % 256

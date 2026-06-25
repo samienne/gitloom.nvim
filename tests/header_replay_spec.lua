@@ -5,9 +5,9 @@
 --- the cutoff (the merge-at-cutoff anchor-severing bug, where a pinned anchor was severed
 --- onto a fresh lane id instead of staying on its crossing lane).
 local h = require("tests.graph_helpers")
-local pane = require("gitloom.pane")
-local columns = require("gitloom.columns")
-local view = require("gitloom.view")
+local pane = require("gitloom.graph.pane")
+local columns = require("gitloom.graph.columns")
+local view = require("gitloom.graph.view")
 local fix = require("tests.large_topo")
 
 -- Build the projected display + lane maps ONCE (the projection is cutoff-independent).

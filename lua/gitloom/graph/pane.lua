@@ -18,7 +18,7 @@
 --- snacks. Window placement, sizing, and the async rebuild live in graph.lua.
 local M = {}
 
-local columns = require("gitloom.columns")
+local columns = require("gitloom.graph.columns")
 
 --- Contract an anchor-only projection (heads + junctions, from `view.project`
 --- with the anchors collapsed) into the **condensed graph** (spec §6.2): the only

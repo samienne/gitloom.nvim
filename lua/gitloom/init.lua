@@ -8,9 +8,9 @@ function M.setup(opts)
     M.config = vim.tbl_extend("force", M.config, opts)
 end
 
-local graph = require("gitloom.graph")
+local window = require("gitloom.window")
 
-vim.api.nvim_create_user_command("GitloomGraph", graph.open, {})
+vim.api.nvim_create_user_command("GitloomGraph", window.open, {})
 
 if vim.g.loaded_gitloom then
     M.setup()

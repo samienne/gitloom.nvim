@@ -1,8 +1,8 @@
 --- Context-pane layout core (spec §6.2): boundary extraction + the footer
 --- builder, tested purely (no snacks). The pane shares commit identities with
 --- the main layout (one DAG), as production shares repo.order.
-local pane = require("gitloom.pane")
-local columns = require("gitloom.columns")
+local pane = require("gitloom.graph.pane")
+local columns = require("gitloom.graph.columns")
 local h = require("tests.graph_helpers")
 local get_column_chars = require("gitloom.graph")._internal.get_column_chars
 

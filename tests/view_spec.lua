@@ -7,7 +7,7 @@
 --- through the real layout (`build_graph` + the wires-connect grid checks) so a
 --- projection that columns.layout can't lay out is caught.
 
-local view = require("gitloom.view")
+local view = require("gitloom.graph.view")
 local graph = require("gitloom.graph")
 local helpers = require("tests.graph_helpers")
 
