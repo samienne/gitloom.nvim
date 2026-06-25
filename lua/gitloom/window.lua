@@ -1319,12 +1319,15 @@ end
 ---@param opts GraphOptions
 ---@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
 ---@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
+---@param attach? ListViewAttach  -- build into an existing host window+buffer (a drilled-in graph frame, §14) instead of creating a window
 -- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
 -- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
 -- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
 -- Returns the listview instance and an `on_show` closure that re-establishes the
--- view after a hide/return; the wrapper registers them.
-local function open_graph(folder, opts, focus_hash, seed_refs)
+-- view after a hide/return (also the frame on-enter for an attached graph); the
+-- wrapper registers them. With `attach`, no window is created — the graph renders
+-- into the given host window + buffer as a navigation frame (§14 uniform frames).
+local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- Resolve the repository this graph targets (spec §2.1) up front, so the
     -- window title can show it and the I/O layer is retargeted before any fetch.
     -- Inlined (not the module-scope resolve_root used by M.pick) to keep this
@@ -2576,6 +2579,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
+        -- Attach into the host window+buffer when drilling in (§14); nil = create
+        -- a window (the repo's root graph). on_win above is then unused.
+        attach = attach,
         -- The message (COL.flex) fills the row; refs (line_right) pin to the
         -- right edge, using the free width down to message_min (§6).
         flex = COL.flex,
@@ -4502,7 +4508,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- (§14): the buffer (rendered graph) survives, so just restore the remembered
     -- position, recenter, and rebuild the cone + panes (both torn down on hide).
     -- Mirrors the open-time focus sequence (sans focus_hash, which is one-shot).
+    -- Also serves as the frame on-enter: an attached graph (§14) has no on_win
+    -- hook, so this is where it re-acquires the live host window id on every entry
+    -- (the host re-opens with a new id across hide/show). In create mode this just
+    -- matches what on_win already set.
     local function on_show()
+        local hw = gwin()
+        if hw then win = hw end
+        if lv and lv.buf then buf = lv.buf end
         local target = saved_positions[repo_key]
         if not (target and goto_hash(target)) then
             local headref = repo.head and repo.refs["HEAD"]
