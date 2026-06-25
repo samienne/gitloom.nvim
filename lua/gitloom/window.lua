@@ -891,6 +891,7 @@ end
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
+---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
@@ -1573,7 +1574,7 @@ function M.open(folder, opts)
             end
             -- Debug (lane ids on, `i`): the footer-pane cutoff (seam buffer line)
             -- and height when shown, or why it is hidden.
-            if render.show_lane_ids() then
+            if opts.show_lane_ids then
                 if header_seam then
                     status = status .. (" | hdr@%s h=%d"):format(tostring(header_seam), header_height or 0)
                 elseif header_dbg then
@@ -2396,7 +2397,7 @@ function M.open(folder, opts)
     end
     -- i: toggle the per-lane id column before the message (main view + footer).
     opts.win.keys.i = function()
-        render.toggle_lane_ids()
+        opts.show_lane_ids = not opts.show_lane_ids
         if lv and lv.controller then
             lv.controller.refresh()
         end
@@ -2949,7 +2950,7 @@ function M.open(folder, opts)
         --     overlay — the seam is misaligned (the bug we are chasing).
         local function mark_cutoff()
             pcall(vim.api.nvim_buf_clear_namespace, buf, seam_ns, 0, -1)
-            if not render.show_lane_ids() then return end
+            if not opts.show_lane_ids then return end
             pcall(function()
                 -- The header's own seam line (may sit behind the overlay).
                 local hs = seam_line(header_seam)
@@ -3081,7 +3082,7 @@ function M.open(folder, opts)
                 end
                 if c and c.collapsed and c.count then text = text .. (" (%d)"):format(c.count) end
                 -- Debug (toggled by `i`): the distinct lane ids on this row.
-                if render.show_lane_ids() then
+                if opts.show_lane_ids then
                     local ids, seen = {}, {}
                     for _, col in ipairs(row.columns or {}) do
                         for _, s in ipairs(col.lanes or {}) do

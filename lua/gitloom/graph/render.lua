@@ -13,17 +13,9 @@ local compose = util.compose
 
 local M = {}
 
--- Lane-id debug overlay (toggled by `K`): when on, each row is prefixed with its
--- columns' lane ids. Module state so the toggle and the renderer share it.
-local show_lane_ids = false
---- @return boolean
-function M.show_lane_ids() return show_lane_ids end
---- Toggle the lane-id debug overlay; returns the new state.
----@return boolean
-function M.toggle_lane_ids()
-    show_lane_ids = not show_lane_ids
-    return show_lane_ids
-end
+-- The lane-id debug overlay (toggled by `i`) is per-window instance state on
+-- `opts.show_lane_ids` (owned by the controller), not engine module state — the
+-- renderer only reads it from the GraphOptions it is handed.
 
 -- ── Reachability dimming + generated colours (specification.md §12.2, §5.5) ──
 
@@ -673,7 +665,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor)
     end
 
     local get_columns = function(columns)
-        if not show_lane_ids then
+        if not opts.show_lane_ids then
             return highlight_text("")
         end
         local result = "("
