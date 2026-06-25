@@ -1000,6 +1000,7 @@ end
 ---@field title string
 ---@field footer string
 ---@field zindex? integer  stacking order, assigned per-open so the newest graph is on top (§2.1)
+---@field on_win? fun(w: table)  snacks calls this on every (re)show; refreshes the live window id (§14)
 ---@field keys? table  keymaps installed on the graph window (snacks.win keys)
 
 ---@class GraphPalette
@@ -1412,6 +1413,14 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- callbacks below close over this local (not a stray global) and see it once
     -- it is assigned after the window opens.
     local lv
+
+    -- The graph's window and buffer ids. `buf` is stable for the session; `win`
+    -- changes whenever the host window is hidden and re-shown — snacks reopens
+    -- with a NEW window id (§14). Declared at function scope (not inside the
+    -- open block below) so the `win.on_win` hook — set before the window opens —
+    -- and every in-block closure share one upvalue; the hook refreshes it on
+    -- each (re)show so all closures read the live window.
+    local win, buf
 
     -- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
     -- sub-row within the item. In dual mode a labelled commit spans two buffer
@@ -2278,6 +2287,12 @@ function M.open(folder, opts, focus_hash, seed_refs)
     end
     opts.win.zindex = graph_z
 
+    -- Refresh the live window/buffer ids on every (re)open. snacks calls on_win
+    -- after open_win on each show() — including after a hide()/return (§14) — with
+    -- a fresh window id, so this keeps the function-scoped `win` current for all
+    -- the closures below without re-creating them.
+    opts.win.on_win = function(w) win, buf = w.win, w.buf end
+
     ---@type ListViewOptions
     local listview_options = {
         win = opts.win,
@@ -2865,7 +2880,9 @@ function M.open(folder, opts, focus_hash, seed_refs)
     -- commit message, or on the selected ref. place_cursor reads the rendered
     -- buffer line and positions the cursor accordingly.
     if lv and lv.win and lv.win.win then
-        local win, buf = lv.win.win, lv.win.buf
+        -- on_win (above) already set these during listview.open; assign the
+        -- function-scoped upvalues here too so the block reads them directly.
+        win, buf = lv.win.win, lv.win.buf
         pcall(vim.api.nvim_set_option_value, "cursorline", true, { win = win })
 
         -- Move the cursor onto the display row that now represents `hash` — a real
@@ -3265,9 +3282,14 @@ function M.open(folder, opts, focus_hash, seed_refs)
         -- Scoped to this window; a guard prevents re-entry from the refresh.
         vim.api.nvim_create_autocmd("WinScrolled", {
             group = group,
-            pattern = tostring(win),
+            -- No window pattern: `win` changes across hide/show (§14), so this is
+            -- registered window-agnostic and filtered by v:event, whose keys are
+            -- the ids of the windows that actually scrolled. Bail unless this
+            -- graph's (live) window is among them.
             callback = function()
                 if not vim.api.nvim_win_is_valid(win) then return end
+                local ev = vim.v.event
+                if not (ev and ev[tostring(win)]) then return end
                 if applying then pending = true; return end -- replayed after the refresh
                 -- The view actually moved: abandon any in-flight pane build (its
                 -- seam is now stale) at once; the debounced pass below starts a
