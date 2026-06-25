@@ -62,37 +62,46 @@ function M.classify(old, new, base)
     return "diverged"
 end
 
---- Link a flat, **newest-first** list of parsed commits (each with `parents` as
---- hash strings) into layout-ready OrderItems for `columns.layout`. Resolves each
---- in-list parent hash to its Commit object and sets the child back-link; a
---- parent hash **not** in the list (the bounded cone's boundary — e.g. the
---- merge-base's own parents) is dropped from `parents`, so that commit reads as a
---- root. Order is preserved. Mutates the commits in place (resolving `parents`,
---- populating `children`) and returns `{ type = "commit", commit }` items. Pure.
----@param commits Commit[]  -- newest-first; `parents` are hash strings
----@return table[]  -- OrderItems for columns.layout
-function M.link(commits)
-    local by_hash = {}
-    for _, c in ipairs(commits) do
-        c.children = c.children or {}
-        by_hash[c.hash] = c
-    end
-    for _, c in ipairs(commits) do
-        local resolved = {}
-        for _, ph in ipairs(c.parents or {}) do
-            local p = by_hash[ph]
-            if p then
-                resolved[#resolved + 1] = p
-                p.children[#p.children + 1] = c
-            end
-        end
-        c.parents = resolved
-    end
-    local items = {}
-    for _, c in ipairs(commits) do
-        items[#items + 1] = { type = "commit", commit = c }
-    end
-    return items
+--- Distribute the change graph's bounded height (spec §11.7.3) between the two
+--- sides. `max` is the total row budget; **one row is reserved** for the shared
+--- ancestor, and the rest is split **evenly** between the new (added) and old
+--- (removed) sides, the odd leftover going to the new side. Any share a side
+--- cannot fill — a short side, or an empty one in a fast-forward / rewind —
+--- **spills** to the other, so the side that actually changed gets the room.
+--- Returns `{ new, old }`: how many commits to keep on each side (newest-first).
+--- Pure.
+---@param max integer       -- total row budget (incl. the shared ancestor row)
+---@param n_new integer     -- commits available on the new side
+---@param n_old integer     -- commits available on the old side
+---@return { new: integer, old: integer }
+function M.split_budget(max, n_new, n_old)
+    local room = math.max((max or 0) - 1, 0) -- reserve one row for the ancestor
+    local new_share = math.ceil(room / 2)    -- leftover (odd room) to the new side
+    local new_keep = math.min(n_new, new_share)
+    local old_keep = math.min(n_old, room - new_share)
+    -- Spill the unused budget (a short/empty side) to whichever side can still use
+    -- it. At most one side has surplus capacity when room is left, so order is
+    -- immaterial; old first, then new.
+    local remaining = room - new_keep - old_keep
+    local add_old = math.min(remaining, n_old - old_keep)
+    old_keep, remaining = old_keep + add_old, remaining - add_old
+    new_keep = new_keep + math.min(remaining, n_new - new_keep)
+    return { new = new_keep, old = old_keep }
+end
+
+--- Keep the newest `keep` commits of a **newest-first** list, reporting how many
+--- were dropped. The pointer head (index 1) is always kept (for `keep >= 1`), so
+--- the dropped commits are the *middle* ones between the kept newest and the
+--- shared ancestor (rendered as a "+K more" marker by the caller). Pure.
+---@generic T
+---@param commits T[]  -- newest-first
+---@param keep integer
+---@return T[] kept, integer dropped
+function M.truncate(commits, keep)
+    keep = math.max(keep or 0, 0)
+    local kept = {}
+    for i = 1, math.min(keep, #commits) do kept[i] = commits[i] end
+    return kept, #commits - #kept
 end
 
 return M

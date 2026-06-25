@@ -1,8 +1,9 @@
 --- Tests for the submodule change view's pure core (specification.md §11.7):
 --- `parse_changes` (find Subproject bumps in a patch), `classify` (the
---- relationship from a merge-base), and `link` (a flat commit list into
---- layout-ready OrderItems). The git I/O, layout, and render splice in graph.lua
---- are window/IO glue and not unit-tested.
+--- relationship from a merge-base), `split_budget` (the even-with-spill height
+--- distribution between the added/removed sides) and `truncate` (keep the newest
+--- N, report the dropped middle). The git I/O, layout, and render splice in
+--- graph.lua are window/IO glue and not unit-tested.
 
 local submodule = require("gitloom.submodule")
 
@@ -100,47 +101,57 @@ describe("submodule.classify", function()
     end)
 end)
 
-describe("submodule.link", function()
-    it("resolves in-list parents and sets child back-links, preserving order", function()
-        -- c -> b -> a (newest first); parents given as hash strings.
-        local commits = {
-            { hash = "c", parents = { "b" }, message = "third" },
-            { hash = "b", parents = { "a" }, message = "second" },
-            { hash = "a", parents = { "root" }, message = "first" },
-        }
-        local items = submodule.link(commits)
-        assert.equals(3, #items)
-        assert.equals("commit", items[1].type)
-        -- Order preserved (newest-first in -> newest-first out).
-        assert.equals("c", items[1].commit.hash)
-        assert.equals("a", items[3].commit.hash)
-
-        local a, b, c = commits[3], commits[2], commits[1]
-        -- Parents resolved to the in-list Commit objects.
-        assert.equals(b, c.parents[1])
-        assert.equals(a, b.parents[1])
-        -- `root` is not in the list (the cone boundary): dropped, so `a` is a root.
-        assert.equals(0, #a.parents)
-        -- Child back-links point the other way.
-        assert.equals(c, b.children[1])
-        assert.equals(b, a.children[1])
-        assert.equals(0, #c.children)
+describe("submodule.split_budget", function()
+    -- max includes the one reserved ancestor row, so the two sides share max-1.
+    it("splits the remaining budget evenly, leftover to the new side", function()
+        -- max 12 -> 11 to share; new gets ceil(11/2)=6, old gets 5.
+        assert.same({ new = 6, old = 5 }, submodule.split_budget(12, 100, 100))
+        -- Odd leftover always lands on the new (added) side.
+        local b = submodule.split_budget(11, 100, 100) -- 10 to share -> 5 / 5
+        assert.same({ new = 5, old = 5 }, b)
     end)
 
-    it("links a merge with two in-list parents", function()
-        -- m merges p1 and p2; both present in the list.
-        local commits = {
-            { hash = "m", parents = { "p1", "p2" } },
-            { hash = "p1", parents = {} },
-            { hash = "p2", parents = {} },
-        }
-        local items = submodule.link(commits)
-        assert.equals(3, #items)
-        local m, p1, p2 = commits[1], commits[2], commits[3]
-        assert.equals(2, #m.parents)
-        assert.equals(p1, m.parents[1])
-        assert.equals(p2, m.parents[2])
-        assert.equals(m, p1.children[1])
-        assert.equals(m, p2.children[1])
+    it("gives the whole budget to the non-empty side (ff / rewind)", function()
+        -- Fast-forward: old side empty -> new side takes all 11 rows.
+        assert.same({ new = 11, old = 0 }, submodule.split_budget(12, 30, 0))
+        -- Rewind: new side empty -> old side takes all 11 rows.
+        assert.same({ new = 0, old = 11 }, submodule.split_budget(12, 0, 30))
+    end)
+
+    it("spills a short side's unused share to the other", function()
+        -- new only has 2 commits; its surplus (6-2=4) spills to old (5+4=9).
+        assert.same({ new = 2, old = 9 }, submodule.split_budget(12, 2, 100))
+        -- Symmetric the other way.
+        assert.same({ new = 9, old = 2 }, submodule.split_budget(12, 100, 2))
+    end)
+
+    it("never exceeds what each side actually has", function()
+        -- Both sides small: keep them all, no padding.
+        assert.same({ new = 1, old = 1 }, submodule.split_budget(12, 1, 1))
+        assert.same({ new = 3, old = 4 }, submodule.split_budget(12, 3, 4))
+    end)
+end)
+
+describe("submodule.truncate", function()
+    it("keeps the newest N and reports the dropped middle", function()
+        local commits = { "a", "b", "c", "d", "e" } -- newest-first
+        local kept, dropped = submodule.truncate(commits, 2)
+        assert.same({ "a", "b" }, kept) -- the pointer head (index 1) is always kept
+        assert.equals(3, dropped)
+    end)
+
+    it("keeps everything when the budget covers the list", function()
+        local kept, dropped = submodule.truncate({ "a", "b" }, 5)
+        assert.same({ "a", "b" }, kept)
+        assert.equals(0, dropped)
+    end)
+
+    it("handles an empty list and a zero budget", function()
+        local kept, dropped = submodule.truncate({}, 4)
+        assert.same({}, kept)
+        assert.equals(0, dropped)
+        kept, dropped = submodule.truncate({ "a", "b" }, 0)
+        assert.same({}, kept)
+        assert.equals(2, dropped)
     end)
 end)

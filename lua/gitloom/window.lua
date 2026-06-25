@@ -15,13 +15,13 @@ local reach = require("gitloom.graph.reach")
 local render = require("gitloom.graph.render")
 
 -- Layout orchestration lives in the engine (gitloom.graph); the controller drives it.
-local build_graph = graph.build_graph
 local refresh_columns = graph.refresh_columns
 local pack_markers = graph.pack_markers
 local owners_from_refs = graph.owners_from_refs
 
--- Max commits drawn in a submodule change graph before capping (spec §11.7.3);
--- the rest collapse into a "+K more" note.
+-- Total row budget for a submodule change graph (spec §11.7.3): one row for the
+-- shared ancestor, the rest split evenly between the two sides; overflow on each
+-- side collapses into a "+K more" note.
 local SUBMODULE_MAX = 12
 
 -- merge_style presets the viewer cycles through with `m` (see M.open). Each
@@ -345,10 +345,29 @@ local fetch_range_diff = git.fetch_range_diff
 -- submodule_block renderer below stays (it composes commit-view rows).
 local fetch_submodule_graph = git.fetch_submodule_graph
 
+-- Default marker colours for the submodule change view (§11.7): a deliberately
+-- darker, muted green/red (ForestGreen / Firebrick) — brighter diff groups like
+-- DiffAdd/Added read pastel. `default = true` so a colorscheme (or the palette's
+-- submodule.new/old override) wins; idempotent, re-asserted on each render so a
+-- late ColorScheme can't leave them undefined.
+local function ensure_submodule_hl()
+    pcall(vim.api.nvim_set_hl, 0, "GitloomSubmoduleAdd", { fg = "#3a7d34", ctermfg = 28, default = true })
+    pcall(vim.api.nvim_set_hl, 0, "GitloomSubmoduleDel", { fg = "#b03a3a", ctermfg = 124, default = true })
+end
+
 --- Render one submodule change's fetched `result` (spec §11.7) into commit-view
 --- rows (compose-style `{ text, highlight }`), replacing the raw `Subproject
 --- commit` pair. `result` may be nil (not yet fetched) — then the raw hashes are
 --- shown, upgraded in place once the fetch resolves (§11.7.4).
+---
+--- When the gate passes the block is a small **two-lane change graph** (a Y): the
+--- commits the bump **added** (`base..new`, green) descend from the new pointer
+--- `B`, the commits it **removed** (`base..old`, red) descend from the old pointer
+--- `A`, both converging at their shared **ancestor** node (the merge-base, drawn
+--- in the first lane colour). A fast-forward / rewind is the degenerate case where
+--- one side is empty and the ancestor *is* the coinciding pointer. The lanes carry
+--- semantic colour, so this hand-draws the (always linear, first-parent) topology
+--- rather than running the free-list lane engine.
 ---@param opts GraphOptions
 ---@param change { path: string, old: string, new: string }
 ---@param result table?
@@ -356,6 +375,11 @@ local fetch_submodule_graph = git.fetch_submodule_graph
 local function submodule_block(opts, change, result)
     local palette = opts.palette or {}
     local diffp = palette.diff or {}
+    ensure_submodule_hl()
+    local subp = palette.submodule or {}
+    local new_hl = subp.new or "GitloomSubmoduleAdd"                       -- added (dark green fg)
+    local old_hl = subp.old or "GitloomSubmoduleDel"                       -- removed (dark red fg)
+    local base_hl = subp.base or (palette.tracks and palette.tracks[1]) or "Title" -- ancestor (lane 1)
     local rows = {}
     local function short(h) return (h or ""):sub(1, 8) end
 
@@ -372,70 +396,86 @@ local function submodule_block(opts, change, result)
         return rows
     end
 
-    -- Header: path, old → new, and the direction/counts.
-    local dir
-    if result.class == "ff" then
-        dir = ("+%d"):format(result.ahead)
-    elseif result.class == "rewind" then
-        dir = ("−%d"):format(result.behind)
-    else
-        dir = ("diverged +%d / −%d"):format(result.ahead, result.behind)
-    end
-    rows[#rows + 1] = compose({
+    -- Header: path, old → new, and the direction/counts. The ahead (`+N`) and
+    -- behind (`−N`) tokens take the added/removed colours so they match the graph.
+    local ahead = highlight_text(("+%d"):format(result.ahead), new_hl)
+    local behind = highlight_text(("−%d"):format(result.behind), old_hl)
+    local header = {
         highlight_text("  submodule ", palette.author),
         highlight_text(change.path, diffp.header),
         highlight_text(("  %s → %s  "):format(short(change.old), short(change.new)), palette.date),
-        highlight_text("(" .. dir .. ")", palette.branch),
-    })
+        highlight_text("(", palette.branch),
+    }
+    if result.class == "ff" then
+        header[#header + 1] = ahead
+    elseif result.class == "rewind" then
+        header[#header + 1] = behind
+    else
+        header[#header + 1] = highlight_text("diverged ", palette.branch)
+        header[#header + 1] = ahead
+        header[#header + 1] = highlight_text(" / ", palette.branch)
+        header[#header + 1] = behind
+    end
+    header[#header + 1] = highlight_text(")", palette.branch)
+    rows[#rows + 1] = compose(header)
 
-    if result.class == "diverged" then
-        local function endpoint(label, c, hl)
-            rows[#rows + 1] = compose({
-                highlight_text("    " .. label .. " ", hl),
-                highlight_text(c and short(c.hash) or "", palette.date),
-                highlight_text(c and c.message and ("  " .. c.message) or "", palette.message),
-            })
-        end
-        endpoint("new ", result.new_commit, palette.branch)
-        endpoint("base", result.base_commit, palette.author)
-        endpoint("old ", result.old_commit, palette.remote)
-        return rows
+    -- Truncate each side to its even share of the height budget, spilling an
+    -- empty/short side's room to the other (§11.7.3). The pointer head (newest) is
+    -- always kept; the dropped commits are the middle, shown as a "+K more" marker.
+    local budget = submodule.split_budget(SUBMODULE_MAX, #(result.new_commits or {}), #(result.old_commits or {}))
+    local new_kept, new_drop = submodule.truncate(result.new_commits or {}, budget.new)
+    local old_kept, old_drop = submodule.truncate(result.old_commits or {}, budget.old)
+    local base_commit = result.base_commit or { hash = result.base }
+    -- Two lanes only when both sides have commits (diverged); otherwise a single
+    -- lane down to the ancestor, which then *is* the opposite pointer (ff → old,
+    -- rewind → new).
+    local two = #new_kept > 0 and #old_kept > 0
+    local base_tag = (result.class == "ff" and "old") or (result.class == "rewind" and "new") or nil
+
+    -- A gutter cell is { ch, hl }; a row is the indent + gutter + commit info. The
+    -- gutter glyphs (markers and lanes) and the commit **hash** carry the semantic
+    -- green / red / ancestor colour (`hl`); the subject stays neutral so the
+    -- message reads normally rather than tinted like a diff.
+    local function emit(cells, c, tag, hl)
+        local segs = { highlight_text("    ", nil) }
+        for _, cell in ipairs(cells) do segs[#segs + 1] = highlight_text(cell.ch, cell.hl) end
+        segs[#segs + 1] = highlight_text("  " .. short(c.hash), hl)
+        if tag then segs[#segs + 1] = highlight_text(" ◀ " .. tag, palette.head) end
+        if c.deco and c.deco ~= "" then segs[#segs + 1] = highlight_text(" " .. c.deco, palette.branch) end
+        if c.message and c.message ~= "" then segs[#segs + 1] = highlight_text("  " .. c.message, palette.message) end
+        rows[#rows + 1] = compose(segs)
+    end
+    local function elide(cells, n)
+        local segs = { highlight_text("    ", nil) }
+        for _, cell in ipairs(cells) do segs[#segs + 1] = highlight_text(cell.ch, cell.hl) end
+        segs[#segs + 1] = highlight_text(("  … +%d more"):format(n), DIM_FALLBACK)
+        rows[#rows + 1] = compose(segs)
     end
 
-    -- ff / rewind: lay the first-parent commits out (the same Phase 1 the main
-    -- graph uses) and draw the glyph gutter. The commits are newest-first with the
-    -- fork-point anchor last; when there are too many, keep the newest
-    -- SUBMODULE_MAX-1 plus the anchor (pane.cap keeps the last row) and note the
-    -- commits elided between (§11.7.3).
-    local pane = require("gitloom.graph.pane")
-    local laid = build_graph(opts, result.items or {})
-    local shown = pane.cap(laid, SUBMODULE_MAX)
-    local dropped = #laid - #shown
-    -- The pointer tag for a row: "new"/"old" when it is the new/old pointer (§11.7.3).
-    local function ptr_tag(hash)
-        if hash == change.new then return "new" end
-        if hash == change.old then return "old" end
-        return nil
+    -- The new (added) side, top-down from B. In the two-lane case its lane keeps
+    -- running (`│`) past the old side's rows down to the ancestor.
+    local new_node = { ch = "●", hl = new_hl }
+    local new_pipe = { ch = "│", hl = new_hl }
+    local blank = { ch = " ", hl = nil }
+    for i, c in ipairs(new_kept) do
+        emit(two and { new_node, blank } or { new_node }, c, i == 1 and "new" or nil, new_hl)
     end
-    for i, item in ipairs(shown) do
-        -- The elision falls between the newest kept rows and the anchor (last).
-        if dropped > 0 and i == #shown then
-            rows[#rows + 1] = highlight_text(("    … +%d more"):format(dropped), DIM_FALLBACK)
-        end
-        local c = item.commit
-        if c then
-            local segs = {
-                highlight_text("    ", nil),
-                get_column_chars(opts, item.columns, false),
-                highlight_text("  " .. short(c.hash), palette.date),
-            }
-            local tag = ptr_tag(c.hash)
-            if tag then segs[#segs + 1] = highlight_text(" ◀ " .. tag, palette.head) end
-            if c.deco and c.deco ~= "" then segs[#segs + 1] = highlight_text(" " .. c.deco, palette.branch) end
-            if c.message and c.message ~= "" then segs[#segs + 1] = highlight_text("  " .. c.message, palette.message) end
-            rows[#rows + 1] = compose(segs)
-        end
+    if new_drop > 0 then elide(two and { new_pipe, blank } or { new_pipe }, new_drop) end
+
+    -- The old (removed) side, top-down from A. In the two-lane case it sits in the
+    -- second column while the new lane passes alongside in the first.
+    local old_node = { ch = "●", hl = old_hl }
+    local old_pipe = { ch = "│", hl = old_hl }
+    for i, c in ipairs(old_kept) do
+        emit(two and { new_pipe, old_node } or { old_node }, c, i == 1 and "old" or nil, old_hl)
     end
+    if old_drop > 0 then elide(two and { new_pipe, old_pipe } or { old_pipe }, old_drop) end
+
+    -- The shared ancestor: the convergence node. In the two-lane case the old lane
+    -- bends into it (`╯`); single-lane, it is just the bottom node, marked with the
+    -- pointer it coincides with.
+    emit(two and { { ch = "●", hl = base_hl }, { ch = "╯", hl = old_hl } }
+        or { { ch = "●", hl = base_hl } }, base_commit, base_tag, base_hl)
     return rows
 end
 
@@ -887,6 +927,7 @@ end
 ---@field selected? string  the h/l-selected ref decoration (§2)
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
+---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
 ---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
 ---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
@@ -957,6 +998,16 @@ function M.open(folder, opts)
                 delete = "DiffDelete",
                 hunk = "Title",
                 header = "Comment",
+            },
+            -- Submodule change view (§11.7): the added / removed / common-ancestor
+            -- marker colours (foreground only — no row tint). The defaults are a
+            -- darker, muted green/red (GitloomSubmoduleAdd/Del, defined with
+            -- default=true so a colorscheme can override); base = nil falls back to
+            -- the first lane colour (tracks[1]).
+            submodule = {
+                new = "GitloomSubmoduleAdd",
+                old = "GitloomSubmoduleDel",
+                base = nil,
             },
             tracks = {
                 --"DiagnosticWarn",
