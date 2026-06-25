@@ -136,6 +136,55 @@ describe("pane.footer (§6.2)", function()
     end)
 end)
 
+describe("pane.mark_pane_cone (§6.2 reachability emphasis)", function()
+    -- A diamond of condensed pane nodes: root R <- M <- {A, B} <- T (T merges A,B).
+    -- `.parents` point older (down, toward roots); `.children` point newer (up).
+    local function diamond()
+        local n = {}
+        for _, hh in ipairs({ "R", "M", "A", "B", "T" }) do n[hh] = { hash = hh, parents = {}, children = {} } end
+        local function link(child, parent)
+            table.insert(n[child].parents, n[parent])
+            table.insert(n[parent].children, n[child])
+        end
+        link("M", "R"); link("A", "M"); link("B", "M"); link("T", "A"); link("T", "B")
+        return n
+    end
+
+    it("footer (down) marks an in-cone crossing lane's ancestors, not its siblings", function()
+        local n = diamond()
+        -- Seed at A (an in-cone crossing lane continuing into the footer): everything
+        -- below A is a pivot-ancestor (A, its parent M, the root R); the sibling B and
+        -- the newer T are NOT.
+        local cone = pane.mark_pane_cone({ n.A }, "down")
+        assert.is_true(cone.A and cone.M and cone.R)
+        assert.is_nil(cone.B)
+        assert.is_nil(cone.T)
+    end)
+
+    it("up (header) marks an in-cone crossing lane's descendants, not its ancestors", function()
+        local n = diamond()
+        -- Seed at M (a crossing lane continuing up into the header): everything above M
+        -- is a pivot-descendant (M, both fork children A and B, the merge T); the older
+        -- root R is NOT.
+        local cone = pane.mark_pane_cone({ n.M }, "up")
+        assert.is_true(cone.M and cone.A and cone.B and cone.T)
+        assert.is_nil(cone.R)
+    end)
+
+    it("a confluence below an in-cone lane is in-cone from the join on", function()
+        local n = diamond()
+        -- A is in-cone, B is not. Going down they meet at M: M (and R below it) are in
+        -- the cone via A, even though B — A's sibling that also reaches M — is dimmed.
+        local cone = pane.mark_pane_cone({ n.A }, "down")
+        assert.is_true(cone.M) -- the confluence is lit
+        assert.is_nil(cone.B)  -- the sibling that merges in is not
+    end)
+
+    it("an empty seed set yields an empty cone", function()
+        assert.same({}, pane.mark_pane_cone({}, "down"))
+    end)
+end)
+
 -- The seam separator render_pane draws below the header: a bar per lane leaving
 -- the bottom row downward (into the main view). Including it makes the grid a
 -- closed picture so the wires-connect checker sees the seam-bound tips connect.

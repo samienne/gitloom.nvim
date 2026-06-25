@@ -39,9 +39,11 @@ exists primarily to exercise and validate the graph algorithm.
   placements can be compared at a glance. `<Tab>` is the quick **collapse ⇄
   expand toggle** for the branch under the cursor (§10.4): it collapses an
   expanded branch or expands a marker, in place, and the cursor follows so
-  repeated `<Tab>` flips it open/closed. `<CR>` opens an **action menu** for the
-  row (§10.4) — examine the commit, open its diff, collapse / expand / hide the
-  branch — most-relevant action first.
+  repeated `<Tab>` flips it open/closed. `<CR>` opens the **commit view** (§11)
+  for the commit under the cursor when the cursor is on the message (no ref
+  selected); when a ref is selected with `h`/`l`, or on a collapsed head or a
+  packed-marker line, it instead opens an **action menu** (§10.4) — collapse /
+  expand / hide the selected branch, examine, open its diff.
   `D` opens that commit's diff in an external diff viewer via the configured
   provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
@@ -687,6 +689,33 @@ and forking branches are visually distinct. A fork's mainline continuation keeps
 incoming lane's colour; each *extra* fork child takes its own. (A pane that drew
 every branch one colour would read as a single discontinuous tangle.)
 
+**Reachability emphasis (§12).** When reachability emphasis is on, the panes dim
+out-of-cone topology exactly like the main view: a pane lane (and its labels)
+keeps full colour when it is in the pivot's cone and is blended toward the
+background (`palette.dim`) when it is not. A pane reads as one continuous picture
+with the graph — a branch lit in the main view stays lit where it continues into
+the pane, and a dimmed one stays dimmed.
+
+This costs **`O(pane)`**, not a walk of the off-screen graph. Cone membership
+inside a pane is fully determined by **which seam-crossing lanes are in-cone**,
+then propagated by a directed reachability over the pane's *own* (already-built,
+condensed) graph: **down** (toward parents/roots) for the footer, **up** (toward
+children/tips) for the header. This is sound because the cone is monotone — every
+parent of an in-cone commit is in-cone and every child of an in-cone commit is
+in-cone (§12.1) — so everything the footer draws below an in-cone crossing lane is
+a pivot-ancestor, and everything the header draws above one is a pivot-descendant.
+A confluence where an out-of-cone lane joins an in-cone one is in-cone from the
+join onward (the meeting node is a parent/child of an in-cone node), which the
+propagation captures for free.
+
+This obeys the same **boundary-as-source-of-truth** invariant as layout: a
+crossing lane's lit/dim state in the pane **equals** its state at the main view's
+edge — the seam agrees in colour *and* emphasis. The emphasis tracks the cursor
+(the seam crossing-lanes' cone state is the main view's own, recomputed as the
+cursor settles, §12.2); because it is a per-pane repaint of the existing rows, not
+a rebuild, it does not depend on a scroll. When emphasis is off (`H`), panes
+render at full colour like the rest of the view.
+
 **Packing.** Bare-`◍` heads (the unpinned tips) are **packed** onto as few rows as
 possible — multiple `◍` share a row wherever their columns don't collide (the §10.4
 marker-overlay rule), so a busy common-ancestor fork is a handful of marker rows, not
@@ -970,10 +999,14 @@ commit the trunk reaches (the mainline) is not collapsible.
   cycle, so the toggled thing never vanishes from under the cursor. After the
   reflow the cursor is repositioned onto the resulting node (the new marker, or
   the expanded region's tip), so repeated `<Tab>` flips it open/closed in place.
-- `<CR>` — an **action menu** for the row: every applicable action, most-relevant
-  first (examine commit, open diff, collapse, expand, **hide**). This is where
+- `<CR>` — opens the **commit view** (§11) directly when the cursor is on a
+  normal commit's message (no ref selected). When a ref is selected with `h`/`l`,
+  or the row is a **collapsed head** or a **packed-marker line**, it instead opens
+  an **action menu** for the row: every applicable action, most-relevant first
+  (collapse, expand, **hide**, examine commit, open diff). The menu is where
   hidden and full mode control live, and it is the overflow-proof way to reach
-  any marker on a packed line even when not all labels fit.
+  any marker on a packed line even when not all labels fit. (Collapse/expand are
+  also on `<Tab>`; diff is also on `D`.)
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
 which labels fit); `<Tab>` and the menu act on the selected marker. Reachability
@@ -1091,9 +1124,10 @@ all-normal.
 
 ## 11. Commit view
 
-Pressing `<CR>` on a commit row opens the **commit view**: a separate read-only
-floating window showing the full details of that one commit. `q` closes it. Like
-the graph, it is a viewer — it never mutates the repository (§9).
+Pressing `<CR>` on a commit row — with the cursor on the message (no ref
+selected; §10.4) — opens the **commit view**: a separate read-only floating
+window showing the full details of that one commit. `q` closes it. Like the
+graph, it is a viewer — it never mutates the repository (§9).
 
 ### 11.1 Data source
 
@@ -1436,6 +1470,13 @@ responsive. `H` toggles it off and on live (and `highlight`
 configures the initial state, §8) — when off, the whole graph renders at full
 colour, **identical regardless of the cursor row** (highlight state never affects
 colour while it is off).
+
+The **context panes (§6.2)** participate in the same emphasis: off-screen
+topology dims with the cone too. The cone walk above is window-bounded, but it
+still lights the *stub* of every cone Lane crossing the viewport edge, so the
+panes recover in-cone membership from those seam-crossing lanes and propagate it
+over their own small graph (§6.2 "Reachability emphasis") — the dimming reaches
+into the header and footer without ever walking the off-screen history.
 
 Lane-anchored navigation is realized as the single-commit case of **commit
 selection** (§13): stepping along a branch's lanes commit-to-commit, with splits

@@ -184,7 +184,11 @@ bottom row lines up with the graph's top with no broken lanes), and the header
 vanishes when you scroll to the top. Each lane keeps **the same colour it has in the
 graph**, so branches stay distinct, and isolated `◍` tips pack onto as few rows as
 possible (the pinned anchors keep their own labelled rows). Both are topology-only
-(dashed lanes, solid junctions, no commit text). Toggle them with `F` (§6.2).
+(dashed lanes, solid junctions, no commit text). The panes also follow the
+**reachability emphasis** (§12): the branch under the cursor stays lit where it
+continues into the header/footer while unrelated off-screen lanes dim, so the cone
+reads as one continuous picture across all three viewports. Toggle them with
+`F` (§6.2).
 
 The footer shows the active merge mode, the ref label mode, a `N collapsed,
 M hidden` summary when any branch modes are set, and whether the graph is
