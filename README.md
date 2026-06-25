@@ -307,7 +307,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         author = "Comment",
         branch = "WarningMsg",   -- local branch name in (name ↑remotes)
         remote = "Comment",      -- the ↑remotes suffix (and remote-only names)
-        head = "Special",        -- HEAD marker on the current branch
+        head = "Special",        -- the current branch's label (a detached HEAD's marker)
         message = nil,
         tags = "Comment",
         selected = "Visual",     -- the h/l-selected ref decoration

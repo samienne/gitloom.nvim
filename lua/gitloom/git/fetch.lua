@@ -144,7 +144,10 @@ function M.fetch_refs(repo)
     return future
 end
 
---- Mark the current branch's commit with a `head` ref (skipped when detached).
+--- Mark HEAD's commit with a `head` ref. On a branch (`symbolic-ref` resolves)
+--- that branch's tip is marked and `repo.head` set; on a **detached HEAD** the
+--- checked-out commit is marked directly (`rev-parse HEAD`) with `repo.head` left
+--- nil, so the graph still shows where HEAD is (§3.2).
 ---@param repo Repo
 function M.fetch_head(repo)
     local future, promise = make_future()
@@ -164,7 +167,21 @@ function M.fetch_head(repo)
                 end
             end,
             on_exit = function()
-                promise.resolve()
+                if repo.head then
+                    promise.resolve()
+                    return
+                end
+                -- Detached HEAD: no branch name. Mark the checked-out commit.
+                js({ "git", "rev-parse", "HEAD" }, {
+                    stdout_buffered = true,
+                    on_stdout = function(_, lines)
+                        local hash = lines[1]
+                        if hash and hash ~= "" then
+                            add_ref(repo, "HEAD", "head", hash)
+                        end
+                    end,
+                    on_exit = function() promise.resolve() end,
+                })
             end,
         })
 
@@ -176,7 +193,8 @@ end
 --- before applying changes. Resolves to `{ entries, head }`: `entries` is a list
 --- of `{ name, kind, hash, upstream? }` (annotated tags dereferenced, upstream
 --- tracking captured like fetch_refs so `R` refreshes the §6.3 indicator), `head`
---- the current branch name (nil when detached).
+--- the current branch name (nil when detached), and `detached` the checked-out
+--- commit hash when detached (so the resync can still mark HEAD; nil on a branch).
 ---@return Future
 function M.fetch_ref_entries()
     local future, promise = make_future()
@@ -200,7 +218,8 @@ function M.fetch_ref_entries()
             end,
             on_exit = function()
                 -- Chain HEAD's symbolic-ref so the head binding can be reconciled
-                -- in the same pass.
+                -- in the same pass. When detached (no branch), chain `rev-parse HEAD`
+                -- so the checked-out commit can still be marked (§3.2).
                 local head = nil
                 js({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }, {
                     stdout_buffered = true,
@@ -208,7 +227,20 @@ function M.fetch_ref_entries()
                         if l[1] and l[1] ~= "" then head = l[1] end
                     end,
                     on_exit = function()
-                        promise.resolve({ entries = entries, head = head })
+                        if head then
+                            promise.resolve({ entries = entries, head = head })
+                            return
+                        end
+                        local detached = nil
+                        js({ "git", "rev-parse", "HEAD" }, {
+                            stdout_buffered = true,
+                            on_stdout = function(_, l)
+                                if l[1] and l[1] ~= "" then detached = l[1] end
+                            end,
+                            on_exit = function()
+                                promise.resolve({ entries = entries, head = nil, detached = detached })
+                            end,
+                        })
                     end,
                 })
             end,

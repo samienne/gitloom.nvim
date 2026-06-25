@@ -212,36 +212,36 @@ describe("pane_labels (header/footer §6.2)", function()
     local function texts(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.text end return t end
     local function kinds(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.kind end return t end
 
-    it("shows ONLY HEAD, dropping the branch HEAD points at on the same commit", function()
-        -- The report: HEAD points at `feature/topic`, both on the same commit.
-        -- HEAD already represents that branch, so the pane shows just HEAD — not the branch
-        -- (passed as head_branch = repo.head) that merely co-locates with it.
+    it("draws the current branch by name in the HEAD colour (no separate marker)", function()
+        -- HEAD points at `feature/topic`, both on the same commit. The pane shows
+        -- the branch name, coloured as HEAD ("you are here") — not a bare HEAD marker.
         local segs = pane_labels({ refs = {
             ref("local", "feature/topic"),
             ref("head", "HEAD"),
         } }, "feature/topic")
-        assert.same({ "HEAD" }, texts(segs))
+        assert.same({ "(feature/topic)" }, texts(segs))
         assert.same({ "head" }, kinds(segs)) -- coloured as HEAD
     end)
 
-    it("also drops the HEAD branch's remote-tracking ref", function()
+    it("carries the current branch's remote-tracking ref into its head-coloured group", function()
         local segs = pane_labels({ refs = {
             ref("local", "feat"),
             ref("remote", "origin/feat"),
             ref("head", "HEAD"),
         } }, "feat")
-        assert.same({ "HEAD" }, texts(segs))
+        assert.same({ "(feat ↑origin)" }, texts(segs))
+        assert.same({ "head" }, kinds(segs))
     end)
 
-    it("keeps ANOTHER pinned anchor on HEAD's commit, dropping only the HEAD branch", function()
-        -- HEAD is on `feat`, but pinned `release` also lands here — show both HEAD and the
-        -- other anchor; only the HEAD branch itself is suppressed.
+    it("keeps ANOTHER pinned anchor on HEAD's commit beside the head-coloured branch", function()
+        -- HEAD is on `feat`, but pinned `release` also lands here — show both; only
+        -- `feat` takes the HEAD colour, `release` its own branch colour.
         local segs = pane_labels({ refs = {
             ref("local", "feat"),
             ref("local", "release"),
             ref("head", "HEAD"),
         } }, "feat")
-        assert.same({ "HEAD", "(release)" }, texts(segs))
+        assert.same({ "(feat)", "(release)" }, texts(segs))
         assert.same({ "head", "branch" }, kinds(segs))
     end)
 

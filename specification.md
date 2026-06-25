@@ -294,7 +294,7 @@ Each ref is classified by its refname and resolved to its target commit:
 | `refs/heads/<name>`              | `local`  | `<name>`              |
 | `refs/remotes/<remote>/<name>`   | `remote` | `<remote>/<name>`     |
 | `refs/tags/<name>`               | `tag`    | `<name>` (annotated tags resolved to their commit via the dereferenced hash) |
-| HEAD (symbolic)                  | `head`   | marks the current branch's commit; a detached HEAD is not marked (current limitation) |
+| HEAD (symbolic)                  | `head`   | marks the current branch's commit (drawn by colouring that branch's label in the HEAD colour, §6); a detached HEAD marks the checked-out commit directly |
 
 `refs/remotes/<remote>/HEAD` (the remote's default-branch symref) is skipped.
 The target hash is looked up in the commit table; a missing target yields a
@@ -570,12 +570,16 @@ a fixed aligned column, so navigation stays line-by-line): in the default mode t
 refs are right-aligned at the window edge and the message fills the gap, truncated
 with `…` when it does not fit.
 
-**Ref decorations** — a `HEAD` marker on the current branch, then branch
-groups, then tags as `[name]`. Branch refs (local + remote) that share a
-**short name** collapse into one group: the name is shown once, followed by the
-remotes that also point at this commit, as `(name ↑remote1,remote2)`. The name
-is highlighted when a local branch exists and dimmed when the group is
-remote-only. A local branch with no matching remotes is just `(name)`. This
+**Ref decorations** — branch groups, then tags as `[name]`. The **current
+branch** carries no separate marker: it is drawn in the **HEAD colour**
+(`palette.head`) instead of the normal branch colour, so "you are here" reads
+from the label itself. A literal `HEAD` marker appears **only on a detached
+HEAD** (no current branch, §3.2) — there is no branch name to colour, so the
+checked-out commit shows the bare `HEAD`. Branch refs (local + remote) that
+share a **short name** collapse into one group: the name is shown once, followed
+by the remotes that also point at this commit, as `(name ↑remote1,remote2)`. The
+name is highlighted when a local branch exists (the HEAD colour when it is the
+current branch) and dimmed when the group is remote-only. A local branch with no matching remotes is just `(name)`. This
 keeps the common case (a branch plus its remote-tracking copies all at one
 commit) from repeating the name per remote. A local branch that **tracks an
 upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
@@ -608,8 +612,8 @@ marker; `inline` and `dual` (§6.1) keep their flex-column `…` truncation.
 
 How a row's ref decorations are *placed* is selected by `label_mode` (§8) and
 cycled live with `B` (the footer shows the active mode). The grouping and the
-selectable order (HEAD marker, branch groups, then tags) are identical in every
-mode — only the placement differs:
+selectable order (branch groups then tags; the current branch coloured as HEAD,
+§6) are identical in every mode — only the placement differs:
 
 - **`right`** *(default)* — refs are pinned to the **right edge** of the commit
   line and the message fills the gap, with the width budget and `+N` overflow
