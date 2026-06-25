@@ -52,15 +52,15 @@ local LABEL_MODES = {
 local label_mode_index = 1
 
 
--- Remembered cursor position per repository, keyed by Neovim's cwd (which is the
--- repo the graph reflects — git runs in cwd). The value is the hash of the commit
--- under the cursor when the window last closed, so reopening the graph restores
--- the cursor to the same commit instead of re-focusing HEAD (spec §2). In-memory
--- for the Neovim session; not persisted to disk.
+-- Remembered cursor position per repository, keyed by the repository root
+-- (repo.root, §2.1 — the repo the graph reflects). The value is the hash of the
+-- commit under the cursor when the window last closed, so reopening the graph
+-- restores the cursor to the same commit instead of re-focusing HEAD (spec §2).
+-- In-memory for the Neovim session; not persisted to disk.
 local saved_positions = {}
 
 -- Per-repository session MRU for the ref picker (`<leader>b`, §2): the ref names
--- jumped to this session, newest first, keyed by Neovim's cwd (the repo, like
+-- jumped to this session, newest first, keyed by the repository root (like
 -- saved_positions). Surfaced at the top of the picker. In-memory for the session.
 local recent_refs = {}
 
@@ -349,6 +349,24 @@ local fetch_range_diff = git.fetch_range_diff
 -- Submodule change-graph I/O (§11.7) now lives in gitloom.git.fetch; the
 -- submodule_block renderer below stays (it composes commit-view rows).
 local fetch_submodule_graph = git.fetch_submodule_graph
+
+-- Repository picker I/O (§2.1): list a repo's direct submodules and summarize a
+-- repo for a picker row. Used by M.pick.
+local fetch_submodules = git.fetch_submodules
+local fetch_repo_summary = git.fetch_repo_summary
+
+-- Resolve the repository root the graph targets (spec §2.1): the given `folder`
+-- or Neovim's cwd, normalized to its git top level so opening from a subdir
+-- keys the per-repo session state consistently. Falls back to the raw path when
+-- not inside a git repo (a synchronous one-shot at open / pick time).
+---@param folder string?
+---@return string
+local function resolve_root(folder)
+    local base = folder or vim.fn.getcwd()
+    local top = vim.fn.systemlist({ "git", "-C", base, "rev-parse", "--show-toplevel" })[1]
+    top = top and top:gsub("%s+$", "") -- strip a trailing CR/newline (Windows)
+    return (vim.v.shell_error == 0 and top and top ~= "") and top or base
+end
 
 -- Default marker colours for the submodule change view (§11.7): a deliberately
 -- darker, muted green/red (ForestGreen / Firebrick) — brighter diff groups like
@@ -974,6 +992,22 @@ end
 
 ---@param opts GraphOptions
 function M.open(folder, opts)
+    -- Resolve the repository this graph targets (spec §2.1) up front, so the
+    -- window title can show it and the I/O layer is retargeted before any fetch.
+    -- Inlined (not the module-scope resolve_root used by M.pick) to keep M.open
+    -- under LuaJIT's 60-upvalue ceiling — it must not add a new upvalue.
+    local root
+    do
+        local base = folder or vim.fn.getcwd()
+        local top = vim.fn.systemlist({ "git", "-C", base, "rev-parse", "--show-toplevel" })[1]
+        top = top and top:gsub("%s+$", "") -- strip a trailing CR/newline (Windows)
+        root = (vim.v.shell_error == 0 and top and top ~= "") and top or base
+    end
+    git.set_cwd(root)
+    -- The window title identifies the repo (§2.1): its leaf dir name, plus the
+    -- current branch once HEAD loads (filled in live by update_footer/graph_title).
+    local repo_name = vim.fn.fnamemodify(root, ":t")
+
     ---@type GraphOptions
     local defaults = {
         win = {
@@ -983,7 +1017,7 @@ function M.open(folder, opts)
             -- resize.
             width = function() return math.max(vim.o.columns - 4, 1) end,
             height = function() return math.max(vim.o.lines - 4, 1) end,
-            title = "GraphView",
+            title = (" %s "):format(repo_name),
             footer = footer_text(),
         },
         palette = {
@@ -1097,6 +1131,9 @@ function M.open(folder, opts)
     -- The default footer is computed before opts.mirror is resolved; unless the
     -- caller set its own footer, recompute it so the initial mirror state shows.
     local user_footer = opts and opts.win and opts.win.footer
+    -- Likewise the default title shows the repo (§2.1); leave a caller-supplied
+    -- win.title untouched (graph_title/update_footer also skip it).
+    local user_title = opts and opts.win and opts.win.title
     ---@type GraphOptions
     opts = vim.tbl_deep_extend("force", defaults, opts or {})
     if not user_footer then
@@ -1116,6 +1153,7 @@ function M.open(folder, opts)
     local listview = require("gitloom.listview")
 
     ---@class Repo
+    ---@field root string                    the repository root all git queries run in (§2.1)
     ---@field commits table<string, Commit>  hash → Commit (the resolution table)
     ---@field order OrderItem[]              raw commit items, 1:1 with commits (projection input)
     ---@field display? OrderItem[]           the projected OrderItem graph the view renders (§10; set at init)
@@ -1124,6 +1162,7 @@ function M.open(folder, opts)
 
     ---@type Repo
     local repo = {
+        root = root,
         commits = {},
         order = {},
         refs = {},
@@ -1286,9 +1325,10 @@ function M.open(folder, opts)
     -- for the `R` key.
     local resync = function(_) end
 
-    -- The repository the graph reflects, identified by Neovim's cwd (git runs in
-    -- cwd). Keys the remembered cursor position so reopening restores it (§2).
-    local repo_key = vim.fn.getcwd()
+    -- The repository the graph reflects, identified by its root (git runs in
+    -- repo.root, §2.1). Keys the remembered cursor position and the ref-picker
+    -- MRU so reopening restores them per repository (§2/§2.1).
+    local repo_key = repo.root
 
     -- The listview instance. Forward-declared so the on_controller/stream
     -- callbacks below close over this local (not a stray global) and see it once
@@ -1702,6 +1742,14 @@ function M.open(folder, opts)
     -- Recompute the footer (active modes + the branch-mode summary, §10) and
     -- apply it to the floating window. Centralised so every state change updates
     -- it the same way.
+    --
+    -- The window title identifies the repository (§2.1): its name, plus the
+    -- current branch once HEAD is known. Recomputed alongside the footer (cheap;
+    -- it only changes when the branch resolves) and applied in the same config.
+    local function graph_title()
+        local b = repo.head
+        return b and (" %s · %s "):format(repo_name, b) or (" %s "):format(repo_name)
+    end
     local function update_footer()
         if lv and lv.win and lv.win.win then
             local nanchors = 0
@@ -1733,10 +1781,14 @@ function M.open(folder, opts)
                 end
             end
             lv.win.opts.footer = status
-            pcall(vim.api.nvim_win_set_config, lv.win.win, {
-                footer = lv.win.opts.footer,
-                footer_pos = "center",
-            })
+            local cfg = { footer = lv.win.opts.footer, footer_pos = "center" }
+            -- Refresh the repo title too (unless the caller pinned its own).
+            if not user_title then
+                lv.win.opts.title = graph_title()
+                cfg.title = lv.win.opts.title
+                cfg.title_pos = "center"
+            end
+            pcall(vim.api.nvim_win_set_config, lv.win.win, cfg)
         end
     end
 
@@ -2612,6 +2664,11 @@ function M.open(folder, opts)
                 -- deliberate keypress, not debounced cursor drift.
                 update_cone()
                 if lv and lv.controller then lv.controller.refresh() end
+                -- The context panes dim with the cone too (§6.2); selecting a marker
+                -- changes the cone without scrolling, so re-dim them (repaint, no
+                -- rebuild) — otherwise the footer/header keep the pre-selection
+                -- highlight and a selected collapsed branch never lights below/above.
+                maybe_update_panes()
                 place_cursor()
                 return
             end
@@ -3230,9 +3287,14 @@ function M.open(folder, opts)
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.connectivity[dir] then lane = s; break end
                 end
+                -- Carry the chosen lane's cone state onto the synthetic seam segment so
+                -- the seam bars dim with the cone (§6.2); without it the seam row has no
+                -- `highlighted`/`edges` and seg_hl reads every bar as out-of-cone, so the
+                -- footer's top (and header's bottom) seam line dimmed even fully lit lanes.
                 sep[j] = lane
                     and { connectivity = { up = true, down = true },
-                        lanes = { { connectivity = { up = true, down = true }, id = lane.id, color = lane.color } } }
+                        lanes = { { connectivity = { up = true, down = true }, id = lane.id,
+                            color = lane.color, highlighted = render.seg_hl(lane) or false } } }
                     or { connectivity = {}, lanes = {} }
             end
             return sep
@@ -3932,6 +3994,121 @@ function M.open(folder, opts)
     end
 
     return lv
+end
+
+--- Repository picker (spec §2.1): pick the main module or one of its direct
+--- submodules and open the graph for it. The intended binding is the user's own
+--- (e.g. `<leader>wG`); `:GitloomPick` forwards setup() config here.
+---
+--- The picker **opens immediately** with the entries whose paths are known up
+--- front (the main module, then each submodule as `git submodule status`
+--- resolves) and **fills each row's branch / commit summary asynchronously** as
+--- git returns it (spec §2/§2.1) — mutating the item and re-rendering, so a slow
+--- or large submodule never blocks the list. An uninitialized submodule is shown
+--- disabled (no local repo to open). Confirming opens `M.open` on that repo.
+---@param opts GraphOptions
+function M.pick(opts)
+    opts = opts or {}
+    local picker_ok, picker = pcall(require, "snacks.picker")
+    if not picker_ok then
+        vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
+        return
+    end
+
+    local main_root = resolve_root(nil)
+    -- The main module is known instantly, so the picker can open at once; its
+    -- summary and the submodule list/summaries fill in below.
+    local main_item = {
+        kind = "main",
+        label = vim.fn.fnamemodify(main_root, ":t") .. " (main module)",
+        target = main_root,
+        state = "ok",
+        checked_out = true,
+        text = "main module " .. main_root,
+    }
+    local items = { main_item }
+
+    local align = picker.util.align
+    local p
+    -- Re-render the open list after mutating an item's fields (cheap, no finder
+    -- re-run); add a freshly-discovered item by re-running the finder (which
+    -- returns the live `items` table). No-ops once the picker is closed.
+    local function rerender()
+        if p and not p.closed then p:update({ force = true }) end
+    end
+    local function readd()
+        if p and not p.closed then p:find({ refresh = true }) end
+    end
+
+    -- Fill one entry's branch/commit summary in place, then re-render.
+    local function fill(item, cwd)
+        fetch_repo_summary(cwd).next(function(s)
+            item.branch, item.short, item.subject = s.branch, s.short, s.subject
+            item.filled = true
+            rerender()
+        end)
+    end
+
+    p = picker.pick({
+        source = "gitloom_repos",
+        title = "Gitloom repositories",
+        items = items,
+        layout = { preset = "select" }, -- compact, no preview window
+        ---@param item { kind: string, label: string, state: string, branch?: string, short?: string, subject?: string, filled?: boolean }
+        format = function(item)
+            local ret = {}
+            local label_hl = item.kind == "main" and "SnacksPickerGitBranchCurrent" or "SnacksPickerDirectory"
+            ret[#ret + 1] = { align(item.label, 32, { truncate = true }), label_hl }
+            ret[#ret + 1] = { " " }
+            if item.state == "uninitialized" then
+                ret[#ret + 1] = { align("(not checked out)", 20), "SnacksPickerComment" }
+            elseif item.filled then
+                ret[#ret + 1] = { align(item.branch ~= "" and item.branch or "(detached)", 18, { truncate = true }),
+                    "SnacksPickerGitBranch" }
+                ret[#ret + 1] = { " " }
+                ret[#ret + 1] = { align(item.short or "", 8), "SnacksPickerGitCommit" }
+                ret[#ret + 1] = { " " }
+                ret[#ret + 1] = { item.subject or "", "SnacksPickerComment" }
+            else
+                ret[#ret + 1] = { "…", "SnacksPickerComment" } -- summary still loading
+            end
+            return ret
+        end,
+        confirm = function(pk, item)
+            pk:close()
+            if not item then return end
+            if not item.checked_out then
+                vim.notify(
+                    ("gitloom: %s is not checked out"):format(item.label),
+                    vim.log.levels.INFO)
+                return
+            end
+            -- Open after the picker tears down (it restores focus to the prior
+            -- window first), like the ref picker's confirm.
+            vim.schedule(function() M.open(item.target, opts) end)
+        end,
+    })
+
+    -- Fill the main module's summary, then discover + append + fill submodules.
+    fill(main_item, main_root)
+    fetch_submodules(main_root).next(function(subs)
+        for _, s in ipairs(subs) do
+            local abspath = main_root .. "/" .. s.path
+            local item = {
+                kind = "submodule",
+                label = s.path,
+                target = abspath,
+                state = s.state,
+                checked_out = s.checked_out,
+                text = s.path,
+            }
+            items[#items + 1] = item
+            if s.checked_out then fill(item, abspath) end
+        end
+        readd() -- bring the new submodule rows into the open list
+    end)
+
+    return p
 end
 
 

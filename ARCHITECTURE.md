@@ -458,9 +458,35 @@ one-line swap with no real gain today. gitloom owns row ordering (`order_commits
 paint (it equals the `topo` sort mode's own output), and the active sort mode
 produces the authoritative order at completion.
 
-All run via `vim.fn.jobstart` (no explicit `cwd`, so they observe Neovim's
-working directory) and resolve a `Future` on `on_exit`. The controller chains
-them refs → head → commits.
+All run via `vim.fn.jobstart` and resolve a `Future` on `on_exit`. The
+controller chains them refs → head → commits.
+
+**Repository root (spec §2.1).** The git layer runs every query in an
+**active repository root** rather than implicitly following Neovim's cwd. A
+module-level `active_cwd` in `fetch.lua` (set via `M.set_cwd`, exposed as
+`git.set_cwd`) is injected as each job's `cwd` by a single `js` wrapper around
+`vim.fn.jobstart`; `nil` falls back to Neovim's cwd (the original behaviour
+until a graph sets it). This mirrors the window's existing module-level state
+(one active graph). The window resolves the root once when the graph opens
+(`git -C <folder|cwd> rev-parse --show-toplevel`, defaulting to the cwd repo
+when no folder is passed), stores it on `Repo.root`, and pushes it with
+`git.set_cwd`. This is what lets the graph target a **submodule** or the
+**main module** instead of the cwd repo; the window's per-session view state
+(`saved_positions`, `recent_refs`) is keyed by `repo.root` accordingly.
+
+**Repository picker (`:GitloomPick` → `window.pick`, §2.1).** `fetch_submodules(cwd)`
+runs `git submodule status` in an **explicit** `cwd` (the picker queries the cwd
+repo without disturbing any open graph's active root — `git_lines` now takes an
+optional `cwd` that overrides `active_cwd`) and parses it with the pure
+`submodule.parse_submodules` into `{ name, path, sha, state, checked_out }` per
+direct submodule. `fetch_repo_summary(cwd)` returns `{ branch, short, subject }`
+for a picker row. `window.pick` opens the snacks picker immediately with the
+known entries (main module first, submodules appended as discovery resolves via
+`picker:find{refresh}`) and fills each row's summary asynchronously
+(`picker:update{force}` after mutating the item), so a slow submodule never
+blocks the list; an uninitialized submodule is shown disabled, and confirming
+opens `M.open` on that repo. The pure `parse_submodules` is unit-tested; the
+async picker orchestration is window glue (not unit-tested, like the rest).
 
 ### Parsing / ref resolution
 
@@ -884,7 +910,7 @@ The cone is then recomputed for the new pivot/viewport. The target is the
 **remembered position** for the repo if there is one, else **HEAD**
 (`repo.refs["HEAD"]`; absent on a detached HEAD, which falls back to the top).
 The remembered position is a module-level `saved_positions` table keyed by
-Neovim's cwd (the repo git runs in); the `CursorMoved` handler records the hash
+the repository root (`repo.root`, §2.1); the `CursorMoved` handler records the hash
 under the cursor (`cursor_hash`) on every row change, so it is always current
 without a close hook. It is in-memory for the Neovim session — not persisted to
 disk.
@@ -977,9 +1003,10 @@ in graph.lua.
 
 graph.lua glue (gated, async — never fetches; §11.7.1/§11.7.4):
 
-- `git_output(args, cwd?)` is a thin future over `jobstart` (used for the
-  submodule queries; the submodule is addressed with `git -C <path>` so a missing
-  checkout fails the query rather than throwing on an invalid `cwd`).
+- `git_code(args)` is a thin future over `jobstart` resolving `{ code, out }`
+  (used for the submodule queries; runs in the active repository root like the
+  rest, with the submodule addressed by `git -C <path>` relative to it, so a
+  missing checkout fails the query rather than throwing on an invalid `cwd`).
 - `fetch_submodule_graph(opts, change)` chains the gated queries — presence
   (`cat-file -e <hash>^{commit}` for both), `merge-base`, `rev-list --count` for
   ahead/behind, and **two** `log --first-parent base..tip` runs (one for

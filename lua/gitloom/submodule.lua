@@ -42,6 +42,42 @@ function M.parse_changes(patch)
     return out
 end
 
+--- Parse `git submodule status` output into one entry per **direct** submodule
+--- (spec §2.1), for the repository picker. Each status line is
+--- `<flag><sha> <path>[ (<describe>)]`, where the leading flag character is the
+--- submodule's checkout state:
+---   ` ` — checked out at the recorded commit (`ok`),
+---   `+` — checked out but at a **different** commit than recorded (`modified`),
+---   `U` — has merge conflicts (`conflict`),
+---   `-` — **not initialized / checked out** (`uninitialized`) — there is no
+---         local repository to open, so the picker shows it disabled.
+--- Returns `{ name, path, sha, state, checked_out }` per submodule, in status
+--- order. `path` is relative to the repository root; `checked_out` is false only
+--- for the `uninitialized` state. Pure.
+---@param lines string[]?  -- `git submodule status` output lines
+---@return { name: string, path: string, sha: string, state: "ok"|"modified"|"conflict"|"uninitialized", checked_out: boolean }[]
+function M.parse_submodules(lines)
+    local STATE = { [" "] = "ok", ["+"] = "modified", ["U"] = "conflict", ["-"] = "uninitialized" }
+    local out = {}
+    for _, line in ipairs(lines or {}) do
+        local flag, sha, rest = line:match("^([%-%+U ])(%x+) (.+)$")
+        if sha and STATE[flag] then
+            -- `rest` is the path, optionally followed by a ` (<describe>)`
+            -- suffix git appends for a checked-out submodule; strip it.
+            local path = rest:match("^(.-) %(.*%)%s*$") or rest
+            local state = STATE[flag]
+            out[#out + 1] = {
+                name = path,
+                path = path,
+                sha = sha,
+                state = state,
+                checked_out = state ~= "uninitialized",
+            }
+        end
+    end
+    return out
+end
+
 --- Classify the relationship between the old pointer `old` and the new pointer
 --- `new` from their merge-base `base` (the empty string or nil when the two
 --- histories are disjoint). Pure.

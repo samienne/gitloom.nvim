@@ -31,8 +31,11 @@ exists primarily to exercise and validate the graph algorithm.
 
 ## 2. Entry point
 
-- `:GitloomGraph` opens the graph for the repository at Neovim's current
-  working directory.
+- `:GitloomGraph` opens the graph for a **repository root**. With no argument
+  it targets the repository at Neovim's current working directory (the
+  default). It accepts an optional repository path so the graph can be opened
+  on a **specific repository** — a submodule of the cwd repo, or the main
+  module (§2.1).
 - The window is a floating window. `q` closes it; `m` cycles the merge/split
   rendering style (§5.2) so the styles can be compared at a glance; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
@@ -73,9 +76,11 @@ mode.
   it; §6), so `<CR>` / the action menu act on that branch with no further
   navigation. Picking HEAD — which has no own label — just centers, cursor at the
   message.
-  `?` opens a float listing all keybindings. The footer shows live status
-  (the active merge mode and ref label mode, a `N collapsed, M hidden` summary
-  when any branch modes are set, and `(mirrored)` when mirroring is on).
+  `?` opens a float listing all keybindings. The window **title** identifies the
+  repository the graph is for (§2.1): its name, plus the current branch once HEAD
+  is known (a caller-supplied `win.title` is left untouched). The footer shows
+  live status (the active merge mode and ref label mode, a `N collapsed, M hidden`
+  summary when any branch modes are set, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
   rows), with `cursorline` marking the current row (§7). The cursor is parked at
   the **commit message** rather than left at column 0. `h`/`l` move a selection
@@ -101,12 +106,38 @@ mode.
   the view on that row when possible — clamped at the top/bottom of the graph
   (like `zz`). On a detached HEAD (no current branch) there is nothing to focus,
   so the cursor stays at the top. The cursor's row is then **remembered per
-  repository** (keyed by Neovim's working directory) for the duration of the
+  repository** (keyed by repository root, §2.1) for the duration of the
   Neovim session: closing and reopening the graph restores the cursor to the same
   commit (re-centered) instead of re-focusing HEAD. The remembered target is the
   **commit under the cursor by hash**, so it survives reflow (§10.5) and resolves
   to the commit's collapsed head (§10.3) when its branch is folded; if that commit
   is no longer present, focus falls back to HEAD.
+
+### 2.1 Repository selection
+
+The graph is bound to a **repository root** — an absolute path resolved once
+when the graph opens (from the given path, or Neovim's cwd, via git's
+top-level). All of gitloom's git queries run against that root, so the graph
+need not be the repository at the editor's cwd.
+
+- A **picker** entry point lists the **main module** (the cwd repo's top
+  level) and its **direct submodules**; choosing one opens the graph for that
+  repository. Nested submodules are out of scope for the first cut (cf.
+  §11.7.5). A submodule that is **not initialized / checked out** is shown but
+  disabled — there is no local repository to open. Like the graph itself, the
+  picker **opens immediately** with the entries whose paths are known up front
+  and **fills each entry's branch / commit summary asynchronously** as git
+  resolves it, so a slow or large submodule never blocks the list. `setup()`
+  binds the picker to **`<leader>wG`** by default (a normal-mode mapping;
+  configurable via the `pick_key` option, `false` to disable).
+- gitloom retains view state — the remembered cursor position (§2) and the
+  ref-picker session MRU (§2 `<leader>b`) — **per repository** for the Neovim
+  session, keyed by repository root. Switching repositories and returning
+  restores where you were in each.
+- Switching the active repository **while the graph is open**, and a link from
+  the commit view into a submodule's own repository (§11.7), are planned but
+  not in this first cut. The entry points accept an explicit repository so
+  those workflows reuse them.
 
 ## 3. Data source
 
@@ -891,6 +922,13 @@ Endpoint     = Commit | "index" | "worktree"
 where it is merged over the built-in defaults (read at invocation time, so a
 later `setup()` still applies). Programmatic callers may also pass options
 directly to the open function.
+
+`setup()` also installs the **repository-picker mapping** (§2.1): a normal-mode
+map of `pick_key` (default `<leader>wG`) to the picker. This is a setup-level
+option (not a `GraphOptions` field) — installed by `setup()` rather than at
+plugin load so `<leader>` resolves against the user's `mapleader`. Set
+`pick_key = false` to install no mapping, or a string to choose the LHS.
+`:GitloomPick` invokes the picker regardless.
 
 ## 9. Non-goals
 
