@@ -657,6 +657,13 @@ cutoff condenses to a node-less junction rather than a stray head. When many lan
 genuinely interconnect off-screen the header can still grow; it is capped with a
 `+N above` overflow.)
 
+**Virtual commits never appear in a pane.** The working-tree virtual commits
+(§4.2) are the live state, not topology; the header's up-walk stops before
+reaching them, so the topmost **real** commit (typically HEAD) is the highest
+head the header draws. When the only off-screen-newer content is virtual, the
+header is hidden. (The footer walks *down* toward the roots, so virtual commits —
+always above HEAD — never reach it.)
+
 **Lane termination.** Every crossing lane is *continued* until it ends at real
 topology — never arrow-capped:
 

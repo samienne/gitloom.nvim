@@ -188,7 +188,12 @@ to each other and to the lanes crossing the cutoff:
    the viewport hides every branch that forks from it.
 2. **Rebuild the focused sub-DAG** — `pane.continue_up(boundary, tips, anchors,
    order_of, seam)` runs a three-pass reachability over the **display** DAG (the
-   projected nodes, so `order_of` is always defined), up-only, bounded above the seam:
+   projected nodes, so `order_of` is always defined), up-only, bounded above the seam.
+   **Working-tree virtual commits (§4.2) are excluded:** `above()` treats a virtual
+   node as not-above, and a boundary lane that begins on one is not seeded — so the
+   up-walk stops at the topmost **real** commit (the live state is never drawn in a
+   pane; spec §6.2). A virtual-only off-screen region therefore yields an empty rebuild
+   and the header is hidden.
    - **Pass 1 — `seed_reach`.** Each boundary column is a distinct **seed** (a fork
      seam yields ≥2 columns on one commit — different lanes, so seed identity is the
      *column*, not the begin hash); each pinned tip is a seed too. From every seed walk
