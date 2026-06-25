@@ -345,6 +345,24 @@ local fetch_range_diff = git.fetch_range_diff
 -- submodule_block renderer below stays (it composes commit-view rows).
 local fetch_submodule_graph = git.fetch_submodule_graph
 
+-- Repository picker I/O (§2.1): list a repo's direct submodules and summarize a
+-- repo for a picker row. Used by M.pick.
+local fetch_submodules = git.fetch_submodules
+local fetch_repo_summary = git.fetch_repo_summary
+
+-- Resolve the repository root the graph targets (spec §2.1): the given `folder`
+-- or Neovim's cwd, normalized to its git top level so opening from a subdir
+-- keys the per-repo session state consistently. Falls back to the raw path when
+-- not inside a git repo (a synchronous one-shot at open / pick time).
+---@param folder string?
+---@return string
+local function resolve_root(folder)
+    local base = folder or vim.fn.getcwd()
+    local top = vim.fn.systemlist({ "git", "-C", base, "rev-parse", "--show-toplevel" })[1]
+    top = top and top:gsub("%s+$", "") -- strip a trailing CR/newline (Windows)
+    return (vim.v.shell_error == 0 and top and top ~= "") and top or base
+end
+
 -- Default marker colours for the submodule change view (§11.7): a deliberately
 -- darker, muted green/red (ForestGreen / Firebrick) — brighter diff groups like
 -- DiffAdd/Added read pastel. `default = true` so a colorscheme (or the palette's
@@ -1107,11 +1125,11 @@ function M.open(folder, opts)
     ---@field refs table<string, Ref>        name → Ref ("HEAD" for the head)
     ---@field head? string                   current branch name
 
-    -- The repository this graph targets (spec §2.1): the given `folder` or
-    -- Neovim's cwd, normalized to the repo top level so opening from a subdir
-    -- keys the session state consistently. Falls back to the raw path when not
-    -- inside a git repo. `git.set_cwd` retargets the I/O layer to it; the
-    -- per-session view state (saved_positions / recent_refs) is keyed by it.
+    -- The repository this graph targets (spec §2.1): the `folder` (or cwd)
+    -- normalized to its git top level. `git.set_cwd` retargets the I/O layer to
+    -- it; the per-session view state (saved_positions / recent_refs) is keyed by
+    -- it. Inlined (not the module-scope resolve_root used by M.pick) to keep
+    -- M.open under LuaJIT's 60-upvalue ceiling — it must not add an upvalue.
     local root
     do
         local base = folder or vim.fn.getcwd()
@@ -3897,6 +3915,121 @@ function M.open(folder, opts)
     end
 
     return lv
+end
+
+--- Repository picker (spec §2.1): pick the main module or one of its direct
+--- submodules and open the graph for it. The intended binding is the user's own
+--- (e.g. `<leader>wG`); `:GitloomPick` forwards setup() config here.
+---
+--- The picker **opens immediately** with the entries whose paths are known up
+--- front (the main module, then each submodule as `git submodule status`
+--- resolves) and **fills each row's branch / commit summary asynchronously** as
+--- git returns it (spec §2/§2.1) — mutating the item and re-rendering, so a slow
+--- or large submodule never blocks the list. An uninitialized submodule is shown
+--- disabled (no local repo to open). Confirming opens `M.open` on that repo.
+---@param opts GraphOptions
+function M.pick(opts)
+    opts = opts or {}
+    local picker_ok, picker = pcall(require, "snacks.picker")
+    if not picker_ok then
+        vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
+        return
+    end
+
+    local main_root = resolve_root(nil)
+    -- The main module is known instantly, so the picker can open at once; its
+    -- summary and the submodule list/summaries fill in below.
+    local main_item = {
+        kind = "main",
+        label = vim.fn.fnamemodify(main_root, ":t") .. " (main module)",
+        target = main_root,
+        state = "ok",
+        checked_out = true,
+        text = "main module " .. main_root,
+    }
+    local items = { main_item }
+
+    local align = picker.util.align
+    local p
+    -- Re-render the open list after mutating an item's fields (cheap, no finder
+    -- re-run); add a freshly-discovered item by re-running the finder (which
+    -- returns the live `items` table). No-ops once the picker is closed.
+    local function rerender()
+        if p and not p.closed then p:update({ force = true }) end
+    end
+    local function readd()
+        if p and not p.closed then p:find({ refresh = true }) end
+    end
+
+    -- Fill one entry's branch/commit summary in place, then re-render.
+    local function fill(item, cwd)
+        fetch_repo_summary(cwd).next(function(s)
+            item.branch, item.short, item.subject = s.branch, s.short, s.subject
+            item.filled = true
+            rerender()
+        end)
+    end
+
+    p = picker.pick({
+        source = "gitloom_repos",
+        title = "Gitloom repositories",
+        items = items,
+        layout = { preset = "select" }, -- compact, no preview window
+        ---@param item { kind: string, label: string, state: string, branch?: string, short?: string, subject?: string, filled?: boolean }
+        format = function(item)
+            local ret = {}
+            local label_hl = item.kind == "main" and "SnacksPickerGitBranchCurrent" or "SnacksPickerDirectory"
+            ret[#ret + 1] = { align(item.label, 32, { truncate = true }), label_hl }
+            ret[#ret + 1] = { " " }
+            if item.state == "uninitialized" then
+                ret[#ret + 1] = { align("(not checked out)", 20), "SnacksPickerComment" }
+            elseif item.filled then
+                ret[#ret + 1] = { align(item.branch ~= "" and item.branch or "(detached)", 18, { truncate = true }),
+                    "SnacksPickerGitBranch" }
+                ret[#ret + 1] = { " " }
+                ret[#ret + 1] = { align(item.short or "", 8), "SnacksPickerGitCommit" }
+                ret[#ret + 1] = { " " }
+                ret[#ret + 1] = { item.subject or "", "SnacksPickerComment" }
+            else
+                ret[#ret + 1] = { "…", "SnacksPickerComment" } -- summary still loading
+            end
+            return ret
+        end,
+        confirm = function(pk, item)
+            pk:close()
+            if not item then return end
+            if not item.checked_out then
+                vim.notify(
+                    ("gitloom: %s is not checked out"):format(item.label),
+                    vim.log.levels.INFO)
+                return
+            end
+            -- Open after the picker tears down (it restores focus to the prior
+            -- window first), like the ref picker's confirm.
+            vim.schedule(function() M.open(item.target, opts) end)
+        end,
+    })
+
+    -- Fill the main module's summary, then discover + append + fill submodules.
+    fill(main_item, main_root)
+    fetch_submodules(main_root).next(function(subs)
+        for _, s in ipairs(subs) do
+            local abspath = main_root .. "/" .. s.path
+            local item = {
+                kind = "submodule",
+                label = s.path,
+                target = abspath,
+                state = s.state,
+                checked_out = s.checked_out,
+                text = s.path,
+            }
+            items[#items + 1] = item
+            if s.checked_out then fill(item, abspath) end
+        end
+        readd() -- bring the new submodule rows into the open list
+    end)
+
+    return p
 end
 
 

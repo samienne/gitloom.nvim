@@ -122,7 +122,10 @@ need not be the repository at the editor's cwd.
   level) and its **direct submodules**; choosing one opens the graph for that
   repository. Nested submodules are out of scope for the first cut (cf.
   §11.7.5). A submodule that is **not initialized / checked out** is shown but
-  disabled — there is no local repository to open.
+  disabled — there is no local repository to open. Like the graph itself, the
+  picker **opens immediately** with the entries whose paths are known up front
+  and **fills each entry's branch / commit summary asynchronously** as git
+  resolves it, so a slow or large submodule never blocks the list.
 - gitloom retains view state — the remembered cursor position (§2) and the
   ref-picker session MRU (§2 `<leader>b`) — **per repository** for the Neovim
   session, keyed by repository root. Switching repositories and returning

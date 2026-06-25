@@ -89,6 +89,7 @@ suite. With lazy.nvim:
 ```vim
 :GitloomGraph
 :GitloomGraph path/to/submodule
+:GitloomPick
 ```
 
 Opens the graph for the repository at Neovim's current working directory. With
@@ -96,6 +97,16 @@ an optional path argument it opens the graph for that repository instead — a
 submodule of the current repo, or any other repo root (the path is resolved to
 its git top level). View state (cursor position, ref-picker history) is
 remembered per repository for the session.
+
+`:GitloomPick` opens a picker listing the **main module** and its **direct
+submodules**; choosing one opens the graph for that repository. The picker
+opens immediately and fills each entry's current branch and commit summary as
+git resolves it; a submodule that is not checked out is shown disabled. Bind it
+to a key of your choosing, e.g.:
+
+```lua
+vim.keymap.set("n", "<leader>wG", "<cmd>GitloomPick<cr>", { desc = "Gitloom: pick repo/submodule" })
+```
 
 | Key | Action |
 |-----|--------|

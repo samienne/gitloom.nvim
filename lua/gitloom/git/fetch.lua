@@ -364,13 +364,17 @@ end
 
 --- Run a git command and resolve the future with its stdout as a list of
 --- non-empty lines. A small sibling of fetch_commit_diff for the short
---- working-tree queries (§3.3); runs in the active repository root like the rest.
+--- working-tree queries (§3.3); runs in the active repository root like the
+--- rest, unless an explicit `cwd` is given (the repository picker, §2.1, queries
+--- a specific repo without disturbing the active root).
 ---@param args string[]
+---@param cwd string?  -- explicit working directory; nil = the active root
 ---@return Future
-local function git_lines(args)
+local function git_lines(args, cwd)
     local future, promise = make_future()
     local out = {}
     js(vim.list_extend({ "git" }, args), {
+        cwd = cwd,
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, l in ipairs(lines) do
@@ -398,6 +402,37 @@ local function git_string(args)
         on_exit = function() promise.resolve(table.concat(out, "\n")) end,
     })
     return future
+end
+
+--- List the direct submodules of the repository at `cwd` (the repository
+--- picker, spec §2.1). Runs `git submodule status` in `cwd` explicitly — the
+--- picker is an entry point that must query the cwd's repo without disturbing
+--- any open graph's active root. Resolves the parsed entries (empty when the
+--- repo has no submodules), via the pure submodule.parse_submodules.
+---@param cwd string
+---@return Future
+function M.fetch_submodules(cwd)
+    return git_lines({ "submodule", "status" }, cwd).next(function(lines)
+        return submodule.parse_submodules(lines)
+    end)
+end
+
+--- A one-line summary of the repository at `cwd` for a picker row (spec §2.1):
+--- the current branch (empty on a detached HEAD), the HEAD short hash, and its
+--- subject. Two cheap queries (branch, then `log -1`) run in `cwd`. Resolves
+--- `{ branch, short, subject }`; an empty repo (no HEAD) resolves empty fields.
+---@param cwd string
+---@return Future
+function M.fetch_repo_summary(cwd)
+    return git_lines({ "rev-parse", "--abbrev-ref", "HEAD" }, cwd).next(function(bl)
+        -- `HEAD` means a detached HEAD — report no branch name.
+        local branch = bl[1]
+        if branch == "HEAD" then branch = "" end
+        return git_lines({ "log", "-1", "--format=%h%x1f%s" }, cwd).next(function(ll)
+            local parts = vim.split(ll[1] or "", "\x1f")
+            return { branch = branch or "", short = parts[1] or "", subject = parts[2] or "" }
+        end)
+    end)
 end
 
 --- Read HEAD's hash and the dirty-state counts (spec §3.3). Resolves

@@ -466,6 +466,20 @@ when no folder is passed), stores it on `Repo.root`, and pushes it with
 **main module** instead of the cwd repo; the window's per-session view state
 (`saved_positions`, `recent_refs`) is keyed by `repo.root` accordingly.
 
+**Repository picker (`:GitloomPick` → `window.pick`, §2.1).** `fetch_submodules(cwd)`
+runs `git submodule status` in an **explicit** `cwd` (the picker queries the cwd
+repo without disturbing any open graph's active root — `git_lines` now takes an
+optional `cwd` that overrides `active_cwd`) and parses it with the pure
+`submodule.parse_submodules` into `{ name, path, sha, state, checked_out }` per
+direct submodule. `fetch_repo_summary(cwd)` returns `{ branch, short, subject }`
+for a picker row. `window.pick` opens the snacks picker immediately with the
+known entries (main module first, submodules appended as discovery resolves via
+`picker:find{refresh}`) and fills each row's summary asynchronously
+(`picker:update{force}` after mutating the item), so a slow submodule never
+blocks the list; an uninitialized submodule is shown disabled, and confirming
+opens `M.open` on that repo. The pure `parse_submodules` is unit-tested; the
+async picker orchestration is window glue (not unit-tested, like the rest).
+
 ### Parsing / ref resolution
 
 - `parse_commit_line(line)` — splits the `%x1f` fields into a `Commit`

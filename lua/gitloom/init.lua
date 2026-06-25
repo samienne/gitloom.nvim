@@ -20,6 +20,13 @@ vim.api.nvim_create_user_command("GitloomGraph", function(cmd)
     window.open(folder, M.config)
 end, { nargs = "?", complete = "dir" })
 
+-- Repository picker (§2.1): choose the main module or a submodule, then open the
+-- graph for it. Intended to be bound by the user (e.g. <leader>wG). Forwards the
+-- stored setup() config so the opened graph honours it.
+vim.api.nvim_create_user_command("GitloomPick", function()
+    window.pick(M.config)
+end, {})
+
 if vim.g.loaded_gitloom then
     M.setup()
 end
