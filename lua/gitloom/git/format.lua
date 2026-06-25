@@ -22,12 +22,10 @@ function M.worktree_label(commit)
     local files = ("%d file%s"):format(n, n == 1 and "" or "s")
     if commit.virtual == "staged" then
         return "Staged changes · " .. files
+    elseif commit.virtual == "untracked" then
+        return "Untracked files · " .. files
     end
-    local s = "Unstaged changes · " .. files
-    if (wt.untracked or 0) > 0 then
-        s = s .. (", %d untracked"):format(wt.untracked)
-    end
-    return s
+    return "Unstaged changes · " .. files
 end
 
 --- Render a CommitDetail into the commit view's display lines (one compose-style
@@ -112,9 +110,9 @@ function M.format_range_detail(commits, palette)
 end
 
 --- Metadata rows for the working-tree commit view (spec §11.8): a short title
---- naming the state (staged / unstaged), plus the untracked note for the
---- unstaged node. There is no hash/author/committer/parent — the per-file counts
---- come from the diffstat (§11.4) below. Pure.
+--- naming the state (staged / unstaged / untracked). There is no
+--- hash/author/committer/parent — the per-file counts come from the diffstat
+--- (§11.4) below. Pure.
 ---@param commit Commit   a virtual commit (commit.virtual + commit.wt)
 ---@param palette table
 ---@return table[]
@@ -125,15 +123,15 @@ function M.format_worktree_detail(commit, palette)
     if commit.virtual == "staged" then
         rows[#rows + 1] = highlight_text("Staged changes", palette.author)
         rows[#rows + 1] = highlight_text("index vs HEAD", palette.date)
+    elseif commit.virtual == "untracked" then
+        local n = wt.changed or 0
+        rows[#rows + 1] = highlight_text("Untracked files", palette.author)
+        rows[#rows + 1] = highlight_text(
+            ("%d file%s, shown as additions"):format(n, n == 1 and "" or "s"),
+            palette.date)
     else
         rows[#rows + 1] = highlight_text("Unstaged changes", palette.author)
         rows[#rows + 1] = highlight_text("working tree vs index", palette.date)
-        if (wt.untracked or 0) > 0 then
-            rows[#rows + 1] = highlight_text(
-                ("includes %d untracked file%s as additions"):format(
-                    wt.untracked, wt.untracked == 1 and "" or "s"),
-                palette.date)
-        end
     end
     rows[#rows + 1] = highlight_text("")
     return rows

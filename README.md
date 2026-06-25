@@ -42,8 +42,8 @@ even though it ships as part of the same suite. See
 - **Reachability emphasis** — the row under the cursor dims everything not in
   its history (ancestors) or downstream of it (descendants), keeping each
   lane's colour (just muted) so the relevant graph stands out
-- **Working-tree changes** — uncommitted work shows as up to two `◌` nodes
-  (staged, then unstaged + untracked) on top of HEAD; open either to inspect its
+- **Working-tree changes** — uncommitted work shows as up to three `◌` nodes
+  (staged, unstaged, untracked) on top of HEAD; open any to inspect its
   diff in the commit view or the external viewer. Updates live as you edit or
   stage (and on `R`); strictly read-only — gitloom never stages or commits
 
@@ -353,11 +353,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   plugin, or set it to `nil` to disable the integration. See
   [specification.md](specification.md) §11.5.
 - **`working_tree`** — show uncommitted changes as virtual `◌` commits on top of
-  HEAD (default `true`): a *staged* node (index vs HEAD) and an *unstaged* node
-  (working tree vs index, plus untracked files as additions), each shown only when
-  it has content. They open in the commit view / external diff like any commit, and
-  refresh live as you edit or stage (`BufWritePost` / focus), or as part of the full
-  `R` resync. gitloom never stages or commits. See
+  HEAD (default `true`): a *staged* node (index vs HEAD), an *unstaged* node
+  (tracked working tree vs index), and an *untracked* node (untracked files as
+  additions), stacked newest-first untracked → unstaged → staged → HEAD and each
+  shown only when it has content. They open in the commit view / external diff like
+  any commit, and refresh live as you edit or stage (`BufWritePost` / focus), or as
+  part of the full `R` resync. gitloom never stages or commits. See
   [specification.md](specification.md) §3.3 / §4.2.
 - **`scrolloff`** — the window-local `'scrolloff'` for the graph and commit-view
   windows: how many context rows are kept above/below the cursor (default `10`).

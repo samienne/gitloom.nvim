@@ -213,8 +213,8 @@ end
 
 --- Count the staged / unstaged / untracked files from `git status --porcelain`
 --- output (spec §3.3). Each porcelain line is `XY <path>`: X is the index
---- (staged) status, Y the working-tree (unstaged) status; `??` is untracked
---- (counted on the unstaged side, where the untracked files live). Pure;
+--- (staged) status, Y the working-tree (unstaged) status; `??` is untracked.
+--- The three counts seed the three working-tree virtual commits (§4.2). Pure;
 --- exposed for testing.
 ---@param lines string[]
 ---@return { staged: integer, unstaged: integer, untracked: integer }

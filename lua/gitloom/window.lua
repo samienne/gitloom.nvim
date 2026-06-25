@@ -293,6 +293,7 @@ local format_diffstat = git.format_diffstat
 -- git never produces for a real object, so every hash-keyed path keeps working.
 local WORKTREE_UNSTAGED_HASH = "0000000000000000000000000000000000000000"
 local WORKTREE_STAGED_HASH = "0000000000000000000000000000000000000001"
+local WORKTREE_UNTRACKED_HASH = "0000000000000000000000000000000000000002"
 
 -- Working-tree I/O (state + diffs, §3.3) now lives in gitloom.git.fetch.
 local fetch_worktree_state = git.fetch_worktree_state
@@ -838,8 +839,9 @@ local function open_commit_view(opts, commit, range)
         end)
     elseif commit and commit.virtual then
         -- Working-tree commit view (§11.8): the node's own diff (staged = index
-        -- vs HEAD; unstaged = working tree vs index + untracked). No git-show
-        -- metadata — the header is synthesized (format_worktree_detail).
+        -- vs HEAD; unstaged = tracked working tree vs index; untracked = the
+        -- synthesized untracked additions). No git-show metadata — the header is
+        -- synthesized (format_worktree_detail).
         fetched = fetch_worktree_diff(commit.virtual).next(function(diff_output)
             return { meta = nil, diff = diff_output }
         end)
@@ -1182,9 +1184,9 @@ function M.open(folder, opts)
     -- close/reopen (§2). Assigned in the window block; forward-declared.
     local cursor_hash = function(_) return nil end
 
-    -- Working-tree virtual commits (§3.3/§4.2): the staged/unstaged Commits
-    -- currently spliced above HEAD (so a refresh can remove them), and the HEAD
-    -- hash they were anchored on (so a refresh can tell when history has moved).
+    -- Working-tree virtual commits (§3.3/§4.2): the staged/unstaged/untracked
+    -- Commits currently spliced above HEAD (so a refresh can remove them), and the
+    -- HEAD hash they were anchored on (so a refresh can tell when history moved).
     local worktree_commits = {}
     local worktree_head = nil
     -- Re-reads the dirty state and rebuilds the virtual commits (§3.4). Assigned
@@ -1451,10 +1453,10 @@ function M.open(folder, opts)
 
     -- Rebuild the working-tree virtual commits (§3.3/§4.2) from a fetched state
     -- ({ head_hash, status }). Removes any existing ones, then — when enabled,
-    -- dirty, and the HEAD anchor is still in the model — splices up to two nodes
-    -- (unstaged → staged → HEAD) into repo.order just above HEAD. Returns a status
-    -- the caller surfaces: "ok" | "clean" | "off" | "moved" (HEAD advanced past
-    -- the snapshot, §3.4). The caller reflows.
+    -- dirty, and the HEAD anchor is still in the model — splices up to three nodes
+    -- (untracked → unstaged → staged → HEAD) into repo.order just above HEAD.
+    -- Returns a status the caller surfaces: "ok" | "clean" | "off" | "moved"
+    -- (HEAD advanced past the snapshot, §3.4). The caller reflows.
     local function apply_worktree(state)
         clear_worktree_nodes()
         if opts.working_tree == false then return "off" end
@@ -1464,8 +1466,9 @@ function M.open(folder, opts)
         local anchor = repo.commits[worktree_head]
         if not anchor then return "moved" end -- history advanced past the snapshot
         local want_staged = st.staged > 0
-        local want_unstaged = (st.unstaged > 0) or (st.untracked > 0)
-        if not (want_staged or want_unstaged) then return "clean" end
+        local want_unstaged = st.unstaged > 0
+        local want_untracked = st.untracked > 0
+        if not (want_staged or want_unstaged or want_untracked) then return "clean" end
 
         -- The anchor's row index in the raw order; the nodes splice just above it.
         local ai
@@ -1474,9 +1477,10 @@ function M.open(folder, opts)
         end
         if not ai then return "moved" end
 
-        -- Build bottom-up (parent first): staged on HEAD, unstaged on staged (or
-        -- HEAD when nothing is staged). `new_items` ends newest-first (unstaged,
-        -- staged) for the splice above the anchor.
+        -- Build bottom-up (parent first): staged on HEAD, unstaged on the node
+        -- below it, untracked on top — each parented to whichever exists below.
+        -- `new_items` ends newest-first (untracked, unstaged, staged) for the
+        -- splice above the anchor.
         local below = anchor
         local new_items = {}
         local function make(kind, wt, hash)
@@ -1493,7 +1497,10 @@ function M.open(folder, opts)
             make("staged", { changed = st.staged }, WORKTREE_STAGED_HASH)
         end
         if want_unstaged then
-            make("unstaged", { changed = st.unstaged, untracked = st.untracked }, WORKTREE_UNSTAGED_HASH)
+            make("unstaged", { changed = st.unstaged }, WORKTREE_UNSTAGED_HASH)
+        end
+        if want_untracked then
+            make("untracked", { changed = st.untracked }, WORKTREE_UNTRACKED_HASH)
         end
         for k = #new_items, 1, -1 do
             table.insert(repo.order, ai, new_items[k])
@@ -2083,9 +2090,10 @@ function M.open(folder, opts)
                 return apply_sort()
             end).next(function()
                 -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
-                -- model, read the dirty state and splice the staged/unstaged nodes
-                -- above HEAD before the projection. Gated by working_tree; a clean
-                -- tree is a no-op. Chained so the reflow below projects them.
+                -- model, read the dirty state and splice the staged/unstaged/
+                -- untracked nodes above HEAD before the projection. Gated by
+                -- working_tree; a clean tree is a no-op. Chained so the reflow
+                -- below projects them.
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
             end).next(function(state)

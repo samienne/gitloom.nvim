@@ -172,7 +172,7 @@ first-class (the decorate field conflated them and dropped remotes).
 ### 3.3 Working-tree state
 
 When the working tree is dirty, gitloom shows the uncommitted changes as up to
-two **virtual commits** (§4.2) stacked on top of HEAD — the live state the user
+three **virtual commits** (§4.2) stacked on top of HEAD — the live state the user
 is building. This is read-only: gitloom **displays** the index and working tree,
 it never stages, unstages, or commits (§9).
 
@@ -180,16 +180,18 @@ The state is read with porcelain queries that run **after** the commit stream
 (§3.1) has its HEAD anchor:
 
 - the **staged** node — the index versus HEAD — from `git diff --cached`;
-- the **unstaged** node — the working tree versus the index — from `git diff`,
-  plus the **untracked** files (`git ls-files --others --exclude-standard`,
-  respecting `.gitignore`), each rendered as a whole-file addition (via
-  `git diff --no-index` against the empty device) so untracked content appears as
-  added lines.
+- the **unstaged** node — the **tracked** working tree versus the index — from
+  `git diff`;
+- the **untracked** node — the **untracked** files
+  (`git ls-files --others --exclude-standard`, respecting `.gitignore`), each
+  rendered as a whole-file addition (via `git diff --no-index` against the empty
+  device) so untracked content appears as added lines.
 
 A node is materialised **only when it has content**: a clean index produces no
-staged node, a clean working tree with no untracked files produces no unstaged
-node, so the count of virtual commits is 0, 1, or 2. Untracked files belong to
-the unstaged node (they are in the working tree, not the index).
+staged node, no tracked working-tree changes produce no unstaged node, and no
+untracked files produce no untracked node, so the count of virtual commits is 0,
+1, 2, or 3. The untracked files are their own node — separate from the tracked
+unstaged changes — stacked newest-first as untracked → unstaged → staged → HEAD.
 
 The reads are gated by the `working_tree` option (§8, default on) and are skipped
 entirely when it is off or when HEAD is unborn (no commits yet). They never block
@@ -271,18 +273,21 @@ The working-tree state (§3.3) enters the model as **virtual commits** — synth
 `Commit` nodes that are not part of the real DAG:
 
 ```
-Commit.virtual = "staged" | "unstaged" | nil   -- nil for a real commit
+Commit.virtual = "staged" | "unstaged" | "untracked" | nil   -- nil for a real commit
 ```
 
 A virtual commit:
 
 - carries a reserved **sentinel hash** (a value git never produces for a real
   object), so every hash-keyed path (the commit table, cursor memory, navigation)
-  keeps working unchanged. The staged and unstaged nodes use distinct sentinels;
-- has **one parent** and **no children**, so it is a tip (§5.3). The unstaged
+  keeps working unchanged. The staged, unstaged, and untracked nodes use distinct
+  sentinels;
+- has **one parent** and **no children**, so it is a tip (§5.3). Each node's
+  parent is the next existing node down the stack: the untracked node's parent is
+  the unstaged node, else the staged node, else the HEAD commit; the unstaged
   node's parent is the staged node when one exists, otherwise the HEAD commit; the
   staged node's parent is the HEAD commit. So the stack reads, newest first,
-  unstaged → staged → HEAD;
+  untracked → unstaged → staged → HEAD;
 - carries **no refs** and is **placed directly above** the HEAD commit in the row
   order;
 - carries **no `author`/`date`/`message` from the model** — its detail is read on
@@ -453,7 +458,7 @@ node-less junction, §10.4). Commit markers:
 | `◎`    | root commit (no parents) |
 | `◉`    | tip commit (no children) |
 | `○`    | ordinary commit |
-| `◌`    | working-tree commit (a virtual staged/unstaged node, §4.2) |
+| `◌`    | working-tree commit (a virtual staged/unstaged/untracked node, §4.2) |
 | `◍`    | collapsed head (a contracted region, §10.3) |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
 
@@ -784,9 +789,10 @@ Endpoint     = Commit | "index" | "worktree"
   `open`/`label` to use a different diff plugin; set `open` to `nil`/`false` to
   disable the integration (no action label, `D` is a no-op).
 - `working_tree` — show uncommitted changes as virtual commits on top of HEAD
-  (§3.3, §4.2). **Default true.** When on, a dirty working tree adds up to two
-  `◌` nodes (staged / unstaged) that update on the working-tree refresh (§3.4);
-  when off, the working tree is never read and no virtual commits appear.
+  (§3.3, §4.2). **Default true.** When on, a dirty working tree adds up to three
+  `◌` nodes (staged / unstaged / untracked) that update on the working-tree
+  refresh (§3.4); when off, the working tree is never read and no virtual commits
+  appear.
 - `scrolloff` — window-local `'scrolloff'` applied to the graph and commit-view
   windows: the number of context rows kept above/below the cursor (**default
   `10`**). Set explicitly so the windows don't inherit the global value. Note: a
@@ -1174,7 +1180,8 @@ endpoints. An endpoint is normally a `Commit` (`from` is `nil` for a root), but
 for the working-tree virtual commits (§4.2) it may instead name a **tree state** —
 `"index"` or `"worktree"` — so a range can run *to* the index or working tree
 rather than to a commit (the staged node is `from = HEAD, to = "index"` with
-`rev = "--cached"`; the unstaged node is `to = "worktree"` with `rev = "HEAD"`).
+`rev = "--cached"`; the unstaged node is `to = "worktree"` with `rev = "HEAD"`; the
+untracked node reuses the unstaged node's range, having no range of its own).
 The provider's `open(range)` is
 called to display it; the default opener runs diffview on `range.rev` and, when
 diffview is not installed, reports that instead of erroring. Overriding `open`
@@ -1345,17 +1352,21 @@ action label (§11.5) — but the data sources differ, branched on `Commit.virtu
 
 - the **metadata** region is not a `git show -s` (there is no commit object).
   Instead it is a short working-tree summary: a title naming the state (staged /
-  unstaged), the changed-file counts, and the untracked-file count for the
-  unstaged node. There is no hash, author, committer, or parent list;
+  unstaged / untracked) and the changed-file count (the untracked node counts the
+  untracked files). There is no hash, author, committer, or parent list;
 - the **diff** is the node's own patch from §3.3 — `git diff --cached` for the
-  staged node, `git diff` plus the synthesized untracked additions for the
-  unstaged node — fed through the *same* diffstat and diff pipeline as a real
-  commit, so the file list, counts, and per-file jumps all work unchanged;
+  staged node, `git diff` (tracked only) for the unstaged node, the synthesized
+  untracked additions for the untracked node — fed through the *same* diffstat and
+  diff pipeline as a real commit, so the file list, counts, and per-file jumps all
+  work unchanged;
 - the **action label** and `D` open the node's working-tree `DiffRange` (§11.5)
   in the external provider — the index or the working tree, not a commit range.
+  The untracked node reuses the unstaged node's working-tree range (the untracked
+  files have no git-tracked counterpart, so there is no range of their own).
 
 Like the rest of the commit view it is strictly read-only (§9): it shows the
-staged/unstaged diff but offers no way to stage, unstage, or commit from it.
+staged/unstaged/untracked diff but offers no way to stage, unstage, or commit
+from it.
 
 ## 12. Reachability emphasis
 
