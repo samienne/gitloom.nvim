@@ -8,6 +8,7 @@ local M = {}
 ---@field name string
 ---@field kind "local"|"remote"|"tag"|"head"
 ---@field commit Commit   the commit this ref points at (a direct reference)
+---@field hl? string      optional highlight override (a synthetic pointer mark, §11.7.6)
 
 --- A node in the commit DAG. `hash`/`parents`/`children`/`refs` exist from the
 --- moment a commit is created (a ref or another commit's parent can create it as

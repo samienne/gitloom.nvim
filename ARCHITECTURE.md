@@ -477,7 +477,10 @@ known entries (main module first, submodules appended as discovery resolves via
 `picker:find{refresh}`) and fills each row's summary asynchronously
 (`picker:update{force}` after mutating the item), so a slow submodule never
 blocks the list; an uninitialized submodule is shown disabled, and confirming
-opens `M.open` on that repo. The pure `parse_submodules` is unit-tested; the
+opens `M.open` on that repo. Opening a repository while a graph is already open
+**stacks** a new float over it (each `M.open` is an independent snacks window;
+`q` closes the top to reveal the previous, spec §2.1) — there is no
+switch-in-place machinery. The pure `parse_submodules` is unit-tested; the
 async picker orchestration is window glue (not unit-tested, like the rest).
 
 ### Parsing / ref resolution

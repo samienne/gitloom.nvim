@@ -132,12 +132,19 @@ need not be the repository at the editor's cwd.
   configurable via the `pick_key` option, `false` to disable).
 - gitloom retains view state — the remembered cursor position (§2) and the
   ref-picker session MRU (§2 `<leader>b`) — **per repository** for the Neovim
-  session, keyed by repository root. Switching repositories and returning
-  restores where you were in each.
-- Switching the active repository **while the graph is open**, and a link from
-  the commit view into a submodule's own repository (§11.7), are planned but
-  not in this first cut. The entry points accept an explicit repository so
-  those workflows reuse them.
+  session, keyed by repository root. Reopening a repository restores where you
+  were in it.
+- **Opening a repository while a graph is already open stacks a new graph
+  window over the current one** (each open is an independent floating window);
+  closing it with `q` returns to the graph beneath. There is no separate
+  switch-in-place mechanism — repositories simply stack, and the per-repository
+  remembered position (above) restores each one's cursor on open. The **active
+  repository follows the focused graph**: returning to an underlying stacked
+  graph re-targets git queries to its repository, so each graph always reads its
+  own repo.
+- A repository may be opened **focused on a specific commit** rather than HEAD —
+  used by the commit-view submodule link (§11.7.6), which opens a submodule's
+  repository on the commit under the cursor.
 
 ## 3. Data source
 
@@ -1448,6 +1455,44 @@ bumping several submodules gets one change graph per submodule.
   behind its tip" line (from refs *containing* `B`, when exactly one) could name
   the new pointer's home — deferred, fragile when several branches contain it.
 - **Nested submodules** are out of scope for the first cut.
+
+#### 11.7.6 Opening the submodule's repository
+
+Each **commit row** in the change graph (§11.7.3) is a **link into the
+submodule's own repository**: pressing `<CR>` on a submodule commit line opens
+the graph for that submodule (§2.1), **focused on the commit under the cursor**
+— the new-pointer side, the old-pointer side, or the shared ancestor, whichever
+row the cursor is on. The submodule repository is opened by its path (the change
+graph's `path`, resolved to the submodule's git top level); like any open, it
+**stacks** over the commit view (§2.1), so `q` returns to it.
+
+**Bump context — the old and new pointers are virtual refs.** However the link
+is entered, the opened submodule graph marks both pointers as **synthetic refs**:
+a green **`new`** ref on the new pointer (`B`) and a red **`old`** ref on the old
+pointer (`A`) (`palette.submodule.new` / `old`, the change view's colours). They
+are ordinary ref decorations (§6) in every respect except origin — they are not
+git refs — so they:
+
+- render as labelled decorations on their commits in the main view **and in the
+  context panes** (§6.2), in their colour;
+- are **pinned as anchors** (§10.6) by default, which both **reveals** their
+  branches (the first-parent default, §10.7, keeps a pinned anchor's line shown,
+  so a pointer on an otherwise-collapsed branch appears as a real commit rather
+  than folding into a `◍`) and keeps them **named in the header/footer panes** as
+  you scroll away from them; and
+- appear in the **ref picker** (§2 `<leader>b`), so you can jump between the two
+  pointers.
+
+The cursor focuses the **clicked** commit (also revealed, by hash, in case it is
+an intermediate rather than a pointer). A pointer not present in the opened graph
+(e.g. an orphaned old pointer unreachable from any ref) is simply not added; if
+the *focused* commit is absent, focus falls back to HEAD (§2). Other lines (the
+header, the "+K more" elision, a non-available block) are not links.
+
+The synthetic refs are **transient** — a resync (§3.4) re-reads the real refs and
+drops them; reopen the link to restore them. A `Ref` may carry an optional
+highlight override (`hl`), which is what gives `new`/`old` their colours; this is
+the first use of that mechanism.
 
 ### 11.8 Working-tree commit view
 
