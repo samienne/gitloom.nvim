@@ -50,28 +50,63 @@ local UNTRACKED_DIFF_CAP = 100
 -- a trailing `%d` decoration field (field 8, read by parse_log below).
 local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s%x1f%d"
 
---- Read all refs via `git for-each-ref` and resolve each to its commit.
---- Output line: "<objectname> <refname> [<*objectname>]" — the dereferenced
---- hash is present (and used) for annotated tags.
+-- `git for-each-ref` format shared by the initial ref read and the resync (§3.2,
+-- §6.3). Space-separated like the original (for-each-ref does NOT interpret a
+-- `%x1f` hex escape — it would print it literally). The first four atoms never
+-- contain a space (object name, refname, annotated-tag deref, upstream short
+-- name), so `%(upstream:track)` — the one field with spaces ("ahead N, behind M")
+-- — is placed **last** and parsed as everything from field 5 on. The upstream
+-- atoms populate only for a local branch that tracks an upstream.
+local REF_FMT =
+    "%(objectname) %(refname) %(*objectname) %(upstream:short) %(upstream:track,nobracket)"
+
+-- Parse one REF_FMT line into `{ kind, name, hash, upstream? }`, or nil to skip
+-- (classify_ref returns nil — a remote HEAD symref, etc.). The upstream is set
+-- only when a tracked branch reports an `%(upstream:short)`; `track` is empty when
+-- in sync, "gone" when the upstream was deleted, else "ahead N" / "behind M" /
+-- "ahead N, behind M" (§6.3).
+---@param line string
+---@return { kind: string, name: string, hash: string, upstream?: Upstream }?
+local function parse_ref_line(line)
+    local parts = vim.split(line, " ")
+    local hash, refname, deref, up_short = parts[1], parts[2], parts[3], parts[4]
+    local track = table.concat(parts, " ", 5) -- field 5..end (may hold spaces); "" if none
+    local kind, name = classify_ref(refname or "")
+    if not (kind and name and hash) then return nil end
+    local target = (deref and deref ~= "") and deref or hash
+    local upstream = nil
+    if up_short and up_short ~= "" then
+        if track == "gone" then
+            upstream = { short = up_short, ahead = 0, behind = 0, gone = true }
+        else
+            upstream = {
+                short = up_short,
+                gone = false,
+                ahead = tonumber((track or ""):match("ahead (%d+)")) or 0,
+                behind = tonumber((track or ""):match("behind (%d+)")) or 0,
+            }
+        end
+    end
+    return { kind = kind, name = name, hash = target, upstream = upstream }
+end
+
+--- Read all refs via `git for-each-ref` and resolve each to its commit. Local
+--- branches that track an upstream carry their divergence (§6.3); annotated tags
+--- are dereferenced to the commit.
 ---@param repo Repo
 function M.fetch_refs(repo)
     local future, promise = make_future()
 
     vim.fn.jobstart(
-        { "git", "for-each-ref", "--format=%(objectname) %(refname) %(*objectname)",
+        { "git", "for-each-ref", "--format=" .. REF_FMT,
             "refs/heads", "refs/remotes", "refs/tags" },
         {
             stdout_buffered = true,
             on_stdout = function(_, lines)
                 for _, line in ipairs(lines) do
                     if line ~= "" then
-                        local parts = vim.split(line, " ")
-                        local hash, refname, deref = parts[1], parts[2], parts[3]
-                        local kind, name = classify_ref(refname or "")
-                        if kind and name and hash then
-                            local target = (deref and deref ~= "") and deref or hash
-                            add_ref(repo, name, kind, target)
-                        end
+                        local r = parse_ref_line(line)
+                        if r then add_ref(repo, r.name, r.kind, r.hash, r.upstream) end
                     end
                 end
             end,
@@ -113,27 +148,26 @@ end
 --- Read the current ref set **without mutating the model** — the resync (§3.4)
 --- needs the fresh refs to diff against `repo.refs` (added / removed / moved)
 --- before applying changes. Resolves to `{ entries, head }`: `entries` is a list
---- of `{ name, kind, hash }` (annotated tags dereferenced like fetch_refs),
---- `head` the current branch name (nil when detached).
+--- of `{ name, kind, hash, upstream? }` (annotated tags dereferenced, upstream
+--- tracking captured like fetch_refs so `R` refreshes the §6.3 indicator), `head`
+--- the current branch name (nil when detached).
 ---@return Future
 function M.fetch_ref_entries()
     local future, promise = make_future()
     local entries = {}
 
     vim.fn.jobstart(
-        { "git", "for-each-ref", "--format=%(objectname) %(refname) %(*objectname)",
+        { "git", "for-each-ref", "--format=" .. REF_FMT,
             "refs/heads", "refs/remotes", "refs/tags" },
         {
             stdout_buffered = true,
             on_stdout = function(_, lines)
                 for _, line in ipairs(lines) do
                     if line ~= "" then
-                        local parts = vim.split(line, " ")
-                        local hash, refname, deref = parts[1], parts[2], parts[3]
-                        local kind, name = classify_ref(refname or "")
-                        if kind and name and hash then
-                            local target = (deref and deref ~= "") and deref or hash
-                            entries[#entries + 1] = { name = name, kind = kind, hash = target }
+                        local r = parse_ref_line(line)
+                        if r then
+                            entries[#entries + 1] =
+                                { name = r.name, kind = r.kind, hash = r.hash, upstream = r.upstream }
                         end
                     end
                 end

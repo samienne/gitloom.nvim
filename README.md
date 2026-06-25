@@ -145,7 +145,19 @@ they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
 pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
 a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
-(§10.6).
+(§10.6). Pinning a local branch also pins its **tracked upstream** (so both lanes
+stay in full and a divergence is drawn rather than the remote collapsing);
+disable with `pin_upstream = false`.
+
+**Upstream tracking.** A local branch that tracks a remote shows a terse
+divergence indicator after its name: `⇡N` ahead, `⇣N` behind, `⇡N⇣M` diverged,
+`gone` when the upstream was deleted (in sync shows nothing). So `(master ⇡2⇣3)`
+means two commits ahead and three behind `origin/master`. The current branch's
+status also shows in the footer, and `⇡⇣` appears in the `<leader>b` ref picker.
+Counts are git's own, computed against the **last-fetched** remote state (gitloom
+never fetches; `git fetch` then `R` refreshes them). The upstream is read from
+git's tracking config, not a shared name, so it stays correct across mirrored or
+many-remote setups. Colors are configurable via `palette.track`.
 
 **Commit selection (range).** Press `V` to start a modal selection that picks a
 range of commits **along one branch**. It is not a contiguous block of rows — it
@@ -286,6 +298,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- colours (foreground only; darker muted green/red by default). base = nil
         -- means "use lane 1's colour" (tracks[1]).
         submodule = { new = "GitloomSubmoduleAdd", old = "GitloomSubmoduleDel", base = nil },
+        -- upstream divergence indicator (§6.3): the ⇡N / ⇣N / gone tokens.
+        track = { ahead = "Added", behind = "WarningMsg", gone = "Comment" },
 
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },
     },
@@ -309,6 +323,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
+    pin_upstream = true,     -- pinning a local branch also pins its tracked upstream (§6.3/§10.6)
     diff = {
         -- External diff provider, operating on a git range (§11.5). Default opens
         -- diffview; override to use another plugin, or set open = nil to disable.

@@ -124,11 +124,16 @@ local KEYBINDS = {
 ---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
 ---@param focus boolean?  -- the first-parent focus default is on (§10.7)
 ---@param sort_label string?  -- the active sort mode's label (§3.1)
-local function footer_text(mirror, modes, focus, nanchors, sort_label)
+local function footer_text(mirror, modes, focus, nanchors, sort_label, track_str)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
     if sort_label then
         status = status .. " | Sort: " .. sort_label
+    end
+    -- Current branch's upstream divergence (§6.3), e.g. "master ⇡2⇣3" / "… gone";
+    -- omitted when in sync or untracked.
+    if track_str and track_str ~= "" then
+        status = status .. " | " .. track_str
     end
     if focus then
         status = status .. " | focus"
@@ -928,6 +933,7 @@ end
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
+---@field track? { ahead?: string, behind?: string, gone?: string }  upstream divergence indicator tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
 ---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
 ---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
@@ -963,6 +969,7 @@ end
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
+---@field pin_upstream? boolean  pinning a local branch also pins its tracked upstream (default true); §6.3/§10.6
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 
 ---@param opts GraphOptions
@@ -1008,6 +1015,12 @@ function M.open(folder, opts)
                 new = "GitloomSubmoduleAdd",
                 old = "GitloomSubmoduleDel",
                 base = nil,
+            },
+            -- Upstream divergence indicator (§6.3): the ⇡N / ⇣N / gone tokens.
+            track = {
+                ahead = "Added",      -- ahead of upstream (pushable)
+                behind = "WarningMsg", -- behind upstream (pull needed)
+                gone = "Comment",     -- upstream deleted
             },
             tracks = {
                 --"DiagnosticWarn",
@@ -1074,6 +1087,9 @@ function M.open(folder, opts)
         -- the global value, which interacts badly with the context-pane overlays
         -- (§6.2) — set 0 if the panes' scrolling misbehaves, or toggle panes with F.
         scrolloff = 10,
+        -- Pin the pair (§6.3/§10.6): pinning a local branch also pins its tracked
+        -- upstream remote ref, so both lanes stay in full and a divergence is drawn.
+        pin_upstream = true,
         icons = {
             --merge = "M",
         },
@@ -1195,6 +1211,21 @@ function M.open(folder, opts)
         end
         for id, v in pairs(view_state.pinned) do
             if v then p[id] = true else p[id] = nil end
+        end
+        -- Pin the pair (§10.6): each pinned local branch also pins its tracked
+        -- upstream remote ref (resolved from git's tracking config, not a shared
+        -- short name), so both lanes stay in full and a divergence is drawn rather
+        -- than the upstream collapsing. An explicit unpin on the upstream wins.
+        if opts.pin_upstream ~= false then
+            local add = {}
+            for id in pairs(p) do
+                local ref = repo.refs[id]
+                local up = ref and ref.upstream and ref.upstream.short
+                if up and repo.refs[up] and view_state.pinned[up] == nil then
+                    add[up] = true
+                end
+            end
+            for up in pairs(add) do p[up] = true end
         end
         return p
     end
@@ -1413,7 +1444,7 @@ function M.open(folder, opts)
     -- cases), then re-bind HEAD to the current branch. add_ref creates a
     -- placeholder Commit for a tip we haven't fetched yet; the new-commit pass
     -- fills it. Mutates repo.refs / repo.commits.
-    ---@param entries { name: string, kind: string, hash: string }[]
+    ---@param entries { name: string, kind: string, hash: string, upstream?: Upstream }[]
     ---@param head string?
     local function reconcile_refs(entries, head)
         local newmap, by_key = {}, {}
@@ -1430,12 +1461,22 @@ function M.open(folder, opts)
         for _, k in ipairs(d.removed) do unlink_ref(k) end
         for _, k in ipairs(d.added) do
             local e = by_key[k]
-            add_ref(repo, e.name, e.kind, e.hash)
+            add_ref(repo, e.name, e.kind, e.hash, e.upstream)
         end
         for _, k in ipairs(d.moved) do
             local e = by_key[k]
             unlink_ref(k) -- detach the old binding before re-pointing
-            add_ref(repo, e.name, e.kind, e.hash)
+            add_ref(repo, e.name, e.kind, e.hash, e.upstream)
+        end
+
+        -- Refresh upstream divergence even where the local tip did NOT move: a
+        -- fetch can move the upstream ref so the local branch is now behind while
+        -- its own hash is unchanged, which diff_ref_tips (keyed on the local tip)
+        -- would miss (§6.3).
+        for _, e in ipairs(entries) do
+            if e.kind == "local" and repo.refs[e.name] then
+                repo.refs[e.name].upstream = e.upstream
+            end
         end
 
         -- HEAD always re-points to the current branch's (possibly new) commit; a
@@ -1665,8 +1706,14 @@ function M.open(folder, opts)
         if lv and lv.win and lv.win.win then
             local nanchors = 0
             for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
+            -- The current branch's upstream divergence for the footer (§6.3).
+            local track_str = nil
+            if repo.head and repo.refs[repo.head] then
+                local lbl = git.track_label(repo.refs[repo.head].upstream)
+                if lbl ~= "" then track_str = repo.head .. lbl end
+            end
             local status = footer_text(opts.mirror, view_state.modes,
-                opts.collapse_merged ~= false, nanchors, SORT_MODES[sort_mode_index].label)
+                opts.collapse_merged ~= false, nanchors, SORT_MODES[sort_mode_index].label, track_str)
             -- Commit selection (§13): show the mode + the selected row count.
             if sel.active then
                 status = status .. (" | SELECT %d"):format(#(sel.path or {}))
@@ -2415,7 +2462,7 @@ function M.open(folder, opts)
             title = "Gitloom refs",
             items = items,
             layout = { preset = "select" }, -- compact, no preview window
-            ---@param item { name: string, kind: string, short: string, subject: string }
+            ---@param item { name: string, kind: string, short: string, subject: string, track?: Upstream }
             format = function(item)
                 local kind_hl = ({
                     head = "SnacksPickerGitBranchCurrent",
@@ -2423,8 +2470,13 @@ function M.open(folder, opts)
                     remote = "SnacksPickerGitBranch",
                     tag = "SnacksPickerLabel",
                 })[item.kind]
+                local track_hl = (opts.palette and opts.palette.track) or {}
                 local ret = {}
                 ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
+                -- Upstream divergence (§6.3): the same ⇡/⇣/gone tokens as the graph.
+                for _, seg in ipairs(git.track_segments(item.track)) do
+                    ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
+                end
                 ret[#ret + 1] = { " " }
                 ret[#ret + 1] = { align(item.short, 8), "SnacksPickerGitCommit" }
                 ret[#ret + 1] = { " " }

@@ -130,7 +130,11 @@ Tests use plenary.busted.
 
 Coverage:
 
-- `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display),
+- `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display,
+  incl. carrying a tracked local branch's upstream onto its group; §6.3),
+  `track_segments` / `track_label` (the upstream divergence indicator's coloured
+  segments + byte-identical plain label: ahead/behind/diverged/gone/in-sync),
+  `decoration_texts` + `ref_picker_items` upstream threading (§6.3),
   `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), and the
   branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
   (§10/§10.4)

@@ -4,6 +4,9 @@
 local internal = require("gitloom.graph")._internal
 local classify_ref = internal.classify_ref
 local group_refs = internal.group_refs
+local track_segments = internal.track_segments
+local track_label = internal.track_label
+local ref_picker_items = internal.ref_picker_items
 local owners_from_refs = internal.owners_from_refs
 local next_mode = internal.next_mode
 local selected_owner_ids = internal.selected_owner_ids
@@ -98,6 +101,106 @@ describe("group_refs", function()
         assert.is_true(g.branches[1].has_local)
         assert.same({}, g.branches[1].remotes)
         assert.same({ "v1.0" }, g.tags)
+    end)
+
+    it("carries a local branch's upstream divergence onto its group (§6.3)", function()
+        local up = { short = "origin/main", ahead = 2, behind = 3, gone = false }
+        local g = group_refs({
+            { kind = "local", name = "main", upstream = up },
+        })
+        assert.equals(up, g.branches[1].track)
+    end)
+
+    it("leaves track nil for an untracked branch or a remote-only group", function()
+        local g = group_refs({
+            ref("local", "feature"),
+            ref("remote", "origin/other"),
+        })
+        for _, b in ipairs(g.branches) do assert.is_nil(b.track) end
+    end)
+end)
+
+describe("track_segments / track_label (§6.3)", function()
+    it("is empty for no upstream or an in-sync branch", function()
+        assert.same({}, track_segments(nil))
+        assert.same({}, track_segments({ short = "origin/x", ahead = 0, behind = 0 }))
+        assert.equals("", track_label(nil))
+        assert.equals("", track_label({ short = "origin/x", ahead = 0, behind = 0 }))
+    end)
+
+    it("shows ahead only", function()
+        assert.same({ { text = " ⇡2", kind = "ahead" } },
+            track_segments({ short = "o/x", ahead = 2, behind = 0 }))
+        assert.equals(" ⇡2", track_label({ short = "o/x", ahead = 2, behind = 0 }))
+    end)
+
+    it("shows behind only", function()
+        assert.same({ { text = " ⇣3", kind = "behind" } },
+            track_segments({ short = "o/x", ahead = 0, behind = 3 }))
+        assert.equals(" ⇣3", track_label({ short = "o/x", ahead = 0, behind = 3 }))
+    end)
+
+    it("shows diverged as ⇡N⇣M with no inner space", function()
+        local segs = track_segments({ short = "o/x", ahead = 2, behind = 3 })
+        assert.same({ { text = " ⇡2", kind = "ahead" }, { text = "⇣3", kind = "behind" } }, segs)
+        -- track_label is exactly the concatenation (byte-identical for selection).
+        assert.equals(" ⇡2⇣3", track_label({ short = "o/x", ahead = 2, behind = 3 }))
+    end)
+
+    it("shows a gone upstream", function()
+        assert.same({ { text = " gone", kind = "gone" } },
+            track_segments({ short = "o/x", ahead = 0, behind = 0, gone = true }))
+        assert.equals(" gone", track_label({ short = "o/x", gone = true }))
+    end)
+
+    it("the label is the concatenation of the segment texts", function()
+        local up = { short = "o/x", ahead = 5, behind = 1 }
+        local cat = ""
+        for _, s in ipairs(track_segments(up)) do cat = cat .. s.text end
+        assert.equals(track_label(up), cat)
+    end)
+end)
+
+describe("decoration_texts upstream (§6.3)", function()
+    local decoration_texts = internal.decoration_texts
+
+    it("appends the divergence indicator to a tracked branch decoration", function()
+        local up = { short = "origin/main", ahead = 2, behind = 3 }
+        local commit = { refs = { { kind = "local", name = "main", upstream = up } } }
+        assert.same({ "(main ⇡2⇣3)" }, decoration_texts(commit))
+    end)
+
+    it("shows the indicator alongside remotes at the same commit", function()
+        local up = { short = "origin/main", ahead = 1, behind = 0 }
+        local commit = { refs = {
+            { kind = "local", name = "main", upstream = up },
+            { kind = "remote", name = "fork/main" },
+        } }
+        assert.same({ "(main ↑fork ⇡1)" }, decoration_texts(commit))
+    end)
+
+    it("adds nothing when the branch is in sync or untracked", function()
+        local synced = { refs = { { kind = "local", name = "main",
+            upstream = { short = "o/m", ahead = 0, behind = 0 } } } }
+        assert.same({ "(main)" }, decoration_texts(synced))
+        local untracked = { refs = { { kind = "local", name = "main" } } }
+        assert.same({ "(main)" }, decoration_texts(untracked))
+    end)
+end)
+
+describe("ref_picker_items upstream (§6.3)", function()
+    it("carries each ref's upstream through to the picker item", function()
+        local up = { short = "origin/main", ahead = 1, behind = 0, gone = false }
+        local commit = { hash = ("a"):rep(40), message = "subject" }
+        local refs = {
+            main = { kind = "local", name = "main", commit = commit, upstream = up },
+            ["origin/main"] = { kind = "remote", name = "origin/main", commit = commit },
+        }
+        local items = ref_picker_items(refs, {})
+        local by_name = {}
+        for _, it in ipairs(items) do by_name[it.name] = it end
+        assert.equals(up, by_name["main"].track)
+        assert.is_nil(by_name["origin/main"].track) -- remotes don't track
     end)
 end)
 
