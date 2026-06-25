@@ -296,6 +296,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
+    scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     diff = {
         -- External diff provider, operating on a git range (§11.5). Default opens
         -- diffview; override to use another plugin, or set open = nil to disable.
@@ -358,11 +359,15 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   refresh live as you edit or stage (`BufWritePost` / focus), or as part of the full
   `R` resync. gitloom never stages or commits. See
   [specification.md](specification.md) §3.3 / §4.2.
+- **`scrolloff`** — the window-local `'scrolloff'` for the graph and commit-view
+  windows: how many context rows are kept above/below the cursor (default `10`).
+  Set explicitly so the windows don't inherit your global value. A non-zero value
+  interacts with the context-pane overlays (§6.2); set `0` to restore the prior
+  always-zero behaviour if the panes' scrolling misbehaves.
 
-> **Note:** `require("gitloom").setup(opts)` currently stores config but does
-> not yet forward it to `:GitloomGraph` — the command uses the defaults above.
-> Wiring `setup()` config through to the graph is a known gap (see
-> [specification.md](specification.md) §Configuration).
+> **Note:** `require("gitloom").setup(opts)` stores config and `:GitloomGraph`
+> now forwards it to the graph (merged over the defaults above, read at invocation
+> time). See [specification.md](specification.md) §Configuration.
 
 ## Testing
 

@@ -482,6 +482,13 @@ local function open_commit_view(opts, commit, range)
     })
     local buf = w.buf
 
+    -- Window-local scrolloff (opts.scrolloff, default 10; §8): keep context rows
+    -- around the cursor when paging through a long diff.
+    if w.win and vim.api.nvim_win_is_valid(w.win) then
+        pcall(vim.api.nvim_set_option_value, "scrolloff", opts.scrolloff or 0,
+            { scope = "local", win = w.win })
+    end
+
     -- Maps a diffstat file row's buffer line -> the buffer line where that
     -- file's diff section begins. Rebuilt on each render; <CR> jumps by it.
     local file_jumps = {}
@@ -912,6 +919,7 @@ end
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
+---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 
 ---@param opts GraphOptions
@@ -1008,6 +1016,11 @@ function M.open(folder, opts)
         -- commits (◌) on top of HEAD. On by default; refreshes live (R, writes,
         -- focus, §3.4). Set false to never read the working tree.
         working_tree = true,
+        -- 'scrolloff' applied to the graph and commit-view windows: keep this many
+        -- context rows above/below the cursor. The graph window otherwise inherits
+        -- the global value, which interacts badly with the context-pane overlays
+        -- (§6.2) — set 0 if the panes' scrolling misbehaves, or toggle panes with F.
+        scrolloff = 10,
         icons = {
             --merge = "M",
         },
@@ -2946,9 +2959,12 @@ function M.open(folder, opts)
         local footer = { win = nil, buf = nil }
         local header = { win = nil, buf = nil }
         local last_pane_err -- throttle repeated pane-error notifications
-        -- Force scrolloff off for this window (any inherited value interacts badly
-        -- with the overlay and scrolling); revisit once the stuck-scroll is solved.
-        pcall(vim.api.nvim_set_option_value, "scrolloff", 0, { scope = "local", win = win })
+        -- Window-local scrolloff (opts.scrolloff, default 10; §8). Set explicitly so
+        -- the graph window doesn't inherit the global value, which interacts badly
+        -- with the context-pane overlays (§6.2). Set opts.scrolloff = 0 to restore
+        -- the old behaviour if the panes' scrolling misbehaves.
+        pcall(vim.api.nvim_set_option_value, "scrolloff", opts.scrolloff or 0,
+            { scope = "local", win = win })
         -- Inline, node-less merge style for the pane: joins render on one row (no
         -- fan lines) and junctions draw node-less, so the pane stays compact.
         local pane_opts = vim.tbl_extend("force", {}, opts)
@@ -3579,8 +3595,8 @@ function M.open(folder, opts)
             end
         end
 
-        -- (The cursor is kept above the overlay by `scrolloff`, set in
-        -- update_panes — no manual clamping needed.)
+        -- (The cursor is kept away from the window edges by the window-local
+        -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
 
         -- Tear the panes down with the main window.
         vim.api.nvim_create_autocmd("WinClosed", {
