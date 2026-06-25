@@ -64,6 +64,41 @@ local saved_positions = {}
 -- saved_positions). Surfaced at the top of the picker. In-memory for the session.
 local recent_refs = {}
 
+-- Tier-1 host-window registry (§14): one **host window** per repository root.
+-- `sessions[root]` holds that repo's snacks window (`host`) and the closure that
+-- re-establishes its view after a hide/return (`on_show`); `mru` orders the roots
+-- most-recently-shown first (the `<leader>wg` return target). Opening a repo
+-- already in the registry re-shows its window rather than stacking a new one.
+-- A single module-level table so `M.open` references just one upvalue (it sits at
+-- LuaJIT's 60-upvalue ceiling — see open_graph).
+local nav = { sessions = {}, mru = {} }
+
+function nav.valid(sess)
+    return sess ~= nil and sess.host ~= nil and sess.host.buf ~= nil
+        and vim.api.nvim_buf_is_valid(sess.host.buf)
+end
+
+function nav.record_mru(root)
+    for i, r in ipairs(nav.mru) do
+        if r == root then table.remove(nav.mru, i); break end
+    end
+    table.insert(nav.mru, 1, root)
+end
+
+-- Re-show a hidden (or already-shown) session and restore its view. snacks
+-- show() re-opens with a fresh window id — picked up by the graph's on_win hook
+-- (§14) — so on_show's goto_hash/cone/pane rebuild act on the live window.
+function nav.show(sess)
+    sess.host:show()
+    nav.record_mru(sess.root)
+    if sess.on_show then pcall(sess.on_show) end
+end
+
+function nav.register(root, host, on_show)
+    nav.sessions[root] = { host = host, root = root, on_show = on_show }
+    nav.record_mru(root)
+end
+
 -- Index of the flex (message) column in a row's `line` field: date, author,
 -- graph, message. The message fills the remaining width and refs are pinned to
 -- the right edge of the row (specification.md §6; see listview's build_line).
@@ -1057,11 +1092,16 @@ end
 ---@param opts GraphOptions
 ---@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
 ---@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
-function M.open(folder, opts, focus_hash, seed_refs)
+-- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
+-- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
+-- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
+-- Returns the listview instance and an `on_show` closure that re-establishes the
+-- view after a hide/return; the wrapper registers them.
+local function open_graph(folder, opts, focus_hash, seed_refs)
     -- Resolve the repository this graph targets (spec §2.1) up front, so the
     -- window title can show it and the I/O layer is retargeted before any fetch.
-    -- Inlined (not the module-scope resolve_root used by M.pick) to keep M.open
-    -- under LuaJIT's 60-upvalue ceiling — it must not add a new upvalue.
+    -- Inlined (not the module-scope resolve_root used by M.pick) to keep this
+    -- function under LuaJIT's 60-upvalue ceiling — it must not add a new upvalue.
     local root
     do
         local base = folder or vim.fn.getcwd()
@@ -2430,6 +2470,10 @@ function M.open(folder, opts, focus_hash, seed_refs)
     }
 
     opts.win.keys = opts.win.keys or {}
+    -- q: HIDE the host window (§14), not destroy it — the navigation stack and
+    -- view state survive so `<leader>wg` can return to exactly here. snacks
+    -- hide() = close({buf=false}), so the buffer (and this closure) live on.
+    opts.win.keys.q = function(self) if self then self:hide() end end
     -- m: cycle the merge/split style. A full reflow (re-layout from the raw order
     -- then re-pack) — the packed display can't be relaid in place (its marker
     -- groups aren't single commits).
@@ -4151,11 +4195,15 @@ function M.open(folder, opts, focus_hash, seed_refs)
         -- (The cursor is kept away from the window edges by the window-local
         -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
 
-        -- Tear the panes down with the main window.
+        -- Close the panes when THIS graph's window closes — including a hide()
+        -- (§14). Matched against the live `win` via ev.match rather than a baked-in
+        -- pattern, since `win` changes across hide/show (the panes are rebuilt on
+        -- the next show by on_show → update_panes).
         vim.api.nvim_create_autocmd("WinClosed", {
             group = group,
-            pattern = tostring(win),
-            callback = close_panes,
+            callback = function(ev)
+                if tonumber(ev.match) == win then close_panes() end
+            end,
         })
 
         -- No initial cone/refresh here: the fetch is async, so no commits are
@@ -4163,6 +4211,46 @@ function M.open(folder, opts, focus_hash, seed_refs)
         place_cursor()
     end
 
+    -- Re-establish this view when the host window is shown again after a hide
+    -- (§14): the buffer (rendered graph) survives, so just restore the remembered
+    -- position, recenter, and rebuild the cone + panes (both torn down on hide).
+    -- Mirrors the open-time focus sequence (sans focus_hash, which is one-shot).
+    local function on_show()
+        local target = saved_positions[repo_key]
+        if not (target and goto_hash(target)) then
+            local headref = repo.head and repo.refs["HEAD"]
+            if headref and headref.commit then goto_hash(headref.commit.hash) end
+        end
+        center_view()
+        place_cursor()
+        update_cone()
+        if lv and lv.controller then lv.controller.refresh() end
+        update_panes()
+    end
+
+    return lv, on_show
+end
+
+--- Open the graph for a repository, or **re-show** its host window if one is
+--- already open (§14): one host window per repository root, never stacked.
+--- `<leader>wG`'s picker and `:GitloomGraph` both route here. `focus_hash` /
+--- `seed_refs` (the submodule deep-link, §11.7.6) apply only when the window is
+--- built fresh; re-showing an open repo restores where you were (Phase E will
+--- generalise the deep-link to a navigation-stack push).
+---@param folder string|nil
+---@param opts GraphOptions
+---@param focus_hash string|nil
+---@param seed_refs table|nil
+function M.open(folder, opts, focus_hash, seed_refs)
+    local root = resolve_root(folder)
+    local sess = nav.sessions[root]
+    if nav.valid(sess) then
+        git.set_cwd(root)
+        nav.show(sess)
+        return sess.host
+    end
+    local lv, on_show = open_graph(folder, opts, focus_hash, seed_refs)
+    if lv and lv.win then nav.register(root, lv.win, on_show) end
     return lv
 end
 
