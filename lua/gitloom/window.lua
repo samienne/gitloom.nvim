@@ -85,18 +85,48 @@ function nav.record_mru(root)
     table.insert(nav.mru, 1, root)
 end
 
--- Re-show a hidden (or already-shown) session and restore its view. snacks
--- show() re-opens with a fresh window id — picked up by the graph's on_win hook
--- (§14) — so on_show's goto_hash/cone/pane rebuild act on the live window.
+-- Keep one host window visible at a time (§14): hide every currently-shown
+-- session except `except_root` (the rest stay hidden, ready for `<leader>wg`).
+function nav.hide_others(except_root)
+    for r, s in pairs(nav.sessions) do
+        if r ~= except_root and s.host and s.host:valid() then
+            s.host:hide()
+        end
+    end
+end
+
+-- Re-show a hidden (or already-shown) session and restore its view, hiding any
+-- other visible session first. snacks show() re-opens with a fresh window id —
+-- picked up by the graph's on_win hook (§14) — so on_show's goto_hash/cone/pane
+-- rebuild act on the live window.
 function nav.show(sess)
+    nav.hide_others(sess.root)
     sess.host:show()
     nav.record_mru(sess.root)
     if sess.on_show then pcall(sess.on_show) end
 end
 
+local function nav_drop(root)
+    nav.sessions[root] = nil
+    for i, r in ipairs(nav.mru) do
+        if r == root then table.remove(nav.mru, i); break end
+    end
+end
+
 function nav.register(root, host, on_show)
     nav.sessions[root] = { host = host, root = root, on_show = on_show }
     nav.record_mru(root)
+    -- `<C-w>q` destroys the window via snacks close(), which wipes the scratch
+    -- buffer; drop the session then so the next open rebuilds rather than
+    -- re-showing a dead window. hide() keeps the buffer, so this only fires on a
+    -- real close/wipe, not on a hide/return.
+    if host.buf then
+        vim.api.nvim_create_autocmd("BufWipeout", {
+            buffer = host.buf,
+            once = true,
+            callback = function() nav_drop(root) end,
+        })
+    end
 end
 
 -- Index of the flex (message) column in a row's `line` field: date, author,
@@ -2474,6 +2504,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs)
     -- view state survive so `<leader>wg` can return to exactly here. snacks
     -- hide() = close({buf=false}), so the buffer (and this closure) live on.
     opts.win.keys.q = function(self) if self then self:hide() end end
+    -- <C-w>q: DESTROY the host window and clear its state (§14). snacks close()
+    -- wipes the scratch buffer, so the session's BufWipeout cleanup drops it and a
+    -- later open rebuilds — vs. q's hide-and-keep.
+    opts.win.keys["<C-w>q"] = function(self) if self then self:close() end end
     -- m: cycle the merge/split style. A full reflow (re-layout from the raw order
     -- then re-pack) — the packed display can't be relaid in place (its marker
     -- groups aren't single commits).
@@ -4249,9 +4283,25 @@ function M.open(folder, opts, focus_hash, seed_refs)
         nav.show(sess)
         return sess.host
     end
+    nav.hide_others(root)
     local lv, on_show = open_graph(folder, opts, focus_hash, seed_refs)
     if lv and lv.win then nav.register(root, lv.win, on_show) end
     return lv
+end
+
+--- Return to the most-recently-shown host window (`<leader>wg`, §14) — the
+--- counterpart to `q`: re-show the stack you last left, where you left it. With
+--- no session to return to, open the repository at Neovim's cwd (cold start).
+---@param opts GraphOptions
+function M.return_last(opts)
+    local root = nav.mru[1]
+    local sess = root and nav.sessions[root]
+    if nav.valid(sess) then
+        git.set_cwd(sess.root)
+        nav.show(sess)
+        return sess.host
+    end
+    return M.open(nil, opts)
 end
 
 --- Repository picker (spec §2.1): pick the main module or one of its direct

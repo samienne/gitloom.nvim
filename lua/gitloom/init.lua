@@ -11,6 +11,11 @@ local window = require("gitloom.window")
 -- to disable, or a string to remap.
 local DEFAULT_PICK_KEY = "<leader>wG"
 
+-- Default normal-mode mapping for returning to the most-recently-open graph
+-- (§14) — the counterpart to `q`. Installed by setup() like the picker key.
+-- `return_key = false` disables it, a string remaps it.
+local DEFAULT_RETURN_KEY = "<leader>wg"
+
 function M.setup(opts)
     opts = opts or {}
     M.config = vim.tbl_extend("force", M.config, opts)
@@ -22,6 +27,15 @@ function M.setup(opts)
     if key then
         vim.keymap.set("n", key, function() window.pick(M.config) end,
             { desc = "Gitloom: pick repository / submodule" })
+    end
+
+    -- The return key (`<leader>wg`): re-show the last graph, or open the cwd
+    -- repo if none is open. Same config convention as pick_key.
+    local rkey = M.config.return_key
+    if rkey == nil then rkey = DEFAULT_RETURN_KEY end
+    if rkey then
+        vim.keymap.set("n", rkey, function() window.return_last(M.config) end,
+            { desc = "Gitloom: return to the last graph" })
     end
 end
 
