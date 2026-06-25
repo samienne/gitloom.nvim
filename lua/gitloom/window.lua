@@ -75,6 +75,23 @@ local AUTHOR_COL, AUTHOR_MAX = 2, 25
 -- right-aligned graph + message don't shift as the lane width changes.
 local GRAPH_COL = 3
 
+-- Floating-window stacking order. Neovim's default float zindex is 50, which is
+-- what the snacks graph window and the modal commit view get. The overlays must
+-- layer above their own parent, and the modal commit view + the `?` help must
+-- sit above the graph's context panes (otherwise the footer pokes through the
+-- commit view and the help hides behind the panes). Larger = closer to the user.
+--   graph window / commit view base ........ 50  (snacks default)
+--   header/footer panes (overlay graph) .... 60
+--   commit view (modal, over the graph) .... 100
+--   commit view sticky overlay (over it) ... 110
+--   `?` help float (topmost) ............... 300
+local ZINDEX = {
+    panes = 60,
+    commit_view = 100,
+    commit_ctx = 110,
+    help = 300,
+}
+
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
 local KEYBINDS = {
@@ -459,6 +476,9 @@ local function open_commit_view(opts, commit, range)
         title = title,
         footer = "q: close",
         keys = { q = "close" },
+        -- Above the graph window's header/footer panes so they don't poke
+        -- through this modal view.
+        zindex = ZINDEX.commit_view,
     })
     local buf = w.buf
 
@@ -612,7 +632,8 @@ local function open_commit_view(opts, commit, range)
             height = #rows,
             style = "minimal",
             focusable = false,
-            zindex = 200,
+            -- Above the commit view itself (its sticky-scroll header).
+            zindex = ZINDEX.commit_ctx,
         }
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
             pcall(vim.api.nvim_win_set_config, ctx_win, cfg)
@@ -2214,6 +2235,8 @@ function M.open(folder, opts)
         vim.lsp.util.open_floating_preview(format_lane_info(item), "", {
             border = "rounded",
             focusable = true,
+            -- Topmost, like the `?` help, so the panes don't hide it.
+            zindex = ZINDEX.help,
         })
     end
     -- d: toggle the date column between absolute and relative. Render-only.
@@ -2415,6 +2438,8 @@ function M.open(folder, opts)
         vim.lsp.util.open_floating_preview(help_lines(), "", {
             border = "rounded",
             focusable = true,
+            -- Topmost, so it isn't hidden behind the header/footer panes.
+            zindex = ZINDEX.help,
         })
     end
     -- h / l: move the ref selection on the current row (§2). Positions are the
@@ -2996,7 +3021,9 @@ function M.open(folder, opts)
                 height = height,
                 style = "minimal",
                 focusable = false,
-                zindex = 200,
+                -- Above the graph window's content, but below the modal commit
+                -- view / help float so those cover the panes.
+                zindex = ZINDEX.panes,
             }
             if p.win and vim.api.nvim_win_is_valid(p.win) then
                 pcall(vim.api.nvim_win_set_config, p.win, cfg)

@@ -128,7 +128,11 @@ in `gitloom.window` does the windowing.
 
 1. **Seam by screen rows.** The footer is a **borderless overlay** over the
    bottom rows of the main window (relative="win") — the sticky-scroll pattern,
-   so its lanes butt directly against the seam with no border between. The seam
+   so its lanes butt directly against the seam with no border between. Its
+   `zindex` sits above the graph content but below the modal commit view and the
+   `?`/`K` help floats (the `ZINDEX` table in window.lua: panes 60, commit view
+   100 + its own sticky overlay 110, help 300), so a modal opened over the graph
+   covers the panes instead of the panes poking through it. The seam
    is the screen row just above the overlay (`seam_for` = window position +
    height − overlay height). `boundary_at(target)` then reads the **down-lanes of
    whichever *rendered line*** sits at that screen row — a commit's columns line,
