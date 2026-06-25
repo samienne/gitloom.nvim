@@ -124,7 +124,21 @@ seam lanes **down** their first-parent chains to the roots and lays them out wit
 bespoke seam-up grid. `pane.lua` is the pure, window-agnostic core; `update_panes`
 in `gitloom.window` does the windowing.
 
-**The footer pipeline** (`update_panes`, gated by `opts.panes`), per scroll:
+The rebuild is **scroll-gated and async**. The cursor/scroll debounce calls
+`maybe_update_panes`, which rebuilds only when the scroll position (`line("w0")`)
+changed — the panes are a function of the scroll, not the cursor row, so a cursor
+move within the window costs nothing. Forced callers (reflow, the `M`/`B`/`F`/…
+toggles) call `update_panes` directly. `update_panes` runs `build_panes` as a
+**coroutine** driven across event-loop ticks (`drive_panes`): the deep
+first-parent walks in `pane.continue`/`pane.continue_up`/`pane.condense` call an
+optional `yield` hook every `YIELD_EVERY` steps, and `build_panes`' own O(N) index
+passes yield via `py`, so a deep history never blocks a keypress. A scroll (or a
+newer build) bumps `pane_gen`, abandoning the in-flight coroutine; **both** panes
+are computed before any overlay mutation (a no-yield tail), so a cancelled build
+leaves the prior panes intact. The first chunk runs synchronously, so small panes
+still land in the same tick. The repo.order index is cached (`order_idx`).
+
+**The footer pipeline** (`build_panes`, gated by `opts.panes`), per rebuild:
 
 1. **Seam by screen rows.** The footer is a **borderless overlay** over the
    bottom rows of the main window (relative="win") — the sticky-scroll pattern,
@@ -154,8 +168,9 @@ in `gitloom.window` does the windowing.
    main graph, with a `┊` separator marking the seam. Height grows to a fixed
    point and is capped (always keeping the root, `pane.cap`).
 
-`pane.continue` errors are contained (`update_panes` pcalls the build and hides
-both panes on failure). The graph window's `scrolloff` is set window-local from
+`pane.continue` errors are contained (`drive_panes` resumes the build coroutine,
+so an error surfaces as a `false` return rather than an exception, and both panes
+are hidden on failure). The graph window's `scrolloff` is set window-local from
 `opts.scrolloff` (default 10, §8) rather than inherited; a non-zero value
 interacts with the overlays (`<C-e>`/`<C-y>` and the scroll-driven refresh were
 the reason it was historically forced to 0), so `opts.scrolloff = 0` restores
@@ -228,8 +243,7 @@ to each other and to the lanes crossing the cutoff:
    seam separator at the **bottom** (padded so the seam butts the main view).
 
 Full cross-level head packing (lifting *all* unpinned heads onto a single row, vs.
-today's consecutive packing) and moving the rebuild off the cone-debounce path are
-the remaining refinements.
+today's consecutive packing) is the remaining refinement.
 
 ## Layers
 

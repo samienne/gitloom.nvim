@@ -20,6 +20,28 @@ local M = {}
 
 local columns = require("gitloom.graph.columns")
 
+-- Chunking support for the async pane build (window.lua): `continue`/`continue_up`/
+-- `condense` walk a commit's first-parent chain to a root/tip, which is O(history
+-- depth) and can be large. When the caller passes a `yield` function, these
+-- helpers call it once per `YIELD_EVERY` units of work so a coroutine driver can
+-- suspend the walk between event-loop ticks (and cancel it if the view moves).
+-- Pure/synchronous callers (the unit tests) pass no `yield`, so behaviour is
+-- unchanged. `yield` is only ever called from loop *bodies*, never across a
+-- C-call boundary (e.g. a `table.sort` comparator), so it is safe under LuaJIT
+-- coroutines.
+local YIELD_EVERY = 2048
+--- A monotonic work counter that calls `yield` every `YIELD_EVERY` steps.
+---@param yield (fun())?
+---@return fun()  -- call once per unit of work
+local function chunker(yield)
+    local n = 0
+    return function()
+        if not yield then return end
+        n = n + 1
+        if n % YIELD_EVERY == 0 then yield() end
+    end
+end
+
 --- Contract an anchor-only projection (heads + junctions, from `view.project`
 --- with the anchors collapsed) into the **condensed graph** (spec §6.2): the only
 --- nodes kept are **ref heads, junctions (fork/merge), tips and roots**; every
@@ -46,8 +68,10 @@ local columns = require("gitloom.graph.columns")
 ---@param nodes table[]  -- DisplayNodes, newest-first
 ---@param anchor_names table<string, boolean>?  -- ref names that count as markers
 ---@param up boolean?  -- header orientation (keep tips, splice seam pass-throughs)
+---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY units of work
 ---@return table  -- { items = OrderItem[], node_of_hash = table<string, table> }
-function M.condense(nodes, anchor_names, up)
+function M.condense(nodes, anchor_names, up, yield)
+    local step = chunker(yield)
     -- Refs on a node that count as markers (anchor refs, or all when unfiltered). The
     -- HEAD marker (kind == "head") is ALWAYS kept: the pinned set is keyed by the BRANCH
     -- name HEAD points at (repo.head), not "HEAD", so filtering by anchor_names alone
@@ -102,6 +126,7 @@ function M.condense(nodes, anchor_names, up)
     while changed do
         changed = false
         for _, n in ipairs(nodes) do
+            step()
             if not transp[n] and #marker_refs(n) == 0 then
                 local kc, kp = #reach(n, "children"), #reach(n, "parents")
                 -- Kept endpoints: the header keeps a tip (no child), the footer a root
@@ -122,6 +147,7 @@ function M.condense(nodes, anchor_names, up)
     -- A copy per kept node (inherits the original's fields via metatable).
     local copy = {}
     for _, n in ipairs(nodes) do
+        step()
         if not transp[n] then
             copy[n] = setmetatable({
                 hash = n.hash, parents = {}, children = {},
@@ -132,6 +158,7 @@ function M.condense(nodes, anchor_names, up)
 
     -- Re-point edges among kept nodes, jumping over spliced runs (dedup).
     for _, n in ipairs(nodes) do
+        step()
         local c = copy[n]
         if c then
             local pseen, cseen = {}, {}
@@ -179,6 +206,7 @@ function M.condense(nodes, anchor_names, up)
         for _, h in ipairs(n.region or {}) do node_of[h] = target end
     end
     for _, n in ipairs(nodes) do
+        step()
         if copy[n] then
             map_to(n, copy[n])
         else
@@ -211,8 +239,10 @@ end
 ---@param anchor_names table<string, boolean>?
 ---@param extra table[]?  -- extra entry Commits (pinned tips below the cutoff)
 ---@param order_of (fun(node: table): integer|nil)?
+---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY units of work
 ---@return table
-function M.continue(boundary, anchor_names, extra, order_of)
+function M.continue(boundary, anchor_names, extra, order_of, yield)
+    local step = chunker(yield)
     local inset, fp_child = {}, {} -- hash → Commit ; hash → in-set first-parent children
     local queue = {}
     local function push(c) if c and not inset[c.hash] then inset[c.hash] = c; queue[#queue + 1] = c end end
@@ -223,6 +253,7 @@ function M.continue(boundary, anchor_names, extra, order_of)
     -- order columns.layout/condense expect.
     local qi = 1
     while qi <= #queue do
+        step()
         local c = queue[qi]; qi = qi + 1
         local p = c.parents and c.parents[1]
         if p then
@@ -236,10 +267,12 @@ function M.continue(boundary, anchor_names, extra, order_of)
     -- chains meet). Inherits commit fields via metatable.
     local node = {}
     for _, c in ipairs(queue) do
+        step()
         node[c.hash] = setmetatable({ hash = c.hash, refs = c.refs, parents = {}, children = {} },
             { __index = c })
     end
     for _, c in ipairs(queue) do
+        step()
         local n = node[c.hash]
         local p = c.parents and c.parents[1]
         if p and inset[p.hash] then n.parents[1] = node[p.hash] end
@@ -251,9 +284,11 @@ function M.continue(boundary, anchor_names, extra, order_of)
     -- children-before-parents; sort newest-first so condense/columns.layout see a
     -- valid topological order.
     if order_of then
+        -- NB: never yield inside a table.sort comparator — it runs under a C frame
+        -- and yielding across it errors. The walk above is already chunked.
         table.sort(nodes, function(a, b) return (order_of(a) or 0) < (order_of(b) or 0) end)
     end
-    return M.condense(nodes, anchor_names)
+    return M.condense(nodes, anchor_names, nil, yield)
 end
 
 --- Cap a pane's rows to `max` (spec §6.2). A **header** (`keep_first` on) runs
@@ -490,8 +525,10 @@ end
 ---@param anchor_names table<string, boolean>?
 ---@param order_of (fun(node: table): integer|nil)?  -- node → index (newer = smaller)
 ---@param seam_idx integer  -- only nodes with a smaller index are above the seam
+---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY units of work
 ---@return table
-function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
+function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
+    local step = chunker(yield)
     local function above(n)
         local i = n and order_of and order_of(n)
         return i ~= nil and i < seam_idx
@@ -525,6 +562,7 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
         reach[n0.hash][s.id] = true
         local seen, stack = { [n0.hash] = true }, { n0 }
         while #stack > 0 do
+            step()
             local c = stack[#stack]; stack[#stack] = nil
             for _, ch in ipairs(c.children or {}) do
                 if above(ch) then
@@ -550,6 +588,7 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     end
     local function walk_useful()
         while #stack2 > 0 do
+            step()
             local c = stack2[#stack2]; stack2[#stack2] = nil
             for _, p in ipairs(c.parents or {}) do
                 if in_region(p) then mark_useful(p) end
@@ -560,6 +599,7 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
         if s.pinned then mark_useful(s.node) end
         local seen, stack = { [s.node.hash] = true }, { s.node }
         while #stack > 0 do
+            step()
             local c = stack[#stack]; stack[#stack] = nil
             if is_confluence(c.hash) then mark_useful(c) end
             for _, ch in ipairs(c.children or {}) do
@@ -607,6 +647,7 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
         end
     end
     while #stack3 > 0 do
+        step()
         local c = stack3[#stack3]; stack3[#stack3] = nil
         -- Follow each lane's OWN continuation, not the whole shared future.
         --   * Below a confluence, a lane goes up via its **first-parent child** (its
@@ -648,6 +689,7 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     end
     for _, c in pairs(inducted) do ensure(c) end
     for _, c in pairs(inducted) do
+        step()
         local m = node[c.hash]
         local kids = {}
         for _, ch in ipairs(c.children or {}) do
@@ -689,8 +731,10 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx)
     -- Newest-first (children before parents — the topo order condense wants).
     local nodes = {}
     for _, m in pairs(node) do nodes[#nodes + 1] = m end
+    -- NB: never yield inside a table.sort comparator (C-frame); the walks above
+    -- are already chunked.
     table.sort(nodes, function(a, b) return pos_of(a) < pos_of(b) end)
-    return M.condense(nodes, anchor_names, true)
+    return M.condense(nodes, anchor_names, true, yield)
 end
 
 --- Connectivity literal → a full `{up,down,left,right}` table (Phase-2 cell shape).
