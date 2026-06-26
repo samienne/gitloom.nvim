@@ -70,7 +70,7 @@ end
 -- some steps (q) intentionally hide the host.
 local function step(label, keys)
     vim.v.errmsg = ""
-    pcall(vim.cmd, "messages clear")
+    pcall(function() vim.cmd("messages clear") end)
     if keys then feed(keys) end
     settle(250)
     local aerr = async_error()
@@ -155,7 +155,7 @@ function M.run()
 
     -- Hide → re-show: the host re-opens with a NEW window id (§14 live-id path).
     focus()
-    pcall(vim.cmd, "messages clear")
+    pcall(function() vim.cmd("messages clear") end)
     feed("q"); settle(400)
     if live() ~= nil then fail("q did not hide the host (graph buffer still windowed)") end
     pcall(window.open, nil, OPTS); settle(600)

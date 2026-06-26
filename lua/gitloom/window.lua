@@ -1497,6 +1497,38 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field refs table<string, Ref>        name → Ref ("HEAD" for the head)
     ---@field head? string                   current branch name
 
+    ---@class GraphCtx
+    --- Per-session state for one graph (one host window / one repo root, §14).
+    --- Bundles what were ~20 separate `open_graph` locals so the extracted
+    --- helpers/handlers take a single `ctx` instead of closing over the scope —
+    --- which keeps `open_graph` clear of LuaJIT's 60-upvalue ceiling. Built below
+    --- and threaded into every module-level graph helper (call them as `ctx:foo()`
+    --- so sibling dispatch resolves at call time — see the extraction notes).
+    ---
+    --- == identity / config ==
+    ---@field root string                git I/O root (§2.1); == repo.root
+    ---@field host_root string           session key — the host window's root (§14)
+    ---@field repo_key string            keys saved_positions / recent_refs (== repo.root)
+    ---@field opts GraphOptions          the (copied) options table, mutated live by toggles
+    ---@field repo Repo                  commits / order / display / refs / head
+    ---@field palette table             == opts.palette
+    ---@field seed_pin_names table<string,boolean>  pointer marks pinned by default (§11.7.6)
+    --- == live window / buffer (never frozen — §14 hide/show changes the win id) ==
+    ---@field buf? integer               stable graph scratch buffer for the session
+    ---@field lv? table                  the listview instance (set after it opens)
+    ---@field win fun(self:GraphCtx):integer?  live host window id (== gwin)
+    --- == view / selection state ==
+    ---@field selection_state SelectionState
+    ---@field sel GraphSel
+    ---@field display_index table<string,integer>
+    ---@field node_loc table<string,{item:table,col:integer}>
+    ---@field view_state { cone?:table, modes:table, effective:table, pinned:table }
+    ---@field sig_cache { norder:integer, nowners:integer, cm?:boolean, sig?:table }
+    ---@field worktree_commits table
+    ---@field worktree_head? string
+    ---@field last_line? integer
+    ---@field selection_visible boolean
+
     ---@type Repo
     local repo = {
         root = root,
@@ -1536,7 +1568,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- (DisplayNodes, newest-first); `dparent`/`dchild` remember the branch chosen
     -- at each junction for h/l. `display_index` maps a node hash → its index in
     -- `repo.display`, rebuilt on reflow and on entering selection.
-    ---@type { active: boolean, path?: table[], anchor?: table, cursor?: table, dparent: table<string,integer>, dchild: table<string,integer> }
+    -- A structural alias (not a @class) so it stays assignable to the select.lua
+    -- helpers' `SelectionPath` param while also carrying the window-glue `active`.
+    ---@alias GraphSel { active: boolean, path?: table[], anchor?: table, cursor?: table, dparent: table<string,integer>, dchild: table<string,integer> }
+    ---@type GraphSel
     local sel = { active = false, path = nil, anchor = nil, cursor = nil, dparent = {}, dchild = {} }
     local display_index = {}
     -- node hash → { item, col }: the OrderItem holding the node and the index of
@@ -1696,6 +1731,34 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         if w and vim.api.nvim_win_is_valid(w) then return w end
         return nil
     end
+
+    -- The session state carrier (see GraphCtx). Aliases the locals above so the
+    -- extracted module-level helpers can take `ctx` instead of closing over this
+    -- scope. Table fields share the same reference, so a mutation through either
+    -- the local or `ctx.field` is visible to both during the incremental migration;
+    -- `lv`/`buf` are filled once the window opens, and `ctx:win()` reads the live
+    -- host window (the id changes across §14 hide/show — never freeze it).
+    ---@type GraphCtx
+    local ctx = {
+        root = root,
+        host_root = host_root,
+        repo_key = repo_key,
+        opts = opts,
+        repo = repo,
+        palette = palette,
+        seed_pin_names = seed_pin_names,
+        selection_state = selection_state,
+        sel = sel,
+        display_index = display_index,
+        node_loc = node_loc,
+        view_state = view_state,
+        sig_cache = sig_cache,
+        worktree_commits = worktree_commits,
+        worktree_head = worktree_head,
+        last_line = last_line,
+        selection_visible = false,
+        win = gwin,
+    }
 
     -- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
     -- sub-row within the item. In dual mode a labelled commit spans two buffer
@@ -2555,7 +2618,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- after open_win on each show() — including after a hide()/return (§14) — with
     -- a fresh window id, so this keeps the function-scoped `win` current for all
     -- the closures below without re-creating them.
-    opts.win.on_win = function(w) win, buf = w.win, w.buf end
+    opts.win.on_win = function(w) win, buf = w.win, w.buf; ctx.buf = w.buf end
 
     ---@type ListViewOptions
     local listview_options = {
@@ -3160,6 +3223,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     opts.win.keys = nil
 
     lv = listview.open(listview_options)
+    ctx.lv = lv
 
     -- Cursor parking (§2/§7): cursorline marks the row; the cursor rests at the
     -- commit message, or on the selected ref. place_cursor reads the rendered
