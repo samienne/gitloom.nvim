@@ -2684,6 +2684,12 @@ local function h_filter(ctx)
 
     local ibuf = vim.api.nvim_create_buf(false, true)
     vim.bo[ibuf].buftype = "nofile"
+    -- No autocompletion in the filter box: a completion plugin (e.g. blink.cmp)
+    -- attaches on InsertEnter — after our buffer maps — and grabs insert-mode keys
+    -- like <C-k> (blink's signature toggle) before they reach us, so <C-k> appears
+    -- "dead". Disabling completion keeps the overlay's keys ours (§16.4); a search
+    -- box wants no popup anyway. `b:completion` is blink's per-buffer opt-out.
+    vim.b[ibuf].completion = false
     -- Seeded with the active query when re-opened over a stamped filter (§16.5).
     vim.api.nvim_buf_set_lines(ibuf, 0, -1, false, { (ctx.filter and ctx.filter.query) or "" })
     local iwin = vim.api.nvim_open_win(ibuf, true, {
