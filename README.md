@@ -416,8 +416,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`pack_markers`** — whether concurrent collapsed heads pack onto shared lines
   (§10.4; default `true`). Toggle live with `p`.
 - **`junction_markers`** — whether a fork/merge kept inside collapsed branches
-  renders node-less (just the split lanes, no message; §10.4; default `true`).
-  Off shows those junction commits in full.
+  renders node-less (just the split lanes, no message; §10.4; default `true`). A
+  junction that carries a ref still shows a `◍` marker so the label is anchored;
+  only ref-less junctions are fully node-less. Off shows those junction commits in
+  full.
 - **`date_format`** / **`date_mode`** — the author date is parsed into a
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =

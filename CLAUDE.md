@@ -149,9 +149,10 @@ Coverage:
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
   collapsed contraction to one head with junctions kept, **branch-topology
-  preservation** (a fork/merge — a commit with ≥2 visible children/parents — is
-  never collapsed away; no floating head; asserted on targeted cases and the
-  whole fuzz sweep), distinct-signature regions staying separate heads, the
+  preservation** (a kept junction — a fork, or a merge that still has a visible
+  child — is never collapsed away, but a **merge tip** (a collapsed merge with no
+  visible child) folds into its `◍` head; no floating head; asserted on targeted
+  cases and the whole fuzz sweep), distinct-signature regions staying separate heads, the
   display-mode join truth-table, the
   collapsed `◍` glyph render, the precomputed-sig caching equivalence, the
   first-parent-only signature (`fp_only`) and the `view.owners` first-parent
@@ -433,8 +434,10 @@ Details not covered by the spec or architecture:
   `columns.layout` lays out unchanged. `view.project` computes each commit's
   reachability **signature**, partitions into equal-signature regions, joins to a
   display mode, contracts each **linear** collapsed run to one `◍` head while
-  keeping junctions (a fork/merge — ≥2 visible children/parents — stays a real
-  node so branch topology survives, §10.3), drops hidden commits, and re-points
+  keeping junctions (a fork, or a merge that still has a visible child, stays a
+  real node so branch topology survives; a **merge tip** — a collapsed merge with
+  no visible child — folds into a `◍` head since it is the branch's tip, §10.3),
+  drops hidden commits, and re-points
   edges. graph.lua keeps
   `repo.order` (raw, 1:1 with commits) as the projection input and `repo.display`
   (the projection) as what the listview renders and `order_at`/`mark_reachable`
@@ -506,15 +509,27 @@ Details not covered by the spec or architecture:
   list or a function — the graph column when `opts.mirror` is on, whose
   right-aligned content would otherwise shift as the lane width changes).
 - **Node-less junctions render inline** (spec §10.4): `columns.layout` skips the
-  separate split/merge line for a node-less junction (it carries no message), so
-  a join is one row, not a fan line plus an empty lane row.
+  separate split/merge line for a node-less junction with a **single** fan (it
+  carries no message), so a join is one row, not a fan line plus an empty lane
+  row. The exception is a junction that is **both** a fork and a merge: collapsing
+  both funnels onto one line would lay two independent fans across it (§5.1
+  forbids two separated lanes sharing a horizontal except at a single fan), so it
+  follows `merge_style` like a normal commit — `inline_junction` is gated on `not
+  (#incoming > 1 and #outgoing > 1)`, sending its fan-in to a split line.
 - **Junction markers** (`opts.junction_markers`, default on; spec §10.4): a kept
   fork/merge inside collapsed branches (a junction, flagged `junction=true` in
   `view.project`, `collapsed=false`) renders **node-less** — `get_column_chars`
-  draws its cell as box-drawing lanes (`├ ┬ ┼ …`, the new `is_node` gate) instead
+  draws its cell as box-drawing lanes (`├ ┬ ┼ …`, the `is_node` gate) instead
   of a commit node, and `display_item` blanks date/author/message (keeps refs +
   the split/merge fan lines). So the split topology shows without the commit's
   weight. Topology model/invariants are unchanged (it stays a real node).
+  **Exception — a ref must be anchored to a node:** a junction that carries refs
+  is *not* node-less. The `is_node` gate only suppresses the node when
+  `#commit.refs == 0`; a labelled junction renders the `◍` collapsed marker (the
+  glyph gates ◍ on `collapsed or (junction and junction_markers)`), keeping the
+  blank message and fan lanes, so the ref sits on a node instead of floating. The
+  layout is unchanged (still inline / split-line per the funnel rule) — only the
+  glyph swaps, so there is no compactness cost.
 - **Module layout (post-split)**: the code is layered into a **git data
   library** (`gitloom.git`), a pure **graph engine** (`gitloom.graph`), a
   **window controller** (`gitloom.window`), and helpers — dependencies point

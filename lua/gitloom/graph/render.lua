@@ -386,8 +386,13 @@ function M.get_column_chars(opts, columns, emphasis)
         -- A kept junction (§10.4) is drawn node-less — its cell renders the fork/
         -- merge as box-drawing lanes, not a commit node — so the split topology
         -- shows without the commit's weight. Disabled by opts.junction_markers.
-        local is_node = track.has_commit
-            and not (opts.junction_markers ~= false and track.commit and track.commit.junction)
+        -- EXCEPTION: a junction that carries **refs** shows the ◍ collapsed marker
+        -- (the glyph below) rather than a bare box — a ref label must be anchored
+        -- to a node, else it floats with no indication of which junction it tags
+        -- (§10.4). Only a ref-less junction renders truly node-less.
+        local junction_nodeless = opts.junction_markers ~= false and track.commit
+            and track.commit.junction and #(track.commit.refs or {}) == 0
+        local is_node = track.has_commit and not junction_nodeless
 
         -- The glyph's connectivity: the full cell by default, but under emphasis a
         -- real junction keeps only the arms its *highlighted* Segments draw (each
@@ -428,9 +433,11 @@ function M.get_column_chars(opts, columns, emphasis)
             char = track.override
         elseif is_node then
             -- "⏺". A collapsed head (spec §10.3) gets its own glyph so a
-            -- contracted region reads differently from a real commit.
+            -- contracted region reads differently from a real commit. A labelled
+            -- kept junction (§10.4) reuses ◍ too: it is a collapsed-mode commit, so
+            -- the marker anchors its ref and signals the fold (message stays blank).
             char = track.commit.virtual and "◌" or
-                track.commit.collapsed and "◍" or
+                (track.commit.collapsed or (track.commit.junction and opts.junction_markers ~= false)) and "◍" or
                 (#track.commit.parents == 0) and "◎" or
                 not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and opts.icons.merge or
                 (#track.commit.children == 0) and "◉" or "○"

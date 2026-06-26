@@ -173,19 +173,30 @@ function M.project(items, owners, sig)
         mode[h] = mode_of(sig[h], owner_mode)
     end
 
-    -- Only *linear* collapsed runs contract into a head; a collapsed commit that
-    -- is a **junction** — a fork (≥2 visible children) or a merge (≥2 visible
-    -- parents) — stays its own visible node so branch topology is preserved
-    -- (spec §10.3). "Visible" = not hidden, so hiding all-but-one branch demotes a
-    -- junction back to a linear commit that may collapse.
+    -- A collapsed fork/merge is a **kept junction** — it stays its own visible,
+    -- node-less row so the visible branching is preserved (spec §10.3) and is
+    -- excluded from head-membership — with one exception: a **merge tip**, a
+    -- merge (≥2 visible parents) with **no visible child**. A head is anchored by
+    -- its tip (its newest member), and a merge tip is exactly that — the end of
+    -- the branch, carrying its ref, with nothing above it — so it folds into a ◍
+    -- head like a linear run (§10.3). A fork root (≥2 visible children, no visible
+    -- parent) is not a tip and stays a kept junction. Same-signature union (below)
+    -- keeps the contraction within one collapsed region, so no *visible*
+    -- fork/merge is ever absorbed. "Visible" = not hidden, so hiding all-but-one
+    -- branch demotes a junction back to a linear commit that may collapse.
     local function visible(h) return mode[h] ~= "hidden" end
     local function nvis(list)
         local n = 0
         for _, x in ipairs(list or {}) do if visible(x.hash) then n = n + 1 end end
         return n
     end
+    local function is_kept_junction(c)
+        local nc, np = nvis(c.children), nvis(c.parents)
+        if nc < 2 and np < 2 then return false end -- not a fork/merge
+        return nc >= 1 -- a merge tip (no visible child) folds into a head; else kept
+    end
     local function is_head_member(c)
-        return mode[c.hash] == "collapsed" and nvis(c.children) <= 1 and nvis(c.parents) <= 1
+        return mode[c.hash] == "collapsed" and not is_kept_junction(c)
     end
 
     -- Union-find over head-members: merge adjacent same-signature ones so each
@@ -246,10 +257,11 @@ function M.project(items, owners, sig)
             for _, r in ipairs(c.refs or {}) do head.refs[#head.refs + 1] = r end
             node_of_hash[h] = head
         else
-            -- A normal commit, or a collapsed junction kept visible (§10.3). A
-            -- kept junction (collapsed mode but a fork/merge) is flagged so the
-            -- renderer can draw it as a messageless, node-less marker — the split
-            -- topology without the commit's visual weight (§10.4).
+            -- A normal commit, or a collapsed **kept junction** (§10.3) — every
+            -- collapsed commit reaching here is one, since head members (incl.
+            -- merge tips) are handled above. It is flagged so the renderer draws
+            -- it as a messageless, node-less marker — the split topology without
+            -- the commit's visual weight (§10.4).
             local dn = setmetatable(
                 { commit = c, collapsed = false, junction = (mode[h] == "collapsed"),
                     parents = {}, children = {} },

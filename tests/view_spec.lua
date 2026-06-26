@@ -54,30 +54,41 @@ local function count_visible(list, mode)
     return n
 end
 
+--- Whether `c` is a **kept junction**: a fork/merge that stays its own visible,
+--- node-less node (spec §10.3) and must never be absorbed into a head. Every
+--- fork/merge is kept EXCEPT a **merge tip** — a merge (≥2 visible parents) with
+--- no visible child — which, being the branch's tip, folds into a ◍ head.
+local function is_kept_junction(c, mode)
+    local nc, np = count_visible(c.children, mode), count_visible(c.parents, mode)
+    if nc < 2 and np < 2 then return false end -- not a fork/merge
+    return nc >= 1                             -- merge tip (nc == 0) folds; else kept
+end
+
 --- Branch topology must be preserved by the projection (the §10.3 contract): a
---- collapsed head may only contract a *linear* run, so a commit with ≥2 visible
---- children (a fork) or ≥2 visible parents (a merge) is never collapsed away — it
---- stays its own visible node. Also: no visible commit is dropped, and no
---- collapsed head floats (a region with external visible neighbours but no edge).
+--- collapsed head contracts a linear run — or a merge tip plus its same-region
+--- mainline — but never a **kept junction** (a fork, or a merge that still has a
+--- visible child), which stays its own visible node. Also: no visible commit is
+--- dropped, and no collapsed head floats (a region with external visible
+--- neighbours but no edge).
 local function assert_topology(proj, by_hash, label)
     label = label and (" (" .. label .. ")") or ""
     local mode, node_of = proj.mode, proj.node_of_hash
-    -- 1. no head's region contains a junction (fork or merge)
+    -- 1. no head's region contains a kept junction (it must stay node-less)
     for _, n in ipairs(proj.nodes) do
         if n.collapsed then
             for _, h in ipairs(n.region) do
-                local c = by_hash[h]
-                assert.is_true(count_visible(c.children, mode) <= 1, "head absorbed a fork: " .. h .. label)
-                assert.is_true(count_visible(c.parents, mode) <= 1, "head absorbed a merge: " .. h .. label)
+                assert.falsy(is_kept_junction(by_hash[h], mode),
+                    "head absorbed a kept junction: " .. h .. label)
             end
         end
     end
-    -- 2. every visible commit maps to a node; junctions stay real (not collapsed)
+    -- 2. every visible commit maps to a node; a kept junction stays real (not
+    --    collapsed). A merge tip may fold into a head.
     for h, c in pairs(by_hash) do
         if mode[h] ~= "hidden" then
             assert.is_not_nil(node_of[h], "visible commit dropped: " .. h .. label)
-            if count_visible(c.children, mode) >= 2 or count_visible(c.parents, mode) >= 2 then
-                assert.falsy(node_of[h].collapsed, "junction collapsed away: " .. h .. label)
+            if is_kept_junction(c, mode) then
+                assert.falsy(node_of[h].collapsed, "kept junction collapsed away: " .. h .. label)
             end
         end
     end
@@ -351,6 +362,37 @@ describe("view.project — branch topology preservation", function()
         assert.falsy(proj.node_of_hash.m.collapsed) -- the merge stays real
         assert.falsy(proj.node_of_hash.root.collapsed) -- the fork stays real
     end)
+
+    it("folds a merge tip (no visible children) into a collapsed head", function()
+        -- The branch's tip is a merge with no children: tip = merge(f1, om). f1
+        -- is the branch's own (collapsed) work; om is the merged-in side, kept
+        -- visible by a normal owner. The merge tip must fold into a ◍ head that
+        -- carries its ref and keeps the merged-in side as a lane — NOT a node-less
+        -- junction (spec §10.3, the merge-tip exception).
+        local items, by_hash = dag({
+            { "tip", { "f1", "om" } }, -- merge tip, ref T (no children)
+            { "f1", { "base" } },      -- the branch's own work
+            { "om", { "base" } },      -- merged-in side, ref O (normal ⇒ visible)
+            { "base", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            T = { "tip", "collapsed" },
+            O = { "om" }, -- normal
+        }))
+        assert_topology(proj, by_hash)
+        local head = proj.node_of_hash.tip
+        assert.is_true(head.collapsed, "merge tip should fold into a collapsed head")
+        assert.falsy(head.junction)
+        assert.equals("tip", head.tip.hash)         -- tip-anchored
+        assert.is_true(hash_set(head.region).tip)   -- the tip is in its head's region
+        assert.falsy(proj.node_of_hash.om.collapsed) -- merged-in side stays visible
+        -- the head keeps the merged-in side as a parent edge (the merge still shows)
+        local reaches_om = false
+        for _, p in ipairs(head.parents) do
+            if p == proj.node_of_hash.om then reaches_om = true end
+        end
+        assert.is_true(reaches_om, "head keeps the merged-in side as a parent edge")
+    end)
 end)
 
 describe("get_column_chars — crossing vs node-less junction glyph", function()
@@ -438,6 +480,66 @@ describe("junction markers — node-less junctions (§10.4)", function()
         local grid = helpers.render_grid(opts, graph._internal.build_graph(opts, proj.items))
         assert.same({}, helpers.check_grid(grid, opts))
         assert.equals(4, node_count(grid)) -- x now shows a node too
+    end)
+
+    it("a fork+merge node-less junction keeps its fan-in on a separate split line (§5.1)", function()
+        -- j is BOTH a fork (children ca, cb) and a merge (parents pa, pb), all
+        -- collapsed ⇒ a node-less junction. Collapsing both funnels onto one row
+        -- would lay two independent fans across it (§5.1 forbids two separated
+        -- lanes sharing a horizontal except at a *single* fan). So under
+        -- split_on_separate_line its fan-in must go to its own split line.
+        local items, by_hash = dag({
+            { "ca", { "j" } },          -- child a (ref A)
+            { "cb", { "j" } },          -- child b (ref B)
+            { "j", { "pa", "pb" } },    -- fork (ca,cb) + merge (pa,pb)
+            { "pa", { "base" } },
+            { "pb", { "base" } },
+            { "base", {} },
+        })
+        local proj = view.project(items, owners(by_hash, {
+            A = { "ca", "collapsed" }, B = { "cb", "collapsed" },
+        }))
+        local jnode = proj.node_of_hash.j
+        assert.is_true(jnode.junction) -- node-less fork+merge junction
+        local opts = helpers.big_opts() -- split_on_separate_line = true
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local jrow
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.hash == "j" then jrow = row end
+        end
+        assert.is_not_nil(jrow)
+        assert.is_not_nil(jrow.split, "fork+merge junction must get a separate split line, not collapse inline")
+        -- and the layout is still valid end-to-end
+        assert.same({}, helpers.check_grid(helpers.render_grid(opts, rows), opts))
+    end)
+
+    -- x forks (children a, b) collapsed ⇒ a kept junction; optionally label it.
+    local function junction_line(opts, ref)
+        local items, by_hash = dag({
+            { "a", { "x" } }, { "b", { "x" } }, { "x", { "root" } }, { "root", {} },
+        })
+        if ref then by_hash.x.refs = { { name = ref, kind = "local" } } end
+        local proj = view.project(items, owners(by_hash, {
+            A = { "a", "collapsed" }, B = { "b", "collapsed" },
+        }))
+        assert.is_true(proj.node_of_hash.x.junction) -- a kept junction in the model
+        local rows = graph._internal.build_graph(opts, proj.items)
+        local xrow
+        for _, r in ipairs(rows) do if r.commit and r.commit.hash == "x" then xrow = r end end
+        assert.same({}, helpers.check_grid(helpers.render_grid(opts, rows), opts))
+        return graph._internal.get_column_chars(opts, xrow.columns).text
+    end
+
+    it("a labelled junction shows the ◍ marker so its ref is anchored (§10.4)", function()
+        -- A ref must be anchored to a node, so a junction that carries refs renders
+        -- the ◍ collapsed marker instead of a bare node-less box.
+        local txt = junction_line(helpers.big_opts(), "topic")
+        assert.is_not_nil(txt:find("◍"), "a labelled junction must render ◍, got: " .. txt)
+    end)
+
+    it("a ref-less junction stays node-less (no marker)", function()
+        local txt = junction_line(helpers.big_opts(), nil)
+        assert.is_nil(txt:find("◍"), "a ref-less junction should stay node-less, got: " .. txt)
     end)
 end)
 
