@@ -667,8 +667,25 @@ local function display(win, buf, model, first, last)
     vim.bo[buf].modifiable = true
     vim.bo[buf].readonly = false
 
-    -- Replace exactly the buffer lines the rendered item blocks cover.
-    vim.api.nvim_buf_set_lines(buf, base - 1, base - 1 + #lines, false, lines)
+    -- Write the rendered lines into the buffer **without corrupting the jumplist**
+    -- (§14.3). A multi-line block `set_lines(a, b, …)` deletes+reinserts the range
+    -- and collapses any jumplist entries inside it to the range start — which broke
+    -- `<C-o>`/`<C-i>` after a reachability-dimming refresh (§12), since the dimming
+    -- re-renders some rows' glyphs (cone arms gap out) over the visible range. A
+    -- **single-line 1-for-1** replace preserves the entry on that line (verified).
+    -- So: when the row count is unchanged (every refresh except a relayout) replace
+    -- only the changed lines, one at a time; otherwise fall back to the block write
+    -- (a true content change / relayout, where a jumplist reset is acceptable).
+    local cur = vim.api.nvim_buf_get_lines(buf, base - 1, base - 1 + #lines, false)
+    if #cur ~= #lines then
+        vim.api.nvim_buf_set_lines(buf, base - 1, base - 1 + #lines, false, lines)
+    else
+        for i = 1, #lines do
+            if cur[i] ~= lines[i] then
+                vim.api.nvim_buf_set_lines(buf, base - 1 + (i - 1), base - 1 + i, false, { lines[i] })
+            end
+        end
+    end
     vim.api.nvim_buf_clear_namespace(buf, namespace, base - 1, base - 1 + #lines)
 
     for _, hl in ipairs(highlight) do

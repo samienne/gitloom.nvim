@@ -153,11 +153,18 @@ end
 --- only on the DAG and the owner *tips*, not on modes, so a caller reflowing
 --- after a mode change can reuse a cached one and skip the O(N·owners) pass
 --- (the caching split, ARCHITECTURE.md / spec §10.5). Omit it to compute fresh.
+---
+--- `keep` (the filter-search match set, spec §16.3) is an optional set of commit
+--- hashes that must **never** contract into a collapsed head — they stay their
+--- own visible nodes even under collapsed owners, exactly like junctions. The
+--- filter passes all-collapsed owners plus the matching hashes here, so a match
+--- mid-run splits the collapsed run above and below it (§16.3). Omit for no filter.
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired (repo.order)
 ---@param owners table[] -- { id, tip = Commit, mode? = "normal"|"collapsed"|"hidden" }
 ---@param sig table<string, table<string, boolean>>?  -- precomputed signatures
+---@param keep table<string, boolean>?  -- hashes never contracted (§16.3)
 ---@return table  -- { items = OrderItem[], nodes = DisplayNode[], sig, mode, node_of_hash }
-function M.project(items, owners, sig)
+function M.project(items, owners, sig, keep)
     owners = owners or {}
     local owner_mode = {}
     for _, o in ipairs(owners) do owner_mode[o.id] = o.mode or "normal" end
@@ -195,8 +202,12 @@ function M.project(items, owners, sig)
         if nc < 2 and np < 2 then return false end -- not a fork/merge
         return nc >= 1 -- a merge tip (no visible child) folds into a head; else kept
     end
+    -- A collapsed commit contracts into a head unless it is a kept junction
+    -- (above) or a **filter match** (§16.3 `keep`): a kept commit never contracts,
+    -- so a match stays a visible node splitting the collapsed run above and below it.
     local function is_head_member(c)
         return mode[c.hash] == "collapsed" and not is_kept_junction(c)
+            and not (keep and keep[c.hash])
     end
 
     -- Union-find over head-members: merge adjacent same-signature ones so each
@@ -257,13 +268,15 @@ function M.project(items, owners, sig)
             for _, r in ipairs(c.refs or {}) do head.refs[#head.refs + 1] = r end
             node_of_hash[h] = head
         else
-            -- A normal commit, or a collapsed **kept junction** (§10.3) — every
-            -- collapsed commit reaching here is one, since head members (incl.
-            -- merge tips) are handled above. It is flagged so the renderer draws
-            -- it as a messageless, node-less marker — the split topology without
-            -- the commit's visual weight (§10.4).
+            -- A normal commit, a collapsed **kept junction** (§10.3, rendered
+            -- node-less — every *collapsed* commit reaching here is one, since head
+            -- members incl. merge tips were handled above), or a **filter match**
+            -- (§16.3). A match is always shown as a real commit (its message),
+            -- never a node-less junction even when it is itself a fork/merge — so
+            -- the junction flag excludes kept matches.
             local dn = setmetatable(
-                { commit = c, collapsed = false, junction = (mode[h] == "collapsed"),
+                { commit = c, collapsed = false,
+                    junction = (mode[h] == "collapsed") and not (keep and keep[h]),
                     parents = {}, children = {} },
                 { __index = c })
             nodes[#nodes + 1] = dn
