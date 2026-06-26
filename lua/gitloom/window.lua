@@ -4822,5 +4822,21 @@ function M.pick(opts)
     return p
 end
 
+-- Test seam (NOT the public API): the pure, ctx-taking graph helpers, exposed so
+-- specs can drive them against a hand-built ctx/repo fixture — the resync core
+-- (reconcile_refs / prune_to_reachable), the working-tree splice (apply_worktree
+-- / clear_worktree_nodes), the owned re-sort (reorder_repo), the per-commit
+-- linker (integrate_commit), and the pin resolution (effective_pinned). These
+-- mutate only their `ctx.repo`, touching no window. Mirrors graph._internal.
+M._internal = {
+    effective_pinned = effective_pinned,
+    reconcile_refs = reconcile_refs,
+    prune_to_reachable = prune_to_reachable,
+    reorder_repo = reorder_repo,
+    clear_worktree_nodes = clear_worktree_nodes,
+    apply_worktree = apply_worktree,
+    integrate_commit = integrate_commit,
+    build_display_index = build_display_index,
+}
 
 return M
