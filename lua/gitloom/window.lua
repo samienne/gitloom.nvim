@@ -331,7 +331,7 @@ local KEYBINDS = {
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "<leader>s", "Search commits by subject / author (picker; :GitloomSearch)" },
-    { "/", "Filter the graph to matching commits (live; n/N walk matches, <C-o> exits)" },
+    { "/", "Filter the graph to matching commits (live; C-j/C-k step · CR jump · C-s stamp · Esc cancel)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
@@ -2636,40 +2636,49 @@ local function h_filter(ctx)
         end
     end
 
-    -- Snapshot for cancel (§16.1): the committed filter + the graph's view.
-    local prev_filter = ctx.filter
+    -- The graph view to return to on cancel (§16.4). The transient overlay is
+    -- inherently isolated: the input owns the keys, so no collapse/pin can happen
+    -- while it is open, and reflow's force-collapse is local (§16.1) — so cancel
+    -- just clears ctx.filter and restores this view (no view-state bookkeeping).
     local saved_view = vim.api.nvim_win_call(gwin, vim.fn.winsaveview)
 
-    -- The single-line input float, seeded with the active query when editing.
     local ibuf = vim.api.nvim_create_buf(false, true)
     vim.bo[ibuf].buftype = "nofile"
-    vim.api.nvim_buf_set_lines(ibuf, 0, -1, false, { (prev_filter and prev_filter.query) or "" })
+    -- Seeded with the active query when re-opened over a stamped filter (§16.5).
+    vim.api.nvim_buf_set_lines(ibuf, 0, -1, false, { (ctx.filter and ctx.filter.query) or "" })
     local iwin = vim.api.nvim_open_win(ibuf, true, {
         relative = "win", win = gwin,
         anchor = "SW", row = vim.api.nvim_win_get_height(gwin), col = 0,
         width = vim.api.nvim_win_get_width(gwin), height = 1,
         style = "minimal", border = "rounded",
-        title = " filter: subject / author ",
+        title = " filter  (C-j/C-k matches · CR jump · C-s stamp · Esc cancel) ",
         zindex = float_zindex(gwin),
     })
     pcall(vim.api.nvim_set_option_value, "winhl", "Normal:NormalFloat", { win = iwin })
 
-    -- Apply a query to the graph (the live preview): empty => drop the filter.
-    local function apply(query)
-        query = (query or ""):gsub("^%s+", ""):gsub("%s+$", "")
-        if query == "" then
-            ctx.filter = nil
-        else
-            ctx.filter = { query = query, keep = selectm.filter_keep(commits, query) }
-        end
-        ctx:reflow()
-    end
     local function buf_query()
         return vim.api.nvim_buf_is_valid(ibuf)
             and (vim.api.nvim_buf_get_lines(ibuf, 0, 1, false)[1] or "") or ""
     end
 
-    -- Debounced live rebuild (§16.4): each keystroke re-arms; only the last fires.
+    -- Apply the query (the live preview); empty => no filter. After reflow keep a
+    -- **current match** under the graph cursor (behind the input) so C-j/C-k and
+    -- <CR> have a selection — but only re-home it when the cursor fell off a match,
+    -- so narrowing the query doesn't yank the view around on every keystroke.
+    local function apply(query)
+        query = (query or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        ctx.filter = (query == "") and nil
+            or { query = query, keep = selectm.filter_keep(commits, query) }
+        ctx:reflow()
+        if ctx.filter then
+            local at = ctx:order_at(vim.api.nvim_win_get_cursor(gwin)[1])
+            if not (at and at.commit and ctx.filter.keep[at.commit.hash]) then
+                filter_land(ctx)
+            end
+        end
+    end
+
+    -- Debounced live rebuild (§16.6): each keystroke re-arms; only the last fires.
     local function schedule()
         ctx.filter_gen = ctx.filter_gen + 1
         local gen = ctx.filter_gen
@@ -2682,40 +2691,68 @@ local function h_filter(ctx)
     local function close_input()
         ctx.filter_gen = ctx.filter_gen + 1 -- cancel any pending rebuild
         -- Leave insert mode before handing focus back, or the graph buffer is
-        -- entered in insert mode (the input float was insert-mode, §16.1).
+        -- entered in insert mode (the input float was insert-mode, §16.4).
         vim.cmd("stopinsert")
         pcall(vim.api.nvim_win_close, iwin, true)
         if vim.api.nvim_buf_is_valid(ibuf) then pcall(vim.api.nvim_buf_delete, ibuf, { force = true }) end
         if vim.api.nvim_win_is_valid(gwin) then pcall(vim.api.nvim_set_current_win, gwin) end
     end
 
-    local function commit_filter()
-        apply(buf_query()) -- settle the latest query synchronously
-        local active = ctx.filter ~= nil
-        close_input()
-        if active then
-            if not filter_land(ctx) then
-                vim.notify("gitloom: no matches", vim.log.levels.INFO)
-            end
-        else
-            -- Empty query: filter dropped; restore the pre-filter view.
-            pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
-        end
+    -- The current match's hash (the commit under the graph cursor), or nil.
+    local function current_match_hash()
+        local item = ctx:order_at(vim.api.nvim_win_get_cursor(gwin)[1])
+        return item and item.commit and item.commit.hash or nil
     end
 
-    local function cancel()
+    -- <CR>: select the current match and dismiss (§16.4) — discard the filter,
+    -- return to the base view, cursor on the match (resolved to its visible row).
+    local function select_dismiss()
+        apply(buf_query()) -- settle the latest query
+        local hash = ctx.filter and current_match_hash() or nil
+        ctx.filter = nil
         close_input()
-        ctx.filter = prev_filter
+        ctx:reflow()
+        if hash and ctx:goto_hash(hash) then
+            ctx:center_view()
+        else
+            pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        end
+        ctx:update_cone()
+        ctx:update_panes()
+    end
+
+    -- <Esc>: cancel (§16.4) — discard the filter, return to base at the original cursor.
+    local function cancel()
+        ctx.filter = nil
+        close_input()
         ctx:reflow()
         pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        ctx:update_cone()
+        ctx:update_panes()
+    end
+
+    -- <C-j>/<C-k>: step the current match while the overlay is open (§16.4).
+    local function step(dir)
+        if ctx.filter then filter_goto(ctx, dir) end
+    end
+
+    -- <C-s>/<C-CR>: stamp the filtered view into a persistent stack entry (§16.5).
+    -- Not yet implemented — the next increment wires the breadcrumb frame.
+    local function stamp()
+        vim.notify("gitloom: filter stamping (§16.5) not yet implemented", vim.log.levels.INFO)
     end
 
     vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" },
         { buffer = ibuf, callback = schedule })
-    vim.keymap.set({ "i", "n" }, "<CR>", commit_filter, { buffer = ibuf, nowait = true })
-    vim.keymap.set({ "i", "n" }, "<Esc>", cancel, { buffer = ibuf, nowait = true })
+    local m = { buffer = ibuf, nowait = true }
+    vim.keymap.set({ "i", "n" }, "<CR>", select_dismiss, m)
+    vim.keymap.set({ "i", "n" }, "<Esc>", cancel, m)
+    vim.keymap.set({ "i", "n" }, "<C-j>", function() step(1) end, m)
+    vim.keymap.set({ "i", "n" }, "<C-k>", function() step(-1) end, m)
+    vim.keymap.set({ "i", "n" }, "<C-s>", stamp, m)
+    vim.keymap.set({ "i", "n" }, "<C-CR>", stamp, m)
 
-    -- Preview the seed immediately (editing an existing filter), then type.
+    -- Preview the seed immediately (editing a stamped filter), then type.
     schedule()
     vim.cmd("startinsert!")
 end
