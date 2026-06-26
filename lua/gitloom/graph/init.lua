@@ -300,6 +300,8 @@ M._internal = {
     next_mode = selectm.next_mode,
     selected_owner_ids = selectm.selected_owner_ids,
     collapse_owners = selectm.collapse_owners,
+    smartcase_match = selectm.smartcase_match,
+    filter_keep = selectm.filter_keep,
     -- gitloom.graph.reach
     reachable_cone = reach.reachable_cone,
     mark_reachable = reach.mark_reachable,

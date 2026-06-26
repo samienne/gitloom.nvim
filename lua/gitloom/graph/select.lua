@@ -239,4 +239,40 @@ function M.collapse_owners(sig, pinned, effective)
     return (#out > 0) and out or nil
 end
 
+--- Smartcase substring test (spec §16.2): `needle` matches `haystack`
+--- case-insensitively unless `needle` contains an uppercase letter, in which case
+--- the match is case-sensitive (like Neovim's 'smartcase'). A plain literal
+--- substring — the needle is not treated as a Lua pattern.
+---@param haystack string
+---@param needle string
+---@return boolean
+function M.smartcase_match(haystack, needle)
+    if needle == "" then return true end
+    if needle:match("%u") then
+        return haystack:find(needle, 1, true) ~= nil -- case-sensitive
+    end
+    return haystack:lower():find(needle, 1, true) ~= nil
+end
+
+--- The filter-search keep-set (spec §16.3): the hashes of commits whose **subject
+--- or author** matches `query` (smartcase substring, §16.2). Pure over a commit
+--- list; the window glue feeds repo.order's commits and hands the result to
+--- `view.project` as `keep`. The query is trimmed; a blank query matches nothing
+--- (the caller drops the filter rather than contracting the whole graph).
+---@param commits table[]  -- Commit-likes with { hash, message?, author? }
+---@param query string
+---@return table<string, boolean> keep  -- matching hashes
+function M.filter_keep(commits, query)
+    local keep = {}
+    query = query and query:gsub("^%s+", ""):gsub("%s+$", "") or ""
+    if query == "" then return keep end
+    for _, c in ipairs(commits or {}) do
+        if c.hash and (M.smartcase_match(c.message or "", query)
+                or M.smartcase_match(c.author or "", query)) then
+            keep[c.hash] = true
+        end
+    end
+    return keep
+end
+
 return M

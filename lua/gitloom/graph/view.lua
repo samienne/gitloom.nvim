@@ -153,11 +153,18 @@ end
 --- only on the DAG and the owner *tips*, not on modes, so a caller reflowing
 --- after a mode change can reuse a cached one and skip the O(N·owners) pass
 --- (the caching split, ARCHITECTURE.md / spec §10.5). Omit it to compute fresh.
+---
+--- `keep` (the filter-search match set, spec §16.3) is an optional set of commit
+--- hashes that must **never** contract into a collapsed head — they stay their
+--- own visible nodes even under collapsed owners, exactly like junctions. The
+--- filter passes all-collapsed owners plus the matching hashes here, so a match
+--- mid-run splits the collapsed run above and below it (§16.3). Omit for no filter.
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired (repo.order)
 ---@param owners table[] -- { id, tip = Commit, mode? = "normal"|"collapsed"|"hidden" }
 ---@param sig table<string, table<string, boolean>>?  -- precomputed signatures
+---@param keep table<string, boolean>?  -- hashes never contracted (§16.3)
 ---@return table  -- { items = OrderItem[], nodes = DisplayNode[], sig, mode, node_of_hash }
-function M.project(items, owners, sig)
+function M.project(items, owners, sig, keep)
     owners = owners or {}
     local owner_mode = {}
     for _, o in ipairs(owners) do owner_mode[o.id] = o.mode or "normal" end
@@ -184,8 +191,11 @@ function M.project(items, owners, sig)
         for _, x in ipairs(list or {}) do if visible(x.hash) then n = n + 1 end end
         return n
     end
+    -- A kept commit (§16.3 filter match) never contracts — like a junction, it
+    -- stays a visible node, so a match splits a collapsed run above and below it.
     local function is_head_member(c)
         return mode[c.hash] == "collapsed" and nvis(c.children) <= 1 and nvis(c.parents) <= 1
+            and not (keep and keep[c.hash])
     end
 
     -- Union-find over head-members: merge adjacent same-signature ones so each
@@ -249,9 +259,15 @@ function M.project(items, owners, sig)
             -- A normal commit, or a collapsed junction kept visible (§10.3). A
             -- kept junction (collapsed mode but a fork/merge) is flagged so the
             -- renderer can draw it as a messageless, node-less marker — the split
-            -- topology without the commit's visual weight (§10.4).
+            -- topology without the commit's visual weight (§10.4). A **filter
+            -- match** (in `keep`, §16.3) is the exception: it is shown as a real
+            -- commit (its message), so it is never flagged a node-less junction
+            -- even when it is itself a fork/merge.
+            local is_junction = (mode[h] == "collapsed")
+                and (nvis(c.children) > 1 or nvis(c.parents) > 1)
+                and not (keep and keep[h])
             local dn = setmetatable(
-                { commit = c, collapsed = false, junction = (mode[h] == "collapsed"),
+                { commit = c, collapsed = false, junction = is_junction,
                     parents = {}, children = {} },
                 { __index = c })
             nodes[#nodes + 1] = dn
