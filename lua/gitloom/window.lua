@@ -1300,16 +1300,543 @@ end
 ---@field pin_upstream? boolean  pinning a local branch also pins its tracked upstream (default true); §6.3/§10.6
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 
----@param opts GraphOptions
----@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
----@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
 ---@class GraphAttach : ListViewAttach
 ---@field host_root string  the parent repo whose host window/session receives the frame (§14)
----
----@param attach? GraphAttach  -- build into an existing host window+buffer (a drilled-in graph frame, §14) instead of creating a window
+
+-- ── Extracted graph helpers (Phase B1) ──────────────────────────────────────
+-- Pure, window-free per-session helpers, lifted out of `open_graph` so its
+-- closure stays under LuaJIT's 60-upvalue ceiling. Each takes the GraphCtx as its
+-- first argument; the ctx-attached ones (GRAPH_HELPERS) are called `ctx:name()` so
+-- sibling dispatch resolves at call time (no definition-order coupling). All the
+-- module-level deps they use (order_commits, fetch_rev_order, get_or_create_commit,
+-- diff_ref_tips, add_ref, reachable_hashes, range_endpoints, item_lines, the
+-- WORKTREE_*_HASH / SORT_MODES constants, make_future) are declared above.
+local GRAPH_HELPERS = {}
+
+-- The OrderItem for a DisplayNode (by hash), or nil when packed into a marker
+-- group (§10.4). Internal to the selection/cone helpers below.
+local function node_item(ctx, node)
+    if not node then return nil end
+    local i = ctx.display_index[node.hash]
+    return i and ctx.repo.display[i] or nil
+end
+-- A path endpoint's real newest / oldest Commit: a collapsed head stands for its
+-- whole region (§13.1) — newest = tip, oldest = last region member.
+local function real_newest(node) return node.collapsed and node.tip or node.commit end
+local function real_oldest(ctx, node)
+    if node.collapsed then
+        local region = node.region or {}
+        local h = region[#region]
+        return (h and ctx.repo.commits[h]) or node.tip
+    end
+    return node.commit
+end
+
+-- Re-establish gitloom's owned row order (§3.1): order_commits over the real
+-- (non-virtual) rows, rebuilding repo.order and reusing the OrderItem objects.
+local function reorder_repo(ctx)
+    local repo = ctx.repo
+    local item_of, commits = {}, {}
+    for _, it in ipairs(repo.order) do
+        if it.type == "commit" and it.commit and not it.commit.virtual then
+            item_of[it.commit.hash] = it
+            commits[#commits + 1] = it.commit
+        end
+    end
+    local ordered = order_commits(commits)
+    local new_order = {}
+    for _, c in ipairs(ordered) do
+        new_order[#new_order + 1] = item_of[c.hash]
+    end
+    repo.order = new_order
+end
+
+-- Reorder repo.order to match an external hash sequence (a `rev` sort mode; §3.1).
+---@param hashlist string[]
+local function reorder_by_hashes(ctx, hashlist)
+    local repo = ctx.repo
+    local item_of = {}
+    for _, it in ipairs(repo.order) do
+        if it.type == "commit" and it.commit and not it.commit.virtual then
+            item_of[it.commit.hash] = it
+        end
+    end
+    local new_order, placed = {}, {}
+    for _, h in ipairs(hashlist) do
+        local it = item_of[h]
+        if it and not placed[h] then
+            new_order[#new_order + 1] = it
+            placed[h] = true
+        end
+    end
+    for _, it in ipairs(repo.order) do
+        if it.type == "commit" and it.commit and not it.commit.virtual
+            and not placed[it.commit.hash] then
+            new_order[#new_order + 1] = it
+            placed[it.commit.hash] = true
+        end
+    end
+    repo.order = new_order
+end
+
+-- The effective anchor set (§10.6): HEAD + master/main/dev + seeded marks, with
+-- the user's pin/unpin overrides and the pin-the-pair upstream rule on top.
+local function effective_pinned(ctx)
+    local repo, view_state, opts = ctx.repo, ctx.view_state, ctx.opts
+    local p = {}
+    if repo.head and repo.refs[repo.head] then p[repo.head] = true end
+    for _, name in ipairs({ "master", "main", "dev" }) do
+        if repo.refs[name] then p[name] = true end
+    end
+    for name in pairs(ctx.seed_pin_names) do
+        if repo.refs[name] then p[name] = true end
+    end
+    for id, v in pairs(view_state.pinned) do
+        if v then p[id] = true else p[id] = nil end
+    end
+    if opts.pin_upstream ~= false then
+        local add = {}
+        for id in pairs(p) do
+            local ref = repo.refs[id]
+            local up = ref and ref.upstream and ref.upstream.short
+            if up and repo.refs[up] and view_state.pinned[up] == nil then
+                add[up] = true
+            end
+        end
+        for up in pairs(add) do p[up] = true end
+    end
+    return p
+end
+GRAPH_HELPERS.effective_pinned = effective_pinned
+
+-- node hash → repo.display index, and packed-head marker locations (§13.4).
+local function build_display_index(ctx)
+    ctx.display_index, ctx.node_loc = {}, {}
+    local di, nl = ctx.display_index, ctx.node_loc
+    local function locate(it, node)
+        for c, cell in ipairs(it.columns or {}) do
+            if cell.has_commit and cell.commit == node then
+                nl[node.hash] = { item = it, col = c }
+                return
+            end
+        end
+    end
+    for i, it in ipairs(ctx.repo.display or {}) do
+        if it.commit then
+            di[it.commit.hash] = i
+            locate(it, it.commit)
+        elseif it.type == "markers" then
+            for _, m in ipairs(it.markers or {}) do locate(it, m) end
+        end
+    end
+end
+GRAPH_HELPERS.build_display_index = build_display_index
+
+-- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
+-- sub-row (dual mode spans two lines; mapped via the listview controller).
+local function order_at(ctx, line)
+    local idx, first = line, line
+    local lv = ctx.lv
+    if lv and lv.controller and lv.controller.item_at then
+        idx = lv.controller.item_at(line)
+        first = lv.controller.item_start and lv.controller.item_start(idx) or idx
+    end
+    return ctx.repo.display[idx], idx, line - first
+end
+GRAPH_HELPERS.order_at = order_at
+
+-- Apply the active sort mode to repo.order, returning a Future (the `rev` modes
+-- query git asynchronously; §3.1). The caller reflows.
+---@return Future
+local function apply_sort(ctx)
+    local mode = SORT_MODES[sort_mode_index]
+    if mode.rev then
+        local branch = ctx.opts.branches or { "--all" }
+        if type(branch) ~= "table" then branch = { branch } end
+        return fetch_rev_order(branch, mode.rev)
+            .next(function(hashes) reorder_by_hashes(ctx, hashes) end)
+    end
+    reorder_repo(ctx)
+    local future, promise = make_future()
+    promise.resolve()
+    return future
+end
+GRAPH_HELPERS.apply_sort = apply_sort
+
+-- Merge a freshly-parsed Commit into the model (§3): fill its placeholder (or
+-- insert it), resolve parent hashes to Commit refs with child back-links, append
+-- an OrderItem (returned). nil for an already-loaded commit.
+---@param item Commit
+---@return OrderItem?
+local function integrate_commit(ctx, item)
+    local repo = ctx.repo
+    local existing = repo.commits[item.hash]
+    if existing then
+        if existing.loaded then return nil end -- already a row; don't re-link
+        -- Fill the placeholder; cepoch (committer date) MUST be copied — ref tips
+        -- are pre-created as placeholders and order_commits seeds tips by cepoch
+        -- (§3.1); dropping it breaks the order on squash-merge repos.
+        existing.author = item.author
+        existing.date = item.date
+        existing.cepoch = item.cepoch
+        existing.parents = item.parents
+        existing.message = item.message
+        existing.loaded = true
+        item = existing
+    else
+        repo.commits[item.hash] = item
+        item.children = item.children or {}
+    end
+    local resolved = {}
+    for _, p in ipairs(item.parents) do
+        local parent = get_or_create_commit(repo, p --[[@as string]])
+        table.insert(parent.children, item)
+        table.insert(resolved, parent)
+    end
+    item.parents = resolved
+    ---@type OrderItem
+    local order_item = { type = "commit", commit = item, columns = {} }
+    table.insert(repo.order, order_item)
+    return order_item
+end
+GRAPH_HELPERS.integrate_commit = integrate_commit
+
+-- Reconcile the model's refs with a freshly-read set (§3.4): diff_ref_tips drives
+-- drop / add / re-point, then HEAD re-binds to the current branch.
+---@param entries { name: string, kind: string, hash: string, upstream?: Upstream }[]
+---@param head string?
+---@param detached string?  the checked-out commit hash when detached (§3.2)
+local function reconcile_refs(ctx, entries, head, detached)
+    local repo = ctx.repo
+    -- Unlink a Ref from its commit's back-list and the registry.
+    local function unlink_ref(key)
+        local ref = repo.refs[key]
+        if not ref then return end
+        local c = ref.commit
+        if c and c.refs then
+            for i = #c.refs, 1, -1 do
+                if c.refs[i] == ref then table.remove(c.refs, i) end
+            end
+        end
+        repo.refs[key] = nil
+    end
+    local newmap, by_key = {}, {}
+    for _, e in ipairs(entries) do
+        newmap[e.name] = e.hash
+        by_key[e.name] = e
+    end
+    local oldmap = {}
+    for k, ref in pairs(repo.refs) do
+        if k ~= "HEAD" then oldmap[k] = ref.commit and ref.commit.hash end
+    end
+    local d = diff_ref_tips(oldmap, newmap)
+    for _, k in ipairs(d.removed) do unlink_ref(k) end
+    for _, k in ipairs(d.added) do
+        local e = by_key[k]
+        add_ref(repo, e.name, e.kind, e.hash, e.upstream)
+    end
+    for _, k in ipairs(d.moved) do
+        local e = by_key[k]
+        unlink_ref(k) -- detach the old binding before re-pointing
+        add_ref(repo, e.name, e.kind, e.hash, e.upstream)
+    end
+    -- Refresh upstream divergence even where the local tip did not move (§6.3).
+    for _, e in ipairs(entries) do
+        if e.kind == "local" and repo.refs[e.name] then
+            repo.refs[e.name].upstream = e.upstream
+        end
+    end
+    unlink_ref("HEAD")
+    repo.head = head
+    if head and repo.refs[head] and repo.refs[head].commit then
+        add_ref(repo, "HEAD", "head", repo.refs[head].commit.hash)
+    elseif not head and detached then
+        add_ref(repo, "HEAD", "head", detached)
+    end
+end
+GRAPH_HELPERS.reconcile_refs = reconcile_refs
+
+-- Prune commits no longer reachable from any ref (§3.4) — force-push/rebase
+-- orphans. Walks tips, drops unreachable real commits, prunes child back-links
+-- and repo.order.
+local function prune_to_reachable(ctx)
+    local repo = ctx.repo
+    local tips = {}
+    for _, ref in pairs(repo.refs) do
+        if ref.commit then tips[#tips + 1] = ref.commit.hash end
+    end
+    local keep = reachable_hashes(repo.commits, tips)
+    local removed = false
+    for hash, c in pairs(repo.commits) do
+        if not keep[hash] and not c.virtual then
+            repo.commits[hash] = nil
+            removed = true
+        end
+    end
+    if not removed then return end
+    for _, c in pairs(repo.commits) do
+        if c.children then
+            local kept = {}
+            for _, ch in ipairs(c.children) do
+                if repo.commits[ch.hash] then kept[#kept + 1] = ch end
+            end
+            c.children = kept
+        end
+    end
+    local kept_order = {}
+    for _, it in ipairs(repo.order) do
+        if it.commit and repo.commits[it.commit.hash] then
+            kept_order[#kept_order + 1] = it
+        end
+    end
+    repo.order = kept_order
+end
+GRAPH_HELPERS.prune_to_reachable = prune_to_reachable
+
+-- Remove the working-tree virtual commits from the raw model (§4.2). The caller
+-- reflows. (ctx.worktree_commits is REPLACED, so write it back through ctx.)
+local function clear_worktree_nodes(ctx)
+    local repo = ctx.repo
+    if #ctx.worktree_commits == 0 then return end
+    for _, v in ipairs(ctx.worktree_commits) do
+        local p = v.parents and v.parents[1]
+        if p and p.children then
+            for i = #p.children, 1, -1 do
+                if p.children[i] == v then table.remove(p.children, i) end
+            end
+        end
+        repo.commits[v.hash] = nil
+    end
+    local kept = {}
+    for _, it in ipairs(repo.order) do
+        if not (it.commit and it.commit.virtual) then kept[#kept + 1] = it end
+    end
+    repo.order = kept
+    ctx.worktree_commits = {}
+end
+GRAPH_HELPERS.clear_worktree_nodes = clear_worktree_nodes
+
+-- Rebuild the working-tree virtual commits (§3.3/§4.2) from a fetched state,
+-- splicing untracked → unstaged → staged above HEAD. Returns the status string.
+local function apply_worktree(ctx, state)
+    local repo, opts = ctx.repo, ctx.opts
+    ctx:clear_worktree_nodes()
+    if opts.working_tree == false then return "off" end
+    ctx.worktree_head = state and state.head_hash
+    local st = state and state.status
+    if not (st and ctx.worktree_head) then return "clean" end
+    local anchor = repo.commits[ctx.worktree_head]
+    if not anchor then return "moved" end -- history advanced past the snapshot
+    local want_staged = st.staged > 0
+    local want_unstaged = st.unstaged > 0
+    local want_untracked = st.untracked > 0
+    if not (want_staged or want_unstaged or want_untracked) then return "clean" end
+    local ai
+    for i, it in ipairs(repo.order) do
+        if it.commit == anchor then ai = i; break end
+    end
+    if not ai then return "moved" end
+    -- Build bottom-up (parent first); new_items ends newest-first for the splice.
+    local below = anchor
+    local new_items = {}
+    local function make(kind, wt, hash)
+        ---@type Commit
+        local v = { hash = hash, virtual = kind, parents = { below },
+            children = {}, refs = {}, wt = wt }
+        table.insert(below.children, v)
+        below = v
+        ctx.worktree_commits[#ctx.worktree_commits + 1] = v
+        repo.commits[hash] = v
+        table.insert(new_items, 1, { type = "commit", commit = v, columns = {} })
+    end
+    if want_staged then make("staged", { changed = st.staged }, WORKTREE_STAGED_HASH) end
+    if want_unstaged then make("unstaged", { changed = st.unstaged }, WORKTREE_UNSTAGED_HASH) end
+    if want_untracked then make("untracked", { changed = st.untracked }, WORKTREE_UNTRACKED_HASH) end
+    for k = #new_items, 1, -1 do
+        table.insert(repo.order, ai, new_items[k])
+    end
+    return "ok"
+end
+GRAPH_HELPERS.apply_worktree = apply_worktree
+
+-- The selection's DiffRange (§13.5): newest .. oldest real endpoints.
+local function selection_range(ctx)
+    local p = ctx.sel.path
+    if not (p and #p > 0) then return nil end
+    local newer, older = real_newest(p[1]), real_oldest(ctx, p[#p])
+    if not (newer and older) then return nil end
+    return range_endpoints(newer, older)
+end
+GRAPH_HELPERS.selection_range = selection_range
+
+-- The selected commits newest-first (§13.5): a collapsed head expands to its
+-- region members.
+local function selection_commits(ctx)
+    local repo = ctx.repo
+    local out, seen = {}, {}
+    local function push(c)
+        if c and not seen[c.hash] then seen[c.hash] = true; out[#out + 1] = c end
+    end
+    for _, node in ipairs(ctx.sel.path or {}) do
+        if node.collapsed then
+            for _, h in ipairs(node.region or {}) do push(repo.commits[h]) end
+        else
+            push(node.commit)
+        end
+    end
+    return out
+end
+GRAPH_HELPERS.selection_commits = selection_commits
+
+-- Emphasis for the selected path (§13.4): light the path's markers + the lane
+-- between each consecutive pair, reset the rest in the visible range. Returns the
+-- cone set (keyed by DisplayNode) for row dimming.
+local function mark_path(ctx, top, bottom)
+    local repo = ctx.repo
+    for i = top, bottom do
+        local it = repo.display[i]
+        if it then
+            for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
+            for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
+            for _, line in ipairs(item_lines(it)) do
+                for _, t in ipairs(line) do
+                    for _, s in ipairs(t.lanes or {}) do
+                        for _, e in ipairs(s.edges or {}) do e.highlighted = false end
+                    end
+                    if t.has_commit then t.active = false end
+                end
+            end
+        end
+    end
+    local cone = {}
+    local p = ctx.sel.path or {}
+    for _, node in ipairs(p) do cone[node] = true end
+    for i = 1, #p - 1 do
+        local a, b = p[i], p[i + 1]
+        local it = node_item(ctx, a)
+        if it then
+            for _, lane in ipairs(it.parent_lanes or {}) do
+                if lane.parent == b then lane.highlighted = true end
+            end
+        else
+            local loc = ctx.node_loc[a.hash] or ctx.node_loc[b.hash]
+            if loc then
+                for _, s in ipairs(loc.item.columns[loc.col].lanes or {}) do
+                    for _, e in ipairs(s.edges or {}) do
+                        if e.begin == a and e.parent == b then e.highlighted = true end
+                    end
+                end
+            end
+        end
+    end
+    for _, node in ipairs(p) do
+        local it = node_item(ctx, node)
+        if it then
+            for _, line in ipairs(item_lines(it)) do
+                for _, t in ipairs(line) do
+                    if t.has_commit and t.commit == node then t.active = true end
+                end
+            end
+        else
+            local loc = ctx.node_loc[node.hash]
+            if loc then loc.item.columns[loc.col].active = true end
+        end
+    end
+    return cone
+end
+GRAPH_HELPERS.mark_path = mark_path
+
+-- Reachability emphasis seeded from a packed marker head (§10.4 + §12): walk the
+-- DisplayNode graph from the head (.parents then .children), bounded to the
+-- visible rows, lighting each lane via its shared edge object. Returns the cone.
+local function mark_node_cone(ctx, pivot, top, bottom)
+    local repo = ctx.repo
+    local visible, item_of = {}, {}
+    for i = top, bottom do
+        local it = repo.display[i]
+        if it then
+            if it.commit then
+                visible[it.commit] = true; item_of[it.commit] = it
+            elseif it.type == "markers" then
+                for _, m in ipairs(it.markers or {}) do visible[m] = true; item_of[m] = it end
+            end
+        end
+    end
+    for i = top, bottom do
+        local it = repo.display[i]
+        if it then
+            for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
+            for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
+            for _, line in ipairs(item_lines(it)) do
+                for _, t in ipairs(line) do
+                    for _, s in ipairs(t.lanes or {}) do
+                        for _, e in ipairs(s.edges or {}) do e.highlighted = false end
+                    end
+                    if t.has_commit then t.active = false end
+                end
+            end
+        end
+    end
+    local cone = {}
+    if not pivot or not visible[pivot] then return cone end
+    cone[pivot] = true
+    local function light_edge(child, parent)
+        local it = node_item(ctx, child)
+        if it then
+            for _, lane in ipairs(it.parent_lanes or {}) do
+                if lane.parent == parent then lane.highlighted = true end
+            end
+        else
+            local loc = ctx.node_loc[child.hash] or ctx.node_loc[parent.hash]
+            if loc then
+                for _, s in ipairs(loc.item.columns[loc.col].lanes or {}) do
+                    for _, e in ipairs(s.edges or {}) do
+                        if e.begin == child and e.parent == parent then e.highlighted = true end
+                    end
+                end
+            end
+        end
+    end
+    local stack = { pivot } -- ancestors via .parents
+    while #stack > 0 do
+        local n = table.remove(stack)
+        for _, p in ipairs(n.parents or {}) do
+            light_edge(n, p)
+            if visible[p] and not cone[p] then cone[p] = true; stack[#stack + 1] = p end
+        end
+    end
+    stack = { pivot } -- descendants via .children
+    while #stack > 0 do
+        local n = table.remove(stack)
+        for _, ch in ipairs(n.children or {}) do
+            light_edge(ch, n)
+            if visible[ch] and not cone[ch] then cone[ch] = true; stack[#stack + 1] = ch end
+        end
+    end
+    for n in pairs(cone) do -- light each cone node's marker cell
+        local it = node_item(ctx, n)
+        if it then
+            for _, line in ipairs(item_lines(it)) do
+                for _, t in ipairs(line) do
+                    if t.has_commit and t.commit == n then t.active = true end
+                end
+            end
+        else
+            local loc = ctx.node_loc[n.hash]
+            if loc then loc.item.columns[loc.col].active = true end
+        end
+    end
+    return cone
+end
+GRAPH_HELPERS.mark_node_cone = mark_node_cone
+
 -- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
 -- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
 -- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
+---@param opts GraphOptions
+---@param focus_hash string?  -- commit to focus on open instead of HEAD (§2.1 / §11.7.6)
+---@param seed_refs? { hash: string, name: string, hl: string }[]  -- synthetic pinned pointer refs (§11.7.6)
+---@param attach? GraphAttach  -- build into an existing host window+buffer (a drilled-in graph frame, §14) instead of creating a window
 -- Returns the listview instance and an `on_show` closure that re-establishes the
 -- view after a hide/return (also the frame on-enter for an attached graph); the
 -- wrapper registers them. With `attach`, no window is created — the graph renders
@@ -1528,6 +2055,20 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field worktree_head? string
     ---@field last_line? integer
     ---@field selection_visible boolean
+    --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
+    ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
+    ---@field build_display_index fun(self:GraphCtx)
+    ---@field order_at fun(self:GraphCtx, line:integer):table?,integer,integer
+    ---@field apply_sort fun(self:GraphCtx):Future
+    ---@field integrate_commit fun(self:GraphCtx, item:Commit):OrderItem?
+    ---@field reconcile_refs fun(self:GraphCtx, entries:table[], head:string?, detached:string?)
+    ---@field prune_to_reachable fun(self:GraphCtx)
+    ---@field clear_worktree_nodes fun(self:GraphCtx)
+    ---@field apply_worktree fun(self:GraphCtx, state:table?):string
+    ---@field selection_range fun(self:GraphCtx):table?
+    ---@field selection_commits fun(self:GraphCtx):Commit[]
+    ---@field mark_path fun(self:GraphCtx, top:integer, bottom:integer):table
+    ---@field mark_node_cone fun(self:GraphCtx, pivot:table, top:integer, bottom:integer):table
 
     ---@type Repo
     local repo = {
@@ -1580,25 +2121,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- so display_index alone can't reach it. Lets the selection emphasis light a
     -- head's lane/marker even when packed (§13.4).
     local node_loc = {}
-    local function build_display_index()
-        display_index, node_loc = {}, {}
-        local function locate(it, node)
-            for c, cell in ipairs(it.columns or {}) do
-                if cell.has_commit and cell.commit == node then
-                    node_loc[node.hash] = { item = it, col = c }
-                    return
-                end
-            end
-        end
-        for i, it in ipairs(repo.display or {}) do
-            if it.commit then
-                display_index[it.commit.hash] = i
-                locate(it, it.commit)
-            elseif it.type == "markers" then
-                for _, m in ipairs(it.markers or {}) do locate(it, m) end
-            end
-        end
-    end
 
     -- Reachability cone for the dimming pass (§12); nil until a pivot exists.
     -- `modes` is the branch-mode view state (ref name → mode); empty = all normal
@@ -1608,43 +2130,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- and the `<CR>` cycle. Both filled by reflow.
     -- `pinned` is the explicit per-ref pin overrides (ref id → boolean), on top
     -- of the HEAD-pinned-by-default rule (§10.6). The effective anchor set is
-    -- computed by `effective_pinned()`; it generalises the single trunk of §10.7.
+    -- computed by `ctx:effective_pinned()`; it generalises the single trunk of §10.7.
     local view_state = { cone = nil, modes = {}, effective = {}, pinned = {} }
 
     -- The effective anchor set (§10.6). Pinned by default: the current branch
     -- (HEAD) and the common trunks `master`/`main`/`dev` when present. The user's
     -- explicit pin/unpin overrides apply on top. Returns a set of ref-owner ids.
-    local function effective_pinned()
-        local p = {}
-        if repo.head and repo.refs[repo.head] then p[repo.head] = true end
-        for _, name in ipairs({ "master", "main", "dev" }) do
-            if repo.refs[name] then p[name] = true end
-        end
-        -- The seeded pointer marks (§11.7.6) are pinned by default so the new/old
-        -- branches are revealed and labelled in the panes.
-        for name in pairs(seed_pin_names) do
-            if repo.refs[name] then p[name] = true end
-        end
-        for id, v in pairs(view_state.pinned) do
-            if v then p[id] = true else p[id] = nil end
-        end
-        -- Pin the pair (§10.6): each pinned local branch also pins its tracked
-        -- upstream remote ref (resolved from git's tracking config, not a shared
-        -- short name), so both lanes stay in full and a divergence is drawn rather
-        -- than the upstream collapsing. An explicit unpin on the upstream wins.
-        if opts.pin_upstream ~= false then
-            local add = {}
-            for id in pairs(p) do
-                local ref = repo.refs[id]
-                local up = ref and ref.upstream and ref.upstream.short
-                if up and repo.refs[up] and view_state.pinned[up] == nil then
-                    add[up] = true
-                end
-            end
-            for up in pairs(add) do p[up] = true end
-        end
-        return p
-    end
     -- Cached per-commit signatures for the projection (spec §10.5). They depend
     -- only on the commit set, the owner tips/fp-flags and the focus policy, not on
     -- modes, so a mode toggle reuses them; invalidated when those change. Keyed by
@@ -1739,6 +2230,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- `lv`/`buf` are filled once the window opens, and `ctx:win()` reads the live
     -- host window (the id changes across §14 hide/show — never freeze it).
     ---@type GraphCtx
+    -- The helper fields are attached just below by the GRAPH_HELPERS loop, not in
+    -- this literal — so the partial table is intentional.
+    ---@diagnostic disable-next-line: missing-fields
     local ctx = {
         root = root,
         host_root = host_root,
@@ -1759,19 +2253,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         selection_visible = false,
         win = gwin,
     }
+    -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
+    -- reference here — GRAPH_HELPERS — instead of one upvalue per helper).
+    for k, f in pairs(GRAPH_HELPERS) do ctx[k] = f end
 
-    -- Resolve a 1-based *buffer* line to its OrderItem, order index, and 0-based
-    -- sub-row within the item. In dual mode a labelled commit spans two buffer
-    -- lines (sub 0 = label row, sub 1 = message row); the buffer line is mapped
-    -- via the listview. Without the map (or other modes) it is 1:1, sub 0.
-    local function order_at(line)
-        local idx, first = line, line
-        if lv and lv.controller and lv.controller.item_at then
-            idx = lv.controller.item_at(line)
-            first = lv.controller.item_start and lv.controller.item_start(idx) or idx
-        end
-        return repo.display[idx], idx, line - first
-    end
 
     -- Re-establish gitloom's owned row order (§3.1): run order_commits over the
     -- real (non-virtual) commit rows and rebuild repo.order in that order, reusing
@@ -1779,71 +2264,17 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- stream completion (the stream appended in provisional arrival order) and on
     -- every resync after new commits land. Worktree virtual commits are spliced
     -- separately (apply_worktree), so they are skipped and re-applied afterwards.
-    local function reorder_repo()
-        local item_of, commits = {}, {}
-        for _, it in ipairs(repo.order) do
-            if it.type == "commit" and it.commit and not it.commit.virtual then
-                item_of[it.commit.hash] = it
-                commits[#commits + 1] = it.commit
-            end
-        end
-        local ordered = order_commits(commits)
-        local new_order = {}
-        for _, c in ipairs(ordered) do
-            new_order[#new_order + 1] = item_of[c.hash]
-        end
-        repo.order = new_order
-    end
 
     -- Reorder repo.order to match an external hash sequence (a `rev`-based sort
     -- mode's `git rev-list` output; §3.1). Rows git lists but we lack are skipped;
     -- in-memory rows git didn't list (refspec drift) are appended, so no row is
     -- dropped. Reuses the existing OrderItem objects. Virtual worktree commits are
     -- spliced separately, so they are excluded here.
-    ---@param hashlist string[]
-    local function reorder_by_hashes(hashlist)
-        local item_of = {}
-        for _, it in ipairs(repo.order) do
-            if it.type == "commit" and it.commit and not it.commit.virtual then
-                item_of[it.commit.hash] = it
-            end
-        end
-        local new_order, placed = {}, {}
-        for _, h in ipairs(hashlist) do
-            local it = item_of[h]
-            if it and not placed[h] then
-                new_order[#new_order + 1] = it
-                placed[h] = true
-            end
-        end
-        for _, it in ipairs(repo.order) do
-            if it.type == "commit" and it.commit and not it.commit.virtual
-                and not placed[it.commit.hash] then
-                new_order[#new_order + 1] = it
-                placed[it.commit.hash] = true
-            end
-        end
-        repo.order = new_order
-    end
 
     -- Apply the active sort mode (§3.1) to repo.order, returning a Future (the
     -- `rev` modes query git asynchronously). The `gitloom` mode sorts the
     -- in-memory DAG (order_commits); the `rev` modes take git's exact sequence.
     -- The caller reflows.
-    ---@return Future
-    local function apply_sort()
-        local mode = SORT_MODES[sort_mode_index]
-        if mode.rev then
-            local branch = opts.branches or { "--all" }
-            if type(branch) ~= "table" then branch = { branch } end
-            return fetch_rev_order(branch, mode.rev)
-                .next(function(hashes) reorder_by_hashes(hashes) end)
-        end
-        reorder_repo()
-        local future, promise = make_future()
-        promise.resolve()
-        return future
-    end
 
     -- Merge a freshly-parsed Commit into the model (§3): fill its placeholder (or
     -- insert it), resolve its parent hashes to Commit references with child
@@ -1851,173 +2282,13 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- initial stream (on_batch) and the resync's new-commit pass. Identity-stable:
     -- a placeholder keeps its object and refs. Returns nil for an already-loaded
     -- commit (re-seen) so the caller doesn't double-link or double-list it.
-    ---@param item Commit
-    ---@return OrderItem?
-    local function integrate_commit(item)
-        local existing = repo.commits[item.hash]
-        if existing then
-            if existing.loaded then return nil end -- already a row; don't re-link
-            -- Fill the placeholder; keep its resolved refs and children. cepoch
-            -- (committer date) MUST be copied: ref tips are pre-created as
-            -- placeholders by fetch_refs, and order_commits seeds tips by cepoch
-            -- (§3.1) — dropping it falls back to author date and breaks the order
-            -- on squash-merge repos (author ≠ committer date).
-            existing.author = item.author
-            existing.date = item.date
-            existing.cepoch = item.cepoch
-            existing.parents = item.parents
-            existing.message = item.message
-            existing.loaded = true
-            item = existing
-        else
-            repo.commits[item.hash] = item
-            item.children = item.children or {}
-        end
 
-        -- Resolve parent hashes (still strings from `git log`) to Commit refs.
-        local resolved = {}
-        for _, p in ipairs(item.parents) do
-            local parent = get_or_create_commit(repo, p --[[@as string]])
-            table.insert(parent.children, item)
-            table.insert(resolved, parent)
-        end
-        item.parents = resolved
 
-        ---@type OrderItem
-        local order_item = { type = "commit", commit = item, columns = {} }
-        table.insert(repo.order, order_item)
-        return order_item
-    end
-
-    -- Remove a Ref from the model: unlink it from its commit's back-list and drop
-    -- the registry entry. The resync uses it to retire a deleted or moved ref.
-    ---@param key string
-    local function unlink_ref(key)
-        local ref = repo.refs[key]
-        if not ref then return end
-        local c = ref.commit
-        if c and c.refs then
-            for i = #c.refs, 1, -1 do
-                if c.refs[i] == ref then table.remove(c.refs, i) end
-            end
-        end
-        repo.refs[key] = nil
-    end
-
-    -- Reconcile the model's refs with a freshly-read ref set (§3.4): drop deleted
-    -- refs, add new ones, and re-point moved ones (diff_ref_tips drives the three
-    -- cases), then re-bind HEAD to the current branch. add_ref creates a
-    -- placeholder Commit for a tip we haven't fetched yet; the new-commit pass
-    -- fills it. Mutates repo.refs / repo.commits.
-    ---@param entries { name: string, kind: string, hash: string, upstream?: Upstream }[]
-    ---@param head string?
-    ---@param detached string?  the checked-out commit hash when detached (§3.2)
-    local function reconcile_refs(entries, head, detached)
-        local newmap, by_key = {}, {}
-        for _, e in ipairs(entries) do
-            newmap[e.name] = e.hash
-            by_key[e.name] = e
-        end
-        local oldmap = {}
-        for k, ref in pairs(repo.refs) do
-            if k ~= "HEAD" then oldmap[k] = ref.commit and ref.commit.hash end
-        end
-
-        local d = diff_ref_tips(oldmap, newmap)
-        for _, k in ipairs(d.removed) do unlink_ref(k) end
-        for _, k in ipairs(d.added) do
-            local e = by_key[k]
-            add_ref(repo, e.name, e.kind, e.hash, e.upstream)
-        end
-        for _, k in ipairs(d.moved) do
-            local e = by_key[k]
-            unlink_ref(k) -- detach the old binding before re-pointing
-            add_ref(repo, e.name, e.kind, e.hash, e.upstream)
-        end
-
-        -- Refresh upstream divergence even where the local tip did NOT move: a
-        -- fetch can move the upstream ref so the local branch is now behind while
-        -- its own hash is unchanged, which diff_ref_tips (keyed on the local tip)
-        -- would miss (§6.3).
-        for _, e in ipairs(entries) do
-            if e.kind == "local" and repo.refs[e.name] then
-                repo.refs[e.name].upstream = e.upstream
-            end
-        end
-
-        -- HEAD always re-points to the current branch's (possibly new) commit; a
-        -- detached HEAD re-points to the checked-out commit directly (§3.2); a
-        -- vanished branch drops it.
-        unlink_ref("HEAD")
-        repo.head = head
-        if head and repo.refs[head] and repo.refs[head].commit then
-            add_ref(repo, "HEAD", "head", repo.refs[head].commit.hash)
-        elseif not head and detached then
-            add_ref(repo, "HEAD", "head", detached)
-        end
-    end
-
-    -- Prune commits no longer reachable from any ref (§3.4) — the orphans a
-    -- force-push / rebase leaves behind. Walks parents from every ref tip, then
-    -- drops unreachable real commits from repo.commits, prunes child back-links
-    -- pointing at removed commits, and filters repo.order. Virtual worktree
-    -- commits are not present here (cleared before a resync).
-    local function prune_to_reachable()
-        local tips = {}
-        for _, ref in pairs(repo.refs) do
-            if ref.commit then tips[#tips + 1] = ref.commit.hash end
-        end
-        local keep = reachable_hashes(repo.commits, tips)
-
-        local removed = false
-        for hash, c in pairs(repo.commits) do
-            if not keep[hash] and not c.virtual then
-                repo.commits[hash] = nil
-                removed = true
-            end
-        end
-        if not removed then return end
-
-        for _, c in pairs(repo.commits) do
-            if c.children then
-                local kept = {}
-                for _, ch in ipairs(c.children) do
-                    if repo.commits[ch.hash] then kept[#kept + 1] = ch end
-                end
-                c.children = kept
-            end
-        end
-        local kept_order = {}
-        for _, it in ipairs(repo.order) do
-            if it.commit and repo.commits[it.commit.hash] then
-                kept_order[#kept_order + 1] = it
-            end
-        end
-        repo.order = kept_order
-    end
 
     -- Remove the working-tree virtual commits from the raw model (§4.2): unlink
     -- each from its parent's children, drop it from the commit table, and filter
     -- its OrderItem out of repo.order. Leaves the real DAG untouched. The caller
     -- reflows afterwards.
-    local function clear_worktree_nodes()
-        if #worktree_commits == 0 then return end
-        for _, v in ipairs(worktree_commits) do
-            local p = v.parents and v.parents[1]
-            if p and p.children then
-                for i = #p.children, 1, -1 do
-                    if p.children[i] == v then table.remove(p.children, i) end
-                end
-            end
-            repo.commits[v.hash] = nil
-        end
-        local kept = {}
-        for _, it in ipairs(repo.order) do
-            if not (it.commit and it.commit.virtual) then kept[#kept + 1] = it end
-        end
-        repo.order = kept
-        worktree_commits = {}
-    end
 
     -- Rebuild the working-tree virtual commits (§3.3/§4.2) from a fetched state
     -- ({ head_hash, status }). Removes any existing ones, then — when enabled,
@@ -2025,56 +2296,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- (untracked → unstaged → staged → HEAD) into repo.order just above HEAD.
     -- Returns a status the caller surfaces: "ok" | "clean" | "off" | "moved"
     -- (HEAD advanced past the snapshot, §3.4). The caller reflows.
-    local function apply_worktree(state)
-        clear_worktree_nodes()
-        if opts.working_tree == false then return "off" end
-        worktree_head = state and state.head_hash
-        local st = state and state.status
-        if not (st and worktree_head) then return "clean" end
-        local anchor = repo.commits[worktree_head]
-        if not anchor then return "moved" end -- history advanced past the snapshot
-        local want_staged = st.staged > 0
-        local want_unstaged = st.unstaged > 0
-        local want_untracked = st.untracked > 0
-        if not (want_staged or want_unstaged or want_untracked) then return "clean" end
-
-        -- The anchor's row index in the raw order; the nodes splice just above it.
-        local ai
-        for i, it in ipairs(repo.order) do
-            if it.commit == anchor then ai = i; break end
-        end
-        if not ai then return "moved" end
-
-        -- Build bottom-up (parent first): staged on HEAD, unstaged on the node
-        -- below it, untracked on top — each parented to whichever exists below.
-        -- `new_items` ends newest-first (untracked, unstaged, staged) for the
-        -- splice above the anchor.
-        local below = anchor
-        local new_items = {}
-        local function make(kind, wt, hash)
-            ---@type Commit
-            local v = { hash = hash, virtual = kind, parents = { below },
-                children = {}, refs = {}, wt = wt }
-            table.insert(below.children, v)
-            below = v
-            worktree_commits[#worktree_commits + 1] = v
-            repo.commits[hash] = v
-            table.insert(new_items, 1, { type = "commit", commit = v, columns = {} })
-        end
-        if want_staged then
-            make("staged", { changed = st.staged }, WORKTREE_STAGED_HASH)
-        end
-        if want_unstaged then
-            make("unstaged", { changed = st.unstaged }, WORKTREE_UNSTAGED_HASH)
-        end
-        if want_untracked then
-            make("untracked", { changed = st.untracked }, WORKTREE_UNTRACKED_HASH)
-        end
-        for k = #new_items, 1, -1 do
-            table.insert(repo.order, ai, new_items[k])
-        end
-        return "ok"
-    end
 
     -- A full reflow (§10.5): project the raw commit order under the current
     -- branch modes into a fresh OrderItem graph, lay it out, and swap it into the
@@ -2089,7 +2310,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- anchor ⇒ all-normal.
         local cm = opts.collapse_merged ~= false
         local owners = viewbuilder.owners(
-            repo.order, owners_from_refs(repo.refs, {}), effective_pinned(), view_state.modes, cm)
+            repo.order, owners_from_refs(repo.refs, {}), ctx:effective_pinned(), view_state.modes, cm)
         view_state.effective = {}
         for _, o in ipairs(owners) do view_state.effective[o.id] = o.mode end
         -- Reuse cached signatures unless the commit/owner set or focus changed;
@@ -2111,7 +2332,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         if lv and lv.controller and lv.controller.set_items then
             lv.controller.set_items(repo.display)
         end
-        build_display_index()
+        ctx:build_display_index()
         update_cone()
         if lv and lv.controller then lv.controller.refresh() end
         update_panes()
@@ -2124,7 +2345,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- Resolved from the selection (a ref or a packed marker) or, failing that,
     -- the region under the cursor via its signature — so it needs no ref.
     local function branch_under_cursor(line)
-        local item = order_at(line)
+        local item = ctx:order_at(line)
         if not item then return nil end
         -- a selected marker on a packed line → expand that marker
         if item.type == "markers" then
@@ -2161,7 +2382,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end
         -- a normal/junction commit → collapse the region containing it, if it is
         -- not mainline (no pinned anchor reaches it).
-        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], effective_pinned(), view_state.effective)
+        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], ctx:effective_pinned(), view_state.effective)
         if ids then
             return { state = "expanded", owners = ids, follow = c.hash, commit = c }
         end
@@ -2182,7 +2403,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     local function update_footer()
         if lv and lv.win and lv.win.win then
             local nanchors = 0
-            for _ in pairs(effective_pinned()) do nanchors = nanchors + 1 end
+            for _ in pairs(ctx:effective_pinned()) do nanchors = nanchors + 1 end
             -- The current branch's upstream divergence for the footer (§6.3).
             local track_str = nil
             if repo.head and repo.refs[repo.head] then
@@ -2231,33 +2452,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     end
 
     -- ── Commit selection (range) — window glue (spec §13) ───────────────────
-    -- The OrderItem for a DisplayNode (by hash), or nil when it has no own row
-    -- (a head packed into a marker group, §10.4 — selection clamps there in v1).
-    local function node_item(node)
-        if not node then return nil end
-        local i = display_index[node.hash]
-        return i and repo.display[i] or nil
-    end
-    -- Resolve a path endpoint DisplayNode to its real newest / oldest Commit: a
-    -- collapsed head (§10.3) stands for its whole region, so its newest is the tip
-    -- and its oldest is the last region member (§13.1).
-    local function real_newest(node) return node.collapsed and node.tip or node.commit end
-    local function real_oldest(node)
-        if node.collapsed then
-            local region = node.region or {}
-            local h = region[#region]
-            return (h and repo.commits[h]) or node.tip
-        end
-        return node.commit
-    end
-    -- The selection's DiffRange (§13.5): newest .. oldest real endpoints.
-    local function selection_range()
-        local p = sel.path
-        if not (p and #p > 0) then return nil end
-        local newer, older = real_newest(p[1]), real_oldest(p[#p])
-        if not (newer and older) then return nil end
-        return range_endpoints(newer, older)
-    end
     -- Hand the selection range to the external diff provider (§13.5; the `D`
     -- key, and the range view's action label).
     local function open_selection_diff()
@@ -2266,32 +2460,16 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             vim.notify("gitloom: no diff provider configured (set diff.open)", vim.log.levels.WARN)
             return
         end
-        local r = selection_range()
+        local r = ctx:selection_range()
         if r then open(r) end
-    end
-    -- The selected commits, newest first (§13.5): each path node's real commit,
-    -- a collapsed head expanded to its region members (resolved via repo.commits).
-    local function selection_commits()
-        local out, seen = {}, {}
-        local function push(c)
-            if c and not seen[c.hash] then seen[c.hash] = true; out[#out + 1] = c end
-        end
-        for _, node in ipairs(sel.path or {}) do
-            if node.collapsed then
-                for _, h in ipairs(node.region or {}) do push(repo.commits[h]) end
-            else
-                push(node.commit)
-            end
-        end
-        return out
     end
     -- <CR> while selecting (§13.5): open the commit view in **range mode** — the
     -- selected-commit list + the combined range diff/diffstat, its action label
     -- opening the same range in the external viewer.
     local function open_selection_view()
-        local r = selection_range()
+        local r = ctx:selection_range()
         if not r then return end
-        local commits = selection_commits()
+        local commits = ctx:selection_commits()
         local n = #commits
         local title = (n == 1) and ("Commit " .. (commits[1] and commits[1].hash:sub(1, 7) or ""))
             or (("Selection: %d commits"):format(n))
@@ -2302,65 +2480,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- the lane between each consecutive pair, dim the rest. Mirrors mark_reachable
     -- — reset the highlight on every lane/marker drawn in the visible range, then
     -- light the path. Returns the cone set (keyed by DisplayNode) for row dimming.
-    local function mark_path(top, bottom)
-        for i = top, bottom do
-            local it = repo.display[i]
-            if it then
-                for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
-                for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
-                for _, line in ipairs(item_lines(it)) do
-                    for _, t in ipairs(line) do
-                        for _, s in ipairs(t.lanes or {}) do
-                            for _, e in ipairs(s.edges or {}) do e.highlighted = false end
-                        end
-                        if t.has_commit then t.active = false end
-                    end
-                end
-            end
-        end
-        local cone = {}
-        local p = sel.path or {}
-        for _, node in ipairs(p) do cone[node] = true end
-        -- Light the lane each consecutive pair shares (newer p[i] = child → older
-        -- p[i+1] = parent). For a node on its own row use its parent_lanes; for a
-        -- packed head (no parent_lanes) match the shared Lane object by edge
-        -- identity in its marker column — it is the same object the child's row
-        -- draws, so lighting it lights both.
-        for i = 1, #p - 1 do
-            local a, b = p[i], p[i + 1]
-            local it = node_item(a)
-            if it then
-                for _, lane in ipairs(it.parent_lanes or {}) do
-                    if lane.parent == b then lane.highlighted = true end
-                end
-            else
-                local loc = node_loc[a.hash] or node_loc[b.hash]
-                if loc then
-                    for _, s in ipairs(loc.item.columns[loc.col].lanes or {}) do
-                        for _, e in ipairs(s.edges or {}) do
-                            if e.begin == a and e.parent == b then e.highlighted = true end
-                        end
-                    end
-                end
-            end
-        end
-        -- Light each path node's marker cell (its own row, or its column in a
-        -- packed marker group).
-        for _, node in ipairs(p) do
-            local it = node_item(node)
-            if it then
-                for _, line in ipairs(item_lines(it)) do
-                    for _, t in ipairs(line) do
-                        if t.has_commit and t.commit == node then t.active = true end
-                    end
-                end
-            else
-                local loc = node_loc[node.hash]
-                if loc then loc.item.columns[loc.col].active = true end
-            end
-        end
-        return cone
-    end
 
     -- Reachability emphasis seeded from a packed marker head (spec §10.4 + §12).
     -- On a packed line `h`/`l` selects a head with no row of its own, so
@@ -2371,89 +2490,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- node's marker cell. Returns the cone set keyed by DisplayNode (row dimming).
     -- So selecting a packed head dims the sibling heads/branches and keeps the
     -- selected one lit, exactly like moving onto a normal head (§12).
-    local function mark_node_cone(pivot, top, bottom)
-        local visible, item_of = {}, {}
-        for i = top, bottom do
-            local it = repo.display[i]
-            if it then
-                if it.commit then
-                    visible[it.commit] = true; item_of[it.commit] = it
-                elseif it.type == "markers" then
-                    for _, m in ipairs(it.markers or {}) do visible[m] = true; item_of[m] = it end
-                end
-            end
-        end
-        -- Reset every lane/marker drawn in the window (same sweep as mark_reachable)
-        -- so a persistent lane keeps no stale highlight from the previous pivot.
-        for i = top, bottom do
-            local it = repo.display[i]
-            if it then
-                for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
-                for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
-                for _, line in ipairs(item_lines(it)) do
-                    for _, t in ipairs(line) do
-                        for _, s in ipairs(t.lanes or {}) do
-                            for _, e in ipairs(s.edges or {}) do e.highlighted = false end
-                        end
-                        if t.has_commit then t.active = false end
-                    end
-                end
-            end
-        end
-        local cone = {}
-        if not pivot or not visible[pivot] then return cone end
-        cone[pivot] = true
-        -- Light the lane the child→parent edge draws: on the child's own row via
-        -- its parent_lanes, or in a packed head's marker column by edge identity
-        -- (the same shared Lane the child row would draw).
-        local function light_edge(child, parent)
-            local it = node_item(child)
-            if it then
-                for _, lane in ipairs(it.parent_lanes or {}) do
-                    if lane.parent == parent then lane.highlighted = true end
-                end
-            else
-                local loc = node_loc[child.hash] or node_loc[parent.hash]
-                if loc then
-                    for _, s in ipairs(loc.item.columns[loc.col].lanes or {}) do
-                        for _, e in ipairs(s.edges or {}) do
-                            if e.begin == child and e.parent == parent then e.highlighted = true end
-                        end
-                    end
-                end
-            end
-        end
-        local stack = { pivot } -- ancestors via .parents
-        while #stack > 0 do
-            local n = table.remove(stack)
-            for _, p in ipairs(n.parents or {}) do
-                light_edge(n, p)
-                if visible[p] and not cone[p] then cone[p] = true; stack[#stack + 1] = p end
-            end
-        end
-        stack = { pivot } -- descendants via .children
-        while #stack > 0 do
-            local n = table.remove(stack)
-            for _, ch in ipairs(n.children or {}) do
-                light_edge(ch, n)
-                if visible[ch] and not cone[ch] then cone[ch] = true; stack[#stack + 1] = ch end
-            end
-        end
-        for n in pairs(cone) do -- light each cone node's marker cell
-            local it = node_item(n)
-            if it then
-                for _, line in ipairs(item_lines(it)) do
-                    for _, t in ipairs(line) do
-                        if t.has_commit and t.commit == n then t.active = true end
-                    end
-                end
-            else
-                local loc = node_loc[n.hash]
-                if loc then loc.item.columns[loc.col].active = true end
-            end
-        end
-        return cone
-    end
 
     -- Recompute the path emphasis, move the cursor onto the moving end, and
     -- redraw (§13). update_cone branches to mark_path while selection is active.
@@ -2468,12 +2504,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- V: start selection on the row's commit (a normal commit or a collapsed head;
     -- a packed marker line is not a start point in v1). anchor = cursor = it.
     local function enter_selection(line)
-        local item = order_at(line)
+        local item = ctx:order_at(line)
         if not item or not item.commit or item.type == "markers" then return end
         -- Commit selection (§13) is over real commits; a working-tree virtual
         -- commit (§4.2) is not a selectable range endpoint (v1).
         if item.commit.virtual then return end
-        build_display_index()
+        ctx:build_display_index()
         selection_state.index = nil -- drop the ref selection (§13.3)
         sel.active, sel.anchor, sel.cursor = true, item.commit, item.commit
         sel.path, sel.dparent, sel.dchild = { item.commit }, {}, {}
@@ -2542,7 +2578,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             mode = "normal"
         else -- a normal/expanded commit: collapse its region, unless mainline
             owners = collapse_owners(sig_cache.sig and sig_cache.sig[node.hash],
-                effective_pinned(), view_state.effective) or {}
+                ctx:effective_pinned(), view_state.effective) or {}
             mode = "collapsed"
         end
         if #owners == 0 then return end
@@ -2663,7 +2699,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     on_batch = function(commits)
                         local new_items = {}
                         for _, item in ipairs(commits) do
-                            local order_item = integrate_commit(item)
+                            local order_item = ctx:integrate_commit(item)
                             if order_item then
                                 new_items[#new_items + 1] = order_item
                             end
@@ -2687,7 +2723,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 -- Stream closed: apply the active sort mode (§3.1) to establish the
                 -- authoritative row order before anything is projected or anchored.
                 -- (The stream appended git's --topo-order arrival order.)
-                return apply_sort()
+                return ctx:apply_sort()
             end).next(function()
                 -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
                 -- model, read the dirty state and splice the staged/unstaged/
@@ -2697,7 +2733,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
             end).next(function(state)
-                if state then apply_worktree(state) end
+                if state then ctx:apply_worktree(state) end
                 -- Seed the pointer marks (§11.7.6) now that the commits exist:
                 -- inject new/old as `tag` refs carrying their colour, so the
                 -- projection attributes them as owners, the default pin (above)
@@ -2837,7 +2873,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- the external viewer.
         if sel.active then open_selection_view(); return end
         local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
-        local item = order_at(line)
+        local item = ctx:order_at(line)
         if not item then return end
         -- Direct commit view: a normal (non-collapsed) commit row with no ref
         -- selected. The branch action menu is reserved for an h/l-selected ref, a
@@ -2895,7 +2931,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         local w = win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
-        local item = order_at(line)
+        local item = ctx:order_at(line)
         if not item or not item.commit or item.commit.collapsed then
             return -- a collapsed head has no single commit to diff
         end
@@ -2906,7 +2942,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         local w = win
         if not w then return end
         local line = vim.api.nvim_win_get_cursor(w)[1]
-        local item = order_at(line)
+        local item = ctx:order_at(line)
         if not item or not item.commit then
             return
         end
@@ -2950,7 +2986,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         local ok, pos = pcall(vim.api.nvim_win_get_cursor, gwin())
         if ok then keep = cursor_hash(pos[1]) end
         sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
-        apply_sort().next(function()
+        ctx:apply_sort().next(function()
             reflow()
             update_footer() -- footer shows the active sort mode
             if keep then goto_hash(keep) end
@@ -3043,7 +3079,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- selects the marker carrying the ref; a commit / collapsed
                     -- head selects its decoration. HEAD has no label → message.
                     local line = vim.api.nvim_win_get_cursor(gwin)[1]
-                    local landed = order_at(line)
+                    local landed = ctx:order_at(line)
                     selection_state.commit, selection_state.index = nil, nil
                     if landed and landed.type == "markers" then
                         for i, u in ipairs(marker_units(landed)) do
@@ -3095,7 +3131,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             if repo.refs[oid] then targets[#targets + 1] = oid end
         end
         if #targets == 0 then return end
-        local want = not effective_pinned()[targets[1]]
+        local want = not ctx:effective_pinned()[targets[1]]
         for _, oid in ipairs(targets) do view_state.pinned[oid] = want end
         reflow()
         update_footer()
@@ -3137,7 +3173,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- cycling ref decorations.
             if sel.active then selection_switch(dir); return end
             local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
-            local item, _, sub = order_at(line)
+            local item, _, sub = ctx:order_at(line)
             -- On a packed marker line, selection moves among the markers (§10.4).
             if item and item.type == "markers" then
                 local count = #marker_units(item)
@@ -3286,7 +3322,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- park on the graph lane column so the lit lane marks the branch (the
             -- cursor row is already set by selection_redraw).
             if sel.active then
-                local item = order_at(line)
+                local item = ctx:order_at(line)
                 if item and item.type == "markers" and sel.cursor then
                     for _, u in ipairs(marker_units(item)) do
                         if u.marker == sel.cursor then
@@ -3305,7 +3341,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
                 return
             end
-            local item = order_at(line)
+            local item = ctx:order_at(line)
             -- A packed marker line: park on the selected marker's label (§10.4).
             if item and item.type == "markers" then
                 local col = nil
@@ -3355,7 +3391,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- first) marker's tip; any other row yields nil. Drives the remembered
         -- position (§2).
         cursor_hash = function(line)
-            local item = order_at(line)
+            local item = ctx:order_at(line)
             if not item then return nil end
             if item.commit then return item.commit.hash end
             if item.type == "markers" then
@@ -3374,13 +3410,13 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local topbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
             local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
             local curbuf = vim.api.nvim_win_get_cursor(win)[1]
-            local item, cur = order_at(curbuf)
-            local top = select(2, order_at(topbuf))
-            local bottom = select(2, order_at(botbuf))
+            local item, cur = ctx:order_at(curbuf)
+            local top = select(2, ctx:order_at(topbuf))
+            local bottom = select(2, ctx:order_at(botbuf))
             -- Commit selection (§13.4): the selected path is the emphasised set,
             -- replacing the cursor-pivot cone for the duration.
             if sel.active then
-                view_state.cone = mark_path(top, bottom)
+                view_state.cone = ctx:mark_path(top, bottom)
                 return
             end
             -- A packed marker line (§10.4): the selected head drives the cone
@@ -3392,7 +3428,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     local u = marker_units(item)[selection_state.index]
                     sel_node = u and u.marker
                 end
-                view_state.cone = sel_node and mark_node_cone(sel_node, top, bottom) or nil
+                view_state.cone = sel_node and ctx:mark_node_cone(sel_node, top, bottom) or nil
                 return
             end
             -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
@@ -3453,7 +3489,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local keep
                 local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
                 if ok then keep = cursor_hash(pos[1]) end
-                local res = apply_worktree(state)
+                local res = ctx:apply_worktree(state)
                 reflow()
                 update_footer()
                 if keep then goto_hash(keep) end
@@ -3498,10 +3534,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local view = vok and vview or nil
 
             -- Drop the worktree virtuals during the rebuild; re-applied at the end.
-            clear_worktree_nodes()
+            ctx:clear_worktree_nodes()
 
             fetch_ref_entries().next(function(res)
-                reconcile_refs(res.entries, res.head, res.detached)
+                ctx:reconcile_refs(res.entries, res.head, res.detached)
                 local new_tips, old_list = {}, {}
                 for _, e in ipairs(res.entries) do new_tips[e.hash] = true end
                 -- A detached HEAD's commit may be on no branch; seed it so it is
@@ -3512,9 +3548,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 for h in pairs(old_tips) do old_list[#old_list + 1] = h end
                 return fetch_new_commits(new_list, old_list)
             end).next(function(commits)
-                for _, c in ipairs(commits) do integrate_commit(c) end
-                prune_to_reachable()
-                return apply_sort() -- re-establish the active sort mode (§3.1)
+                for _, c in ipairs(commits) do ctx:integrate_commit(c) end
+                ctx:prune_to_reachable()
+                return ctx:apply_sort() -- re-establish the active sort mode (§3.1)
             end).next(function()
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
@@ -3522,7 +3558,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if not gwin() then
                     return
                 end
-                if state then apply_worktree(state) end
+                if state then ctx:apply_worktree(state) end
                 reflow()
                 update_footer()
                 -- Restore the scroll first, then re-home the cursor on the focused
@@ -3616,7 +3652,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 -- a marker-less line never clobbers a good remembered position.
                 local h = cursor_hash(line)
                 if h then saved_positions[repo_key] = h end
-                local item, _, sub = order_at(line)
+                local item, _, sub = ctx:order_at(line)
                 -- Landing on a packed marker line pre-selects its first marker
                 -- (§10.4), so h/l and <CR> act on a marker right away.
                 if item and item.type == "markers" then
@@ -4091,7 +4127,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local _yn = 0
             local function py() _yn = _yn + 1; if _yn % YIELD_EVERY == 0 then coroutine.yield() end end
 
-            local pinned = effective_pinned()
+            local pinned = ctx:effective_pinned()
             -- repo.order index per commit hash, for "below the cutoff" tests (cached).
             local idx = order_idx()
             local function item_order(item)
@@ -4163,7 +4199,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 for l = last, w0, -1 do
                     local r = vim.fn.screenpos(win, l, 1).row
                     if r > 0 then
-                        local item, disp_idx = order_at(l)
+                        local item, disp_idx = ctx:order_at(l)
                         -- The item's rendered block spans `r-1` (split, above), `r`
                         -- (columns), `r+1` (merge, below). The seam may fall on any.
                         if item and (r == target or (item.split and r - 1 == target)
@@ -4249,7 +4285,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- the commit boundary) is the overlay height the rows must fit in.
             local function build_header(cover)
                 local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-                local _, w0disp = order_at(w0)
+                local _, w0disp = ctx:order_at(w0)
                 if not w0disp or w0disp <= 1 then return nil, "at top" end
                 local seam = pane.header_seam(repo.display, w0disp, cover)
                 if not seam then return nil, "past end" end
@@ -4299,7 +4335,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- tag, overlay-height, overflow.
             local function converge_header()
                 local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-                local _, w0disp = order_at(w0)
+                local _, w0disp = ctx:order_at(w0)
                 -- Nothing scrolled off above the viewport ⇒ no header at all.
                 if (w0disp or 1) <= 1 then return nil, "at top" end
                 local P = 0
@@ -4395,7 +4431,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             if type(vim.g.gitloom_pane_debug) == "string" then
                 pcall(function()
                     local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-                    local _, w0disp = order_at(w0)
+                    local _, w0disp = ctx:order_at(w0)
                     local out = { ("w0=%d w0disp=%s H=%s seam_tag=%s ovf=%s"):format(
                         w0, tostring(w0disp), tostring(H), tostring(htag), tostring(ovf)) }
                     -- The boundary the header was built from (the whole-commit seam).
@@ -4429,7 +4465,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- display node ABOVE the cutoff (so it seeds the header as a labelled
                     -- head). If a tip is missing here, the header can't show that anchor.
                     out[#out + 1] = ("pinned tips (seam_idx=%s):"):format(tostring(disp_idx))
-                    for name in pairs(effective_pinned()) do
+                    for name in pairs(ctx:effective_pinned()) do
                         local ref = repo.refs[name]
                         local c = ref and ref.commit
                         local dn = c and dnode[c.hash]
