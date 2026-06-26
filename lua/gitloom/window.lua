@@ -286,33 +286,28 @@ end
 -- right-aligned graph + message don't shift as the lane width changes.
 local COL = { flex = 4, author = 2, author_max = 25, graph = 3 }
 
--- Floating-window stacking (spec §2.1). Rather than a hand-tuned ladder, the
--- newest **primary** float (a graph window, the commit view, the `?`/`K` help)
--- lands on top: each computes its base zindex from the **current top** — the max
--- over open floats, floored at Neovim's default 50 — plus Z_STEP. Its **overlays**
--- (the context panes, the commit-view sticky header) sit Z_OVERLAY above their own
--- primary, which is below the next primary (Z_STEP > Z_OVERLAY). So a submodule
--- graph opened from the commit-view link, or another repo from the picker, always
--- stacks in front of what it was opened from, and the order self-corrects as
--- floats close — no fixed per-window constants. Larger = closer to the user.
-local Z_STEP = 20    -- gap between stack levels (must exceed any overlay offset)
-local Z_OVERLAY = 5  -- a primary's overlay sits this far above it
+-- Floating-window z-order (spec §2.1/§14). With the single-window model there is
+-- exactly **one host window** per repo on screen at a time (frames swap its
+-- buffer; other repos' hosts are hidden), so there is no stack to climb — just a
+-- bounded set of layers over that one host: its **overlays** (the context panes
+-- and the commit-view sticky header) and the **transient floats** (`?`/`K`, the
+-- pickers). Each is a fixed delta above the host's **live** zindex — the host can
+-- hide and re-show with a new id (§14), so always read it. Larger = nearer the user.
+local Z_HOST    = 50  -- the host window itself (snacks' default; documentary)
+local Z_OVERLAY = 5   -- panes + the commit-view sticky header, just above the host
+local Z_FLOAT   = 10  -- transient floats (`?`/`K`, pickers), above the overlays
 
--- The highest zindex among the currently-open floating windows (the snacks
--- default 50 is the floor, so the first float still gets a sane base).
-local function max_float_zindex()
-    local m = 50
-    for _, w in ipairs(vim.api.nvim_list_wins()) do
-        local cfg = vim.api.nvim_win_get_config(w)
-        if cfg.relative ~= "" and cfg.zindex and cfg.zindex > m then m = cfg.zindex end
-    end
-    return m
+-- The host window's live zindex (its current config), defaulting to Z_HOST.
+---@param host_win integer?
+local function host_zindex(host_win)
+    local z = host_win and vim.api.nvim_win_get_config(host_win).zindex
+    return z or Z_HOST
 end
-
--- The base zindex for a new primary float: above every float open right now.
-local function next_zindex()
-    return max_float_zindex() + Z_STEP
-end
+-- An overlay sits just above the host; a transient float above the overlays.
+---@param host_win integer?
+local function overlay_zindex(host_win) return host_zindex(host_win) + Z_OVERLAY end
+---@param host_win integer?
+local function float_zindex(host_win) return host_zindex(host_win) + Z_FLOAT end
 
 -- Graph window keybindings — the single source of truth for the `?` help
 -- float. Handlers are registered in M.open.
@@ -906,15 +901,6 @@ local function open_commit_view(opts, commit, range, root)
     -- later return restores it (§14.3); nil until first left.
     local saved_pos = nil
 
-    -- The context overlay sits just above the host window. Read the host's live
-    -- zindex each time, since it can re-open with a new one after a hide/return
-    -- (§14) — not a fixed float constant any more.
-    local function overlay_zindex()
-        local vw = vwin()
-        local z = vw and vim.api.nvim_win_get_config(vw).zindex
-        return (z or 50) + Z_OVERLAY
-    end
-
     local function close_ctx()
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
             pcall(vim.api.nvim_win_close, ctx_win, true)
@@ -981,7 +967,7 @@ local function open_commit_view(opts, commit, range, root)
             style = "minimal",
             focusable = false,
             -- Just above the host window itself (its sticky-scroll header).
-            zindex = overlay_zindex(),
+            zindex = overlay_zindex(vwin()),
         }
         if ctx_win and vim.api.nvim_win_is_valid(ctx_win) then
             pcall(vim.api.nvim_win_set_config, ctx_win, cfg)
@@ -2561,21 +2547,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         update_panes()
     end
 
-    -- Stack this graph above whatever it was opened from (§2.1) — e.g. a
-    -- submodule opened from the commit-view link, where the view sits above the
-    -- previous graph. The panes overlay this base; a later modal goes above it.
-    -- Inlined (not the module next_zindex) to keep M.open under LuaJIT's
-    -- 60-upvalue ceiling — uses only `vim`. The 20 / +5 mirror Z_STEP / Z_OVERLAY.
-    local graph_z
-    do
-        local m = 50
-        for _, gw in ipairs(vim.api.nvim_list_wins()) do
-            local c = vim.api.nvim_win_get_config(gw)
-            if c.relative ~= "" and c.zindex and c.zindex > m then m = c.zindex end
-        end
-        graph_z = m + 20
-    end
-    opts.win.zindex = graph_z
+    -- The host window keeps snacks' default zindex (Z_HOST); its overlays and the
+    -- transient floats layer above it via overlay_zindex / float_zindex (§2.1/§14,
+    -- the single-window bounded model — no stacking ladder).
 
     -- Refresh the live window/buffer ids on every (re)open. snacks calls on_win
     -- after open_win on each show() — including after a hide()/return (§14) — with
@@ -2877,7 +2851,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             border = "rounded",
             focusable = true,
             -- On top of the current graph + panes (§2.1).
-            zindex = next_zindex(),
+            zindex = float_zindex(w),
         })
     end
     -- d: toggle the date column between absolute and relative. Render-only.
@@ -3086,7 +3060,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             border = "rounded",
             focusable = true,
             -- On top of the current graph + panes (§2.1).
-            zindex = next_zindex(),
+            zindex = float_zindex(gwin()),
         })
     end
     -- h / l: move the ref selection on the current row (§2). Positions are the
@@ -3757,10 +3731,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 height = height,
                 style = "minimal",
                 focusable = false,
-                -- Just above this graph's content, but below any later modal
-                -- (commit view / help), which gets a higher base (§2.1). The +5
-                -- is Z_OVERLAY, inlined (M.open upvalue ceiling, like graph_z).
-                zindex = graph_z + 5,
+                -- Just above this host's content, below the transient floats
+                -- (`?`/`K`, which use float_zindex). Read live (§14 hide/re-show).
+                zindex = overlay_zindex(win),
             }
             if p.win and vim.api.nvim_win_is_valid(p.win) then
                 pcall(vim.api.nvim_win_set_config, p.win, cfg)

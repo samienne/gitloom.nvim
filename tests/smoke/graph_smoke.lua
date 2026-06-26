@@ -3,9 +3,12 @@
 -- Opens the REAL graph on this repository, waits for the async commit stream to
 -- settle, then drives the main keymaps and asserts that NO runtime error fired in
 -- any handler or async callback (the exact failure mode a closure→module-function
--- refactor risks: a stale window id, a bare sibling call resolving to nil). The
--- specific per-key invariants are deliberately light and observable so this test
--- survives the refactor unchanged.
+-- refactor risks: a stale window id, a bare sibling call resolving to nil).
+--
+-- The §14 single-window model deliberately changes the host window id across
+-- hide/show, so this harness NEVER holds a window id — it re-resolves the live
+-- window from the (stable) graph buffer each time. The per-key invariants are
+-- intentionally light/observable so the test survives the refactor unchanged.
 --
 -- Run:  nvim --headless -u tests/minimal_init.lua \
 --         -c "lua require('tests.smoke.graph_smoke').run()"
@@ -13,21 +16,20 @@
 
 local M = {}
 
--- Collected failures; the run prints them and sets the exit code.
 local fails = {}
 local function fail(msg) fails[#fails + 1] = msg end
 
+-- Busy-wait helper for vim.wait: just spin the event loop for the full duration.
+local function settle(ms) vim.wait(ms or 250, function() return false end) end
+
 -- Scan the message history for an error logged by an async callback (timer /
 -- jobstart / vim.schedule / autocmd) — these don't propagate through pcall.
--- Returns the offending line, or nil.
 local function async_error()
     local ok, msgs = pcall(vim.fn.execute, "messages")
     if not ok or not msgs then return nil end
     for _, line in ipairs(vim.split(msgs, "\n", { plain = true })) do
-        if line:match("Error executing")
-            or line:match("E5108")
-            or line:match("stack traceback")
-            or line:match("^E%d+:") then
+        if line:match("Error executing") or line:match("E5108")
+            or line:match("stack traceback") or line:match("^E%d+:") then
             return line
         end
     end
@@ -39,22 +41,44 @@ local function feed(keys)
     pcall(vim.api.nvim_feedkeys, t, "x", false)
 end
 
--- Run `label`'s key sequence, settle the event loop, and record any error.
-local function step(label, keys, win)
+-- State shared across the run.
+local window, OPTS, gbuf
+
+-- The window currently showing the graph buffer (re-resolved live), or nil when
+-- the graph frame is off-screen (a commit-view frame is up, or the host is hidden).
+local function live()
+    if not (gbuf and vim.api.nvim_buf_is_valid(gbuf)) then return nil end
+    local w = vim.fn.bufwinid(gbuf)
+    return (w ~= -1 and vim.api.nvim_win_is_valid(w)) and w or nil
+end
+
+-- Ensure the graph frame is shown and current; returns the live window or nil.
+local function focus()
+    local w = live()
+    if not w then
+        pcall(window.open, nil, OPTS) -- re-show a hidden session / pop to graph
+        settle(500)
+        feed("<C-o>") -- if a commit-view frame is up, walk back to the graph
+        settle(200)
+        w = live()
+    end
+    if w then pcall(vim.api.nvim_set_current_win, w) end
+    return w
+end
+
+-- Feed `label`'s keys, settle, and record any async error. No window assertion —
+-- some steps (q) intentionally hide the host.
+local function step(label, keys)
     vim.v.errmsg = ""
-    vim.cmd("messages clear")
+    pcall(vim.cmd, "messages clear")
     if keys then feed(keys) end
-    vim.wait(250, function() return false end) -- let debounced cone/pane work run
+    settle(250)
     local aerr = async_error()
     if aerr then fail(("[%s] async error: %s"):format(label, aerr)) end
     if vim.v.errmsg ~= "" then fail(("[%s] errmsg: %s"):format(label, vim.v.errmsg)) end
-    if win and not vim.api.nvim_win_is_valid(win) then
-        fail(("[%s] host window became invalid"):format(label))
-    end
 end
 
 function M.run()
-    -- snacks is needed for the real window; minimal_init only wires the plugin.
     vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/lazy/snacks.nvim")
     vim.o.lines, vim.o.columns = 60, 160
     local ok_snacks = pcall(function()
@@ -63,109 +87,84 @@ function M.run()
     end)
     if not ok_snacks then fail("snacks setup failed"); return M.finish() end
 
-    local window = require("gitloom.window")
-    -- open_graph fills GraphOptions defaults at runtime; this harness passes none.
+    window = require("gitloom.window")
     ---@diagnostic disable-next-line: missing-fields
-    local OPTS = {} --[[@as GraphOptions]]
+    OPTS = {} --[[@as GraphOptions]]
 
     local ok_open, lv = pcall(window.open, nil, OPTS)
     if not ok_open or not lv then
         fail("window.open errored: " .. tostring(lv)); return M.finish()
     end
+    gbuf = lv.buf
 
-    -- Wait for the stream to populate the graph buffer (rows arrive async, then a
-    -- reflow lands the §10.7 default collapse). Settle on a stable line count.
-    local buf = lv.buf
+    -- Wait for the stream to populate the graph buffer and settle (rows arrive
+    -- async, then a reflow lands the §10.7 default collapse). Stable line count.
     local last_n, stable = -1, 0
     vim.wait(8000, function()
-        if not (buf and vim.api.nvim_buf_is_valid(buf)) then return false end
-        local n = vim.api.nvim_buf_line_count(buf)
+        if not (gbuf and vim.api.nvim_buf_is_valid(gbuf)) then return false end
+        local n = vim.api.nvim_buf_line_count(gbuf)
         if n == last_n and n > 1 then stable = stable + 1 else stable = 0 end
         last_n = n
-        return stable >= 4 -- ~1s of no change
+        return stable >= 4
     end, 60)
 
-    local win = lv.winid and lv.winid()
-    if not (win and vim.api.nvim_win_is_valid(win)) then
-        fail("no valid host window after open"); return M.finish()
+    if not focus() then fail("no valid host window after open"); return M.finish() end
+    if vim.api.nvim_buf_line_count(gbuf) < 2 then
+        fail("graph buffer never populated (" .. vim.api.nvim_buf_line_count(gbuf) .. " lines)")
     end
-    local n0 = vim.api.nvim_buf_line_count(buf)
-    if n0 < 2 then fail("graph buffer never populated (" .. n0 .. " lines)") end
     if async_error() then fail("async error during open: " .. async_error()) end
 
-    -- Make the window current so feedkeys lands in it.
-    pcall(vim.api.nvim_set_current_win, win)
+    -- Navigation.
+    focus(); step("nav-down", "jjjj"); step("nav-up", "kk")
+    step("page-down", "<C-d>"); step("page-up", "<C-u>")
 
-    -- Drive the main surface. Each step asserts no error + a live window.
-    step("nav-down", "jjjj", win)
-    step("nav-up", "kk", win)
-    step("page-down", "<C-d>", win)
-    step("page-up", "<C-u>", win)
-
-    -- Collapse/expand on a collapsed head if one is visible, else at HEAD.
-    pcall(vim.api.nvim_set_current_win, win)
-    pcall(vim.fn.search, "◍", "w")
-    step("collapse-toggle-1", "<Space>", win)
-    step("collapse-toggle-2", "<Space>", win)
+    -- Collapse/expand on a collapsed head if visible, else wherever the cursor is.
+    focus(); pcall(vim.fn.search, "◍", "w")
+    step("collapse-1", "<Space>"); step("collapse-2", "<Space>")
 
     -- Style / mode toggles (render + relayout paths).
-    step("merge-style", "m", win)
-    step("mirror", "M", win)
-    step("mirror-off", "M", win)
-    step("label-mode", "B", win)
-    step("label-mode-off", "BB", win)
-    step("dates", "d", win)
-    step("dim-toggle", "H", win)
-    step("dim-on", "H", win)
-    step("focus-toggle", "c", win)
-    step("focus-on", "c", win)
-    step("pack", "p", win)
-    step("pack-on", "p", win)
-    step("panes-toggle", "F", win)
-    step("panes-on", "F", win)
+    focus()
+    step("merge-style", "m")
+    step("mirror", "M"); step("mirror-off", "M")
+    step("label-mode", "B"); step("label-mode-off", "BB")
+    step("dates", "d")
+    step("dim-off", "H"); step("dim-on", "H")
+    step("focus-off", "c"); step("focus-on", "c")
+    step("pack", "p"); step("pack-on", "p")
+    step("panes-toggle", "F"); step("panes-on", "F")
 
     -- Sort cycle (async rev modes).
-    step("sort-1", "S", win)
-    vim.wait(400, function() return false end)
-    step("sort-2", "S", win)
-    vim.wait(400, function() return false end)
+    step("sort-1", "S"); settle(400)
+    step("sort-2", "S"); settle(400)
 
     -- Commit selection (range) walk.
-    step("select-start", "V", win)
-    step("select-walk", "jj", win)
-    step("select-swap", "o", win)
-    step("select-exit", "<Esc>", win)
+    focus()
+    step("select-start", "V"); step("select-walk", "jj")
+    step("select-swap", "o"); step("select-exit", "<Esc>")
 
-    -- Commit view open + close (a navigation-stack frame). Park on HEAD (a normal
-    -- commit) first so <CR> opens the view rather than the action menu; <Esc>
-    -- defensively dismisses a menu/picker if one opened instead.
-    pcall(vim.api.nvim_set_current_win, win)
-    feed("gg")
-    step("commit-view-open", "<CR>", win)
-    vim.wait(600, function() return false end)
-    if async_error() then fail("commit-view async error: " .. tostring(async_error())) end
-    step("commit-view-back", "q", win)
+    -- Commit view: park on HEAD, <CR> opens the frame (or the action menu on a
+    -- head — <Esc> dismisses that). Then walk back to the graph.
+    focus(); feed("gg")
+    step("commit-view-open", "<CR>"); settle(500)
     feed("<Esc>")
+    step("commit-view-back", "<C-o>")
 
     -- Resync (the R history refresh).
-    pcall(vim.api.nvim_set_current_win, win)
-    step("resync", "R", win)
-    vim.wait(800, function() return false end)
+    focus(); step("resync", "R"); settle(800)
     if async_error() then fail("resync async error: " .. tostring(async_error())) end
 
     -- Hide → re-show: the host re-opens with a NEW window id (§14 live-id path).
-    -- M.open returns the snacks `host` for an existing session, so locate the
-    -- re-shown window via the (stable) graph buffer.
-    vim.cmd("messages clear")
-    feed("q") -- hides the host
-    vim.wait(400, function() return false end)
-    pcall(window.open, nil, OPTS)
-    vim.wait(600, function() return false end)
-    local win2 = buf and vim.api.nvim_buf_is_valid(buf) and vim.fn.bufwinid(buf) or -1
-    if not (win2 and win2 ~= -1 and vim.api.nvim_win_is_valid(win2)) then
+    focus()
+    pcall(vim.cmd, "messages clear")
+    feed("q"); settle(400)
+    if live() ~= nil then fail("q did not hide the host (graph buffer still windowed)") end
+    pcall(window.open, nil, OPTS); settle(600)
+    local w2 = live()
+    if not w2 then
         fail("re-show did not put the graph buffer in a valid window")
     else
-        step("re-show-nav", "jk", win2)
+        pcall(vim.api.nvim_set_current_win, w2)
+        step("re-show-nav", "jk")
     end
     if async_error() then fail("re-show async error: " .. tostring(async_error())) end
 
@@ -179,7 +178,7 @@ function M.finish()
     else
         print("SMOKE: FAIL (" .. #fails .. ")")
         for _, f in ipairs(fails) do print("  - " .. f) end
-        vim.cmd("cq") -- non-zero exit
+        vim.cmd("cq")
     end
 end
 
