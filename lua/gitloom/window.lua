@@ -3314,6 +3314,17 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     lv = listview.open(listview_options)
     ctx.lv = lv
 
+    -- Name the graph buffer after the repository root (§6) so an external GUI
+    -- title (e.g. Neovide's titlebar, derived from the active buffer) identifies
+    -- the repo by path rather than showing snacks' unnamed scratch buffer as
+    -- "[Scratch]". Path first so it leads in a taskbar/alt-tab where titles
+    -- truncate from the right. The path is stable, so this is set once. pcall: a
+    -- duplicate name (E95 — e.g. the same submodule drilled in twice, §14.7) must
+    -- not break open; that buffer just keeps the default name.
+    if lv and lv.buf then
+        pcall(vim.api.nvim_buf_set_name, lv.buf, root .. " (gitloom)")
+    end
+
     -- Cursor parking (§2/§7): cursorline marks the row; the cursor rests at the
     -- commit message, or on the selected ref. place_cursor reads the rendered
     -- buffer line and positions the cursor accordingly.
