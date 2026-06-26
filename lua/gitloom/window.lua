@@ -2505,6 +2505,107 @@ local function on_cursor_moved(ctx)
     ctx:schedule_cone_update()
 end
 
+-- Working-tree refresh (§3.4): re-read the dirty state and rebuild the virtual
+-- commits on the current HEAD anchor. It first re-resolves HEAD, so it can tell
+-- when real history has moved out from under the model ("moved") — the seam the
+-- general history resync (below) extends. Keeps the cursor on its commit across
+-- the reflow. `silent` suppresses the "history moved" notice for the automatic
+-- (write/focus) triggers.
+local function refresh_worktree(ctx, silent)
+    if ctx.opts.working_tree == false then return end
+    fetch_worktree_state().next(function(state)
+        local hw = ctx:win()
+        if not hw then return end
+        local keep
+        local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
+        if ok then keep = ctx:cursor_hash(pos[1]) end
+        local res = ctx:apply_worktree(state)
+        ctx:reflow()
+        ctx:update_footer()
+        if keep then ctx:goto_hash(keep) end
+        ctx:place_cursor()
+        ctx:update_cone()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+        ctx:update_panes()
+        if res == "moved" and not silent then
+            vim.notify("gitloom: HEAD moved — reopen to refresh history (§3.4)",
+                vim.log.levels.WARN)
+        end
+    end)
+end
+GRAPH_HELPERS.refresh_worktree = refresh_worktree
+
+-- History resync (§3.4): re-read refs and reconcile the model in place so a
+-- `commit` / `fetch` / `rebase` / HEAD-moving `checkout` shows without a reopen.
+-- Snapshot the current ref tips (the rev-list exclude set) and the focused commit,
+-- then: re-read refs (non-mutating) → reconcile bindings (add/move/remove) → pull
+-- only the newly-reachable commits → link them → prune orphans → re-establish the
+-- owned order → refresh the worktree → reflow, restoring the cursor by hash and
+-- the scroll. Worktree virtuals are dropped up front and re-applied at the end.
+-- `silent` suppresses the completion notice. Re-reads the live window after every
+-- async boundary (the host can hide/re-show with a new id, §14).
+local function resync(ctx, silent)
+    if not ctx:win() then return end
+    local repo = ctx.repo
+
+    -- What we already have: every current ref tip becomes a negative ref, so the
+    -- fetch returns only commits newly reachable since this point.
+    local old_tips = {}
+    for _, ref in pairs(repo.refs) do
+        if ref.commit then old_tips[ref.commit.hash] = true end
+    end
+
+    -- Remember the focused commit + scroll so the view holds across the rebuild.
+    -- (ctx:win() is non-nil here — the early return above guards it.)
+    local focus
+    local cok, pos = pcall(vim.api.nvim_win_get_cursor, ctx:win())
+    if cok then focus = ctx:cursor_hash(pos[1]) end
+    local vok, vview = pcall(vim.fn.winsaveview)
+    local view = vok and vview or nil
+
+    -- Drop the worktree virtuals during the rebuild; re-applied at the end.
+    ctx:clear_worktree_nodes()
+
+    fetch_ref_entries().next(function(res)
+        ctx:reconcile_refs(res.entries, res.head, res.detached)
+        local new_tips, old_list = {}, {}
+        for _, e in ipairs(res.entries) do new_tips[e.hash] = true end
+        -- A detached HEAD's commit may be on no branch; seed it so it is
+        -- fetched/kept (§3.2).
+        if res.detached then new_tips[res.detached] = true end
+        local new_list = {}
+        for h in pairs(new_tips) do new_list[#new_list + 1] = h end
+        for h in pairs(old_tips) do old_list[#old_list + 1] = h end
+        return fetch_new_commits(new_list, old_list)
+    end).next(function(commits)
+        for _, c in ipairs(commits) do ctx:integrate_commit(c) end
+        ctx:prune_to_reachable()
+        return ctx:apply_sort() -- re-establish the active sort mode (§3.1)
+    end).next(function()
+        if ctx.opts.working_tree == false then return nil end
+        return fetch_worktree_state()
+    end).next(function(state)
+        if not ctx:win() then return end
+        if state then ctx:apply_worktree(state) end
+        ctx:reflow()
+        ctx:update_footer()
+        -- Restore the scroll first, then re-home the cursor on the focused commit
+        -- (goto_hash only scrolls if its new row is off-screen).
+        if view then pcall(vim.fn.winrestview, view) end
+        if not (focus and ctx:goto_hash(focus)) then
+            -- The focused commit is gone (rewound away) — fall back to HEAD.
+            local headref = repo.refs["HEAD"]
+            if headref and headref.commit then ctx:goto_hash(headref.commit.hash) end
+        end
+        ctx:place_cursor()
+        ctx:update_cone()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+        ctx:update_panes()
+        if not silent then vim.notify("gitloom: resynced") end
+    end)
+end
+GRAPH_HELPERS.resync = resync
+
 -- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
 -- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
 -- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
@@ -2798,11 +2899,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         index = nil,
     }
 
-    -- The last buffer line the CursorMoved handler reacted to (it resets the ref
-    -- selection on a row change). Lifted to this scope so a programmatic jump that
-    -- sets its own selection (the ref picker, §2) can mark the landed row as
-    -- already-visited and suppress the reset. Assigned in the window block below.
-    local last_line = nil
 
     -- Commit selection (range) mode (§13). `active` gates the modal keymaps;
     -- `path`/`anchor`/`cursor` are the selected path over the visible projection
@@ -2885,13 +2981,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- HEAD hash they were anchored on (so a refresh can tell when history moved).
     local worktree_commits = {}
     local worktree_head = nil
-    -- Re-reads the dirty state and rebuilds the virtual commits (§3.4). Assigned
-    -- in the window block; forward-declared for the autocmds.
-    local refresh_worktree = function(_) end
-    -- Full history resync (§3.4): re-read refs, pull new commits, prune, re-sort,
-    -- refresh the worktree, reflow. Assigned in the window block; forward-declared
-    -- for the `R` key.
-    local resync = function(_) end
 
     -- The repository the graph reflects, identified by its root (git runs in
     -- repo.root, §2.1). Keys the remembered cursor position and the ref-picker
@@ -2950,7 +3039,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         sig_cache = sig_cache,
         worktree_commits = worktree_commits,
         worktree_head = worktree_head,
-        last_line = last_line,
+        last_line = nil,
         selection_visible = false,
         win = gwin,
     }
@@ -3284,108 +3373,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- suppresses the WinScrolled the deferred refresh emits; a real scroll
         -- during it is remembered in `pending` and replayed.
         ctx.cone_gen, ctx.applying, ctx.pending = 0, false, false
-
-        -- Working-tree refresh (§3.4): re-read the dirty state and rebuild the
-        -- virtual commits on the current HEAD anchor. It first re-resolves HEAD, so
-        -- it can tell when real history has moved out from under the model
-        -- ("moved") — the seam the general history resync (below) extends. Keeps
-        -- the cursor on its commit across the reflow. `silent` suppresses the
-        -- "history moved" notice for the automatic (write/focus) triggers.
-        refresh_worktree = function(silent)
-            if opts.working_tree == false then return end
-            fetch_worktree_state().next(function(state)
-                local hw = gwin()
-                if not hw then return end
-                local keep
-                local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
-                if ok then keep = cursor_hash(pos[1]) end
-                local res = ctx:apply_worktree(state)
-                reflow()
-                update_footer()
-                if keep then goto_hash(keep) end
-                place_cursor()
-                update_cone()
-                if lv and lv.controller then lv.controller.refresh() end
-                update_panes()
-                if res == "moved" and not silent then
-                    vim.notify("gitloom: HEAD moved — reopen to refresh history (§3.4)",
-                        vim.log.levels.WARN)
-                end
-            end)
-        end
-
-        -- History resync (§3.4): re-read refs and reconcile the model in place so a
-        -- `commit` / `fetch` / `rebase` / HEAD-moving `checkout` shows without a
-        -- reopen. Snapshot the current ref tips (the rev-list exclude set) and the
-        -- focused commit, then: re-read refs (non-mutating) → reconcile bindings
-        -- (add/move/remove) → pull only the newly-reachable commits → link them →
-        -- prune orphans → re-establish the owned order → refresh the worktree →
-        -- reflow, restoring the cursor by hash and the scroll. Worktree virtuals
-        -- are dropped up front and re-applied at the end. `silent` suppresses the
-        -- completion notice (reserved for future automatic triggers).
-        resync = function(silent)
-            if not gwin() then
-                return
-            end
-
-            -- What we already have: every current ref tip becomes a negative ref,
-            -- so the fetch returns only commits newly reachable since this point.
-            local old_tips = {}
-            for _, ref in pairs(repo.refs) do
-                if ref.commit then old_tips[ref.commit.hash] = true end
-            end
-
-            -- Remember the focused commit + scroll so the view holds across the
-            -- rebuild (both are hash/topline based, so they survive the reflow).
-            local focus
-            local cok, pos = pcall(vim.api.nvim_win_get_cursor, win)
-            if cok then focus = cursor_hash(pos[1]) end
-            local vok, vview = pcall(vim.fn.winsaveview)
-            local view = vok and vview or nil
-
-            -- Drop the worktree virtuals during the rebuild; re-applied at the end.
-            ctx:clear_worktree_nodes()
-
-            fetch_ref_entries().next(function(res)
-                ctx:reconcile_refs(res.entries, res.head, res.detached)
-                local new_tips, old_list = {}, {}
-                for _, e in ipairs(res.entries) do new_tips[e.hash] = true end
-                -- A detached HEAD's commit may be on no branch; seed it so it is
-                -- fetched/kept (§3.2).
-                if res.detached then new_tips[res.detached] = true end
-                local new_list = {}
-                for h in pairs(new_tips) do new_list[#new_list + 1] = h end
-                for h in pairs(old_tips) do old_list[#old_list + 1] = h end
-                return fetch_new_commits(new_list, old_list)
-            end).next(function(commits)
-                for _, c in ipairs(commits) do ctx:integrate_commit(c) end
-                ctx:prune_to_reachable()
-                return ctx:apply_sort() -- re-establish the active sort mode (§3.1)
-            end).next(function()
-                if opts.working_tree == false then return nil end
-                return fetch_worktree_state()
-            end).next(function(state)
-                if not gwin() then
-                    return
-                end
-                if state then ctx:apply_worktree(state) end
-                reflow()
-                update_footer()
-                -- Restore the scroll first, then re-home the cursor on the focused
-                -- commit (goto_hash only scrolls if its new row is off-screen).
-                if view then pcall(vim.fn.winrestview, view) end
-                if not (focus and goto_hash(focus)) then
-                    -- The focused commit is gone (rewound away) — fall back to HEAD.
-                    local headref = repo.refs["HEAD"]
-                    if headref and headref.commit then goto_hash(headref.commit.hash) end
-                end
-                place_cursor()
-                update_cone()
-                if lv and lv.controller then lv.controller.refresh() end
-                update_panes()
-                if not silent then vim.notify("gitloom: resynced") end
-            end)
-        end
 
         -- Rebuild the dimmed highlight groups after a colorscheme change (the
         -- derived groups are wiped by `hi clear`) and redraw (§12).
@@ -4333,9 +4320,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- extracted reflow / handlers can call ctx:update_panes() / ctx:maybe_update_panes().
         ctx.update_panes = update_panes
         ctx.maybe_update_panes = maybe_update_panes
-        ctx.resync = resync
-        -- Exposed so the module-level schedule_wt_refresh can call it (§3.4).
-        ctx.refresh_worktree = refresh_worktree
 
         -- (The cursor is kept away from the window edges by the window-local
         -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
