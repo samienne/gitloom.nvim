@@ -331,6 +331,7 @@ local KEYBINDS = {
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "<leader>s", "Search commits by subject / author (picker; :GitloomSearch)" },
+    { "/", "Filter the graph to matching commits (live; n/N walk matches, <C-o> exits)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
@@ -2561,6 +2562,164 @@ local function h_commit_search(ctx)
     })
 end
 
+-- The display index of the cursor's row (§16.5), or 1. `order_at` maps a buffer
+-- line to its OrderItem + index in repo.display.
+local function filter_cursor_index(ctx)
+    local w = ctx:win()
+    if not w then return 1 end
+    local _, idx = ctx:order_at(vim.api.nvim_win_get_cursor(w)[1])
+    return idx or 1
+end
+
+-- A display row is a **match** when it is a real commit kept by the active filter
+-- (§16.3) — the kept matches render as normal commit rows.
+local function is_match_row(ctx, item)
+    return item and item.commit and ctx.filter and ctx.filter.keep[item.commit.hash] or false
+end
+
+-- n / N: move to the next / previous match (§16.5) in row order, wrapping at the
+-- ends like Neovim's search. No-op without an active filter.
+local function filter_goto(ctx, dir)
+    if not ctx.filter then return end
+    local display = ctx.repo.display or {}
+    local n = #display
+    if n == 0 then return end
+    local cur = filter_cursor_index(ctx)
+    for step = 1, n do
+        local i = ((cur - 1 + dir * step) % n) + 1
+        if is_match_row(ctx, display[i]) then
+            ctx:goto_hash(display[i].commit.hash)
+            ctx:center_view()
+            ctx:update_cone()
+            return
+        end
+    end
+    vim.notify("gitloom: no matches", vim.log.levels.INFO)
+end
+
+-- Land on the match nearest the cursor after committing a filter (§16.1).
+local function filter_land(ctx)
+    if not ctx.filter then return false end
+    local display = ctx.repo.display or {}
+    local cur = filter_cursor_index(ctx)
+    local best, bestd
+    for i, it in ipairs(display) do
+        if is_match_row(ctx, it) then
+            local d = math.abs(i - cur)
+            if not bestd or d < bestd then best, bestd = it.commit.hash, d end
+        end
+    end
+    if best then
+        ctx:goto_hash(best)
+        ctx:center_view()
+        ctx:update_cone()
+        return true
+    end
+    return false
+end
+
+-- `/` — in-graph filter-search (spec §16): a live, debounced query contracting the
+-- graph to commits whose subject/author match (kept as normal commits, the rest
+-- collapsed via §10), with n/N walking the matches. Opens a single-line floating
+-- input; the graph re-filters live as you type (debounced, §16.4); <CR> commits,
+-- <Esc> cancels (restoring the pre-edit state). `/` while filtered edits in place.
+local FILTER_DEBOUNCE_MS = 150
+local function h_filter(ctx)
+    local gwin = ctx:win()
+    if not gwin then return end
+
+    -- The real commit set to match against (stable for this input session, §16.2).
+    local commits = {}
+    for _, it in ipairs(ctx.repo.order or {}) do
+        if it.commit and it.commit.hash and not it.commit.virtual then
+            commits[#commits + 1] = it.commit
+        end
+    end
+
+    -- Snapshot for cancel (§16.1): the committed filter + the graph's view.
+    local prev_filter = ctx.filter
+    local saved_view = vim.api.nvim_win_call(gwin, vim.fn.winsaveview)
+
+    -- The single-line input float, seeded with the active query when editing.
+    local ibuf = vim.api.nvim_create_buf(false, true)
+    vim.bo[ibuf].buftype = "nofile"
+    vim.api.nvim_buf_set_lines(ibuf, 0, -1, false, { (prev_filter and prev_filter.query) or "" })
+    local iwin = vim.api.nvim_open_win(ibuf, true, {
+        relative = "win", win = gwin,
+        anchor = "SW", row = vim.api.nvim_win_get_height(gwin), col = 0,
+        width = vim.api.nvim_win_get_width(gwin), height = 1,
+        style = "minimal", border = "rounded",
+        title = " filter: subject / author ",
+        zindex = float_zindex(gwin),
+    })
+    pcall(vim.api.nvim_set_option_value, "winhl", "Normal:NormalFloat", { win = iwin })
+
+    -- Apply a query to the graph (the live preview): empty => drop the filter.
+    local function apply(query)
+        query = (query or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if query == "" then
+            ctx.filter = nil
+        else
+            ctx.filter = { query = query, keep = selectm.filter_keep(commits, query) }
+        end
+        ctx:reflow()
+    end
+    local function buf_query()
+        return vim.api.nvim_buf_is_valid(ibuf)
+            and (vim.api.nvim_buf_get_lines(ibuf, 0, 1, false)[1] or "") or ""
+    end
+
+    -- Debounced live rebuild (§16.4): each keystroke re-arms; only the last fires.
+    local function schedule()
+        ctx.filter_gen = ctx.filter_gen + 1
+        local gen = ctx.filter_gen
+        vim.defer_fn(function()
+            if gen ~= ctx.filter_gen or not vim.api.nvim_win_is_valid(iwin) then return end
+            apply(buf_query())
+        end, FILTER_DEBOUNCE_MS)
+    end
+
+    local function close_input()
+        ctx.filter_gen = ctx.filter_gen + 1 -- cancel any pending rebuild
+        -- Leave insert mode before handing focus back, or the graph buffer is
+        -- entered in insert mode (the input float was insert-mode, §16.1).
+        vim.cmd("stopinsert")
+        pcall(vim.api.nvim_win_close, iwin, true)
+        if vim.api.nvim_buf_is_valid(ibuf) then pcall(vim.api.nvim_buf_delete, ibuf, { force = true }) end
+        if vim.api.nvim_win_is_valid(gwin) then pcall(vim.api.nvim_set_current_win, gwin) end
+    end
+
+    local function commit_filter()
+        apply(buf_query()) -- settle the latest query synchronously
+        local active = ctx.filter ~= nil
+        close_input()
+        if active then
+            if not filter_land(ctx) then
+                vim.notify("gitloom: no matches", vim.log.levels.INFO)
+            end
+        else
+            -- Empty query: filter dropped; restore the pre-filter view.
+            pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        end
+    end
+
+    local function cancel()
+        close_input()
+        ctx.filter = prev_filter
+        ctx:reflow()
+        pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+    end
+
+    vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" },
+        { buffer = ibuf, callback = schedule })
+    vim.keymap.set({ "i", "n" }, "<CR>", commit_filter, { buffer = ibuf, nowait = true })
+    vim.keymap.set({ "i", "n" }, "<Esc>", cancel, { buffer = ibuf, nowait = true })
+
+    -- Preview the seed immediately (editing an existing filter), then type.
+    schedule()
+    vim.cmd("startinsert!")
+end
+
 -- P: pin / unpin the branch under the cursor as an anchor (§10.6).
 local function h_pin(ctx)
     local w = ctx:win()
@@ -2637,6 +2796,9 @@ local GRAPH_KEYS = {
     ["p"] = h_pack,
     ["<leader>b"] = h_refpick,
     ["<leader>s"] = h_commit_search,
+    ["/"] = h_filter,
+    ["n"] = function(ctx) if ctx.filter then filter_goto(ctx, 1) end end,
+    ["N"] = function(ctx) if ctx.filter then filter_goto(ctx, -1) end end,
     ["P"] = h_pin,
     ["i"] = h_laneids,
     ["F"] = h_panes,
@@ -3086,6 +3248,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field worktree_head? string
     ---@field last_line? integer
     ---@field selection_visible boolean
+    ---@field filter? { query: string, keep: table<string,boolean> }  in-graph filter-search (§16); nil = none
+    ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
     --- == debounce state (Phase B4) ==
     ---@field cone_gen integer       cone-update debounce generation
     ---@field applying boolean       suppresses the WinScrolled emitted by the deferred refresh
@@ -3295,6 +3459,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         worktree_head = worktree_head,
         last_line = nil,
         selection_visible = false,
+        -- In-graph filter-search (§16): nil = no filter; else { query, keep } —
+        -- the active query and its match set (hashes never contracted, §16.3).
+        filter = nil,
+        filter_gen = 0, -- live-rebuild debounce generation (§16.4)
         win = gwin,
     }
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
@@ -4662,6 +4830,13 @@ local function reflow(ctx)
     local cm = ctx.opts.collapse_merged ~= false
     local owners = viewbuilder.owners(
         ctx.repo.order, owners_from_refs(ctx.repo.refs, {}), ctx:effective_pinned(), ctx.view_state.modes, cm)
+    -- Filter-search (§16.3): contract *everything* — force every owner collapsed,
+    -- so only the matches (the `keep` set, below) and junctions stay visible. This
+    -- is a mode-only override (the owner tips are unchanged), so it does not
+    -- invalidate the signature cache.
+    if ctx.filter then
+        for _, o in ipairs(owners) do o.mode = "collapsed" end
+    end
     ctx.view_state.effective = {}
     for _, o in ipairs(owners) do ctx.view_state.effective[o.id] = o.mode end
     -- Reuse cached signatures unless the commit/owner set or focus changed.
@@ -4670,7 +4845,8 @@ local function reflow(ctx)
         ctx.sig_cache.sig = viewbuilder.signatures(ctx.repo.order, owners)
         ctx.sig_cache.norder, ctx.sig_cache.nowners, ctx.sig_cache.cm = #ctx.repo.order, #owners, cm
     end
-    local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig)
+    local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig,
+        ctx.filter and ctx.filter.keep)
     refresh_columns(ctx.opts, proj.items)
     ctx.repo.display = (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
     -- A reflow recreates the DisplayNodes, so drop any in-flight commit selection.
