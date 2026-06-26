@@ -67,7 +67,11 @@ gitloom's own topological order (reproducing git's `--topo-order`), or git's dat
 / author-date order — reordering in place and keeping the cursor on its commit.
 `V` enters **commit selection** (§13) — a modal range
 selection along one branch, fed to the diff provider and the commit view's range
-mode.
+mode. `<leader>s` opens a **commit search** (§15) — a fuzzy picker over commit
+subjects and authors that jumps the cursor to the chosen commit. `/` enters the
+**filter search** (§16) — a live query that contracts the graph to matching
+commits (kept as normal commits, the rest collapsed); `n`/`N` walk the matches and
+`<C-o>` leaves it.
   `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
   remote-tracking branch, and tag, plus **HEAD**; selecting one moves the cursor
   to that ref's commit and **centers** the view on it (like the initial HEAD
@@ -864,7 +868,7 @@ status in the window footer.
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, sort_mode, mirror,
                  highlight, date_format, date_mode, message_min, label_mode, diff,
-                 working_tree, scrolloff }
+                 working_tree, scrolloff, search }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
 DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
@@ -935,6 +939,11 @@ Endpoint     = Commit | "index" | "worktree"
 - `pin_upstream` — when pinning a local branch, also pin its tracked upstream
   remote-tracking ref as an anchor (§6.3, §10.6). **Default true.** Set false to
   pin only the local branch.
+- `search` — the commit-search picker (§15): `snippet` is the number of graph
+  rows shown around the commit in the preview (**default `7`**, odd so the commit
+  sits centered); `layout` is how the graph snippet and the commit detail are
+  arranged in the preview — `"vertical"` (default, snippet above the detail). A
+  side-by-side `"horizontal"` layout is deferred (it needs a second preview pane).
 
 ### setup() wiring
 
@@ -1261,7 +1270,8 @@ the streaming path stays lean. The refs shown are the row's existing decorations
 
 The diff is fetched the same way, on demand, by a second `git show --format= -p`
 for the commit, chained after the metadata fetch; the view renders once both
-arrive.
+arrive. The same on-demand fetch and formatter are reused by the commit-search
+preview (§15.3).
 
 ### 11.2 Content
 
@@ -1985,3 +1995,157 @@ submodule update can never quietly mutate the submodule's saved layout.
 - **Modifier surface.** The concrete set of filters / scopes (file, path glob,
   author, …) and the keys that apply / clear them are enumerated as they are
   built; the machinery (§14.2–§14.5) is independent of which modifiers exist.
+
+## 15. Commit search
+
+`<leader>s` opens a **commit search** picker (snacks.picker) over the
+repository's commit set — a fuzzy finder across every commit in the model, with a
+preview that shows the commit (§11) alongside a snippet of the graph locating it.
+Selecting a result moves the cursor to that commit and centers the graph on it.
+Like everything else, it is read-only (§9). `:GitloomSearch` is the command
+equivalent. (Plain `/` is the in-graph **filter-search**, §16 — a different tool:
+it narrows the graph to matching commits as a view modifier rather than jumping
+to one.)
+
+### 15.1 Entry point
+
+`<leader>s` (and `:GitloomSearch`) opens the picker immediately, populated from
+the in-memory commit model (§3, §4) — the same `--all` set the graph laid out, in
+`repo.order`. No git query is run: the searchable fields are already resident.
+The picker lists one entry per commit; result rows follow snacks' native
+`git_log` format (abbreviated hash, author date, author, subject) so the list
+reads like the familiar git-log picker.
+
+### 15.2 Matching
+
+The fuzzy match is over each commit's **subject and author name** — the two
+high-signal fields the model already carries (§3.1). It is snacks' client-side
+fuzzy matcher over the resident list (not a git-side `--grep`), so it is
+incremental and instant for any repository size, with no fetch and no cache.
+
+Searching commit **message bodies** is deliberately out of scope here: bodies
+are not in the model (§11.1), holding them resident does not scale, and body
+matches dilute the result list. A future body-search mode is sketched in §15.5.
+
+### 15.3 Preview
+
+The preview shows the selected commit's **commit view** (§11) — fetched on
+demand by the same `git show` queries (§11.1) and rendered by the same formatter
+(metadata, message, diffstat, diff), cached per hash for the picker session —
+**augmented with a graph snippet**: a fixed window of rows around the commit
+drawn from the already-laid-out projection (`repo.display`, §10), with the
+commit's own row marked, showing the real lanes in their graph colours so the
+snippet matches the main view exactly.
+
+The snippet is shown **above** the commit detail in the one preview buffer; a
+side-by-side arrangement is a configurable enhancement (§8, deferred — it needs a
+second preview pane). The preview is **centered on the match**: the matched text
+is located in the rendered detail, scrolled to the center, and highlighted.
+
+### 15.4 Confirm / navigation
+
+Confirming a result moves the cursor to the commit and **centers** the graph on
+it — navigation **within** the current view (§14.2), not a new stack entry
+(§14.3). The jump resolves the commit to its visible row, so a collapsed branch
+lands on its collapsed head (§10.3); a commit that is currently hidden (§10.1)
+is a no-op with a notice — mirroring the ref picker (§2). Opening the full
+commit view (§11) remains its own action, reached with `<CR>` on the row after
+the jump.
+
+### 15.5 Open / deferred
+
+- **Body search** as a separate **live mode** — a toggle within the picker that
+  switches from the resident fuzzy match to a git-side `git log --grep` / `-G`
+  query, re-run per query (no resident corpus; regex, not fuzzy). This keeps body
+  text searchable without caching it or cluttering the default subject/author
+  list; not yet built.
+- **Additional fields / filters** (committer, date range, path) would compose as
+  further picker modes or as view modifiers (§14.2) as needed.
+
+## 16. Filter search (in-graph)
+
+`/` enters a **filter search**: a live query that contracts the graph to the
+commits whose subject or author matches, keeping the matches as **normal commits**
+and collapsing everything else (§10) so they stand out in place. Unlike the
+commit-search picker (§15) it does not jump to one commit — it reshapes the
+current view, and `n`/`N` walk the matches. It is a **view-local filter modifier**
+(§14.2): entering it pushes a navigation-stack entry (a breadcrumb), and `<C-o>`
+returns to the unfiltered graph. Read-only (§9). It also sidesteps native `/`'s
+blind spot — the graph buffer is virtualized, so a plain `/` only searches the
+loaded rows, whereas this filters the whole in-memory set.
+
+### 16.1 Entry and input
+
+`/` opens a single-line **filter input** (a small floating prompt). From the
+**unfiltered** graph it pushes the filter breadcrumb entry (§14.2) and starts
+empty; pressed **while already filtered** it re-opens the input **pre-filled with
+the active query** to edit it in place — refining the *same* breadcrumb, not
+stacking a second one (§16.5). As the query changes the graph re-filters **live,
+debounced** (a short pause after the last keystroke, ~150 ms; the rebuild is
+cancellable, §16.4).
+
+`<CR>` **commits**: it closes the input, fixes the entry's query, places the
+cursor on the nearest match, and arms `n`/`N`. `<Esc>` **cancels the uncommitted
+edit**, restoring the last committed state — the unfiltered graph when this was a
+fresh filter (dropping the just-pushed breadcrumb), or the previously-committed
+query when editing an existing one. Committing an **empty** query also drops the
+filter. The active query is shown in the footer / breadcrumb label.
+
+### 16.2 Matching
+
+The query matches a commit's **subject or author name**, **smartcase substring**:
+case-insensitive unless the query contains an uppercase letter (like Neovim's
+`smartcase`), a literal substring — not fuzzy, for a `/`-search feel. The match
+set is computed over the in-memory model (§3, §4), the same resident
+`subject`/`author` fields the picker uses (§15.2) — no git query. A **fuzzy** mode
+and field scoping (subject-only / author-only) are open extensions (§16.6).
+
+### 16.3 The filtered view
+
+The filter projects the graph through the §10 view builder with **every owner
+collapsed** and the **match set kept**: a matching commit renders as a **normal
+commit** (its subject, author, date, refs), while each maximal run of
+non-matching commits between matches contracts to a single `◍` collapsed head
+(§10.3). **Junctions** (forks/merges) are kept as before (§10.4), so the branch
+topology that connects the matches survives — a match in the middle of a long
+branch collapses the run above it and the run below it, leaving the match an
+island joined through `◍` heads.
+
+With **no matches** the graph is all heads and junctions and the footer reports
+**0 matches**; committing a 0-match query is a no-op with a notice (no empty
+breadcrumb is pushed). The filter sets only the projection's contraction; it does
+**not** change which commits are in `repo.order` (§3.1) — every commit is still
+present, just contracted — so a match's history and the reachability cone (§12)
+are unaffected.
+
+### 16.4 Live rebuild (asynchronous)
+
+Re-filtering reruns the projection + layout (`view.project` + `columns.layout`),
+the same operation as a collapse toggle (§10.4) — so it is **debounced** (rebuild
+only after typing settles) and **cancellable**: a newer keystroke bumps a
+generation counter and abandons the in-flight rebuild before it mutates the view,
+so a burst of keystrokes costs one rebuild, not one per key, and a slow rebuild on
+a large graph never blocks input. The heavy walks are chunked across event-loop
+ticks where needed (reusing the context-pane coroutine drive, §6.2).
+
+### 16.5 Navigation and exit
+
+After committing (§16.1) `n` / `N` move the cursor to the **next / previous
+match** (the kept normal nodes) in row order, wrapping at the ends like Neovim's
+search. The filter persists as the current view until `<C-o>` pops its breadcrumb
+entry (§14.3), returning to the unfiltered graph; navigating onward (a commit
+view, a submodule drill-in) pushes over it as usual. A second `/` while filtered
+**edits** the current filter in place (§16.1) — so the stack carries exactly one
+filter entry, the one `<C-o>` returns from.
+
+### 16.6 Open / deferred
+
+- **Fuzzy mode** and **field scoping** (subject-only / author-only) as toggles in
+  the filter input (§16.2).
+- **Pre-commit match navigation** — stepping through matches (e.g. `<C-n>` /
+  `<C-p>`) while the input is still open, before committing. For now the live
+  collapse already reveals the matches and `n`/`N` start after `<CR>`.
+- **Match highlighting** — emphasising the matched substring within each kept
+  commit's subject (an incsearch-style highlight), not yet drawn.
+- Composing the filter with the body **live-grep** mode (§15.5) — filtering by
+  message body via `git log --grep`, async — is a later extension.

@@ -288,6 +288,7 @@ M._internal = {
     pane_labels = render.pane_labels,
     display_item = render.display_item,
     get_column_chars = render.get_column_chars,
+    graph_snippet = render.graph_snippet,
     top_lane = render.top_lane,
     passthrough_columns = render.passthrough_columns,
     -- gitloom.graph.select

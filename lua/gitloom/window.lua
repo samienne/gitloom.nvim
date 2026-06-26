@@ -330,6 +330,7 @@ local KEYBINDS = {
     { "R", "Resync with the repository (refs + new commits + working tree)" },
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
+    { "<leader>s", "Search commits by subject / author (picker; :GitloomSearch)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
@@ -728,6 +729,136 @@ end
 
 local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 
+--- Build the commit-view content rows (spec §11.2) — the list of compose
+--- `{ text, highlight }` rows plus the per-render index maps — for a single
+--- commit, a working-tree commit, or a range, **independent of any window or
+--- buffer**. The commit view (open_commit_view) renders these into its
+--- host-window frame; the commit-search preview (§15.3) renders the same rows
+--- into the picker's preview buffer, so the two never drift.
+---
+--- All index maps are keyed by **1-based row index** within the returned `rows`
+--- (the caller adds them to whatever buffer offset it writes at). `spec` fields:
+---   commit?       Commit   single-commit / working-tree mode
+---   range?        table    range mode (§13.5): { commits, range, title }
+---   meta?         string   `git show -s` output for `commit` (real commits)
+---   diff?         string   patch (`git show -p` / range diff), or nil
+---   sub_results?  table    per-path submodule change results (§11.7), or {}
+---   root?         string   parent repo root; enables submodule commit links
+---   action?       boolean  include the diff action label (§11.5); default true
+---@param opts GraphOptions
+---@param spec table
+---@return table[] rows
+---@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch? }
+local function build_commit_rows(opts, spec)
+    local commit, range, root = spec.commit, spec.range, spec.root
+    local sub_results = spec.sub_results or {}
+    local file_jumps, sub_jumps = {}, {}
+    local action_line = nil
+    local diff_ctx, diff_start, diff_buf_to_patch = nil, nil, nil
+
+    local rows = {}
+    -- Diff action label as the first line (§11.5), when a provider is set and the
+    -- caller wants it (the preview suppresses it — it is not actionable there).
+    if spec.action ~= false and opts.diff and opts.diff.open then
+        rows[#rows + 1] = highlight_text(opts.diff.label or "▶ Open diff", opts.palette.action)
+        action_line = #rows
+        rows[#rows + 1] = highlight_text("")
+    end
+    -- Metadata: the selected-commit list in range mode (§13.5), the working-tree
+    -- state header for a virtual commit (§11.8), else the single commit's detail.
+    local meta_rows
+    if range then
+        meta_rows = format_range_detail(range.commits, opts.palette)
+    elseif commit and commit.virtual then
+        meta_rows = format_worktree_detail(commit, opts.palette)
+    else
+        ---@cast commit Commit
+        meta_rows = format_commit_detail(parse_show(spec.meta), {
+            decorations = decoration_texts(commit),
+            palette = opts.palette,
+        })
+    end
+    for _, r in ipairs(meta_rows) do
+        rows[#rows + 1] = r
+    end
+
+    -- `git show --format=` prints a leading blank line; drop it.
+    local patch = (spec.diff or ""):gsub("^%s+", "")
+    if patch ~= "" then
+        local files = diffstat_files(patch)
+        rows[#rows + 1] = highlight_text("")
+        local stat_start = #rows + 1 -- row of the diffstat summary
+        for _, r in ipairs(format_diffstat(files, opts.palette)) do
+            rows[#rows + 1] = r
+        end
+        rows[#rows + 1] = highlight_text("")
+        diff_start = #rows + 1 -- row of the first patch line
+
+        -- Submodule change blocks (§11.7): replace each `Subproject commit` pair
+        -- with its change graph. Splicing shifts rows, so build patch<->row maps
+        -- for the file-jump and context-header lookups rather than the plain 1:1
+        -- offset (which holds only with no splice).
+        local diff_rows = format_diff(patch, opts.palette)
+        local repl = {} -- from_line -> { to_line, rows, hashes, path, old, new }
+        for _, ch in ipairs(submodule.parse_changes(patch)) do
+            local block_rows, block_hashes = submodule_block(opts, ch, sub_results[ch.path])
+            repl[ch.from_line] = {
+                to_line = ch.to_line,
+                rows = block_rows,
+                hashes = block_hashes, -- block-row index -> commit hash (§11.7.6)
+                path = ch.path,
+                old = ch.old, -- the bump's pointers, marked on open (§11.7.6)
+                new = ch.new,
+            }
+        end
+        local patch_to_buf, buf_to_patch = {}, {}
+        local pi = 1
+        while pi <= #diff_rows do
+            local r = repl[pi]
+            if r then
+                local at = #rows + 1 -- row of the block's first line
+                for bi, br in ipairs(r.rows) do
+                    rows[#rows + 1] = br
+                    buf_to_patch[#rows] = pi -- block lines govern by the file's region
+                    -- A commit row becomes a link to that commit in the submodule's
+                    -- repo (root + the relative path; §11.7.6) — only when linking.
+                    if root and r.hashes[bi] then
+                        sub_jumps[#rows] = { repo = root .. "/" .. r.path,
+                            hash = r.hashes[bi], old = r.old, new = r.new }
+                    end
+                end
+                for k = pi, r.to_line do patch_to_buf[k] = at end
+                pi = r.to_line + 1
+            else
+                rows[#rows + 1] = diff_rows[pi]
+                patch_to_buf[pi], buf_to_patch[#rows] = #rows, pi
+                pi = pi + 1
+            end
+        end
+
+        -- Summary sits at stat_start; file j at stat_start + j. Its diff section
+        -- starts where its `diff --git` line landed (identity when nothing spliced).
+        for j, f in ipairs(files) do
+            file_jumps[stat_start + j] = patch_to_buf[f.start] or (diff_start + f.start - 1)
+        end
+        -- Context-header lookup over the same patch (§11.6); when a block was
+        -- spliced the rows are no longer 1:1 with the patch, so keep the inverse map.
+        diff_ctx = diff_contexts(patch)
+        if next(repl) then diff_buf_to_patch = buf_to_patch end
+    end
+
+    return rows, {
+        action_line = action_line,
+        file_jumps = file_jumps,
+        sub_jumps = sub_jumps,
+        diff_ctx = diff_ctx,
+        diff_start = diff_start,
+        diff_buf_to_patch = diff_buf_to_patch,
+    }
+end
+-- Exposed on the module so the search picker (§15.3) can reach it directly.
+M.build_commit_rows = build_commit_rows
+
 --- Open the commit view (specification.md §11) for `commit`: a read-only snacks
 --- float that fetches the commit's detail + diff on demand and renders the
 --- metadata, the diffstat, and the diff. `q` closes it (snacks default); `<CR>`
@@ -1072,104 +1203,18 @@ local function open_commit_view(opts, commit, range, root)
         -- user's scroll/cursor; the first render parks on the action label.
         local saved_view = keep_view and vw
             and vim.api.nvim_win_call(vw, vim.fn.winsaveview) or nil
-        file_jumps = {}
-        sub_jumps = {}
-        action_line = nil
-        diff_ctx, diff_start = nil, nil
-        diff_buf_to_patch = nil
-
-        local rows = {}
-        -- Diff action label as the first line (§11.5), when a provider is set.
-        if opts.diff and opts.diff.open then
-            rows[#rows + 1] = highlight_text(opts.diff.label or "▶ Open diff", opts.palette.action)
-            action_line = #rows
-            rows[#rows + 1] = highlight_text("")
-        end
-        -- Metadata: the selected-commit list in range mode (§13.5), else the
-        -- single commit's detail.
-        local meta_rows
-        if range then
-            meta_rows = format_range_detail(range.commits, opts.palette)
-        elseif commit and commit.virtual then
-            -- Working-tree commit view (§11.8): a short state header, not git show.
-            meta_rows = format_worktree_detail(commit, opts.palette)
-        else
-            ---@cast commit Commit
-            meta_rows = format_commit_detail(parse_show(meta_output), {
-                decorations = decoration_texts(commit),
-                palette = opts.palette,
-            })
-        end
-        for _, r in ipairs(meta_rows) do
-            rows[#rows + 1] = r
-        end
-
-        -- `git show --format=` prints a leading blank line; drop it.
-        local patch = (diff_output or ""):gsub("^%s+", "")
-        if patch ~= "" then
-            local files = diffstat_files(patch)
-            rows[#rows + 1] = highlight_text("")
-            local stat_start = #rows + 1 -- buffer line of the diffstat summary row
-            for _, r in ipairs(format_diffstat(files, opts.palette)) do
-                rows[#rows + 1] = r
-            end
-            rows[#rows + 1] = highlight_text("")
-            diff_start = #rows + 1 -- buffer line of the first patch line
-
-            -- Submodule change blocks (§11.7): replace each `Subproject commit`
-            -- pair with its change graph. Splicing shifts buffer lines, so build
-            -- patch<->buffer maps for the file-jump and context-header lookups
-            -- rather than the plain 1:1 offset (which holds only with no splice).
-            local diff_rows = format_diff(patch, opts.palette)
-            local repl = {} -- from_line -> { to_line, rows, hashes, path }
-            for _, ch in ipairs(submodule.parse_changes(patch)) do
-                local block_rows, block_hashes = submodule_block(opts, ch, sub_results[ch.path])
-                repl[ch.from_line] = {
-                    to_line = ch.to_line,
-                    rows = block_rows,
-                    hashes = block_hashes, -- block-row index -> commit hash (§11.7.6)
-                    path = ch.path,
-                    old = ch.old, -- the bump's pointers, marked on open (§11.7.6)
-                    new = ch.new,
-                }
-            end
-            local patch_to_buf, buf_to_patch = {}, {}
-            local pi = 1
-            while pi <= #diff_rows do
-                local r = repl[pi]
-                if r then
-                    local at = #rows + 1 -- buffer line of the block's first row
-                    for bi, br in ipairs(r.rows) do
-                        rows[#rows + 1] = br
-                        buf_to_patch[#rows] = pi -- block lines govern by the file's region
-                        -- A commit row becomes a link to that commit in the
-                        -- submodule's repo (root + the relative path; §11.7.6).
-                        if root and r.hashes[bi] then
-                            sub_jumps[#rows] = { repo = root .. "/" .. r.path,
-                                hash = r.hashes[bi], old = r.old, new = r.new }
-                        end
-                    end
-                    for k = pi, r.to_line do patch_to_buf[k] = at end
-                    pi = r.to_line + 1
-                else
-                    rows[#rows + 1] = diff_rows[pi]
-                    patch_to_buf[pi], buf_to_patch[#rows] = #rows, pi
-                    pi = pi + 1
-                end
-            end
-
-            -- Summary sits at stat_start; file j at stat_start + j. Its diff
-            -- section starts where its `diff --git` line landed (identity when
-            -- nothing was spliced).
-            for j, f in ipairs(files) do
-                file_jumps[stat_start + j] = patch_to_buf[f.start] or (diff_start + f.start - 1)
-            end
-            -- Context-header lookup over the same patch (§11.6); when a block was
-            -- spliced the buffer is no longer 1:1 with the patch, so hand
-            -- ctx_rows_for the inverse map.
-            diff_ctx = diff_contexts(patch)
-            if next(repl) then diff_buf_to_patch = buf_to_patch end
-        end
+        -- Build the content rows + index maps (shared with the search preview,
+        -- §15.3), then bind the window-specific upvalues the keymaps/context
+        -- header read. Row indices are buffer lines here (we write at line 0).
+        local rows, info = build_commit_rows(opts, {
+            commit = commit, range = range, root = root,
+            meta = meta_output, diff = diff_output, sub_results = sub_results,
+        })
+        action_line = info.action_line
+        file_jumps = info.file_jumps
+        sub_jumps = info.sub_jumps
+        diff_ctx, diff_start = info.diff_ctx, info.diff_start
+        diff_buf_to_patch = info.diff_buf_to_patch
 
         local lines = {}
         for _, r in ipairs(rows) do
@@ -1298,6 +1343,7 @@ end
 ---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
 ---@field pin_upstream? boolean  pinning a local branch also pins its tracked upstream (default true); §6.3/§10.6
+---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 
 ---@class GraphAttach : ListViewAttach
@@ -2315,6 +2361,206 @@ local function h_refpick(ctx)
     })
 end
 
+-- <leader>s (and :GitloomSearch): fuzzy commit search (spec §15). A snacks.picker
+-- over the in-memory commit set — matching subject + author, already resident so
+-- there is no fetch and no cache (§15.2). The preview shows the commit view (§11)
+-- under a graph snippet locating the commit (§15.3); confirm jumps and centers the
+-- graph (within-view navigation, §14.2 / §15.4). (`/` is the filter-search, §16.)
+local function h_commit_search(ctx)
+    local opts, repo = ctx.opts, ctx.repo
+    local gwin = ctx:win() -- the graph window to refocus / move on confirm
+    local picker_ok, picker = pcall(require, "snacks.picker")
+    if not picker_ok then
+        vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
+        return
+    end
+
+    -- Items from repo.order (1:1 with commits, the §3.1 --all set). Skip the
+    -- working-tree virtual commits (§4.2) — they are not real commits.
+    local items = {}
+    for _, it in ipairs(repo.order or {}) do
+        local c = it.commit
+        if c and c.hash and not c.virtual then
+            local subject, author = c.message or "", c.author or ""
+            local ok, rel = pcall(function() return c.date and format_relative(c.date) or "" end)
+            items[#items + 1] = {
+                hash = c.hash,
+                short = c.hash:sub(1, 8),
+                subject = subject,
+                author = author,
+                reldate = ok and rel or "",
+                text = subject .. "  " .. author, -- the fuzzy haystack (§15.2)
+            }
+        end
+    end
+    if #items == 0 then
+        vim.notify("gitloom: no commits to search", vim.log.levels.INFO)
+        return
+    end
+
+    -- Full hash -> repo.display row map for the snippet focus (§15.3), including
+    -- collapsed region members -> their head's row, so a folded commit locates on
+    -- its collapsed head (§10.3). Stable for the picker session (no reflow then).
+    local row_of = {}
+    local function map_row(node, i)
+        if node and node.hash then row_of[node.hash] = i end
+        for _, h in ipairs((node and node.region) or {}) do row_of[h] = i end
+    end
+    for i, dit in ipairs(repo.display or {}) do
+        if dit.commit then map_row(dit.commit, i) end
+        if dit.type == "markers" then
+            for _, m in ipairs(dit.markers or {}) do map_row(m, i) end
+        end
+    end
+
+    local search_opts = opts.search or {}
+    local radius = math.max(0, math.floor(((search_opts.snippet or 7) - 1) / 2))
+
+    -- Per-hash session cache of the fetched detail/diff (§15.3). `showing` is the
+    -- hash the preview currently wants; a late fetch writes only if still current
+    -- (snacks reuses one preview buffer across items).
+    local detail_cache = {}
+    local showing = nil
+
+    local function render_preview(pctx)
+        local prev = pctx.preview
+        local pbuf = prev.win and prev.win.buf
+        if not (pbuf and vim.api.nvim_buf_is_valid(pbuf)) then return end
+        local item = pctx.item
+        local commit = repo.commits[item.hash]
+        local rows = {}
+
+        -- Graph snippet (§15.3): the commit's neighbourhood in repo.display.
+        local focus = row_of[item.hash]
+        if focus then
+            for _, r in ipairs(render.graph_snippet(opts, repo.display, focus, radius)) do
+                rows[#rows + 1] = r
+            end
+        else
+            rows[#rows + 1] = highlight_text("(not shown in the current view)", "Comment")
+        end
+        rows[#rows + 1] = highlight_text("")
+
+        -- Commit detail (§11.2 via build_commit_rows) once fetched + present.
+        local cached = detail_cache[item.hash]
+        if commit and cached then
+            for _, r in ipairs(build_commit_rows(opts, {
+                commit = commit, meta = cached.meta, diff = cached.diff,
+                action = false, -- not actionable in a preview
+            })) do
+                rows[#rows + 1] = r
+            end
+        elseif commit then
+            rows[#rows + 1] = highlight_text("Loading…", "Comment")
+        end
+
+        local lines, ns = {}, prev:ns()
+        for _, r in ipairs(rows) do lines[#lines + 1] = r.text end
+        prev:set_lines(lines)
+        vim.api.nvim_buf_clear_namespace(pbuf, ns, 0, -1)
+        for i, r in ipairs(rows) do
+            for _, hl in ipairs(r.highlight or {}) do
+                if hl.hl then
+                    pcall(vim.api.nvim_buf_set_extmark, pbuf, ns, i - 1, hl.start_pos,
+                        { end_col = hl.end_pos, hl_group = hl.hl })
+                end
+            end
+        end
+
+        -- Centre on the match (§15.3): the first line with a query token, else
+        -- the commit subject. Done in the preview window.
+        local pwin = prev.win and prev.win.win
+        if pwin and vim.api.nvim_win_is_valid(pwin) then
+            local pat = pctx.picker and pctx.picker.input and pctx.picker.input.filter
+                and pctx.picker.input.filter.pattern or ""
+            local target = nil
+            for tok in tostring(pat):gmatch("%S+") do
+                local needle = tok:lower()
+                for i, l in ipairs(lines) do
+                    if l:lower():find(needle, 1, true) then target = i break end
+                end
+                if target then break end
+            end
+            if not target and item.subject ~= "" then
+                for i, l in ipairs(lines) do
+                    if l:find(item.subject, 1, true) then target = i break end
+                end
+            end
+            if target then
+                pcall(vim.api.nvim_win_set_cursor, pwin, { target, 0 })
+                pcall(vim.api.nvim_win_call, pwin, function() vim.cmd("normal! zz") end)
+            end
+        end
+    end
+
+    picker.pick({
+        source = "gitloom_search",
+        title = "Gitloom search",
+        items = items,
+        -- Float above the graph: the single-window z-order model (§2.1/§14) keeps
+        -- the host at a fixed zindex, so a transient float sits at float_zindex.
+        layout = {
+            preset = "default",
+            layout = { zindex = float_zindex(gwin) },
+        },
+        ---@param item { short: string, reldate: string, author: string, subject: string }
+        format = function(item)
+            local al = picker.util.align
+            local ret = {}
+            ret[#ret + 1] = { al(item.short, 8), "SnacksPickerGitCommit" }
+            ret[#ret + 1] = { " " }
+            ret[#ret + 1] = { al(item.reldate, 12), "SnacksPickerComment" }
+            ret[#ret + 1] = { " " }
+            ret[#ret + 1] = { al(item.author, 16, { truncate = true }), "SnacksPickerGitBranch" }
+            ret[#ret + 1] = { " " }
+            ret[#ret + 1] = { item.subject, "SnacksPickerComment" }
+            return ret
+        end,
+        preview = function(pctx)
+            pctx.preview:reset()
+            pctx.preview:minimal()
+            -- No wrap: the graph snippet's lanes line up by column, so a wrapped
+            -- row would mangle them (and the diff). Scrolls horizontally instead.
+            pctx.preview:wo({ wrap = false })
+            pctx.preview:set_title(pctx.item.short .. "  " .. pctx.item.subject)
+            local hash = pctx.item.hash
+            showing = hash
+            render_preview(pctx)
+            -- Fetch detail + diff on demand (§11.1), then re-render if still
+            -- current. Cached per hash for the session.
+            if repo.commits[hash] and not detail_cache[hash] then
+                fetch_commit_detail(hash).next(function(meta)
+                    return fetch_commit_diff(hash).next(function(diff)
+                        return { meta = meta, diff = diff }
+                    end)
+                end).next(function(res)
+                    detail_cache[hash] = res
+                    if showing == hash then render_preview(pctx) end
+                end)
+            end
+        end,
+        confirm = function(p, item)
+            p:close()
+            if not item then return end
+            -- Run after the picker tears down; snacks restores focus to the window
+            -- behind the float, so refocus the graph first (as the ref picker does).
+            vim.schedule(function()
+                if not (gwin and vim.api.nvim_win_is_valid(gwin)) then return end
+                pcall(vim.api.nvim_set_current_win, gwin)
+                if not ctx:goto_hash(item.hash) then
+                    vim.notify(
+                        ("gitloom: %s is not visible (hidden?)"):format(item.short),
+                        vim.log.levels.INFO)
+                    return
+                end
+                ctx:center_view()
+                ctx:update_cone()
+                ctx:update_panes()
+            end)
+        end,
+    })
+end
+
 -- P: pin / unpin the branch under the cursor as an anchor (§10.6).
 local function h_pin(ctx)
     local w = ctx:win()
@@ -2390,6 +2636,7 @@ local GRAPH_KEYS = {
     ["c"] = h_focus,
     ["p"] = h_pack,
     ["<leader>b"] = h_refpick,
+    ["<leader>s"] = h_commit_search,
     ["P"] = h_pin,
     ["i"] = h_laneids,
     ["F"] = h_panes,
@@ -2764,6 +3011,13 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Pin the pair (§6.3/§10.6): pinning a local branch also pins its tracked
         -- upstream remote ref, so both lanes stay in full and a divergence is drawn.
         pin_upstream = true,
+        -- Commit search (§15): `snippet` graph rows shown around the commit in the
+        -- preview (odd, so the commit is centered); `layout` is the preview
+        -- arrangement (only "vertical" — snippet above detail — for now, §15.3).
+        search = {
+            snippet = 7,
+            layout = "vertical",
+        },
         icons = {
             --merge = "M",
         },
@@ -3344,6 +3598,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         for key, handler in pairs(GRAPH_KEYS) do
             vim.keymap.set("n", key, function() handler(ctx) end, { buffer = buf, nowait = true })
         end
+        -- `:GitloomSearch` — the command equivalent of `<leader>s` (spec §15.1),
+        -- bound buffer-local on the graph buffer (search targets this graph's repo).
+        pcall(vim.api.nvim_buf_create_user_command, buf, "GitloomSearch",
+            function() h_commit_search(ctx) end,
+            { desc = "Gitloom: fuzzy commit search (§15)" })
 
         -- Move the cursor onto the display row that now represents `hash` — a real
         -- commit row, the marker (head/packed) whose region contains it, or a
