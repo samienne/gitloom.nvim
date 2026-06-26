@@ -581,6 +581,72 @@ function M.get_column_chars(opts, columns, emphasis)
     return result
 end
 
+--- A short one-line label for a snippet row (spec §15.3): the commit subject,
+--- a collapsed head's region count, or a packed marker-group's marker count.
+---@param item OrderItem
+---@return string
+local function snippet_label(item)
+    if item.type == "markers" then
+        local n = #M.marker_units(item)
+        return n .. (n == 1 and " marker" or " markers")
+    end
+    local c = item.commit
+    if not c then return "" end
+    if c.collapsed then
+        local n = c.count or (c.region and #c.region) or 0
+        return n .. (n == 1 and " commit" or " commits")
+    end
+    return c.message or ""
+end
+
+--- Render a compact graph snippet (spec §15.3): the laid-out `items` in the
+--- window `[focus - radius, focus + radius]` as graph glyphs + a short subject,
+--- the focus row marked with a left gutter. Pure over the already-laid-out items
+--- (each must carry `.columns` from columns.layout) — reused by the
+--- commit-search preview to locate a commit in the graph. The graph column is
+--- padded to a common width so the lanes align across rows (left-padded under
+--- `opts.mirror`, which right-aligns lane 1 against the message, else
+--- right-padded). Returns the compose rows and the 1-based index of the focus
+--- row within them, so the caller can centre / highlight it.
+---@param opts GraphOptions
+---@param items OrderItem[]
+---@param focus integer  -- index in `items` to centre on
+---@param radius integer  -- rows kept above and below the focus
+---@return table[] rows  -- compose { text, highlight }
+---@return integer focus_row  -- 1-based row index of the focus within `rows`
+function M.graph_snippet(opts, items, focus, radius)
+    local lo = math.max(1, focus - radius)
+    local hi = math.min(#items, focus + radius)
+
+    -- Phase 2 each row's graph cells, and track the widest so they can be padded
+    -- to a shared column (emphasis off — the snippet is a neutral locator).
+    local graphs, maxw = {}, 0
+    for i = lo, hi do
+        local g = M.get_column_chars(opts, items[i].columns, false)
+        graphs[i] = g
+        maxw = math.max(maxw, vim.fn.strdisplaywidth(g.text))
+    end
+
+    local rows = {}
+    local focus_row = 1
+    for i = lo, hi do
+        local g = graphs[i]
+        local pad = string.rep(" ", maxw - vim.fn.strdisplaywidth(g.text))
+        -- Mirror right-aligns the graph (lane 1 hugs the message edge), so pad on
+        -- the left; the conventional layout pads on the right.
+        local graph_cell = opts.mirror and compose({ pad, g }) or compose({ g, pad })
+        local is_focus = (i == focus)
+        local gutter = highlight_text(is_focus and "▸ " or "  ",
+            is_focus and (opts.palette and opts.palette.selected) or "Comment")
+        local subject = highlight_text(snippet_label(items[i]),
+            is_focus and (opts.palette and opts.palette.selected) or nil)
+        rows[#rows + 1] = compose({ gutter, graph_cell, " ", subject })
+        if is_focus then focus_row = #rows end
+    end
+
+    return rows, focus_row
+end
+
 -- ── Row rendering (the listview DisplayElement) ─────────────────────────────
 
 --- Whether a commit renders as **two real buffer rows** in the current label

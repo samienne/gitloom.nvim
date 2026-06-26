@@ -307,6 +307,10 @@ Coverage:
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
+- `tests/snippet_spec.lua` — `graph_snippet` (the commit-search graph snippet,
+  §15.3): the `[focus±radius]` window + reported focus row, top/bottom clamping,
+  the focus-row gutter marker, the per-row subject, the shared graph-column width
+  (subjects aligned), and a collapsed head labelled by its region count
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -344,6 +348,7 @@ metadata pure helpers; §13),
 virtual-commit pure helpers; §3.3/§4.2/§11.8),
 `reachable_cone`, `mark_reachable`, `build_graph` (Phase 1, delegates to
 `columns.layout`), `get_column_chars` (Phase 2, the renderer),
+`graph_snippet` (the commit-search graph snippet; §15.3),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
 `owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
 helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the

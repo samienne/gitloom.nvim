@@ -933,6 +933,12 @@ new layout behaviour and needs a specification.md §5 amendment first.
   input column (`dir = "up"` keeps lanes entering from above, `"down"` lanes
   leaving below; the rest blank), reused through `get_column_chars` for
   glyphs/colour/dimming and mirroring. `down` is the dual-mode message row.
+- `graph_snippet(opts, items, focus, radius)` — a compact "where is this commit"
+  locator for the commit-search preview (spec §15.3): the rows of `items` in
+  `[focus - radius, focus + radius]` (clamped) rendered as graph cells
+  (`get_column_chars`) padded to a shared width plus a short subject, the focus
+  row marked with a gutter. Pure over already-laid-out items; returns the compose
+  rows and the focus's 1-based row index. Unit-tested (`snippet_spec`).
 
 ### Selection and navigation
 
@@ -1006,7 +1012,14 @@ resolution renders the diff **action label** (when a provider is configured;
 §11.5), then the metadata (`format_commit_detail`), then the diffstat
 (`format_diffstat`), then the diff (`format_diff`) into the buffer (real lines +
 namespaced extmark highlights, then made read-only). The cursor is parked on the
-action label after render. `q` closes it. The pure
+action label after render. `q` closes it. The row assembly — action label,
+metadata, diffstat, diff, plus the submodule change blocks and the per-render
+index maps (file jumps, the §11.6 context lookup) — is factored into
+`build_commit_rows(opts, spec)`, a window-independent helper that emits the
+compose `{text, highlight}` rows for any buffer. `open_commit_view` writes them
+into its host-window frame; the **commit-search preview** (§15.3, below) writes
+the same rows (with `action = false`) into the picker's preview buffer, so the
+two renderings never drift. The pure
 pieces — `parse_show`, `format_commit_detail`, `format_diff`, `diffstat_files`,
 and `format_diffstat` — are unit-tested; only the window/IO glue is not. The
 refs in the view come from the row's commit (`decoration_texts`), not a
@@ -1052,6 +1065,46 @@ height is 0–2), looks up the governing file/hunk, and shows each line only onc
 its real header has scrolled above that effective top — closing the overlay when
 nothing sticks. It is decoration only; a `WinClosed` autocmd tears it down with
 the view.
+
+### Commit search
+
+`/` (and the buffer-local `:GitloomSearch`) opens a `snacks.picker` over the
+in-memory commit set (specification.md §15). `open_search` (a closure in
+`M.open`) builds one item per real commit from `repo.order` — `hash`, `short`,
+`subject`, `author`, a relative date, and `text = subject .. author` (the fuzzy
+haystack, §15.2) — so the match is client-side over resident data: no git query,
+no cache. Working-tree virtual commits (§4.2) are skipped.
+
+The **preview** is a custom `snacks` preview function. It renders, into the one
+preview buffer: a **graph snippet** locating the commit
+(`render.graph_snippet(opts, repo.display, focus, radius)`, §15.3) above the
+**commit view** rows (`build_commit_rows` with `action = false`, fetched on
+demand and cached per hash for the session). A full `hash → repo.display` row map
+(built once when the picker opens, including collapsed region members → their
+head's row, §10.3) resolves the snippet's focus row, so a folded commit locates
+on its collapsed head. The detail fetch (`fetch_commit_detail` then
+`fetch_commit_diff`) re-renders the preview when it resolves, guarded by a
+`showing` token so a late fetch never clobbers a newer selection (snacks reuses
+one preview buffer). After rendering, the preview is centered on the first line
+containing a query token (else the subject) and that line highlighted (§15.3).
+**Confirm** refocuses the graph float, `goto_hash`es the commit, and re-centers —
+within-view navigation (§14.2), no stack push; a hidden commit is a no-op with a
+notice, mirroring the ref picker.
+
+The picker float's `zindex` is set explicitly to the **live graph zindex + 20**
+(`layout = { preset = "default", layout = { zindex = … } }`). snacks' own
+auto-lift (`Snacks.win.zindex`) caps at 100 and gitloom's accumulating zindex
+ladder (§2.1) can push the graph past that, which would leave the picker *behind*
+the graph; the explicit floor avoids it. This is a stopgap — a z-order refactor on
+another branch reworks the stacking model, so this is a likely **merge-conflict /
+revisit point**.
+
+> `open_search` reaches its module helpers (`render`, `build_commit_rows`,
+> `fetch_commit_*`, …) through **local `require`s** rather than capturing them as
+> `M.open` upvalues: `M.open` already sits at Lua's hard 60-upvalue ceiling, so
+> each new module-local referenced inside it would overflow the function. The
+> local-require trick keeps them as `open_search`'s own locals. `build_commit_rows`
+> is exposed as `M.build_commit_rows` so the local require can reach it.
 
 ### Submodule change view
 

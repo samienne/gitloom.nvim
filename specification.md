@@ -935,8 +935,8 @@ Endpoint     = Commit | "index" | "worktree"
 - `search` — the commit-search picker (§15): `snippet` is the number of graph
   rows shown around the commit in the preview (**default `7`**, odd so the commit
   sits centered); `layout` is how the graph snippet and the commit detail are
-  arranged in the preview — `"horizontal"` (default, side by side) or
-  `"vertical"` (snippet above the detail).
+  arranged in the preview — `"vertical"` (default, snippet above the detail). A
+  side-by-side `"horizontal"` layout is deferred (it needs a second preview pane).
 
 ### setup() wiring
 
@@ -2028,10 +2028,10 @@ drawn from the already-laid-out projection (`repo.display`, §10), with the
 commit's own row marked, showing the real lanes in their graph colours so the
 snippet matches the main view exactly.
 
-The snippet and the commit detail are shown **side by side** by default; their
-arrangement is configurable (§8). The preview is **centered on the match**: the
-matched text is located in the rendered detail, scrolled to the center, and
-highlighted.
+The snippet is shown **above** the commit detail in the one preview buffer; a
+side-by-side arrangement is a configurable enhancement (§8, deferred — it needs a
+second preview pane). The preview is **centered on the match**: the matched text
+is located in the rendered detail, scrolled to the center, and highlighted.
 
 ### 15.4 Confirm / navigation
 
