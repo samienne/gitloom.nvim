@@ -46,6 +46,11 @@ even though it ships as part of the same suite. See
   (staged, unstaged, untracked) on top of HEAD; open any to inspect its
   diff in the commit view or the external viewer. Updates live as you edit or
   stage (and on `R`); strictly read-only — gitloom never stages or commits
+- **Search & filter** — `<leader>gl` fuzzy-finds a commit by subject/author in a
+  picker (preview shows the commit + a graph snippet); `/` is a live in-graph
+  **filter** that folds the graph to matching commits in place (the rest
+  collapse), with `<C-j>`/`<C-k>` to step matches, `<CR>` to jump (opening the
+  branch), and `<C-s>` to keep it as a persistent view you return from with `<C-o>`
 
 ### Planned
 
@@ -149,6 +154,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `<leader>gl` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
+| `/` | Filter the graph — a live, isolated overlay that folds it to commits whose subject/author match (the rest collapse); `<C-j>`/`<C-k>` (or `<Up>`/`<Down>`) step matches, `<CR>` jumps to one (opening its branch), `<C-s>` stamps it as a persistent view, `<Esc>` cancels |
 | `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |

@@ -311,6 +311,13 @@ Coverage:
   §15.3): the `[focus±radius]` window + reported focus row, top/bottom clamping,
   the focus-row gutter marker, the per-row subject, the shared graph-column width
   (subjects aligned), and a collapsed head labelled by its region count
+- `tests/filter_spec.lua` — the in-graph filter-search pure core (§16):
+  `smartcase_match` (case-insensitive unless the needle has an uppercase; literal
+  substring, not a pattern), `filter_keep` (the keep-set from commits × query over
+  subject **or** author; smartcase; blank query → empty), and `view.project`'s
+  `keep` set (§16.3: a match stays a normal commit while the runs between matches
+  collapse; junctions preserved; a kept match is never a node-less junction; nil
+  keep = the plain collapse)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -352,10 +359,12 @@ virtual-commit pure helpers; §3.3/§4.2/§11.8),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
 `owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
 helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
-marker-packing pass; §10.4), and `collapse_owners` (the region's collapsible
-owners under the cursor; §10.4). `columns.layout` is reached via
-`require("gitloom.graph.columns")`; the view builder `view.project` /
-`view.signatures` / `view.owners` via `require("gitloom.graph.view")` (§10).
+marker-packing pass; §10.4), `collapse_owners` (the region's collapsible
+owners under the cursor; §10.4), and `smartcase_match` / `filter_keep` (the
+filter-search matcher + keep-set; §16.2). `columns.layout` is reached via
+`require("gitloom.graph.columns")`; the view builder `view.project` (which takes
+the §16.3 `keep` set) / `view.signatures` / `view.owners` via
+`require("gitloom.graph.view")` (§10).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
 `window_right` (the selection-windowed overflow packer — window + left/right `+N`
 counts; §6), `refresh_columns` (the column-width packer), and

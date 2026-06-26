@@ -1078,11 +1078,12 @@ the view.
 ### Commit search
 
 `<leader>gl` (and the buffer-local `:GitloomSearch`) opens a `snacks.picker` over
-the in-memory commit set (specification.md §15). `open_search` (a closure in
-`M.open`) builds one item per real commit from `repo.order` — `hash`, `short`,
-`subject`, `author`, a relative date, and `text = subject .. author` (the fuzzy
-haystack, §15.2) — so the match is client-side over resident data: no git query,
-no cache. Working-tree virtual commits (§4.2) are skipped.
+the in-memory commit set (specification.md §15). `h_commit_search(ctx)` — a
+module-level `GRAPH_KEYS` handler — builds one item per real commit from
+`repo.order` (via `ctx.repo`): `hash`, `short`, `subject`, `author`, a relative
+date, and `text = subject .. author` (the fuzzy haystack, §15.2) — so the match is
+client-side over resident data: no git query, no cache. Working-tree virtual
+commits (§4.2) are skipped.
 
 The **preview** is a custom `snacks` preview function. It renders, into the one
 preview buffer: a **graph snippet** locating the commit
@@ -1100,20 +1101,56 @@ containing a query token (else the subject) and that line highlighted (§15.3).
 within-view navigation (§14.2), no stack push; a hidden commit is a no-op with a
 notice, mirroring the ref picker.
 
-The picker float's `zindex` is set explicitly to the **live graph zindex + 20**
-(`layout = { preset = "default", layout = { zindex = … } }`). snacks' own
-auto-lift (`Snacks.win.zindex`) caps at 100 and gitloom's accumulating zindex
-ladder (§2.1) can push the graph past that, which would leave the picker *behind*
-the graph; the explicit floor avoids it. This is a stopgap — a z-order refactor on
-another branch reworks the stacking model, so this is a likely **merge-conflict /
-revisit point**.
+The picker float sits above the graph via `layout = { preset = "default", layout =
+{ zindex = float_zindex(ctx:win()) } }` — the single-window z-order model (§2.1):
+the host keeps a fixed zindex and transient floats layer at `float_zindex` (host +
+10). The preset is required (without it the layout drops the preview window).
+`build_commit_rows` is exposed as `M.build_commit_rows` so the picker (and its
+preview) share the commit-view renderer.
 
-> `open_search` reaches its module helpers (`render`, `build_commit_rows`,
-> `fetch_commit_*`, …) through **local `require`s** rather than capturing them as
-> `M.open` upvalues: `M.open` already sits at Lua's hard 60-upvalue ceiling, so
-> each new module-local referenced inside it would overflow the function. The
-> local-require trick keeps them as `open_search`'s own locals. `build_commit_rows`
-> is exposed as `M.build_commit_rows` so the local require can reach it.
+### Filter search (in-graph)
+
+`/` (`h_filter(ctx)`) is the in-graph **filter** (specification.md §16) — a
+transient, isolated overlay distinct from the §15 picker. The pure core lives in
+the engine: `view.project` takes a **`keep` set** (§16.3) of commit hashes that
+never contract (like junctions, §10.3), and `select.filter_keep` / `smartcase_match`
+build that set from a query over subject+author (§16.2, smartcase substring).
+Tested in `filter_spec`.
+
+The window glue:
+
+- **State** is `ctx.filter = { query, keep, current }`; `reflow` force-collapses
+  every owner (a mode-only override, so the signature cache survives) and passes
+  `keep` to `view.project`, so only matches and junctions stay visible (§16.3).
+- **The overlay** is a one-line floating input (`b:completion = false` so a
+  completion plugin can't grab its insert-mode keys). Typing re-filters live,
+  debounced via a `filter_gen` counter (§16.4). `<C-j>`/`<C-k>` (and `<Up>`/`<Down>`)
+  step the current match through `filter_goto`, which records `ctx.filter.current`
+  (driving the §16.7 matched-substring highlight in `display_item`) and moves the
+  graph cursor *behind* the focused input (`goto_hash`/`center_view` target
+  `ctx:win()`, not the current window).
+- **`<CR>`** (`select_dismiss`) discards the filter, opens the match's branch
+  (`ensure_expanded` — sets the collapsed owners reaching it to normal), and jumps
+  to the commit with a **recorded** motion (`goto_hash(hash, true)` → `{lnum}G`) so
+  the pre-filter spot (tracked by hash, since expanding shifts lines) enters the
+  jumplist and the hybrid `<C-o>` returns there (§14.3).
+- **Isolation (§16.1)** is only needed for the **stamp**: the transient overlay
+  can't change modes (the input owns the keys), so cancel/dismiss just clear
+  `ctx.filter`. `<C-s>`/`<C-CR>` (`do_stamp`) deep-copies `view_state.modes/pinned`
+  into the live view state and pushes a `filter` nav frame reusing the graph buffer
+  (the `nav.push_frame` wipe-guard protects it); its `on_enter` re-installs the
+  copy + filter; `on_show` restores `ctx.base_view` on `<C-o>`. So the base's
+  collapse/pin are provably untouched, no bookkeeping. `/` over a stamped view
+  refines it in place; `n`/`N` walk matches there.
+
+> **Jumplist + the listview.** In-graph jumps (filter `<CR>`, ref-pick) record the
+> jumplist so `<C-o>`/`<C-i>` work (§14.3, hybrid: in-buffer jumplist first, then
+> the view stack — `list[idx]` = back, `list[idx+1]` = current, `list[idx+2]` =
+> forward). The listview must therefore **not** corrupt the jumplist on a dimming
+> refresh (§12), which re-renders some rows' glyphs: a multi-line block `set_lines`
+> collapses jumplist entries within its range, so the renderer replaces only the
+> changed lines, **one at a time** (a 1-for-1 single-line replace preserves the
+> entry), falling back to a block write only when the row count changes.
 
 ### Submodule change view
 
