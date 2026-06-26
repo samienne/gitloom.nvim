@@ -2405,6 +2405,106 @@ local GRAPH_KEYS = {
     ["o"] = function(ctx) if ctx.sel.active then selection_swap(ctx) end end,
 }
 
+-- ── Autocmd bodies + debounce schedulers (spec §3.4/§12). Module-level, ctx-driven;
+-- the autocmds are registered in open_graph but their bodies live here. ──────────
+
+-- Recomputing the cone and redrawing on *every* CursorMoved makes held j/k feel
+-- sluggish, so debounce it: each move re-arms a short timer and only the last —
+-- once the cursor settles — does the work. `ctx.applying` suppresses the
+-- WinScrolled the deferred refresh emits; a real scroll that lands during it is
+-- remembered in `ctx.pending` and replayed, so the footer never goes stale.
+local CONE_DEBOUNCE_MS = 60
+local function schedule_cone_update(ctx)
+    ctx.cone_gen = ctx.cone_gen + 1
+    local gen = ctx.cone_gen
+    vim.defer_fn(function()
+        local w = ctx:win()
+        if gen ~= ctx.cone_gen or not w then return end
+        -- Skip if a sub-frame took over the host window since this was scheduled
+        -- (§14): don't recompute/redraw the graph onto a commit view.
+        if vim.api.nvim_win_get_buf(w) ~= ctx.buf then return end
+        ctx:update_cone()
+        ctx.applying = true
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+        ctx.applying = false
+        ctx:maybe_update_panes()
+        if ctx.pending then ctx.pending = false; ctx:schedule_cone_update() end
+    end, CONE_DEBOUNCE_MS)
+end
+GRAPH_HELPERS.schedule_cone_update = schedule_cone_update
+
+-- Working-tree refresh triggers (§3.4): a buffer write or regaining focus
+-- re-reads the dirty state, debounced so rapid events coalesce into one git read.
+-- Skipped while a commit selection is active (§13) so a background write never
+-- yanks the selection out from under the user.
+local WT_DEBOUNCE_MS = 200
+local function schedule_wt_refresh(ctx)
+    if ctx.opts.working_tree == false then return end
+    ctx.wt_gen = ctx.wt_gen + 1
+    local gen = ctx.wt_gen
+    vim.defer_fn(function()
+        local w = ctx:win()
+        if gen ~= ctx.wt_gen or not w then return end
+        -- Not while a sub-frame (a commit view, §14) owns the host window.
+        if vim.api.nvim_win_get_buf(w) ~= ctx.buf then return end
+        if ctx.sel.active then return end
+        ctx:refresh_worktree(true) -- silent: no "history moved" notice on auto-refresh
+    end, WT_DEBOUNCE_MS)
+end
+GRAPH_HELPERS.schedule_wt_refresh = schedule_wt_refresh
+
+-- Rebuild the dimmed highlight groups after a colorscheme change (the derived
+-- groups are wiped by `hi clear`) and redraw (§12).
+local function on_color_scheme(ctx)
+    reset_dim_cache()
+    reset_gen_cache()
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+end
+
+-- Stacking (§2.1): the active git root follows the focused graph (graphs/repos
+-- stack and the I/O layer has a single active root), so re-target it on entry.
+local function on_buf_enter(ctx)
+    git.set_cwd(ctx.repo.root)
+end
+
+-- On moving to a different row, reset the ref selection to the message, remember
+-- the position (§2), recompute the cone for the new pivot (debounced), and
+-- re-park. ctx.last_line lets a programmatic jump (the ref picker, §2) pre-set the
+-- selection and suppress the reset.
+local function on_cursor_moved(ctx)
+    local w = ctx:win()
+    if not w then return end
+    local line = vim.api.nvim_win_get_cursor(w)[1]
+    if line == ctx.last_line then return end
+    ctx.last_line = line
+    -- Commit selection (§13) drives the cursor/emphasis from its own handlers.
+    if ctx.sel.active then return end
+    -- Remember the commit under the cursor for this repo (§2); skip rows with no
+    -- commit so a marker-less line never clobbers a good remembered position.
+    local h = ctx:cursor_hash(line)
+    if h then saved_positions[ctx.repo_key] = h end
+    local item, _, sub = ctx:order_at(line)
+    -- A packed marker line pre-selects its first marker (§10.4).
+    if item and item.type == "markers" then
+        ctx.selection_state.commit = item
+        ctx.selection_state.index = (#marker_units(item) > 0) and 1 or nil
+        ctx.selection_visible = ctx.selection_state.index ~= nil
+        ctx:place_cursor()
+        ctx:schedule_cone_update()
+        return
+    end
+    local commit = item and item.commit or nil
+    ctx.selection_state.commit = commit
+    -- In dual mode, landing on a labelled commit's first row (sub 0) pre-selects
+    -- the first label (§2/§6.1); other rows/modes default to the message.
+    local auto = ctx.opts.label_mode == "dual" and sub == 0
+        and commit and #decoration_texts(commit) > 0
+    ctx.selection_state.index = auto and 1 or nil
+    ctx.selection_visible = auto and true or false
+    ctx:place_cursor()
+    ctx:schedule_cone_update()
+end
+
 -- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
 -- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
 -- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
@@ -2631,6 +2731,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field worktree_head? string
     ---@field last_line? integer
     ---@field selection_visible boolean
+    --- == debounce state (Phase B4) ==
+    ---@field cone_gen integer       cone-update debounce generation
+    ---@field applying boolean       suppresses the WinScrolled emitted by the deferred refresh
+    ---@field pending boolean        a real scroll dropped during `applying`, replayed after
+    ---@field wt_gen integer         working-tree refresh debounce generation
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
     ---@field build_display_index fun(self:GraphCtx)
@@ -2660,6 +2765,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field maybe_update_panes fun(self:GraphCtx)
     ---@field update_footer fun(self:GraphCtx)
     ---@field resync fun(self:GraphCtx, silent:boolean?)
+    ---@field refresh_worktree fun(self:GraphCtx, silent:boolean?)
+    --- == debounce schedulers (Phase B4; attached from GRAPH_HELPERS) ==
+    ---@field schedule_cone_update fun(self:GraphCtx)
+    ---@field schedule_wt_refresh fun(self:GraphCtx)
 
     ---@type Repo
     local repo = {
@@ -3170,32 +3279,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         local pane_gen = 0
         local pane_topline = nil
 
-        -- Recomputing the cone and redrawing on *every* CursorMoved makes held
-        -- j/k feel sluggish on large graphs, so debounce it: each move re-arms a
-        -- short timer and only the last one — once the cursor settles — does the
-        -- work. The walk stays synchronous (Lua is single-threaded and the editor
-        -- API isn't usable off the main loop); we just run it far less often.
-        -- `applying` suppresses the WinScrolled the deferred refresh may emit. A
-        -- real scroll that lands during that window is remembered in `pending` and
-        -- replayed, so the footer never goes stale on a dropped scroll.
-        local CONE_DEBOUNCE_MS = 60
-        local cone_gen, applying, pending = 0, false, false
-        local function schedule_cone_update()
-            cone_gen = cone_gen + 1
-            local gen = cone_gen
-            vim.defer_fn(function()
-                if gen ~= cone_gen or not vim.api.nvim_win_is_valid(win) then return end
-                -- Skip if a sub-frame took over the host window since this was
-                -- scheduled (§14): don't recompute/redraw the graph onto a commit view.
-                if vim.api.nvim_win_get_buf(win) ~= buf then return end
-                update_cone()
-                applying = true
-                if lv and lv.controller then lv.controller.refresh() end
-                applying = false
-                maybe_update_panes()
-                if pending then pending = false; schedule_cone_update() end
-            end, CONE_DEBOUNCE_MS)
-        end
+        -- The cone-update debounce generation + scroll-suppress guards (read by the
+        -- module-level schedule_cone_update / WinScrolled, §12). `applying`
+        -- suppresses the WinScrolled the deferred refresh emits; a real scroll
+        -- during it is remembered in `pending` and replayed.
+        ctx.cone_gen, ctx.applying, ctx.pending = 0, false, false
 
         -- Working-tree refresh (§3.4): re-read the dirty state and rebuild the
         -- virtual commits on the current HEAD anchor. It first re-resolves HEAD, so
@@ -3303,103 +3391,40 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- derived groups are wiped by `hi clear`) and redraw (§12).
         vim.api.nvim_create_autocmd("ColorScheme", {
             group = vim.api.nvim_create_augroup("GitloomDim_" .. buf, { clear = true }),
-            callback = function()
-                reset_dim_cache()
-                reset_gen_cache()
-                if lv and lv.controller then
-                    lv.controller.refresh()
-                end
-            end,
+            callback = function() on_color_scheme(ctx) end,
         })
 
         local group = vim.api.nvim_create_augroup("Gitloom_" .. buf, { clear = true })
 
-        -- Working-tree refresh triggers (§3.4): a buffer write (in-Neovim edit /
-        -- stage) or regaining focus (the user did something in another terminal)
-        -- re-reads the dirty state, debounced so rapid events coalesce into one git
-        -- read. Skipped while a commit selection is active (§13) so a background
-        -- write never yanks the selection out from under the user.
-        local WT_DEBOUNCE_MS = 200
-        local wt_gen = 0
-        local function schedule_wt_refresh()
-            if opts.working_tree == false then return end
-            wt_gen = wt_gen + 1
-            local gen = wt_gen
-            vim.defer_fn(function()
-                if gen ~= wt_gen or not vim.api.nvim_win_is_valid(win) then return end
-                -- Not while a sub-frame (a commit view, §14) owns the host window —
-                -- a background write/focus must not reflow the graph onto it.
-                if vim.api.nvim_win_get_buf(win) ~= buf then return end
-                if sel.active then return end
-                refresh_worktree(true) -- silent: no "history moved" notice on auto-refresh
-            end, WT_DEBOUNCE_MS)
-        end
+        -- The working-tree refresh debounce generation (read by the module-level
+        -- schedule_wt_refresh, §3.4).
+        ctx.wt_gen = 0
         vim.api.nvim_create_autocmd("BufWritePost", {
             group = group,
-            callback = schedule_wt_refresh,
+            callback = function() ctx:schedule_wt_refresh() end,
         })
         vim.api.nvim_create_autocmd("FocusGained", {
             group = group,
-            callback = schedule_wt_refresh,
+            callback = function() ctx:schedule_wt_refresh() end,
         })
 
-        -- Stacking (spec §2.1): the active git root follows the focused graph.
-        -- Graphs stack (a submodule opened from the commit-view link, §11.7.6,
-        -- or another repo from the picker), and the git I/O layer has a single
-        -- active root — so on re-entering this graph, re-target it to this repo's
-        -- root, else its on-demand fetches would read the last-opened repo.
+        -- Stacking (spec §2.1): the active git root follows the focused graph
+        -- (re-target the I/O layer on entry, §2.1).
         vim.api.nvim_create_autocmd("BufEnter", {
             group = group,
             buffer = buf,
-            callback = function() git.set_cwd(repo.root) end,
+            callback = function() on_buf_enter(ctx) end,
         })
 
         -- On moving to a different row, reset the selection to the message,
         -- recompute the cone for the new pivot, redraw the dimming, and re-park.
-        -- last_line is declared in the outer scope so a programmatic jump can
-        -- pre-set the selection and suppress the reset (the ref picker, §2).
-        last_line = nil
+        -- ctx.last_line lets a programmatic jump pre-set the selection and suppress
+        -- the reset (the ref picker, §2). Body: on_cursor_moved (module-level).
+        ctx.last_line = nil
         vim.api.nvim_create_autocmd("CursorMoved", {
             group = group,
             buffer = buf,
-            callback = function()
-                local line = vim.api.nvim_win_get_cursor(win)[1]
-                if line == last_line then return end
-                last_line = line
-                -- Commit selection (§13) drives the cursor and emphasis from its
-                -- own handlers; skip the ref pre-select / pivot-cone path entirely.
-                if sel.active then return end
-                -- Remember the commit under the cursor for this repo so reopening
-                -- the graph restores the position (§2). Skip rows with no commit so
-                -- a marker-less line never clobbers a good remembered position.
-                local h = cursor_hash(line)
-                if h then saved_positions[repo_key] = h end
-                local item, _, sub = ctx:order_at(line)
-                -- Landing on a packed marker line pre-selects its first marker
-                -- (§10.4), so h/l and <CR> act on a marker right away.
-                if item and item.type == "markers" then
-                    selection_state.commit = item
-                    selection_state.index = (#marker_units(item) > 0) and 1 or nil
-                    ctx.selection_visible = selection_state.index ~= nil
-                    place_cursor()
-                    schedule_cone_update()
-                    return
-                end
-                local commit = item and item.commit or nil
-                selection_state.commit = commit
-                -- In dual mode landing on a labelled commit's first row (sub 0,
-                -- where the labels live) pre-selects the first one (§2/§6.1); the
-                -- message row and other modes default to the message (no
-                -- selection).
-                local auto = opts.label_mode == "dual" and sub == 0
-                    and commit and #decoration_texts(commit) > 0
-                selection_state.index = auto and 1 or nil
-                ctx.selection_visible = auto and true or false
-                -- Park the cursor now (responsive); the cone + dimming redraw is
-                -- debounced so it lands once movement stops.
-                place_cursor()
-                schedule_cone_update()
-            end,
+            callback = function() on_cursor_moved(ctx) end,
         })
 
         -- Scrolling (no row change) shifts the visible window, so the
@@ -3420,12 +3445,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if vim.api.nvim_win_get_buf(win) ~= buf then return end
                 local ev = vim.v.event
                 if not (ev and ev[tostring(win)]) then return end
-                if applying then pending = true; return end -- replayed after the refresh
+                if ctx.applying then ctx.pending = true; return end -- replayed after the refresh
                 -- The view actually moved: abandon any in-flight pane build (its
                 -- seam is now stale) at once; the debounced pass below starts a
                 -- fresh one once scrolling settles.
                 pane_gen = pane_gen + 1
-                schedule_cone_update()
+                ctx:schedule_cone_update()
             end,
         })
 
@@ -4309,6 +4334,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         ctx.update_panes = update_panes
         ctx.maybe_update_panes = maybe_update_panes
         ctx.resync = resync
+        -- Exposed so the module-level schedule_wt_refresh can call it (§3.4).
+        ctx.refresh_worktree = refresh_worktree
 
         -- (The cursor is kept away from the window edges by the window-local
         -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
