@@ -667,22 +667,24 @@ local function display(win, buf, model, first, last)
     vim.bo[buf].modifiable = true
     vim.bo[buf].readonly = false
 
-    -- Replace exactly the buffer lines the rendered item blocks cover — but ONLY
-    -- when the text actually changed. A reachability-dimming refresh (§12) re-runs
-    -- the render with identical text and different highlights; `set_lines` over the
-    -- whole range would delete+reinsert those lines and **corrupt the jumplist**
-    -- (forward entries lost), breaking `<C-o>`/`<C-i>` (§14.3). Skipping it when
-    -- the text is unchanged leaves the jumplist intact; the extmarks below still
-    -- re-apply the new (dimmed) highlights.
+    -- Write the rendered lines into the buffer **without corrupting the jumplist**
+    -- (§14.3). A multi-line block `set_lines(a, b, …)` deletes+reinserts the range
+    -- and collapses any jumplist entries inside it to the range start — which broke
+    -- `<C-o>`/`<C-i>` after a reachability-dimming refresh (§12), since the dimming
+    -- re-renders some rows' glyphs (cone arms gap out) over the visible range. A
+    -- **single-line 1-for-1** replace preserves the entry on that line (verified).
+    -- So: when the row count is unchanged (every refresh except a relayout) replace
+    -- only the changed lines, one at a time; otherwise fall back to the block write
+    -- (a true content change / relayout, where a jumplist reset is acceptable).
     local cur = vim.api.nvim_buf_get_lines(buf, base - 1, base - 1 + #lines, false)
-    local text_changed = #cur ~= #lines
-    if not text_changed then
-        for i = 1, #lines do
-            if cur[i] ~= lines[i] then text_changed = true; break end
-        end
-    end
-    if text_changed then
+    if #cur ~= #lines then
         vim.api.nvim_buf_set_lines(buf, base - 1, base - 1 + #lines, false, lines)
+    else
+        for i = 1, #lines do
+            if cur[i] ~= lines[i] then
+                vim.api.nvim_buf_set_lines(buf, base - 1 + (i - 1), base - 1 + i, false, { lines[i] })
+            end
+        end
     end
     vim.api.nvim_buf_clear_namespace(buf, namespace, base - 1, base - 1 + #lines)
 
