@@ -67,7 +67,7 @@ gitloom's own topological order (reproducing git's `--topo-order`), or git's dat
 / author-date order — reordering in place and keeping the cursor on its commit.
 `V` enters **commit selection** (§13) — a modal range
 selection along one branch, fed to the diff provider and the commit view's range
-mode. `<leader>s` opens a **commit search** (§15) — a fuzzy picker over commit
+mode. `<leader>gl` opens a **commit search** (§15) — a fuzzy picker over commit
 subjects and authors that jumps the cursor to the chosen commit. `/` enters the
 **filter search** (§16) — a live, isolated overlay that contracts the graph to
 matching commits (kept as normal commits, the rest collapsed); `<C-j>`/`<C-k>`
@@ -2004,7 +2004,7 @@ submodule update can never quietly mutate the submodule's saved layout.
 
 ## 15. Commit search
 
-`<leader>s` opens a **commit search** picker (snacks.picker) over the
+`<leader>gl` opens a **commit search** picker (snacks.picker) over the
 repository's commit set — a fuzzy finder across every commit in the model, with a
 preview that shows the commit (§11) alongside a snippet of the graph locating it.
 Selecting a result moves the cursor to that commit and centers the graph on it.
@@ -2015,7 +2015,7 @@ to one.)
 
 ### 15.1 Entry point
 
-`<leader>s` (and `:GitloomSearch`) opens the picker immediately, populated from
+`<leader>gl` (and `:GitloomSearch`) opens the picker immediately, populated from
 the in-memory commit model (§3, §4) — the same `--all` set the graph laid out, in
 `repo.order`. No git query is run: the searchable fields are already resident.
 The picker lists one entry per commit; result rows follow snacks' native

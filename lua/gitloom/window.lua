@@ -355,7 +355,7 @@ local KEYBINDS = {
     { "R", "Resync with the repository (refs + new commits + working tree)" },
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
-    { "<leader>s", "Search commits by subject / author (picker; :GitloomSearch)" },
+    { "<leader>gl", "Search commits by subject / author (picker; :GitloomSearch)" },
     { "/", "Filter the graph to matching commits (live; C-j/C-k step · CR jump · C-s stamp · Esc cancel)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
@@ -2388,7 +2388,7 @@ local function h_refpick(ctx)
     })
 end
 
--- <leader>s (and :GitloomSearch): fuzzy commit search (spec §15). A snacks.picker
+-- <leader>gl (and :GitloomSearch): fuzzy commit search (spec §15). A snacks.picker
 -- over the in-memory commit set — matching subject + author, already resident so
 -- there is no fetch and no cache (§15.2). The preview shows the commit view (§11)
 -- under a graph snippet locating the commit (§15.3); confirm jumps and centers the
@@ -2918,7 +2918,7 @@ local GRAPH_KEYS = {
     ["c"] = h_focus,
     ["p"] = h_pack,
     ["<leader>b"] = h_refpick,
-    ["<leader>s"] = h_commit_search,
+    ["<leader>gl"] = h_commit_search,
     ["/"] = h_filter,
     ["n"] = function(ctx) if ctx.filter then filter_goto(ctx, 1) end end,
     ["N"] = function(ctx) if ctx.filter then filter_goto(ctx, -1) end end,
@@ -3896,7 +3896,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         for key, handler in pairs(GRAPH_KEYS) do
             vim.keymap.set("n", key, function() handler(ctx) end, { buffer = buf, nowait = true })
         end
-        -- `:GitloomSearch` — the command equivalent of `<leader>s` (spec §15.1),
+        -- `:GitloomSearch` — the command equivalent of `<leader>gl` (spec §15.1),
         -- bound buffer-local on the graph buffer (search targets this graph's repo).
         pcall(vim.api.nvim_buf_create_user_command, buf, "GitloomSearch",
             function() h_commit_search(ctx) end,
