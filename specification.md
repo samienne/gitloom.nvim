@@ -82,7 +82,11 @@ mode.
   message.
   `?` opens a float listing all keybindings. The window **title** identifies the
   repository the graph is for (§2.1): its name, plus the current branch once HEAD
-  is known (a caller-supplied `win.title` is left untouched). The footer shows
+  is known (a caller-supplied `win.title` is left untouched). The graph's buffer
+  is additionally **named** after the repository root (`<root path> (gitloom)`), so
+  an external GUI window title — e.g. Neovide's OS titlebar, which Neovim derives
+  from the active buffer — identifies the repo by path instead of showing an
+  unnamed scratch buffer. The footer shows
   live status (the active merge mode and ref label mode, a `N collapsed, M hidden`
   summary when any branch modes are set, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole

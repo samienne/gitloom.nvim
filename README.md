@@ -124,6 +124,10 @@ the most-recently-open one, and `<C-w>q` **destroys** it. Within a window,
 views, and drilled-in submodules (below). Each repository's cursor position is
 remembered for the session.
 
+The graph buffer is named `<repo path> (gitloom)`, so a GUI window title — e.g.
+Neovide's titlebar — identifies which repository is open by its path rather than
+showing an unnamed scratch buffer. (Requires `:set title`.)
+
 | Key | Action |
 |-----|--------|
 | `q` | Hide the graph window (`<leader>wg` returns to it, `<C-w>q` destroys it) |
