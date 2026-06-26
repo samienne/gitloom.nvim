@@ -55,6 +55,9 @@ even though it ships as part of the same suite. See
   reflowing to match
 - **Graph-initiated actions** and integrations (e.g. diffview) where they
   arise naturally from the graph
+- **"Update available" marker** — flag when a tracked branch is behind its
+  remote, queried with `git ls-remote` (no `fetch`, no objects downloaded,
+  nothing written to the repo) so it stays true to the read-only viewer model
 
 ## Requirements
 
