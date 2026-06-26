@@ -232,7 +232,9 @@ function nav.push_frame(root, frame)
     if not (sess and sess.stack) then return end
     local dropped = navstack.push(sess.stack, frame)
     for _, d in ipairs(dropped) do
-        if d.buf and vim.api.nvim_buf_is_valid(d.buf) then
+        -- Never wipe the shared graph buffer: a stamped-filter frame (§16.5)
+        -- reuses host.buf, so a truncated filter frame must not delete it.
+        if d.buf and d.buf ~= sess.host.buf and vim.api.nvim_buf_is_valid(d.buf) then
             pcall(vim.api.nvim_buf_delete, d.buf, { force = true })
         end
     end
@@ -2642,11 +2644,17 @@ local function h_filter(ctx)
         end
     end
 
-    -- The graph view to return to on cancel (§16.4). The transient overlay is
-    -- inherently isolated: the input owns the keys, so no collapse/pin can happen
-    -- while it is open, and reflow's force-collapse is local (§16.1) — so cancel
-    -- just clears ctx.filter and restores this view (no view-state bookkeeping).
+    -- The graph view at overlay-open, restored on cancel (§16.4).
     local saved_view = vim.api.nvim_win_call(gwin, vim.fn.winsaveview)
+    -- The filter active before the overlay opened: nil from the base graph, or the
+    -- stamped filter when re-opened over a stamped view (§16.5). Cancel restores it.
+    local prev_filter = ctx.filter
+    -- Are we editing a **stamped** filter (the current nav frame is a filter frame)?
+    -- Then <CR>/<C-s> refine it in place; otherwise <CR> jumps & dismisses and
+    -- <C-s> stamps a new one (§16.5).
+    local sess = nav.sessions[ctx.host_root]
+    local cur_frame = sess and navstack.current(sess.stack)
+    local from_stamp = cur_frame ~= nil and cur_frame.kind == "filter"
 
     local ibuf = vim.api.nvim_create_buf(false, true)
     vim.bo[ibuf].buftype = "nofile"
@@ -2710,8 +2718,19 @@ local function h_filter(ctx)
         return item and item.commit and item.commit.hash or nil
     end
 
-    -- <CR>: select the current match and dismiss (§16.4) — discard the filter,
-    -- return to the base view, cursor on the match (resolved to its visible row).
+    -- <Esc>: cancel (§16.4) — restore the pre-overlay filter (nil from base, or the
+    -- stamped filter when refining) and the pre-overlay view.
+    local function cancel()
+        ctx.filter = prev_filter
+        close_input()
+        ctx:reflow()
+        pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        ctx:update_cone()
+        ctx:update_panes()
+    end
+
+    -- <CR> from the base overlay: select the current match and dismiss (§16.4) —
+    -- discard the filter, return to the base view, cursor on the match.
     local function select_dismiss()
         apply(buf_query()) -- settle the latest query
         local hash = ctx.filter and current_match_hash() or nil
@@ -2727,13 +2746,50 @@ local function h_filter(ctx)
         ctx:update_panes()
     end
 
-    -- <Esc>: cancel (§16.4) — discard the filter, return to base at the original cursor.
-    local function cancel()
-        ctx.filter = nil
+    -- <C-s>/<C-CR> from the base overlay: **stamp** the filtered view into a
+    -- persistent nav-stack entry (§16.5). It owns an isolated copy of the view
+    -- state (§16.1) — installed here and restored by on_show on `<C-o>` — and
+    -- reuses the graph buffer (the wipe guard protects it). The frame's on_enter
+    -- re-installs the copy + filter when navigated back to.
+    local function do_stamp()
+        apply(buf_query()) -- settle the latest query
+        if not ctx.filter then cancel(); return end -- empty query: nothing to stamp
+        local filter = ctx.filter
+        filter.current = filter.current or current_match_hash()
+        local copy_modes = vim.deepcopy(ctx.view_state.modes)
+        local copy_pinned = vim.deepcopy(ctx.view_state.pinned)
+        ctx.view_state.modes = copy_modes
+        ctx.view_state.pinned = copy_pinned
         close_input()
-        ctx:reflow()
-        pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
-        ctx:update_cone()
+        local frame
+        frame = {
+            kind = "filter", buf = ctx.buf, label = "/ " .. filter.query,
+            on_enter = function()
+                ctx.view_state.modes = copy_modes
+                ctx.view_state.pinned = copy_pinned
+                ctx.filter = frame.filter or filter
+                ctx:reflow()
+                filter_land(ctx)
+                ctx:update_panes()
+            end,
+            filter = filter,
+        }
+        nav.push_frame(ctx.host_root, frame)
+    end
+
+    -- <CR>/<C-s> while refining a stamped filter (§16.5): update the current frame's
+    -- query in place (no new entry), stay in the stamped view, land on a match. An
+    -- emptied query is treated as cancel (the stamp is kept; exit with `<C-o>`).
+    local function refine()
+        apply(buf_query())
+        if not ctx.filter then cancel(); return end
+        if cur_frame and cur_frame.kind == "filter" then
+            cur_frame.filter = ctx.filter
+            cur_frame.label = "/ " .. ctx.filter.query
+            if sess then nav.render_crumbs(sess) end
+        end
+        close_input()
+        filter_land(ctx)
         ctx:update_panes()
     end
 
@@ -2742,16 +2798,10 @@ local function h_filter(ctx)
         if ctx.filter then filter_goto(ctx, dir) end
     end
 
-    -- <C-s>/<C-CR>: stamp the filtered view into a persistent stack entry (§16.5).
-    -- Not yet implemented — the next increment wires the breadcrumb frame.
-    local function stamp()
-        vim.notify("gitloom: filter stamping (§16.5) not yet implemented", vim.log.levels.INFO)
-    end
-
     vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" },
         { buffer = ibuf, callback = schedule })
     local m = { buffer = ibuf, nowait = true }
-    vim.keymap.set({ "i", "n" }, "<CR>", select_dismiss, m)
+    vim.keymap.set({ "i", "n" }, "<CR>", from_stamp and refine or select_dismiss, m)
     vim.keymap.set({ "i", "n" }, "<Esc>", cancel, m)
     vim.keymap.set({ "i", "n" }, "<C-j>", function() step(1) end, m)
     vim.keymap.set({ "i", "n" }, "<C-k>", function() step(-1) end, m)
@@ -2759,8 +2809,8 @@ local function h_filter(ctx)
     -- single-line input has no vertical motion of its own, §16.4).
     vim.keymap.set({ "i", "n" }, "<Down>", function() step(1) end, m)
     vim.keymap.set({ "i", "n" }, "<Up>", function() step(-1) end, m)
-    vim.keymap.set({ "i", "n" }, "<C-s>", stamp, m)
-    vim.keymap.set({ "i", "n" }, "<C-CR>", stamp, m)
+    vim.keymap.set({ "i", "n" }, "<C-s>", from_stamp and refine or do_stamp, m)
+    vim.keymap.set({ "i", "n" }, "<C-CR>", from_stamp and refine or do_stamp, m)
 
     -- Preview the seed immediately (editing a stamped filter), then type.
     schedule()
@@ -3296,8 +3346,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field worktree_head? string
     ---@field last_line? integer
     ---@field selection_visible boolean
-    ---@field filter? { query: string, keep: table<string,boolean> }  in-graph filter-search (§16); nil = none
+    ---@field filter? { query: string, keep: table<string,boolean>, current?: string }  in-graph filter-search (§16); nil = none
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
+    ---@field base_view { modes: table, pinned: table }  base view-state tables restored on filter exit (§16.1)
     --- == debounce state (Phase B4) ==
     ---@field cone_gen integer       cone-update debounce generation
     ---@field applying boolean       suppresses the WinScrolled emitted by the deferred refresh
@@ -3507,10 +3558,15 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         worktree_head = worktree_head,
         last_line = nil,
         selection_visible = false,
-        -- In-graph filter-search (§16): nil = no filter; else { query, keep } —
-        -- the active query and its match set (hashes never contracted, §16.3).
+        -- In-graph filter-search (§16): nil = no filter; else { query, keep,
+        -- current } — the active query, its match set (hashes never contracted,
+        -- §16.3), and the current match's hash (drives the §16.7 highlight).
         filter = nil,
         filter_gen = 0, -- live-rebuild debounce generation (§16.4)
+        -- The **base** view-state tables (§16.1): a stamped filter installs a
+        -- private copy into view_state and restores these on exit, so the base's
+        -- collapse/pin are provably untouched (no per-change bookkeeping).
+        base_view = { modes = view_state.modes, pinned = view_state.pinned },
         win = gwin,
     }
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
@@ -4849,6 +4905,15 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         local hw = gwin()
         if hw then win = hw end
         if lv and lv.buf then buf = lv.buf end
+        -- Returning to the base graph from a stamped filter (§16.5): drop the
+        -- filter and restore the base view state (the private copy is discarded),
+        -- then reflow to the base before repositioning. No-op when not filtered.
+        if ctx.filter then
+            ctx.filter = nil
+            ctx.view_state.modes = ctx.base_view.modes
+            ctx.view_state.pinned = ctx.base_view.pinned
+            ctx:reflow()
+        end
         local target = saved_positions[repo_key]
         if not (target and goto_hash(target)) then
             local headref = repo.head and repo.refs["HEAD"]
