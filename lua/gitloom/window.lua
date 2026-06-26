@@ -1830,6 +1830,581 @@ local function mark_node_cone(ctx, pivot, top, bottom)
 end
 GRAPH_HELPERS.mark_node_cone = mark_node_cone
 
+-- ── Commit selection (range) — window glue (spec §13). Module-level, ctx-driven;
+-- registered into GRAPH_KEYS alongside the keymap handlers. ────────────────────
+
+-- Hand the selection range to the external diff provider (§13.5; the `D` key and
+-- the range view's action label).
+local function open_selection_diff(ctx)
+    local open = ctx.opts.diff and ctx.opts.diff.open
+    if not open then
+        vim.notify("gitloom: no diff provider configured (set diff.open)", vim.log.levels.WARN)
+        return
+    end
+    local r = ctx:selection_range()
+    if r then open(r) end
+end
+
+-- <CR> while selecting (§13.5): open the commit view in range mode — the selected
+-- commit list + the combined range diff/diffstat.
+local function open_selection_view(ctx)
+    local r = ctx:selection_range()
+    if not r then return end
+    local commits = ctx:selection_commits()
+    local n = #commits
+    local title = (n == 1) and ("Commit " .. (commits[1] and commits[1].hash:sub(1, 7) or ""))
+        or (("Selection: %d commits"):format(n))
+    open_commit_view(ctx.opts, nil, { range = r, commits = commits, title = title }, ctx.repo.root)
+end
+
+-- Recompute the path emphasis, move the cursor onto the moving end, and redraw
+-- (§13). update_cone branches to mark_path while selection is active.
+local function selection_redraw(ctx)
+    local sel = ctx.sel
+    if sel.cursor then ctx:goto_hash(sel.cursor.hash) end
+    ctx:update_cone()
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:place_cursor()
+    ctx:update_footer()
+    ctx:maybe_update_panes()
+end
+
+-- V: start selection on the row's commit (a normal commit or a collapsed head;
+-- a packed marker line is not a start point in v1). anchor = cursor = it.
+local function enter_selection(ctx, line)
+    local sel = ctx.sel
+    local item = ctx:order_at(line)
+    if not item or not item.commit or item.type == "markers" then return end
+    -- A working-tree virtual commit (§4.2) is not a selectable endpoint (v1).
+    if item.commit.virtual then return end
+    ctx:build_display_index()
+    ctx.selection_state.index = nil -- drop the ref selection (§13.3)
+    sel.active, sel.anchor, sel.cursor = true, item.commit, item.commit
+    sel.path, sel.dparent, sel.dchild = { item.commit }, {}, {}
+    selection_redraw(ctx)
+end
+
+local function exit_selection(ctx)
+    local sel = ctx.sel
+    sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
+    ctx:update_cone() -- restore the cursor-pivot cone (§12)
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:place_cursor()
+    ctx:update_footer()
+    ctx:update_panes()
+end
+
+-- j/k along the branch (§13.2): step the moving end one commit; redraw.
+local function selection_move(ctx, dir)
+    if not ctx.sel.active then return end
+    sel_step(ctx.sel, dir)
+    selection_redraw(ctx)
+end
+
+-- <C-d>/<C-u>: a half-viewport of branch commits, stopping at a tip/root (§13.2).
+local function selection_page(ctx, dir)
+    local sel = ctx.sel
+    local hw = ctx:win()
+    if not (sel.active and hw) then return end
+    local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(hw) / 2))
+    for _ = 1, steps do
+        local before = sel.cursor
+        sel_step(sel, dir)
+        if sel.cursor == before then break end
+    end
+    selection_redraw(ctx)
+    ctx:center_view()
+end
+
+-- h/l: switch branch at the nearest junction (§13.3). Negated under mirroring so
+-- `l` always moves toward the visually-right branch.
+local function selection_switch(ctx, delta)
+    local sel = ctx.sel
+    if not sel.active then return end
+    if ctx.opts.mirror ~= false then delta = -delta end
+    if sel_switch(sel, delta) then selection_redraw(ctx) end
+end
+
+-- o: swap the anchor and the moving end (§13.2).
+local function selection_swap(ctx)
+    local sel = ctx.sel
+    if not sel.active then return end
+    sel.anchor, sel.cursor = sel.cursor, sel.anchor
+    selection_redraw(ctx)
+end
+
+-- <Space> while selecting (§13.4): fold/unfold the head under the cursor in place,
+-- re-resolving the selection by hash so it covers the same commits and the view
+-- holds (saved scroll restored). A no-op on a mainline commit.
+local function selection_toggle(ctx)
+    local sel, view_state, sig_cache, repo = ctx.sel, ctx.view_state, ctx.sig_cache, ctx.repo
+    local node = sel.active and sel.cursor
+    if not node or not ctx:win() then return end
+    local owners, mode = {}, nil
+    if node.collapsed then -- a head: expand its still-collapsed owners
+        for oid in pairs(node.signature or {}) do
+            if (view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
+        end
+        mode = "normal"
+    else -- a normal/expanded commit: collapse its region, unless mainline
+        owners = collapse_owners(sig_cache.sig and sig_cache.sig[node.hash],
+            ctx:effective_pinned(), view_state.effective) or {}
+        mode = "collapsed"
+    end
+    if #owners == 0 then return end
+
+    local w = ctx:win() --[[@as integer]] -- guarded non-nil above
+    local view = vim.api.nvim_win_call(w, function() return vim.fn.winsaveview() end)
+    local anchor_is_top = (sel.path or {})[1] == sel.anchor
+    local function members(n) return n.collapsed and (n.region or {}) or { n.hash } end
+    local path_h = {}
+    for _, n in ipairs(sel.path or {}) do
+        for _, h in ipairs(members(n)) do path_h[#path_h + 1] = h end
+    end
+
+    for _, oid in ipairs(owners) do view_state.modes[oid] = mode end
+    ctx:reflow() -- rebuilds display + node_loc, drops sel
+
+    -- Map every real-commit / head hash to its new node (members → the head).
+    local by_hash = {}
+    local function add(n)
+        by_hash[n.hash] = n
+        if n.collapsed then for _, h in ipairs(n.region or {}) do by_hash[h] = n end end
+    end
+    for _, it in ipairs(repo.display or {}) do
+        if it.commit then
+            add(it.commit)
+        elseif it.type == "markers" then
+            for _, m in ipairs(it.markers or {}) do add(m) end
+        end
+    end
+    local newpath = {}
+    for _, h in ipairs(path_h) do
+        local nn = by_hash[h]
+        if nn and nn ~= newpath[#newpath] then newpath[#newpath + 1] = nn end
+    end
+    if #newpath == 0 then return end -- selection lost (e.g. all hidden); stay dropped
+    sel.path = newpath
+    -- Keep the anchor on its end; the cursor takes the other (the toggled end).
+    if anchor_is_top then
+        sel.anchor, sel.cursor = newpath[1], newpath[#newpath]
+    else
+        sel.anchor, sel.cursor = newpath[#newpath], newpath[1]
+    end
+    sel.active = true
+
+    -- Settle the viewport, then recompute the emphasis over the settled range.
+    ctx:goto_hash(sel.cursor.hash)
+    vim.api.nvim_win_call(w, function()
+        local cur = vim.api.nvim_win_get_cursor(w)
+        pcall(vim.fn.winrestview, { topline = view.topline, lnum = cur[1], col = cur[2], leftcol = 0 })
+    end)
+    ctx:update_cone()
+    if ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:place_cursor()
+    ctx:update_footer()
+    ctx:update_panes()
+end
+
+-- Feed builtin motions without remapping (so j/k/<C-d>/<C-u> fall through to the
+-- native motions instead of re-triggering our maps).
+local function feed(keys)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "n", false)
+end
+
+-- h/l: move the ref selection on the current row (§2), or switch branch while
+-- selecting (§13.3). `dir` is -1 (h) / +1 (l).
+local function move_ref(ctx, dir)
+    local sel, selection_state, opts = ctx.sel, ctx.selection_state, ctx.opts
+    -- While selecting (§13.3) h/l switch the followed branch.
+    if sel.active then selection_switch(ctx, dir); return end
+    local line = vim.api.nvim_win_get_cursor(ctx:win() --[[@as integer]])[1]
+    local item, _, sub = ctx:order_at(line)
+    -- On a packed marker line, selection moves among the markers (§10.4).
+    if item and item.type == "markers" then
+        local count = #marker_units(item)
+        local pos = (selection_state.commit == item) and selection_state.index or nil
+        selection_state.commit = item
+        selection_state.index = move_selection(pos, count, dir)
+        ctx.selection_visible = selection_state.index ~= nil
+        -- The cone is seeded from the selected head (§12) — recompute before redraw.
+        ctx:update_cone()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+        ctx:maybe_update_panes() -- the panes dim with the cone too (§6.2)
+        ctx:place_cursor()
+        return
+    end
+    local commit = item and item.commit or nil
+    if not commit then return end
+    -- In dual mode the labels live on the first row only.
+    if opts.label_mode == "dual" and sub ~= 0 then return end
+    local count = #decoration_texts(commit)
+    local pos = (selection_state.commit == commit) and selection_state.index or nil
+    selection_state.commit = commit
+    selection_state.index = move_selection(pos, count, dir)
+    ctx.selection_visible = selection_state.index ~= nil
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:place_cursor()
+end
+
+-- ── Keymap handlers (spec §2/§10/§11/§13). Module-level, ctx-driven; collected
+-- into GRAPH_KEYS and bound buffer-local in open_graph. ────────────────────────
+
+-- q: HIDE the host window (§14) — keeps the buffer + stack so <leader>wg returns.
+local function h_q(ctx) nav.hide(ctx.host_root) end
+-- <C-w>q: DESTROY the host window + clear its state (§14).
+local function h_destroy(ctx) nav.destroy(ctx.host_root) end
+
+-- m: cycle the merge/split style — full reflow.
+local function h_merge_style(ctx)
+    merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
+    ctx.opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
+    ctx:reflow()
+    ctx:update_footer()
+    ctx:place_cursor()
+end
+
+-- M: toggle graph mirroring — render-only.
+local function h_mirror(ctx)
+    ctx.opts.mirror = not ctx.opts.mirror
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:update_footer()
+    ctx:update_panes()
+    ctx:place_cursor()
+end
+
+-- B: cycle ref label placement (right / inline / dual; §6.1) — relayout.
+local function h_label_mode(ctx)
+    label_mode_index = (label_mode_index % #LABEL_MODES) + 1
+    ctx.opts.label_mode = LABEL_MODES[label_mode_index].mode
+    ctx.selection_state.index = nil
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.relayout() end
+    ctx:update_footer()
+    ctx:update_cone()
+    ctx:place_cursor()
+end
+
+-- <Space>: quick collapse ⇄ expand (§10.4); while selecting, fold/unfold (§13.4).
+local function h_space(ctx)
+    if ctx.sel.active then selection_toggle(ctx); return end
+    local line = vim.api.nvim_win_get_cursor(ctx:win() --[[@as integer]])[1]
+    local b = ctx:branch_under_cursor(line)
+    if not b or not b.owners or #b.owners == 0 then return end
+    if b.state == "collapsed" then
+        ctx:set_branch(b, "normal", b.follow)
+    elseif b.state == "expanded" then
+        ctx:set_branch(b, "collapsed", b.follow)
+    end
+end
+
+-- <CR>: commit view on a message (§11.1), else the branch action menu (§10.4).
+local function h_cr(ctx)
+    if ctx.sel.active then open_selection_view(ctx); return end
+    local line = vim.api.nvim_win_get_cursor(ctx:win() --[[@as integer]])[1]
+    local item = ctx:order_at(line)
+    if not item then return end
+    local selection_state, opts, repo = ctx.selection_state, ctx.opts, ctx.repo
+    local ref_selected = selection_state.commit == item.commit and selection_state.index ~= nil
+    if item.type ~= "markers" and item.commit and not item.commit.collapsed and not ref_selected then
+        open_commit_view(opts, item.commit, nil, repo.root)
+        return
+    end
+    local actions = {}
+    local function add(label, run) actions[#actions + 1] = { label = label, run = run } end
+    if item.type == "markers" then
+        for _, u in ipairs(marker_units(item)) do
+            local owners = {}
+            for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
+            local tip = u.marker.tip and u.marker.tip.hash
+            add("Expand " .. u.text, function() ctx:set_branch({ owners = owners }, "normal", tip) end)
+            add("Hide " .. u.text, function() ctx:set_branch({ owners = owners }, "hidden", nil) end)
+        end
+    else
+        local b = ctx:branch_under_cursor(line)
+        if b then
+            if b.state == "expanded" then
+                add("Collapse branch", function() ctx:set_branch(b, "collapsed", b.follow) end)
+                add("Hide branch", function() ctx:set_branch(b, "hidden", nil) end)
+            elseif b.state == "collapsed" then
+                add("Expand branch", function() ctx:set_branch(b, "normal", b.follow) end)
+                add("Hide branch", function() ctx:set_branch(b, "hidden", nil) end)
+            end
+            if b.commit then
+                add(b.state == "collapsed" and "Examine tip commit" or "Examine commit",
+                    function() open_commit_view(opts, b.commit, nil, repo.root) end)
+                if opts.diff and opts.diff.open then
+                    add("Open diff", function() open_diff(opts, b.commit) end)
+                end
+            end
+        end
+    end
+    if #actions == 0 then return end
+    vim.ui.select(actions, {
+        prompt = "gitloom",
+        format_item = function(a) return a.label end,
+    }, function(choice)
+        if choice then choice.run() end
+    end)
+end
+
+-- D: external diff of the commit, or (selecting) the range (§11.5/§13.5).
+local function h_diff(ctx)
+    if ctx.sel.active then open_selection_diff(ctx); return end
+    local w = ctx:win()
+    if not w then return end
+    local line = vim.api.nvim_win_get_cursor(w)[1]
+    local item = ctx:order_at(line)
+    if not item or not item.commit or item.commit.collapsed then return end
+    open_diff(ctx.opts, item.commit)
+end
+
+-- K: float with the lane breakdown for the commit under the cursor.
+local function h_lane(ctx)
+    local w = ctx:win()
+    if not w then return end
+    local line = vim.api.nvim_win_get_cursor(w)[1]
+    local item = ctx:order_at(line)
+    if not item or not item.commit then return end
+    vim.lsp.util.open_floating_preview(format_lane_info(item), "", {
+        border = "rounded",
+        focusable = true,
+        zindex = float_zindex(w),
+    })
+end
+
+-- d: toggle the date column — render-only.
+local function h_date(ctx)
+    ctx.opts.date_mode = (ctx.opts.date_mode == "relative") and "absolute" or "relative"
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:place_cursor()
+end
+
+-- H: toggle reachability dimming (§12) — render-only.
+local function h_dim(ctx)
+    ctx.opts.highlight = ctx.opts.highlight == false
+    ctx:update_cone()
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:maybe_update_panes()
+    ctx:place_cursor()
+end
+
+-- R: resync with the repository (§3.4).
+local function h_resync(ctx) ctx:resync(false) end
+
+-- S: cycle the row sort mode (§3.1).
+local function h_sort(ctx)
+    local keep
+    local ok, pos = pcall(vim.api.nvim_win_get_cursor, ctx:win())
+    if ok then keep = ctx:cursor_hash(pos[1]) end
+    sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
+    ctx:apply_sort().next(function()
+        ctx:reflow()
+        ctx:update_footer()
+        if keep then ctx:goto_hash(keep) end
+        ctx:place_cursor()
+        ctx:update_cone()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+        ctx:update_panes()
+    end)
+end
+
+-- c: toggle first-parent focus (§10.7) — reflow.
+local function h_focus(ctx)
+    ctx.opts.collapse_merged = ctx.opts.collapse_merged == false
+    ctx:reflow()
+    ctx:update_footer()
+    ctx:place_cursor()
+end
+
+-- p: toggle marker packing (§10.4) — reflow.
+local function h_pack(ctx)
+    ctx.opts.pack_markers = ctx.opts.pack_markers == false
+    ctx:reflow()
+    ctx:update_footer()
+    ctx:place_cursor()
+end
+
+-- <leader>b: jump to a branch / ref via snacks.picker (§2).
+local function h_refpick(ctx)
+    local opts, repo = ctx.opts, ctx.repo
+    local gwin = ctx:win() -- the graph window to refocus / move
+    local picker_ok, picker = pcall(require, "snacks.picker")
+    if not picker_ok then
+        vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
+        return
+    end
+    local items = ref_picker_items(repo.refs, recent_refs[ctx.repo_key])
+    if #items == 0 then
+        vim.notify("gitloom: no refs to jump to", vim.log.levels.INFO)
+        return
+    end
+    -- ref_picker_items sets each item's `text` for fuzzy matching; snacks keeps the
+    -- original (MRU) order when the query is empty.
+    local align = picker.util.align
+    picker.pick({
+        source = "gitloom_refs",
+        title = "Gitloom refs",
+        items = items,
+        layout = { preset = "select" }, -- compact, no preview window
+        ---@param item { name: string, kind: string, short: string, subject: string, track?: Upstream }
+        format = function(item)
+            local kind_hl = ({
+                head = "SnacksPickerGitBranchCurrent",
+                ["local"] = "SnacksPickerGitBranch",
+                remote = "SnacksPickerGitBranch",
+                tag = "SnacksPickerLabel",
+            })[item.kind]
+            local track_hl = (opts.palette and opts.palette.track) or {}
+            local ret = {}
+            ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
+            for _, seg in ipairs(git.track_segments(item.track)) do
+                ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
+            end
+            ret[#ret + 1] = { " " }
+            ret[#ret + 1] = { align(item.short, 8), "SnacksPickerGitCommit" }
+            ret[#ret + 1] = { " " }
+            ret[#ret + 1] = { item.subject, "SnacksPickerComment" }
+            return ret
+        end,
+        confirm = function(p, item)
+            p:close()
+            if not item then return end
+            recent_refs[ctx.repo_key] = bump_recent(recent_refs[ctx.repo_key], item.name)
+            -- Run after the picker tears down — snacks restores focus to the window
+            -- behind the float, so refocus the graph first.
+            vim.schedule(function()
+                if not (gwin and vim.api.nvim_win_is_valid(gwin)) then return end
+                pcall(vim.api.nvim_set_current_win, gwin)
+                if not ctx:goto_hash(item.hash) then
+                    vim.notify(("gitloom: %s is not visible (hidden?)"):format(item.name), vim.log.levels.INFO)
+                    return
+                end
+                -- Pre-select the picked ref's label on the landed row (§2).
+                local line = vim.api.nvim_win_get_cursor(gwin)[1]
+                local landed = ctx:order_at(line)
+                local selection_state = ctx.selection_state
+                selection_state.commit, selection_state.index = nil, nil
+                if landed and landed.type == "markers" then
+                    for i, u in ipairs(marker_units(landed)) do
+                        for _, r in ipairs(u.marker.refs or {}) do
+                            if r.name == item.name then
+                                selection_state.commit, selection_state.index = landed, i
+                                break
+                            end
+                        end
+                        if selection_state.commit == landed and selection_state.index == i then break end
+                    end
+                elseif landed and landed.commit then
+                    local idx = ref_decoration_index(landed.commit, item.name, item.kind)
+                    if idx then
+                        selection_state.commit, selection_state.index = landed.commit, idx
+                    end
+                end
+                ctx:center_view()
+                ctx:update_cone()
+                if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+                ctx:place_cursor()
+                -- Mark the landed row visited so the CursorMoved reset keeps our
+                -- pre-selection; record the remembered position (§2) too.
+                ctx.last_line = vim.api.nvim_win_get_cursor(gwin)[1]
+                local h = ctx:cursor_hash(ctx.last_line)
+                if h then saved_positions[ctx.repo_key] = h end
+                ctx:update_panes()
+            end)
+        end,
+    })
+end
+
+-- P: pin / unpin the branch under the cursor as an anchor (§10.6).
+local function h_pin(ctx)
+    local w = ctx:win()
+    if not w then return end
+    local line = vim.api.nvim_win_get_cursor(w)[1]
+    local b = ctx:branch_under_cursor(line)
+    if not b or not b.owners then return end
+    local repo, view_state = ctx.repo, ctx.view_state
+    -- Only refs are pinnable (v1, §10.6) — drop anonymous merge-parent owners.
+    local targets = {}
+    for _, oid in ipairs(b.owners) do
+        if repo.refs[oid] then targets[#targets + 1] = oid end
+    end
+    if #targets == 0 then return end
+    local want = not ctx:effective_pinned()[targets[1]]
+    for _, oid in ipairs(targets) do view_state.pinned[oid] = want end
+    ctx:reflow()
+    ctx:update_footer()
+    if b.follow then ctx:goto_hash(b.follow) end
+    ctx:place_cursor()
+end
+
+-- i: toggle the per-lane id debug column.
+local function h_laneids(ctx)
+    ctx.opts.show_lane_ids = not ctx.opts.show_lane_ids
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:update_panes()
+    ctx:place_cursor()
+end
+
+-- F: toggle the context panes (§6.2).
+local function h_panes(ctx)
+    ctx.opts.panes = ctx.opts.panes == false
+    ctx:update_panes()
+    ctx:place_cursor()
+end
+
+-- ?: float listing all keybindings.
+local function h_help(ctx)
+    vim.lsp.util.open_floating_preview(help_lines(), "", {
+        border = "rounded",
+        focusable = true,
+        zindex = float_zindex(ctx:win()),
+    })
+end
+
+-- V: enter / exit commit selection (§13).
+local function h_select(ctx)
+    local w = ctx:win()
+    if not w then return end
+    if ctx.sel.active then exit_selection(ctx) else enter_selection(ctx, vim.api.nvim_win_get_cursor(w)[1]) end
+end
+
+local function h_esc(ctx)
+    if ctx.sel.active then exit_selection(ctx) end
+end
+
+-- The single source of truth: key → handler(ctx). Bound buffer-local in open_graph.
+local GRAPH_KEYS = {
+    ["q"] = h_q,
+    ["<C-w>q"] = h_destroy,
+    ["m"] = h_merge_style,
+    ["M"] = h_mirror,
+    ["B"] = h_label_mode,
+    ["<Space>"] = h_space,
+    ["<CR>"] = h_cr,
+    ["D"] = h_diff,
+    ["K"] = h_lane,
+    ["d"] = h_date,
+    ["H"] = h_dim,
+    ["R"] = h_resync,
+    ["S"] = h_sort,
+    ["c"] = h_focus,
+    ["p"] = h_pack,
+    ["<leader>b"] = h_refpick,
+    ["P"] = h_pin,
+    ["i"] = h_laneids,
+    ["F"] = h_panes,
+    ["?"] = h_help,
+    ["V"] = h_select,
+    ["<Esc>"] = h_esc,
+    ["h"] = function(ctx) move_ref(ctx, -1) end,
+    ["l"] = function(ctx) move_ref(ctx, 1) end,
+    ["j"] = function(ctx) if ctx.sel.active then selection_move(ctx, "down") else feed(vim.v.count1 .. "j") end end,
+    ["k"] = function(ctx) if ctx.sel.active then selection_move(ctx, "up") else feed(vim.v.count1 .. "k") end end,
+    ["<C-d>"] = function(ctx) if ctx.sel.active then selection_page(ctx, "down") else feed("<C-d>") end end,
+    ["<C-u>"] = function(ctx) if ctx.sel.active then selection_page(ctx, "up") else feed("<C-u>") end end,
+    ["o"] = function(ctx) if ctx.sel.active then selection_swap(ctx) end end,
+}
+
 -- The heavy graph-window builder. Kept as a module-local (not `M.open`) so the
 -- thin `M.open` wrapper below can own the tier-1 session registry (§14) without
 -- adding an upvalue here — this function sits at LuaJIT's 60-upvalue ceiling.
@@ -2082,7 +2657,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field set_branch fun(self:GraphCtx, b:table, mode:string, follow:string?)
     --- == helpers kept nested in open_graph but exposed for the extracted callers ==
     ---@field update_panes fun(self:GraphCtx)
+    ---@field maybe_update_panes fun(self:GraphCtx)
     ---@field update_footer fun(self:GraphCtx)
+    ---@field resync fun(self:GraphCtx, silent:boolean?)
 
     ---@type Repo
     local repo = {
@@ -2380,204 +2957,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- the still-nested update_panes); exposed so the extracted helpers can call it.
     ctx.update_footer = update_footer
 
-    -- Apply a mode to a branch's owners, reflow, and keep the cursor on it (§10.4).
-    local function set_branch(b, mode, follow) return ctx:set_branch(b, mode, follow) end
-
-    -- ── Commit selection (range) — window glue (spec §13) ───────────────────
-    -- Hand the selection range to the external diff provider (§13.5; the `D`
-    -- key, and the range view's action label).
-    local function open_selection_diff()
-        local open = opts.diff and opts.diff.open
-        if not open then
-            vim.notify("gitloom: no diff provider configured (set diff.open)", vim.log.levels.WARN)
-            return
-        end
-        local r = ctx:selection_range()
-        if r then open(r) end
-    end
-    -- <CR> while selecting (§13.5): open the commit view in **range mode** — the
-    -- selected-commit list + the combined range diff/diffstat, its action label
-    -- opening the same range in the external viewer.
-    local function open_selection_view()
-        local r = ctx:selection_range()
-        if not r then return end
-        local commits = ctx:selection_commits()
-        local n = #commits
-        local title = (n == 1) and ("Commit " .. (commits[1] and commits[1].hash:sub(1, 7) or ""))
-            or (("Selection: %d commits"):format(n))
-        open_commit_view(opts, nil, { range = r, commits = commits, title = title }, repo.root)
-    end
-
-    -- Emphasis for the selected path (§13.4): light the path's commit markers and
-    -- the lane between each consecutive pair, dim the rest. Mirrors mark_reachable
-    -- — reset the highlight on every lane/marker drawn in the visible range, then
-    -- light the path. Returns the cone set (keyed by DisplayNode) for row dimming.
-
-    -- Reachability emphasis seeded from a packed marker head (spec §10.4 + §12).
-    -- On a packed line `h`/`l` selects a head with no row of its own, so
-    -- mark_reachable's index pivot can't reach it. Walk the DisplayNode graph from
-    -- the selected head — `.parents` (ancestors) then `.children` (descendants) —
-    -- bounded to the visible rows, lighting each traversed lane via its shared
-    -- edge object (by node_loc for a packed head, as mark_path does) and each cone
-    -- node's marker cell. Returns the cone set keyed by DisplayNode (row dimming).
-    -- So selecting a packed head dims the sibling heads/branches and keeps the
-    -- selected one lit, exactly like moving onto a normal head (§12).
-
-    -- Recompute the path emphasis, move the cursor onto the moving end, and
-    -- redraw (§13). update_cone branches to mark_path while selection is active.
-    local function selection_redraw()
-        if sel.cursor then goto_hash(sel.cursor.hash) end
-        update_cone()
-        if lv and lv.controller then lv.controller.refresh() end
-        place_cursor()
-        update_footer()
-        maybe_update_panes()
-    end
-    -- V: start selection on the row's commit (a normal commit or a collapsed head;
-    -- a packed marker line is not a start point in v1). anchor = cursor = it.
-    local function enter_selection(line)
-        local item = ctx:order_at(line)
-        if not item or not item.commit or item.type == "markers" then return end
-        -- Commit selection (§13) is over real commits; a working-tree virtual
-        -- commit (§4.2) is not a selectable range endpoint (v1).
-        if item.commit.virtual then return end
-        ctx:build_display_index()
-        selection_state.index = nil -- drop the ref selection (§13.3)
-        sel.active, sel.anchor, sel.cursor = true, item.commit, item.commit
-        sel.path, sel.dparent, sel.dchild = { item.commit }, {}, {}
-        selection_redraw()
-    end
-    local function exit_selection()
-        sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
-        update_cone() -- restore the cursor-pivot cone (§12)
-        if lv and lv.controller then lv.controller.refresh() end
-        place_cursor()
-        update_footer()
-        update_panes()
-    end
-    -- j/k along the branch (§13.2): step the moving end one commit; redraw.
-    local function selection_move(dir)
-        if not sel.active then return end
-        sel_step(sel, dir)
-        selection_redraw()
-    end
-    -- <C-d>/<C-u>: a half-viewport of branch commits, stopping at a tip/root
-    -- (§13.2; the exact count is a tuning point, §13.6).
-    local function selection_page(dir)
-        local hw = gwin()
-        if not (sel.active and hw) then return end
-        local steps = math.max(1, math.floor(vim.api.nvim_win_get_height(hw) / 2))
-        for _ = 1, steps do
-            local before = sel.cursor
-            sel_step(sel, dir)
-            if sel.cursor == before then break end
-        end
-        selection_redraw()
-        center_view()
-    end
-    -- h/l: switch branch at the nearest junction (§13.3). The rotation is in lane
-    -- order, so under mirroring (§5.4, lane 1 at the right) the visual direction is
-    -- reversed — negate `delta` so `l` always moves toward the visually-right
-    -- branch and `h` the left, matching how the graph reads.
-    local function selection_switch(delta)
-        if not sel.active then return end
-        if opts.mirror ~= false then delta = -delta end
-        if sel_switch(sel, delta) then selection_redraw() end
-    end
-    -- o: swap the anchor and the moving end (§13.2).
-    local function selection_swap()
-        if not sel.active then return end
-        sel.anchor, sel.cursor = sel.cursor, sel.anchor
-        selection_redraw()
-    end
-    -- <Space> while selecting (§13.4): fold/unfold the head under the cursor in
-    -- place. Expand the cursor's collapsed head (or collapse its region), then
-    -- re-resolve the selection against the new projection **by hash** so it covers
-    -- the same commits: an unfolded head expands into its whole region (so the
-    -- revealed branch stays selected/lit), a collapsed run maps back to its head.
-    -- The diff range is therefore unchanged by fold/unfold; the anchor keeps its
-    -- end and the cursor lands on the toggled (opposite) end. The saved scroll
-    -- (topline) is restored so the view does not jump. A no-op on a mainline
-    -- commit (nothing collapsible there).
-    local function selection_toggle()
-        local node = sel.active and sel.cursor
-        if not node or not gwin() then return end
-        local owners, mode = {}, nil
-        if node.collapsed then -- a head: expand its still-collapsed owners
-            for oid in pairs(node.signature or {}) do
-                if (view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
-            end
-            mode = "normal"
-        else -- a normal/expanded commit: collapse its region, unless mainline
-            owners = collapse_owners(sig_cache.sig and sig_cache.sig[node.hash],
-                ctx:effective_pinned(), view_state.effective) or {}
-            mode = "collapsed"
-        end
-        if #owners == 0 then return end
-
-        -- Capture the selection by hash + the scroll position before reflow
-        -- recreates the DisplayNodes. A collapsed head stands in for its whole
-        -- region, so expand it to its region member hashes; a normal node is
-        -- itself. Remember which end holds the anchor so we can restore both ends.
-        local w = gwin() --[[@as integer]] -- guarded non-nil above
-        local view = vim.api.nvim_win_call(w, function() return vim.fn.winsaveview() end)
-        local anchor_is_top = (sel.path or {})[1] == sel.anchor
-        local function members(n) return n.collapsed and (n.region or {}) or { n.hash } end
-        local path_h = {}
-        for _, n in ipairs(sel.path or {}) do
-            for _, h in ipairs(members(n)) do path_h[#path_h + 1] = h end
-        end
-
-        for _, oid in ipairs(owners) do view_state.modes[oid] = mode end
-        reflow() -- rebuilds display + node_loc, drops sel
-
-        -- Map every real-commit / head hash to its new node (members → the head),
-        -- then rebuild the path: an expanded head's members resolve to their own
-        -- nodes (all kept, so the branch stays selected); a still-collapsed run's
-        -- members all resolve to one head (dedup), as does a newly-collapsed run.
-        local by_hash = {}
-        local function add(n)
-            by_hash[n.hash] = n
-            if n.collapsed then for _, h in ipairs(n.region or {}) do by_hash[h] = n end end
-        end
-        for _, it in ipairs(repo.display or {}) do
-            if it.commit then
-                add(it.commit)
-            elseif it.type == "markers" then
-                for _, m in ipairs(it.markers or {}) do add(m) end
-            end
-        end
-        local newpath = {}
-        for _, h in ipairs(path_h) do
-            local nn = by_hash[h]
-            if nn and nn ~= newpath[#newpath] then newpath[#newpath + 1] = nn end
-        end
-        if #newpath == 0 then return end -- selection lost (e.g. all hidden); stay dropped
-        sel.path = newpath
-        -- Keep the anchor on its end; the cursor takes the other (the toggled end).
-        if anchor_is_top then
-            sel.anchor, sel.cursor = newpath[1], newpath[#newpath]
-        else
-            sel.anchor, sel.cursor = newpath[#newpath], newpath[1]
-        end
-        sel.active = true
-
-        -- Settle the viewport first (move to the cursor, restore the saved scroll
-        -- so the rows above the toggle stay put), *then* recompute the emphasis
-        -- over the settled range and redraw — otherwise mark_path runs over the
-        -- old range and the unfolded rows render with a stale highlight.
-        goto_hash(sel.cursor.hash)
-        vim.api.nvim_win_call(w, function()
-            local cur = vim.api.nvim_win_get_cursor(w)
-            pcall(vim.fn.winrestview, { topline = view.topline, lnum = cur[1], col = cur[2], leftcol = 0 })
-        end)
-        update_cone()
-        if lv.controller then lv.controller.refresh() end
-        place_cursor()
-        update_footer()
-        update_panes()
-    end
-
     -- The host window keeps snacks' default zindex (Z_HOST); its overlays and the
     -- transient floats layer above it via overlay_zindex / float_zindex (§2.1/§14,
     -- the single-window bounded model — no stacking ladder).
@@ -2727,467 +3106,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end,
     }
 
-    opts.win.keys = opts.win.keys or {}
-    -- q: HIDE the host window (§14), not destroy it — the navigation stack and
-    -- view state survive so `<leader>wg` can return to exactly here. snacks
-    -- hide() = close({buf=false}), so the buffer (and this closure) live on.
-    opts.win.keys.q = function() nav.hide(host_root) end
-    -- <C-w>q: DESTROY the host window and clear its state (§14). snacks close()
-    -- wipes the scratch buffer, so the session's BufWipeout cleanup drops it and a
-    -- later open rebuilds — vs. q's hide-and-keep. Acts on the host session
-    -- (host_root), so it tears down the whole window from a drilled-in frame too.
-    opts.win.keys["<C-w>q"] = function() nav.destroy(host_root) end
-    -- m: cycle the merge/split style. A full reflow (re-layout from the raw order
-    -- then re-pack) — the packed display can't be relaid in place (its marker
-    -- groups aren't single commits).
-    opts.win.keys.m = function()
-        merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
-        opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
-        reflow()
-        update_footer() -- reflect the new mode live in the footer
-        place_cursor() -- widths shifted; keep the cursor on message/ref
-    end
-    -- M: toggle graph mirroring (lane 1 on the right). A render-only change, so
-    -- just refresh the display (no relayout/re-fetch) — like the `i` toggle.
-    opts.win.keys.M = function()
-        opts.mirror = not opts.mirror
-        if lv and lv.controller then
-            lv.controller.refresh()
-        end
-        update_footer()
-        update_panes() -- re-align/re-render the footer for the new orientation
-        place_cursor()
-    end
-    -- B: cycle the ref label placement (right / inline / dual; §6.1). The layout
-    -- is unchanged, but dual turns labelled commits into two real rows, which
-    -- changes per-item line counts — so relayout (resize the buffer + rebuild the
-    -- line map), not just refresh. Reset the selection so it re-derives under the
-    -- new mode (dual pre-selects the first label on the next cursor settle).
-    opts.win.keys.B = function()
-        label_mode_index = (label_mode_index % #LABEL_MODES) + 1
-        opts.label_mode = LABEL_MODES[label_mode_index].mode
-        selection_state.index = nil
-        if lv and lv.controller then
-            lv.controller.relayout()
-        end
-        update_footer()
-        update_cone() -- buffer lines shifted; recompute the cone over the new map
-        place_cursor()
-    end
-    -- <Space>: the quick collapse ⇄ expand toggle for the branch under the cursor
-    -- (§10.4). Collapse an expanded branch or expand a marker; the cursor follows
-    -- the result (set_branch → goto_hash) so repeated <Space> flips it in place.
-    -- Two-state — hidden is the menu's job, so nothing vanishes under the cursor.
-    -- (Was <Tab>; freed for <C-i> forward navigation, §14.3.)
-    opts.win.keys["<Space>"] = function()
-        -- While selecting (§13.4), <Space> folds/unfolds the head under the cursor
-        -- in place, keeping the selection and the screen position.
-        if sel.active then selection_toggle(); return end
-        local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
-        local b = branch_under_cursor(line)
-        if not b or not b.owners or #b.owners == 0 then return end
-        if b.state == "collapsed" then
-            set_branch(b, "normal", b.follow)
-        elseif b.state == "expanded" then
-            set_branch(b, "collapsed", b.follow)
-        end
-    end
-    -- <CR>: on a normal commit row with the cursor on the message (no ref
-    -- selected) open the commit view directly — the common case (§11.1).
-    -- Otherwise — a ref selected with h/l, or a collapsed head / packed-marker row
-    -- — open the action menu (§10.4): collapse / expand / hide / examine / diff,
-    -- most-relevant first. On a packed line it lists every marker by name, so any
-    -- branch is reachable even when not all labels fit. (Collapse/expand are also
-    -- on <Tab>; diff is also on D.)
-    opts.win.keys["<CR>"] = function()
-        -- In commit selection (§13.5) <CR> opens the commit view in range mode
-        -- (the selected-commit list + combined range diff); D opens the range in
-        -- the external viewer.
-        if sel.active then open_selection_view(); return end
-        local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
-        local item = ctx:order_at(line)
-        if not item then return end
-        -- Direct commit view: a normal (non-collapsed) commit row with no ref
-        -- selected. The branch action menu is reserved for an h/l-selected ref, a
-        -- collapsed head, or a packed-marker row (§10.4).
-        local ref_selected = selection_state.commit == item.commit and selection_state.index ~= nil
-        if item.type ~= "markers" and item.commit and not item.commit.collapsed
-            and not ref_selected then
-            open_commit_view(opts, item.commit, nil, repo.root)
-            return
-        end
-        local actions = {}
-        local function add(label, run) actions[#actions + 1] = { label = label, run = run } end
-
-        if item.type == "markers" then
-            -- list every marker by name (overflow-proof access)
-            for _, u in ipairs(marker_units(item)) do
-                local owners = {}
-                for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
-                local tip = u.marker.tip and u.marker.tip.hash
-                add("Expand " .. u.text, function() set_branch({ owners = owners }, "normal", tip) end)
-                add("Hide " .. u.text, function() set_branch({ owners = owners }, "hidden", nil) end)
-            end
-        else
-            local b = branch_under_cursor(line)
-            if b then
-                if b.state == "expanded" then
-                    add("Collapse branch", function() set_branch(b, "collapsed", b.follow) end)
-                    add("Hide branch", function() set_branch(b, "hidden", nil) end)
-                elseif b.state == "collapsed" then
-                    add("Expand branch", function() set_branch(b, "normal", b.follow) end)
-                    add("Hide branch", function() set_branch(b, "hidden", nil) end)
-                end
-                if b.commit then
-                    add(b.state == "collapsed" and "Examine tip commit" or "Examine commit",
-                        function() open_commit_view(opts, b.commit, nil, repo.root) end)
-                    if opts.diff and opts.diff.open then
-                        add("Open diff", function() open_diff(opts, b.commit) end)
-                    end
-                end
-            end
-        end
-
-        if #actions == 0 then return end
-        vim.ui.select(actions, {
-            prompt = "gitloom",
-            format_item = function(a) return a.label end,
-        }, function(choice)
-            if choice then choice.run() end
-        end)
-    end
-    -- D: open the commit's diff in the external diff viewer (§11.5), or — while
-    -- selecting (§13.5) — the selected range.
-    opts.win.keys.D = function()
-        if sel.active then open_selection_diff(); return end
-        local w = win
-        if not w then return end
-        local line = vim.api.nvim_win_get_cursor(w)[1]
-        local item = ctx:order_at(line)
-        if not item or not item.commit or item.commit.collapsed then
-            return -- a collapsed head has no single commit to diff
-        end
-        open_diff(opts, item.commit)
-    end
-    -- K: float with the full lane breakdown for the commit under the cursor.
-    opts.win.keys.K = function()
-        local w = win
-        if not w then return end
-        local line = vim.api.nvim_win_get_cursor(w)[1]
-        local item = ctx:order_at(line)
-        if not item or not item.commit then
-            return
-        end
-        vim.lsp.util.open_floating_preview(format_lane_info(item), "", {
-            border = "rounded",
-            focusable = true,
-            -- On top of the current graph + panes (§2.1).
-            zindex = float_zindex(w),
-        })
-    end
-    -- d: toggle the date column between absolute and relative. Render-only.
-    opts.win.keys.d = function()
-        opts.date_mode = (opts.date_mode == "relative") and "absolute" or "relative"
-        if lv and lv.controller then
-            lv.controller.refresh()
-        end
-        place_cursor()
-    end
-    -- H: toggle reachability highlighting (dimming) on/off (§12). Render-only.
-    opts.win.keys.H = function()
-        opts.highlight = opts.highlight == false
-        update_cone() -- recompute for the current pivot so the toggle takes effect
-        if lv and lv.controller then
-            lv.controller.refresh()
-        end
-        maybe_update_panes() -- the panes dim with the cone too (§6.2); re-dim (no scroll ⇒ repaint)
-        place_cursor()
-    end
-    -- R: resync with the repository (§3.4) — re-read refs, pull newly-reachable
-    -- commits, prune orphans, re-sort, and rebuild the working-tree virtuals,
-    -- keeping the cursor/scroll/selection. The general history refresh; the
-    -- working-tree refresh is folded into it.
-    opts.win.keys.R = function()
-        resync(false)
-    end
-    -- S: cycle the row sort mode (§3.1) — gitloom's clustered topo sort, git's
-    -- exact --topo-order, or git's date / author-date order. Reorders repo.order
-    -- in place (no re-stream) and reflows, keeping the cursor on its commit.
-    opts.win.keys.S = function()
-        local keep
-        local ok, pos = pcall(vim.api.nvim_win_get_cursor, gwin())
-        if ok then keep = cursor_hash(pos[1]) end
-        sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
-        ctx:apply_sort().next(function()
-            reflow()
-            update_footer() -- footer shows the active sort mode
-            if keep then goto_hash(keep) end
-            place_cursor()
-            update_cone()
-            if lv and lv.controller then lv.controller.refresh() end
-            update_panes()
-        end)
-    end
-    -- c: toggle the first-parent focus (§10.7) — collapse every non-mainline
-    -- branch vs. show the full graph. Changes per-item line counts, so reflow.
-    opts.win.keys.c = function()
-        opts.collapse_merged = opts.collapse_merged == false
-        reflow()
-        update_footer()
-        place_cursor()
-    end
-    -- p: toggle marker packing (§10.4) — merge concurrent collapsed heads onto
-    -- shared lines vs. one per line. Changes line counts, so reflow.
-    opts.win.keys.p = function()
-        opts.pack_markers = opts.pack_markers == false
-        reflow()
-        update_footer()
-        place_cursor()
-    end
-    -- <leader>b: jump to a branch / ref via a snacks.picker (§2). Lists every ref
-    -- (HEAD included), recently jumped refs first (the session MRU); selecting one
-    -- centers the view on its commit. The jump (goto_hash) resolves a folded
-    -- commit to its collapsed head and re-runs the open-time focus steps (cone +
-    -- panes) so dimming/footer follow the new pivot; a hidden ref is a no-op.
-    opts.win.keys["<leader>b"] = function()
-        local gwin = win -- the graph float to refocus / move
-        local picker_ok, picker = pcall(require, "snacks.picker")
-        if not picker_ok then
-            vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
-            return
-        end
-        local items = ref_picker_items(repo.refs, recent_refs[repo_key])
-        if #items == 0 then
-            vim.notify("gitloom: no refs to jump to", vim.log.levels.INFO)
-            return
-        end
-        -- ref_picker_items sets each item's `text` (name + subject) for fuzzy
-        -- matching; snacks keeps the original (MRU) order when the query is empty.
-        local align = picker.util.align
-        picker.pick({
-            source = "gitloom_refs",
-            title = "Gitloom refs",
-            items = items,
-            layout = { preset = "select" }, -- compact, no preview window
-            ---@param item { name: string, kind: string, short: string, subject: string, track?: Upstream }
-            format = function(item)
-                local kind_hl = ({
-                    head = "SnacksPickerGitBranchCurrent",
-                    ["local"] = "SnacksPickerGitBranch",
-                    remote = "SnacksPickerGitBranch",
-                    tag = "SnacksPickerLabel",
-                })[item.kind]
-                local track_hl = (opts.palette and opts.palette.track) or {}
-                local ret = {}
-                ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
-                -- Upstream divergence (§6.3): the same ⇡/⇣/gone tokens as the graph.
-                for _, seg in ipairs(git.track_segments(item.track)) do
-                    ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
-                end
-                ret[#ret + 1] = { " " }
-                ret[#ret + 1] = { align(item.short, 8), "SnacksPickerGitCommit" }
-                ret[#ret + 1] = { " " }
-                ret[#ret + 1] = { item.subject, "SnacksPickerComment" }
-                return ret
-            end,
-            confirm = function(p, item)
-                p:close()
-                if not item then return end
-                recent_refs[repo_key] = bump_recent(recent_refs[repo_key], item.name)
-                -- Run after the picker tears down. snacks restores focus to the
-                -- window behind the float, so refocus the graph float first — else
-                -- the cursor we move lands in the wrong (background) window.
-                vim.schedule(function()
-                    if not (gwin and vim.api.nvim_win_is_valid(gwin)) then return end
-                    pcall(vim.api.nvim_set_current_win, gwin)
-                    if not goto_hash(item.hash) then
-                        vim.notify(
-                            ("gitloom: %s is not visible (hidden?)"):format(item.name),
-                            vim.log.levels.INFO)
-                        return
-                    end
-                    -- Pre-select the picked ref's label on the landed row (§2) so
-                    -- <CR>/the menu act on it with no h/l. A packed marker row
-                    -- selects the marker carrying the ref; a commit / collapsed
-                    -- head selects its decoration. HEAD has no label → message.
-                    local line = vim.api.nvim_win_get_cursor(gwin)[1]
-                    local landed = ctx:order_at(line)
-                    selection_state.commit, selection_state.index = nil, nil
-                    if landed and landed.type == "markers" then
-                        for i, u in ipairs(marker_units(landed)) do
-                            for _, r in ipairs(u.marker.refs or {}) do
-                                if r.name == item.name then
-                                    selection_state.commit, selection_state.index = landed, i
-                                    break
-                                end
-                            end
-                            if selection_state.commit == landed and selection_state.index == i then break end
-                        end
-                    elseif landed and landed.commit then
-                        local idx = ref_decoration_index(landed.commit, item.name, item.kind)
-                        if idx then
-                            selection_state.commit, selection_state.index = landed.commit, idx
-                        end
-                    end
-                    center_view()
-                    update_cone()
-                    -- Refresh first so the windowed refs (§6) are in the buffer,
-                    -- then park the cursor on the now-visible selected label.
-                    if lv and lv.controller then lv.controller.refresh() end
-                    place_cursor()
-                    -- Mark the landed row visited so the CursorMoved reset (which
-                    -- fires after this) keeps our pre-selection instead of clearing
-                    -- it to the message; record the remembered position (§2) too,
-                    -- since that handler — which normally does — now early-returns.
-                    last_line = vim.api.nvim_win_get_cursor(gwin)[1]
-                    local h = cursor_hash(last_line)
-                    if h then saved_positions[repo_key] = h end
-                    update_panes()
-                end)
-            end,
-        })
-    end
-    -- P: pin / unpin the branch under the cursor as an **anchor** (§10.6).
-    -- Anchors stay normal under focus; everything else collapses. HEAD is pinned
-    -- by default. Acts on the selected ref (or the region under the cursor),
-    -- restricted to real refs; changes the focus default, so reflow.
-    opts.win.keys.P = function()
-        local w = win
-        if not w then return end
-        local line = vim.api.nvim_win_get_cursor(w)[1]
-        local b = branch_under_cursor(line)
-        if not b or not b.owners then return end
-        -- Only refs are pinnable (v1, §10.6) — drop anonymous merge-parent owners.
-        local targets = {}
-        for _, oid in ipairs(b.owners) do
-            if repo.refs[oid] then targets[#targets + 1] = oid end
-        end
-        if #targets == 0 then return end
-        local want = not ctx:effective_pinned()[targets[1]]
-        for _, oid in ipairs(targets) do view_state.pinned[oid] = want end
-        reflow()
-        update_footer()
-        if b.follow then goto_hash(b.follow) end
-        place_cursor()
-    end
-    -- i: toggle the per-lane id column before the message (main view + footer).
-    opts.win.keys.i = function()
-        opts.show_lane_ids = not opts.show_lane_ids
-        if lv and lv.controller then
-            lv.controller.refresh()
-        end
-        update_panes() -- re-render the footer with/without its lane-id debug column
-        place_cursor()
-    end
-    -- F: toggle the context panes (footer) on/off.
-    opts.win.keys.F = function()
-        opts.panes = opts.panes == false
-        update_panes() -- builds it when on, closes it when off
-        place_cursor()
-    end
-    -- ?: float listing all keybindings.
-    opts.win.keys["?"] = function()
-        vim.lsp.util.open_floating_preview(help_lines(), "", {
-            border = "rounded",
-            focusable = true,
-            -- On top of the current graph + panes (§2.1).
-            zindex = float_zindex(gwin()),
-        })
-    end
-    -- h / l: move the ref selection on the current row (§2). Positions are the
-    -- branch groups then tags (decoration_texts) plus the message (rightmost,
-    -- default). Selection is held by commit identity so it follows the commit
-    -- across reflow; the cursor is moved onto the selected ref (or the message).
-    local selection_visible = false -- a decoration (not the message) is selected
-    local function move_ref(dir)
-        return function()
-            -- While selecting (§13.3) h/l switch the followed branch instead of
-            -- cycling ref decorations.
-            if sel.active then selection_switch(dir); return end
-            local line = vim.api.nvim_win_get_cursor(win --[[@as integer]])[1]
-            local item, _, sub = ctx:order_at(line)
-            -- On a packed marker line, selection moves among the markers (§10.4).
-            if item and item.type == "markers" then
-                local count = #marker_units(item)
-                local pos = (selection_state.commit == item) and selection_state.index or nil
-                selection_state.commit = item
-                selection_state.index = move_selection(pos, count, dir)
-                selection_visible = selection_state.index ~= nil
-                -- The reachability cone is seeded from the selected head (§12), so a
-                -- different marker means a different cone — recompute before redraw
-                -- so the dimming follows the selection. Synchronous: this is a
-                -- deliberate keypress, not debounced cursor drift.
-                update_cone()
-                if lv and lv.controller then lv.controller.refresh() end
-                -- The context panes dim with the cone too (§6.2); selecting a marker
-                -- changes the cone without scrolling, so re-dim them (repaint, no
-                -- rebuild) — otherwise the footer/header keep the pre-selection
-                -- highlight and a selected collapsed branch never lights below/above.
-                maybe_update_panes()
-                place_cursor()
-                return
-            end
-            local commit = item and item.commit or nil
-            if not commit then
-                return
-            end
-            -- In dual mode the labels live on the first row only; on the message
-            -- row (sub 1) there is nothing to select.
-            if opts.label_mode == "dual" and sub ~= 0 then
-                return
-            end
-            local count = #decoration_texts(commit)
-            local pos = (selection_state.commit == commit) and selection_state.index or nil
-            selection_state.commit = commit
-            selection_state.index = move_selection(pos, count, dir)
-            selection_visible = selection_state.index ~= nil
-            if lv and lv.controller then
-                lv.controller.refresh()
-            end
-            place_cursor()
-        end
-    end
-    opts.win.keys.h = move_ref(-1)
-    opts.win.keys.l = move_ref(1)
-
-    -- Commit selection (range) mode (§13). V enters/exits; while active, j/k walk
-    -- the followed branch, h/l switch branch at a junction, <C-d>/<C-u> jump a
-    -- half-viewport of branch commits, o swaps ends, <CR>/D open the range. When
-    -- inactive, j/k and <C-d>/<C-u> fall through to the builtin motions (fed
-    -- without remap so they don't re-trigger these maps); o is a no-op.
-    local function feed(keys)
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "n", false)
-    end
-    opts.win.keys.V = function()
-        local w = win
-        if not w then return end
-        if sel.active then exit_selection() else enter_selection(vim.api.nvim_win_get_cursor(w)[1]) end
-    end
-    opts.win.keys["<Esc>"] = function()
-        if sel.active then exit_selection() end
-    end
-    opts.win.keys.j = function()
-        if sel.active then selection_move("down") else feed(vim.v.count1 .. "j") end
-    end
-    opts.win.keys.k = function()
-        if sel.active then selection_move("up") else feed(vim.v.count1 .. "k") end
-    end
-    opts.win.keys["<C-d>"] = function()
-        if sel.active then selection_page("down") else feed("<C-d>") end
-    end
-    opts.win.keys["<C-u>"] = function()
-        if sel.active then selection_page("up") else feed("<C-u>") end
-    end
-    opts.win.keys.o = function()
-        if sel.active then selection_swap() end
-    end
-
-    -- Bind the graph keymaps OURSELVES, buffer-local, rather than via snacks window
-    -- keys (snacks binds them on its own buffer only). Buffer-local binding is what
-    -- lets the same handlers drive any frame buffer the host swaps in — the uniform
-    -- frames model (§14): every graph (root or a drilled-in submodule) is a frame
-    -- buffer in the one host window. Lift them out so snacks doesn't double-bind.
-    local graph_keys = opts.win.keys or {}
+    -- The graph keymaps live in the module-level GRAPH_KEYS table (key → handler(ctx));
+    -- bound OURSELVES buffer-local below, not via snacks window keys (snacks binds on
+    -- its own buffer only). Buffer-local binding is what lets the same handlers drive
+    -- any frame buffer the host swaps in — the uniform frames model (§14). Ensure
+    -- snacks doesn't also bind anything.
     opts.win.keys = nil
 
     lv = listview.open(listview_options)
@@ -3204,15 +3127,13 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         win, buf = gwin() --[[@as integer]], lv.buf
         pcall(vim.api.nvim_set_option_value, "cursorline", true, { win = win })
 
-        -- Bind each graph key buffer-local on the graph buffer. The handlers take
-        -- no argument now — they read the live host window through the `win` upvalue
-        -- (refreshed by on_win / on_enter) and act on the session via `root`, so the
-        -- same handlers drive the graph whether it owns the window or is an attached
-        -- frame in a shared host (§14 uniform frames).
-        for key, handler in pairs(graph_keys) do
-            if type(handler) == "function" then
-                vim.keymap.set("n", key, handler, { buffer = buf, nowait = true })
-            end
+        -- Bind each graph key buffer-local, wrapping the module-level handler as a
+        -- zero-arg closure over this session's `ctx` — the single upvalue each handler
+        -- needs. They read the live host window via ctx:win() and act on the session
+        -- via ctx, so the same handlers drive the graph whether it owns the window or
+        -- is an attached frame in a shared host (§14 uniform frames).
+        for key, handler in pairs(GRAPH_KEYS) do
+            vim.keymap.set("n", key, function() handler(ctx) end, { buffer = buf, nowait = true })
         end
 
         -- Move the cursor onto the display row that now represents `hash` — a real
@@ -3459,7 +3380,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if item and item.type == "markers" then
                     selection_state.commit = item
                     selection_state.index = (#marker_units(item) > 0) and 1 or nil
-                    selection_visible = selection_state.index ~= nil
+                    ctx.selection_visible = selection_state.index ~= nil
                     place_cursor()
                     schedule_cone_update()
                     return
@@ -3473,7 +3394,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local auto = opts.label_mode == "dual" and sub == 0
                     and commit and #decoration_texts(commit) > 0
                 selection_state.index = auto and 1 or nil
-                selection_visible = auto and true or false
+                ctx.selection_visible = auto and true or false
                 -- Park the cursor now (responsive); the cone + dimming redraw is
                 -- debounced so it lands once movement stops.
                 place_cursor()
@@ -4384,8 +4305,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             if top ~= pane_topline then update_panes() else repaint_panes() end
         end
         -- Kept nested (closes over the pane machinery + win); exposed so the
-        -- extracted reflow can call ctx:update_panes().
+        -- extracted reflow / handlers can call ctx:update_panes() / ctx:maybe_update_panes().
         ctx.update_panes = update_panes
+        ctx.maybe_update_panes = maybe_update_panes
+        ctx.resync = resync
 
         -- (The cursor is kept away from the window edges by the window-local
         -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
