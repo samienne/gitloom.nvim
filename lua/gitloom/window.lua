@@ -2673,8 +2673,10 @@ local function h_filter(ctx)
     -- The graph view at overlay-open, restored on cancel and used as the jumplist
     -- anchor on `<CR>` (§16.4): select_dismiss restores this cursor then jumps to
     -- the match with a real motion, so the pre-filter spot enters the jumplist and
-    -- the hybrid `<C-o>` (§14.3) returns here.
+    -- the hybrid `<C-o>` (§14.3) returns here. The pre-filter spot is also tracked
+    -- **by hash**, because opening the match's branch (§16.4) shifts line numbers.
     local saved_view = vim.api.nvim_win_call(gwin, vim.fn.winsaveview)
+    local pre_hash = ctx:cursor_hash(saved_view.lnum)
     -- The filter active before the overlay opened: nil from the base graph, or the
     -- stamped filter when re-opened over a stamped view (§16.5). Cancel restores it.
     local prev_filter = ctx.filter
@@ -2772,10 +2774,15 @@ local function h_filter(ctx)
         ctx.filter = nil
         close_input()
         ctx:reflow()
-        -- Restore the pre-filter cursor, then **jump** to the match (a real jump
-        -- motion) so the pre-filter spot lands in the jumplist and `<C-o>` returns
-        -- there (§16.4). With no match, just stay at the restored position.
-        pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        -- Open the match's branch (§16.4) so we land on the commit itself, not its
+        -- collapsed head — this can shift line numbers, so position the cursor at
+        -- the pre-filter commit **by hash** before jumping (else fall back to the
+        -- saved view). Then **jump** to the match with a real motion so the
+        -- pre-filter spot enters the jumplist and `<C-o>` returns there (§14.3).
+        if hash then ctx:ensure_expanded(hash) end
+        if not (pre_hash and ctx:goto_hash(pre_hash)) then
+            pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        end
         if hash and ctx:goto_hash(hash, true) then
             ctx:center_view()
         end
@@ -3408,13 +3415,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     --- == extracted helpers (Phase B2; attached from GRAPH_HELPERS) ==
     ---@field reflow fun(self:GraphCtx)
     ---@field update_cone fun(self:GraphCtx)
-    ---@field goto_hash fun(self:GraphCtx, hash:string?):boolean
+    ---@field goto_hash fun(self:GraphCtx, hash:string?, record:boolean?):boolean
     ---@field place_cursor fun(self:GraphCtx)
     ---@field center_view fun(self:GraphCtx)
     ---@field cursor_hash fun(self:GraphCtx, line:integer):string?
     ---@field branch_under_cursor fun(self:GraphCtx, line:integer):table?
     ---@field graph_title fun(self:GraphCtx):string
     ---@field set_branch fun(self:GraphCtx, b:table, mode:string, follow:string?)
+    ---@field ensure_expanded fun(self:GraphCtx, hash:string?):boolean
     --- == helpers kept nested in open_graph but exposed for the extracted callers ==
     ---@field update_panes fun(self:GraphCtx)
     ---@field maybe_update_panes fun(self:GraphCtx)
@@ -5226,6 +5234,36 @@ local function set_branch(ctx, b, mode, follow)
     ctx:place_cursor()
 end
 GRAPH_HELPERS.set_branch = set_branch
+
+-- Expand the collapsed branch(es) containing `hash` so the commit becomes its own
+-- visible row (§10.3) rather than staying folded inside a `◍` head. Used by the
+-- filter jump (§16.4) so landing on a match **opens** its branch. Sets every
+-- collapsed owner reaching the commit to normal and reflows; a no-op when the
+-- commit is already a visible row (or has no signature). Returns true if it
+-- reflowed.
+local function ensure_expanded(ctx, hash)
+    if not hash then return false end
+    for _, it in ipairs(ctx.repo.display or {}) do
+        if it.commit and it.commit.hash == hash and not it.commit.collapsed then
+            return false -- already a visible commit row
+        end
+    end
+    local sig = ctx.sig_cache.sig and ctx.sig_cache.sig[hash]
+    if not sig then return false end
+    local changed = false
+    for oid in pairs(sig) do
+        if (ctx.view_state.effective[oid] or "normal") == "collapsed" then
+            ctx.view_state.modes[oid] = "normal"
+            changed = true
+        end
+    end
+    if changed then
+        ctx:reflow()
+        ctx:update_footer()
+    end
+    return changed
+end
+GRAPH_HELPERS.ensure_expanded = ensure_expanded
 
 --- Drill into a submodule as a navigation FRAME in the current host window
 --- (§14.7): push a graph frame for `sub_folder`, focused on `focus_hash` with the

@@ -2133,10 +2133,11 @@ The keys while the overlay is open:
   follows the selected match behind the input (`n`/`N` can't be used here: the
   input owns ordinary keys).
 - **`<CR>`** — **select & dismiss**: discard the filter copy, return to the base
-  view, and place the cursor on the selected match (resolved to its visible row,
-  §10.3 — a collapsed branch lands on its head). The transient overlay leaves
-  **no** stack entry; the pre-filter position is recorded in the jumplist, so
-  `<C-o>` (§14.3) returns there.
+  view, and place the cursor on the selected match. If the match's branch is
+  collapsed in the base view (§10.3), it is **opened** so the cursor lands on the
+  commit itself, not its `◍` head (the branch stays expanded). The transient
+  overlay leaves **no** stack entry; the pre-filter position is recorded in the
+  jumplist, so `<C-o>` (§14.3) returns there.
 - **`<Esc>`** — **cancel**: discard the copy and return to the base view at the
   **original** cursor (forget). An empty query behaves like cancel.
 - **`<C-CR>` / `<C-s>`** — **stamp** the filtered view (§16.5). (`<C-CR>` needs a
