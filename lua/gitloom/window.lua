@@ -245,12 +245,35 @@ end
 -- back along the trail, `<C-i>` steps forward. `<C-i>` is `<Tab>` in a terminal,
 -- which used to be the collapse/expand toggle (§10.4) — that moved to `<Space>`
 -- precisely to free `<C-i>` for forward navigation everywhere.
+--
+-- They are **hybrid** (like the commit view's, §11.4): first walk the **in-buffer
+-- jumplist** — so `<C-o>` returns to where you were before an in-graph jump (a
+-- filter `<CR>`, a ref-pick), the natural Vim feel — and only pop / push the view
+-- stack once the jumplist would leave this buffer. j/k don't add to the jumplist,
+-- so it holds only real jumps.
 function nav.install_nav_keys(buf, root)
     if not (buf and vim.api.nvim_buf_is_valid(buf)) then return end
-    vim.keymap.set("n", "<C-o>", function() nav.back(root) end,
-        { buffer = buf, nowait = true, silent = true, desc = "Gitloom: back (§14)" })
-    vim.keymap.set("n", "<C-i>", function() nav.forward(root) end,
-        { buffer = buf, nowait = true, silent = true, desc = "Gitloom: forward (§14)" })
+    local function termcodes(k) return vim.api.nvim_replace_termcodes(k, true, false, true) end
+    vim.keymap.set("n", "<C-o>", function()
+        local jl = vim.fn.getjumplist()
+        local list, curidx = jl[1], jl[2]
+        local target = (curidx >= 1) and list[curidx] or nil
+        if target and target.bufnr == buf then
+            vim.api.nvim_feedkeys(termcodes("<C-o>"), "n", false) -- in-buffer jump back
+        else
+            nav.back(root)
+        end
+    end, { buffer = buf, nowait = true, silent = true, desc = "Gitloom: back (§14)" })
+    vim.keymap.set("n", "<C-i>", function()
+        local jl = vim.fn.getjumplist()
+        local list, curidx = jl[1], jl[2]
+        local target = list[curidx + 1]
+        if target and target.bufnr == buf then
+            vim.api.nvim_feedkeys(termcodes("<C-i>"), "n", false) -- in-buffer jump forward
+        else
+            nav.forward(root)
+        end
+    end, { buffer = buf, nowait = true, silent = true, desc = "Gitloom: forward (§14)" })
 end
 
 function nav.register(root, host, on_show)
@@ -2644,8 +2667,11 @@ local function h_filter(ctx)
         end
     end
 
-    -- The graph view at overlay-open, restored on cancel (§16.4).
+    -- The graph view at overlay-open, restored on cancel (§16.4). Record this
+    -- position in the jumplist (`m'`) so that after a `<CR>` jump to a match the
+    -- hybrid `<C-o>` (§14.3) returns here — the pre-filter spot (§16.4).
     local saved_view = vim.api.nvim_win_call(gwin, vim.fn.winsaveview)
+    pcall(vim.api.nvim_win_call, gwin, function() vim.cmd("normal! m'") end)
     -- The filter active before the overlay opened: nil from the base graph, or the
     -- stamped filter when re-opened over a stamped view (§16.5). Cancel restores it.
     local prev_filter = ctx.filter

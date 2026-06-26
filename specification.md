@@ -1884,10 +1884,14 @@ entries, the tier-2 unit.
 - **Push.** Content-changing navigation (open a commit, apply / clear a filter,
   follow a submodule link, change scope) pushes a new entry on top of the
   current one.
-- **`<C-o>` / `<C-i>`** walk back / forward along the stack. They operate within
-  the host window and do **not** use Neovim's jumplist (whose
-  position-in-buffer model is the wrong shape for this drill-down-and-return
-  navigation).
+- **`<C-o>` / `<C-i>`** are **hybrid**: they first walk the **in-buffer jumplist**
+  — so they return to where you were before an in-graph jump (a filter `<CR>`
+  §16.4, a ref-pick §2), the natural Vim feel — and only step back / forward along
+  the **stack** once the jumplist would leave the current buffer. The stack itself
+  is the drill-down-and-return tier (a commit view, a submodule); the jumplist is
+  the within-view tier. (Ordinary `j`/`k` motion does not touch the jumplist, so it
+  holds only real jumps; the commit view applies the same rule to its diffstat
+  jumps, §11.4.)
 - **Truncate on branch.** Going back and then navigating somewhere new
   **discards the forward tail** and wipes those entries' buffers (§14.5). The
   trail always reflects a single path from its root to the current entry.
@@ -2131,7 +2135,8 @@ The keys while the overlay is open:
 - **`<CR>`** — **select & dismiss**: discard the filter copy, return to the base
   view, and place the cursor on the selected match (resolved to its visible row,
   §10.3 — a collapsed branch lands on its head). The transient overlay leaves
-  **no** stack entry.
+  **no** stack entry; the pre-filter position is recorded in the jumplist, so
+  `<C-o>` (§14.3) returns there.
 - **`<Esc>`** — **cancel**: discard the copy and return to the base view at the
   **original** cursor (forget). An empty query behaves like cancel.
 - **`<C-CR>` / `<C-s>`** — **stamp** the filtered view (§16.5). (`<C-CR>` needs a
