@@ -141,7 +141,7 @@ remembered for the session.
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
-| `/` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
+| `<leader>s` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
 | `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
@@ -371,7 +371,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     pin_upstream = true,     -- pinning a local branch also pins its tracked upstream (§6.3/§10.6)
-    search = {               -- commit search (§15; `/` or :GitloomSearch)
+    search = {               -- commit search (§15; <leader>s or :GitloomSearch)
         snippet = 7,         -- graph rows shown around the commit in the preview
         layout = "vertical", -- preview arrangement (snippet above the detail)
     },
@@ -443,7 +443,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   Set explicitly so the windows don't inherit your global value. A non-zero value
   interacts with the context-pane overlays (§6.2); set `0` to restore the prior
   always-zero behaviour if the panes' scrolling misbehaves.
-- **`search`** — the commit search (`/` or `:GitloomSearch`, §15). `snippet` is
+- **`search`** — the commit search (`<leader>s` or `:GitloomSearch`, §15). `snippet` is
   how many graph rows are shown around the commit in the preview (default `7`,
   odd so the commit is centered); `layout` is the preview arrangement (currently
   only `"vertical"` — the snippet above the commit detail).

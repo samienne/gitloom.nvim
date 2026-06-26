@@ -1068,8 +1068,8 @@ the view.
 
 ### Commit search
 
-`/` (and the buffer-local `:GitloomSearch`) opens a `snacks.picker` over the
-in-memory commit set (specification.md §15). `open_search` (a closure in
+`<leader>s` (and the buffer-local `:GitloomSearch`) opens a `snacks.picker` over
+the in-memory commit set (specification.md §15). `open_search` (a closure in
 `M.open`) builds one item per real commit from `repo.order` — `hash`, `short`,
 `subject`, `author`, a relative date, and `text = subject .. author` (the fuzzy
 haystack, §15.2) — so the match is client-side over resident data: no git query,

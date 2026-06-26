@@ -335,7 +335,7 @@ local KEYBINDS = {
     { "R", "Resync with the repository (refs + new commits + working tree)" },
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
-    { "/", "Search commits by subject / author (picker; :GitloomSearch)" },
+    { "<leader>s", "Search commits by subject / author (picker; :GitloomSearch)" },
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
@@ -3097,11 +3097,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         })
     end
 
-    -- `/` (and `:GitloomSearch`): fuzzy commit search (spec §15). A snacks.picker
-    -- over the in-memory commit set — matching subject + author, already resident
-    -- so there is no fetch and no cache (§15.2). The preview shows the commit view
-    -- (§11) under a graph snippet locating the commit (§15.3); confirm jumps and
-    -- centers the graph on the commit (within-view navigation, §14.2 / §15.4).
+    -- `<leader>s` (and `:GitloomSearch`): fuzzy commit search (spec §15). A
+    -- snacks.picker over the in-memory commit set — matching subject + author,
+    -- already resident so there is no fetch and no cache (§15.2). The preview shows
+    -- the commit view (§11) under a graph snippet locating the commit (§15.3);
+    -- confirm jumps and centers the graph (within-view navigation, §14.2 / §15.4).
+    -- (`/` is the in-graph filter-search, §16 — a separate tool.)
     local function open_search()
         local gwin = win -- the graph float to refocus / move on confirm
         -- Reach module helpers via local `require`s rather than M.open upvalues:
@@ -3279,6 +3280,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             preview = function(ctx)
                 ctx.preview:reset()
                 ctx.preview:minimal()
+                -- No wrap: the graph snippet's lanes line up by column, so a
+                -- wrapped row would mangle them (and the diff). The preview
+                -- scrolls horizontally instead.
+                ctx.preview:wo({ wrap = false })
                 ctx.preview:set_title(ctx.item.short .. "  " .. ctx.item.subject)
                 local hash = ctx.item.hash
                 showing = hash
@@ -3318,7 +3323,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             end,
         })
     end
-    opts.win.keys["/"] = open_search
+    opts.win.keys["<leader>s"] = open_search
 
     -- P: pin / unpin the branch under the cursor as an **anchor** (§10.6).
     -- Anchors stay normal under focus; everything else collapses. HEAD is pinned
@@ -3486,8 +3491,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 vim.keymap.set("n", key, handler, { buffer = buf, nowait = true })
             end
         end
-        -- `:GitloomSearch` — the command equivalent of `/` (spec §15.1), bound
-        -- buffer-local on the graph buffer (the search targets this graph's repo).
+        -- `:GitloomSearch` — the command equivalent of `<leader>s` (spec §15.1),
+        -- bound buffer-local on the graph buffer (search targets this graph's repo).
         pcall(vim.api.nvim_buf_create_user_command, buf, "GitloomSearch", open_search,
             { desc = "Gitloom: fuzzy commit search (§15)" })
 
