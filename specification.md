@@ -1053,18 +1053,31 @@ Intended consequences:
 
 ### 10.3 Contraction — collapse preserves shape, hide removes
 
-Only a **linear run** of collapsed commits contracts to a single collapsed-head
+A **linear run** of collapsed commits contracts to a single collapsed-head
 row. A collapsed commit that is a **junction** — a fork (two or more *visible*,
 i.e. non-hidden, children) or a merge (two or more visible parents) — is **never
-collapsed away**: it stays its own visible row, so the branching is intact. (A
-signature boundary, where owners meet, is likewise a region boundary.) Hiding
-all-but-one of a junction's branches demotes it to a linear commit that may then
-collapse.
+collapsed away**: it stays its own visible row, so the branching is intact —
+with one exception, the **merge tip** (below). (A signature boundary, where
+owners meet, is likewise a region boundary.) Hiding all-but-one of a junction's
+branches demotes it to a linear commit that may then collapse.
 
-The projection therefore has the **same branch topology as the commit graph**:
-every fork and merge of the visible commits survives, with only the linear
-stretches between them contracted to heads. Edges crossing a collapsed region's
-boundary re-point to its head, so a head is never left floating.
+A **merge tip** is the exception. A collapsed merge (two or more visible
+parents) with **no visible child** is the end of its branch — the newest commit,
+carrying the branch's ref, with nothing above it. A collapsed head is anchored
+by its **tip** (its newest member), so a merge tip is a natural head: it
+contracts into a `◍` **collapsed head**, like a linear run, rather than a
+node-less junction. The head absorbs the adjacent collapsed commits of its
+region (the rest of the folded branch below it), so it stands for the whole
+folded branch with the right commit count, while the merged-in side stays a lane
+off the head — so the merge still shows and the head never floats. (A fork
+**root** — a collapsed fork with no visible parent — is *not* a tip; it stays a
+node-less junction.)
+
+The projection therefore preserves the commit graph's **branch topology**: every
+fork, and every merge that still has a visible child, survives as its own node;
+only linear runs and merge tips contract into heads (a merge tip's head keeps the
+merged-in side as a lane). Edges crossing a collapsed region's boundary re-point
+to its head, so a head is never left floating.
 
 Hiding removes a region's rows outright and, unlike collapse, does **not**
 preserve shape. An edge from a hidden region into a retained commit is dropped
@@ -1083,9 +1096,21 @@ two kinds:
 - a **kept junction** (§10.3) — a fork/merge inside collapsed branches whose
   commit is just a split point. It renders **node-less**: the cell draws the
   fork/merge as box-drawing lanes (`├ ┬ ┼ …`) instead of a node, with no
-  message — so the split topology shows without the commit's visual weight. Any
-  refs on it are still shown. Controlled by the `junction_markers` option
-  (default on); off renders those junctions as full commits.
+  message — so the split topology shows without the commit's visual weight.
+  Controlled by the `junction_markers` option (default on); off renders those
+  junctions as full commits. (A **merge tip** — a collapsed merge with no visible
+  child — is *not* a kept junction; being the branch's tip it contracts into a
+  `◍` head, §10.3.) A node-less junction with a **single** fan needs no separate
+  fan line — it renders on one row (the fan inline). One that is **both** a fork
+  and a merge keeps its fan-in and fan-out on **separate** lines per `merge_style`
+  (the fan-in on its own split line), so two independent funnels never share a
+  row (§5.1).
+
+  **A ref must be anchored to a node.** A kept junction that carries refs is *not*
+  drawn node-less — it shows the `◍` collapsed marker (it is a collapsed-mode
+  commit), keeping its fan lanes and blank message, so the ref label sits on a
+  node rather than floating beside bare box-drawing with no indication of which
+  junction it tags. Only a **ref-less** junction renders truly node-less.
 
 **Topology-only rendering.** A marker's row shows *topology, not content* —
 graph glyphs and ref labels only, no date, author, or message. This is a

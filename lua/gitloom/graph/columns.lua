@@ -270,10 +270,16 @@ function M.layout(opts, items, seed)
         for _, o in ipairs(outgoing) do row.parent_lanes[#row.parent_lanes + 1] = o.lane end
         for _, inc in ipairs(incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
 
-        -- A node-less junction (spec §10.4) carries no message, so its fan needs
-        -- no separate line — render it inline so the join is one row, not a fan
-        -- line plus an empty lane row.
+        -- A node-less junction (spec §10.4) carries no message, so a *single* fan
+        -- needs no separate line — render it inline so the join is one row, not a
+        -- fan line plus an empty lane row. The exception is a junction that is
+        -- **both** a fork (≥2 children) and a merge (≥2 parents): collapsing both
+        -- funnels onto one Line would lay two independent fans across it, which
+        -- §5.1 forbids (two separated lanes share a horizontal only at a *single*
+        -- fan). So it follows `merge_style` like a normal commit — its fan-in goes
+        -- to a split Line above — keeping the two funnels on separate Lines.
         local inline_junction = C.junction and (opts.junction_markers ~= false)
+            and not (#incoming > 1 and #outgoing > 1)
         local sep_split = opts.merge_style.split_on_separate_line and #incoming > 1 and not inline_junction
         local sep_merge = opts.merge_style.merge_on_separate_line and #outgoing > 1 and not inline_junction
 
