@@ -1304,6 +1304,7 @@ end
 ---@field message? string
 ---@field tags? string
 ---@field selected? string  the h/l-selected ref decoration (§2)
+---@field search? string  the filter-search matched substring (§16.7)
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
@@ -2588,16 +2589,19 @@ local function filter_goto(ctx, dir)
     for step = 1, n do
         local i = ((cur - 1 + dir * step) % n) + 1
         if is_match_row(ctx, display[i]) then
+            ctx.filter.current = display[i].commit.hash -- drives the §16.7 highlight
             ctx:goto_hash(display[i].commit.hash)
             ctx:center_view()
             ctx:update_cone()
+            if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
             return
         end
     end
     vim.notify("gitloom: no matches", vim.log.levels.INFO)
 end
 
--- Land on the match nearest the cursor after committing a filter (§16.1).
+-- Land on the match nearest the cursor (§16.4). Records it as the current match
+-- (driving the §16.7 highlight) and refreshes so the highlight follows.
 local function filter_land(ctx)
     if not ctx.filter then return false end
     local display = ctx.repo.display or {}
@@ -2610,9 +2614,11 @@ local function filter_land(ctx)
         end
     end
     if best then
+        ctx.filter.current = best
         ctx:goto_hash(best)
         ctx:center_view()
         ctx:update_cone()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
         return true
     end
     return false
@@ -2749,6 +2755,10 @@ local function h_filter(ctx)
     vim.keymap.set({ "i", "n" }, "<Esc>", cancel, m)
     vim.keymap.set({ "i", "n" }, "<C-j>", function() step(1) end, m)
     vim.keymap.set({ "i", "n" }, "<C-k>", function() step(-1) end, m)
+    -- Arrow aliases (robust where <C-k> is shadowed by digraph/config; a
+    -- single-line input has no vertical motion of its own, §16.4).
+    vim.keymap.set({ "i", "n" }, "<Down>", function() step(1) end, m)
+    vim.keymap.set({ "i", "n" }, "<Up>", function() step(-1) end, m)
     vim.keymap.set({ "i", "n" }, "<C-s>", stamp, m)
     vim.keymap.set({ "i", "n" }, "<C-CR>", stamp, m)
 
@@ -3115,6 +3125,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             message = nil,
             tags = "Comment",
             selected = "Visual", -- the h/l-selected ref decoration (§2)
+            search = "Search",   -- the filter-search matched substring (§16.7)
             action = "Special",  -- the commit-view diff action label (§11.5)
             -- Reachability dimming (§12): blend factor toward the bg for the
             -- out-of-cone rows/lanes. Higher = more muted.
@@ -3648,7 +3659,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end,
         display = function(item)
             return display_item(opts, item, selection_state, view_state.cone,
-                sel.active and sel.cursor or nil, repo.head)
+                sel.active and sel.cursor or nil, repo.head, ctx.filter)
         end,
         on_controller = function(controller)
             -- Refs first: they create sparse Commit placeholders with refs

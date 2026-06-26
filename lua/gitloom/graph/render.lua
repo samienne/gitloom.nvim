@@ -664,6 +664,19 @@ function M.dual_two_line(opts, commit)
         and #M.decoration_texts(commit) > 0
 end
 
+--- The 1-based byte range `[s, e]` of the first **smartcase substring** match of
+--- `needle` in `haystack` (spec §16.2/§16.7), or nil — case-insensitive unless the
+--- needle has an uppercase letter. Literal (the needle is not a Lua pattern).
+---@param haystack string
+---@param needle string
+---@return integer? s, integer? e
+local function match_span(haystack, needle)
+    if not needle or needle == "" then return nil end
+    local hs, nd = haystack, needle
+    if not needle:match("%u") then hs, nd = haystack:lower(), needle:lower() end
+    return hs:find(nd, 1, true)
+end
+
 ---@param opts GraphOptions
 ---@param item OrderItem
 ---@param selection_state SelectionState
@@ -672,8 +685,11 @@ end
 ---  marker row can mark the selected head; nil when not selecting
 ---@param head_branch? string  the current branch (= repo.head); its label is drawn in
 ---  the HEAD colour (§6), and the bare `HEAD` marker shows only when this is nil (detached)
+---@param match? { query: string, current?: string }  the active filter-search (§16.7):
+---  highlight the matched substring in a commit's message (`palette.search`), brighter
+---  (`IncSearch`) on the current match (`current` = its hash); nil when not filtering
 ---@return DisplayElement
-function M.display_item(opts, item, selection_state, cone, sel_cursor, head_branch)
+function M.display_item(opts, item, selection_state, cone, sel_cursor, head_branch, match)
     local palette = opts.palette
 
     -- The 1-based decoration index selected on this row, or nil. Selection is
@@ -875,7 +891,23 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     if item.type == "commit" then
         local label_mode = opts.label_mode or "right"
         local ids = get_columns(item.columns) -- optional lane-id debug prefix
-        local message = rh(item.commit.message or "", palette.message) or ""
+        -- Message, with the filter-search match highlighted (§16.7): the matched
+        -- substring in palette.search, brighter (IncSearch) on the current match.
+        local msg_text = item.commit.message or ""
+        local message
+        local ms, me
+        if match then ms, me = match_span(msg_text, match.query) end
+        if match and ms and me then
+            local hl = (match.current == item.commit.hash) and "IncSearch"
+                or (palette.search or "Search")
+            message = compose({
+                rh(msg_text:sub(1, ms - 1), palette.message),
+                highlight_text(msg_text:sub(ms, me), hl),
+                rh(msg_text:sub(me + 1), palette.message),
+            })
+        else
+            message = rh(msg_text, palette.message) or ""
+        end
         local ref_items = get_ref_items(item.commit)
 
         local date_item = rh(git.format_date(item.commit.date, opts) .. " ", palette.date)
