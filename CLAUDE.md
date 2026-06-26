@@ -529,7 +529,21 @@ Details not covered by the spec or architecture:
   streaming/resync, the reachability debounce, the context panes, the commit
   view, and the external-diff glue (`M.open`). **gitloom.util** vendors
   `make_future`/`compose`/`highlight_text`/`trim_ws`. (Still pending: a finer
-  window→commitview→panes split.) pane.lua is the context-pane
+  window→commitview→panes split.) **window.lua internal structure:** a graph
+  session is a **`GraphCtx`** (`ctx`) table bundling the per-session state (repo,
+  opts, view_state, sel, sig_cache, the live `ctx:win()` host-window accessor,
+  etc.); `open_graph` assembles it, and the graph **helpers**, **keymap
+  handlers**, and **autocmd bodies** are *module-level* functions taking `ctx`
+  (collected in the `GRAPH_HELPERS` table → attached as `ctx:method()`, and the
+  `GRAPH_KEYS` table → bound buffer-local), so the formerly-giant `open_graph`
+  closure stays well under LuaJIT's 60-upvalue ceiling (it references the two
+  tables, not each helper). Sibling calls go through `ctx:` (resolved at call
+  time, so definition order is free). The pane-machinery cluster
+  (`update_panes` + its coroutine helpers) and the one-time stream/`on_show`
+  setup remain nested inside `open_graph` (cohesive, already encapsulated via
+  `ctx`). The float **z-order** is the single-window bounded model (§14):
+  `host_zindex`/`overlay_zindex`/`float_zindex`, fixed deltas above the host's
+  live zindex — no stacking ladder. pane.lua is the context-pane
   layout core (boundary-line extraction; `continue`/`condense`/`footer` = the
   footer's down-rebuild; `continue_up` = the header's **minimal connecting subgraph**
   (only how the pinned anchors relate to each other + the lanes crossing the cutoff —

@@ -324,7 +324,12 @@ lua/gitloom/
 - **gitloom.window (window.lua)** — the controller: the floating window, the
   keymaps and autocmds, the commit stream + resync, the reachability debounce,
   the context panes, the commit view, and the external-diff glue. It is the only
-  Neovim-window-coupled layer; it drives the engine and the data library.
+  Neovim-window-coupled layer; it drives the engine and the data library. A graph
+  session is a **`GraphCtx`** (`ctx`) — `open_graph` assembles it and the helpers,
+  keymap handlers, and autocmd bodies are *module-level* functions taking `ctx`
+  (gathered in `GRAPH_HELPERS` → `ctx:method()` and `GRAPH_KEYS` → buffer-local
+  binds), so the controller closure stays well under LuaJIT's 60-upvalue cap. The
+  pane machinery and one-time stream/`on_show` setup stay nested.
 - **gitloom.git** — the data library: the immutable commit model, the parsers
   and formatters that turn raw `git` output into structured data, the owned
   topo-sort, and the `jobstart` I/O (`fetch.lua`, its sole Neovim coupling).
