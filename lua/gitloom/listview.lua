@@ -667,8 +667,23 @@ local function display(win, buf, model, first, last)
     vim.bo[buf].modifiable = true
     vim.bo[buf].readonly = false
 
-    -- Replace exactly the buffer lines the rendered item blocks cover.
-    vim.api.nvim_buf_set_lines(buf, base - 1, base - 1 + #lines, false, lines)
+    -- Replace exactly the buffer lines the rendered item blocks cover — but ONLY
+    -- when the text actually changed. A reachability-dimming refresh (§12) re-runs
+    -- the render with identical text and different highlights; `set_lines` over the
+    -- whole range would delete+reinsert those lines and **corrupt the jumplist**
+    -- (forward entries lost), breaking `<C-o>`/`<C-i>` (§14.3). Skipping it when
+    -- the text is unchanged leaves the jumplist intact; the extmarks below still
+    -- re-apply the new (dimmed) highlights.
+    local cur = vim.api.nvim_buf_get_lines(buf, base - 1, base - 1 + #lines, false)
+    local text_changed = #cur ~= #lines
+    if not text_changed then
+        for i = 1, #lines do
+            if cur[i] ~= lines[i] then text_changed = true; break end
+        end
+    end
+    if text_changed then
+        vim.api.nvim_buf_set_lines(buf, base - 1, base - 1 + #lines, false, lines)
+    end
     vim.api.nvim_buf_clear_namespace(buf, namespace, base - 1, base - 1 + #lines)
 
     for _, hl in ipairs(highlight) do
