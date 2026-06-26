@@ -2036,6 +2036,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field root string                git I/O root (§2.1); == repo.root
     ---@field host_root string           session key — the host window's root (§14)
     ---@field repo_key string            keys saved_positions / recent_refs (== repo.root)
+    ---@field repo_name string           the repo's display name (title; § 2.1)
     ---@field opts GraphOptions          the (copied) options table, mutated live by toggles
     ---@field repo Repo                  commits / order / display / refs / head
     ---@field palette table             == opts.palette
@@ -2069,6 +2070,19 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field selection_commits fun(self:GraphCtx):Commit[]
     ---@field mark_path fun(self:GraphCtx, top:integer, bottom:integer):table
     ---@field mark_node_cone fun(self:GraphCtx, pivot:table, top:integer, bottom:integer):table
+    --- == extracted helpers (Phase B2; attached from GRAPH_HELPERS) ==
+    ---@field reflow fun(self:GraphCtx)
+    ---@field update_cone fun(self:GraphCtx)
+    ---@field goto_hash fun(self:GraphCtx, hash:string?):boolean
+    ---@field place_cursor fun(self:GraphCtx)
+    ---@field center_view fun(self:GraphCtx)
+    ---@field cursor_hash fun(self:GraphCtx, line:integer):string?
+    ---@field branch_under_cursor fun(self:GraphCtx, line:integer):table?
+    ---@field graph_title fun(self:GraphCtx):string
+    ---@field set_branch fun(self:GraphCtx, b:table, mode:string, follow:string?)
+    --- == helpers kept nested in open_graph but exposed for the extracted callers ==
+    ---@field update_panes fun(self:GraphCtx)
+    ---@field update_footer fun(self:GraphCtx)
 
     ---@type Repo
     local repo = {
@@ -2237,6 +2251,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         root = root,
         host_root = host_root,
         repo_key = repo_key,
+        repo_name = repo_name,
         opts = opts,
         repo = repo,
         palette = palette,
@@ -2302,41 +2317,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- listview. With all-normal modes the projection is the identity; this is the
     -- path every branch-mode change takes (and the stream takes once the
     -- projection is no longer the identity). Recomputes the cone over the new map.
-    reflow = function()
-        local viewbuilder = require("gitloom.graph.view")
-        -- Owners under the first-parent default (§10.7): the pinned anchors
-        -- (§10.6; HEAD by default) are first-parent-only + normal, every other ref
-        -- and merge parent defaults collapsed; view_state.modes overrides. No
-        -- anchor ⇒ all-normal.
-        local cm = opts.collapse_merged ~= false
-        local owners = viewbuilder.owners(
-            repo.order, owners_from_refs(repo.refs, {}), ctx:effective_pinned(), view_state.modes, cm)
-        view_state.effective = {}
-        for _, o in ipairs(owners) do view_state.effective[o.id] = o.mode end
-        -- Reuse cached signatures unless the commit/owner set or focus changed;
-        -- only the join + contraction (mode-dependent) recompute on a toggle.
-        if sig_cache.norder ~= #repo.order or sig_cache.nowners ~= #owners
-            or sig_cache.cm ~= cm or not sig_cache.sig then
-            sig_cache.sig = viewbuilder.signatures(repo.order, owners)
-            sig_cache.norder, sig_cache.nowners, sig_cache.cm = #repo.order, #owners, cm
-        end
-        local proj = viewbuilder.project(repo.order, owners, sig_cache.sig)
-        refresh_columns(opts, proj.items)
-        -- Pack concurrent collapsed heads onto shared lines (spec §10.4) unless
-        -- packing is off. The unpacked, laid-out list stays the projection input.
-        repo.display = (opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
-        -- A reflow recreates the DisplayNodes, so any in-flight commit selection
-        -- (§13) holds stale node references — drop it. (Pure selection movement
-        -- never reflows; this guards m/<Space>/c/p/P etc. taken mid-selection.)
-        sel.active, sel.path, sel.anchor, sel.cursor = false, nil, nil, nil
-        if lv and lv.controller and lv.controller.set_items then
-            lv.controller.set_items(repo.display)
-        end
-        ctx:build_display_index()
-        update_cone()
-        if lv and lv.controller then lv.controller.refresh() end
-        update_panes()
-    end
+    reflow = function() return ctx:reflow() end
 
     -- The "branch" the collapse interactions (§10.4) act on at a buffer line:
     --   { state = "expanded"|"collapsed"|"mainline", owners = ids to flip,
@@ -2344,50 +2325,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     --     Commit for examine/diff }.
     -- Resolved from the selection (a ref or a packed marker) or, failing that,
     -- the region under the cursor via its signature — so it needs no ref.
-    local function branch_under_cursor(line)
-        local item = ctx:order_at(line)
-        if not item then return nil end
-        -- a selected marker on a packed line → expand that marker
-        if item.type == "markers" then
-            if selection_state.commit == item and selection_state.index then
-                local u = marker_units(item)[selection_state.index]
-                if u then
-                    local owners = {}
-                    for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
-                    return { state = "collapsed", owners = owners,
-                        follow = u.marker.tip and u.marker.tip.hash, commit = u.marker.tip }
-                end
-            end
-            return { state = "collapsed" } -- packed line, no selection
-        end
-        local c = item.commit
-        if not c then return nil end
-        -- a selected ref → that branch (toggle by its effective mode)
-        if selection_state.index and selection_state.commit == c then
-            local ids = selected_owner_ids(c, selection_state.index)
-            if ids then
-                local cur = view_state.effective[ids[1]] or "normal"
-                return { state = (cur == "collapsed") and "collapsed" or "expanded",
-                    owners = ids, follow = c.hash, commit = c }
-            end
-        end
-        -- a single collapsed marker (head) → expand its region
-        if c.collapsed then
-            local owners = {}
-            for oid in pairs(c.signature or {}) do
-                if (view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
-            end
-            return { state = "collapsed", owners = owners,
-                follow = c.tip and c.tip.hash, commit = c.tip }
-        end
-        -- a normal/junction commit → collapse the region containing it, if it is
-        -- not mainline (no pinned anchor reaches it).
-        local ids = collapse_owners(sig_cache.sig and sig_cache.sig[c.hash], ctx:effective_pinned(), view_state.effective)
-        if ids then
-            return { state = "expanded", owners = ids, follow = c.hash, commit = c }
-        end
-        return { state = "mainline", commit = c }
-    end
+    local function branch_under_cursor(line) return ctx:branch_under_cursor(line) end
 
     -- Recompute the footer (active modes + the branch-mode summary, §10) and
     -- apply it to the floating window. Centralised so every state change updates
@@ -2396,10 +2334,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- The window title identifies the repository (§2.1): its name, plus the
     -- current branch once HEAD is known. Recomputed alongside the footer (cheap;
     -- it only changes when the branch resolves) and applied in the same config.
-    local function graph_title()
-        local b = repo.head
-        return b and (" %s · %s "):format(repo_name, b) or (" %s "):format(repo_name)
-    end
+    local function graph_title() return ctx:graph_title() end
     local function update_footer()
         if lv and lv.win and lv.win.win then
             local nanchors = 0
@@ -2441,15 +2376,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             pcall(vim.api.nvim_win_set_config, lv.win.win, cfg)
         end
     end
+    -- Kept nested (reads the local footer_seam/header_seam pane state written by
+    -- the still-nested update_panes); exposed so the extracted helpers can call it.
+    ctx.update_footer = update_footer
 
     -- Apply a mode to a branch's owners, reflow, and keep the cursor on it (§10.4).
-    local function set_branch(b, mode, follow)
-        for _, oid in ipairs(b.owners or {}) do view_state.modes[oid] = mode end
-        reflow()
-        update_footer()
-        if follow then goto_hash(follow) end
-        place_cursor()
-    end
+    local function set_branch(b, mode, follow) return ctx:set_branch(b, mode, follow) end
 
     -- ── Commit selection (range) — window glue (spec §13) ───────────────────
     -- Hand the selection range to the external diff provider (§13.5; the `D`
@@ -3288,157 +3220,26 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- junction. Used after a collapse/expand reflow so the toggle stays put,
         -- and to focus HEAD / the remembered position on open (§2). Returns true
         -- when a row was found and the cursor moved, false otherwise.
-        goto_hash = function(hash)
-            if not hash then return false end
-            for i, it in ipairs(repo.display or {}) do
-                local found = it.commit and it.commit.hash == hash
-                if not found and it.commit and it.commit.collapsed and it.commit.region then
-                    for _, h in ipairs(it.commit.region) do
-                        if h == hash then found = true; break end
-                    end
-                end
-                if not found and it.type == "markers" then
-                    for _, m in ipairs(it.markers or {}) do
-                        if m.hash == hash then found = true; break end
-                        for _, h in ipairs(m.region or {}) do
-                            if h == hash then found = true; break end
-                        end
-                        if found then break end
-                    end
-                end
-                if found then
-                    local lnum = (lv.controller.item_start and lv.controller.item_start(i)) or i
-                    pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
-                    return true
-                end
-            end
-            return false
-        end
+        goto_hash = function(hash) return ctx:goto_hash(hash) end
 
-        place_cursor = function()
-            local line = vim.api.nvim_win_get_cursor(win)[1]
-            -- Commit selection (§13.2): on a packed marker line park on the
-            -- selected head's label so the right head is unmistakable; otherwise
-            -- park on the graph lane column so the lit lane marks the branch (the
-            -- cursor row is already set by selection_redraw).
-            if sel.active then
-                local item = ctx:order_at(line)
-                if item and item.type == "markers" and sel.cursor then
-                    for _, u in ipairs(marker_units(item)) do
-                        if u.marker == sel.cursor then
-                            local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-                            local mcol = ref_byte_col(text, u.text)
-                            if mcol then
-                                pcall(vim.api.nvim_win_set_cursor, win, { line, mcol })
-                                return
-                            end
-                            break
-                        end
-                    end
-                end
-                local col = lv and lv.controller and lv.controller.col_offset
-                    and lv.controller.col_offset(line, "line", COL.graph) or 0
-                pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
-                return
-            end
-            local item = ctx:order_at(line)
-            -- A packed marker line: park on the selected marker's label (§10.4).
-            if item and item.type == "markers" then
-                local col = nil
-                if selection_state.commit == item and selection_state.index then
-                    local u = marker_units(item)[selection_state.index]
-                    if u then
-                        local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-                        col = ref_byte_col(text, u.text)
-                    end
-                end
-                if not col and lv and lv.controller and lv.controller.col_offset then
-                    col = lv.controller.col_offset(line, "line", COL.flex)
-                end
-                pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
-                return
-            end
-            if not item or not item.commit then return end
-            local col = nil
-            -- A selected ref: jump onto it. The label text lives on the rendered
-            -- buffer line of the current row (the label row in dual; the commit
-            -- line otherwise), so find it there; if it is not on this row (e.g.
-            -- the message row, or a `+N`-collapsed ref) we fall back to the flex
-            -- column below.
-            if selection_state.commit == item.commit and selection_state.index then
-                local texts = decoration_texts(item.commit)
-                if selection_state.index <= #texts then
-                    local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-                    col = ref_byte_col(text, texts[selection_state.index])
-                end
-            end
-            -- Otherwise park at the start of the flex column (message / labels).
-            if not col and lv and lv.controller and lv.controller.col_offset then
-                col = lv.controller.col_offset(line, "line", COL.flex)
-            end
-            pcall(vim.api.nvim_win_set_cursor, win, { line, col or 0 })
-        end
+        place_cursor = function() return ctx:place_cursor() end
 
         -- Center the view vertically on the cursor's row when there is room,
         -- clamped at the top/bottom of the graph (exactly `zz`'s behaviour). Used
         -- to focus HEAD / the remembered position on open (§2).
-        center_view = function()
-            pcall(vim.api.nvim_win_call, win, function() vim.cmd("normal! zz") end)
-        end
+        center_view = function() return ctx:center_view() end
 
         -- The hash of the commit under the cursor at `line`: a real commit row
         -- yields its hash; a packed marker line (§10.4) yields the selected (or
         -- first) marker's tip; any other row yields nil. Drives the remembered
         -- position (§2).
-        cursor_hash = function(line)
-            local item = ctx:order_at(line)
-            if not item then return nil end
-            if item.commit then return item.commit.hash end
-            if item.type == "markers" then
-                local units = marker_units(item)
-                local u = units[selection_state.index] or units[1]
-                if u and u.marker and u.marker.tip then return u.marker.tip.hash end
-            end
-            return nil
-        end
+        cursor_hash = function(line) return ctx:cursor_hash(line) end
 
         -- Recompute the pivot's cone over the visible rows and re-mark track
         -- activeness (§12). Cheap (O(visible)); the caller then refreshes. The
         -- window gives *buffer* lines; map them to order indices (a dual labelled
         -- commit spans two buffer lines) so the cone walk stays in order space.
-        update_cone = function()
-            local topbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-            local botbuf = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
-            local curbuf = vim.api.nvim_win_get_cursor(win)[1]
-            local item, cur = ctx:order_at(curbuf)
-            local top = select(2, ctx:order_at(topbuf))
-            local bottom = select(2, ctx:order_at(botbuf))
-            -- Commit selection (§13.4): the selected path is the emphasised set,
-            -- replacing the cursor-pivot cone for the duration.
-            if sel.active then
-                view_state.cone = ctx:mark_path(top, bottom)
-                return
-            end
-            -- A packed marker line (§10.4): the selected head drives the cone
-            -- (mark_node_cone) so its branch stays lit and the siblings dim, like a
-            -- normal head. No selection ⇒ neutral (everything lit).
-            if item and item.type == "markers" then
-                local sel_node
-                if selection_state.commit == item and selection_state.index then
-                    local u = marker_units(item)[selection_state.index]
-                    sel_node = u and u.marker
-                end
-                view_state.cone = sel_node and ctx:mark_node_cone(sel_node, top, bottom) or nil
-                return
-            end
-            -- Lanes are attached by Phase 1 (columns.layout, via build_graph /
-            -- refresh_columns); walk them from the pivot to mark highlights (§12).
-            if not (item and item.commit) then
-                view_state.cone = nil
-                return
-            end
-            view_state.cone = mark_reachable(repo.display, cur, top, bottom)
-        end
+        update_cone = function() return ctx:update_cone() end
 
         -- Async-pane-build state (assigned/used by update_panes, below). `pane_gen`
         -- is the cancellation token: bumping it abandons any in-flight chunked
@@ -4582,6 +4383,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
             if top ~= pane_topline then update_panes() else repaint_panes() end
         end
+        -- Kept nested (closes over the pane machinery + win); exposed so the
+        -- extracted reflow can call ctx:update_panes().
+        ctx.update_panes = update_panes
 
         -- (The cursor is kept away from the window edges by the window-local
         -- `scrolloff` set above (opts.scrolloff) — no manual clamping needed.)
@@ -4639,6 +4443,251 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
     return lv, on_show
 end
+
+-- ── Window-coupled graph helpers (Phase B2) ─────────────────────────────────
+-- Extracted from open_graph so their module-level references (the graph engine,
+-- the reachability walk, the view builder) leave open_graph's upvalue set. Each
+-- takes `ctx` (called as `ctx:NAME()`); open_graph keeps a one-line wrapper that
+-- delegates here, so its existing bare call sites are unchanged. The live window
+-- is read fresh via `ctx:win()` (§14 hide/show changes the id), never frozen.
+
+-- A full reflow (§10.5): project the raw commit order under the current branch
+-- modes into a fresh OrderItem graph, lay it out, and swap it into the listview.
+local function reflow(ctx)
+    local viewbuilder = require("gitloom.graph.view")
+    local cm = ctx.opts.collapse_merged ~= false
+    local owners = viewbuilder.owners(
+        ctx.repo.order, owners_from_refs(ctx.repo.refs, {}), ctx:effective_pinned(), ctx.view_state.modes, cm)
+    ctx.view_state.effective = {}
+    for _, o in ipairs(owners) do ctx.view_state.effective[o.id] = o.mode end
+    -- Reuse cached signatures unless the commit/owner set or focus changed.
+    if ctx.sig_cache.norder ~= #ctx.repo.order or ctx.sig_cache.nowners ~= #owners
+        or ctx.sig_cache.cm ~= cm or not ctx.sig_cache.sig then
+        ctx.sig_cache.sig = viewbuilder.signatures(ctx.repo.order, owners)
+        ctx.sig_cache.norder, ctx.sig_cache.nowners, ctx.sig_cache.cm = #ctx.repo.order, #owners, cm
+    end
+    local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig)
+    refresh_columns(ctx.opts, proj.items)
+    ctx.repo.display = (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
+    -- A reflow recreates the DisplayNodes, so drop any in-flight commit selection.
+    ctx.sel.active, ctx.sel.path, ctx.sel.anchor, ctx.sel.cursor = false, nil, nil, nil
+    if ctx.lv and ctx.lv.controller and ctx.lv.controller.set_items then
+        ctx.lv.controller.set_items(ctx.repo.display)
+    end
+    ctx:build_display_index()
+    ctx:update_cone()
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:update_panes()
+end
+GRAPH_HELPERS.reflow = reflow
+
+-- Recompute the pivot's cone over the visible rows and re-mark track activeness
+-- (§12). The window gives *buffer* lines; map them to order indices.
+local function update_cone(ctx)
+    local w = ctx:win()
+    if not w then return end
+    local topbuf = vim.api.nvim_win_call(w, function() return vim.fn.line("w0") end)
+    local botbuf = vim.api.nvim_win_call(w, function() return vim.fn.line("w$") end)
+    local curbuf = vim.api.nvim_win_get_cursor(w)[1]
+    local item, cur = ctx:order_at(curbuf)
+    local top = select(2, ctx:order_at(topbuf))
+    local bottom = select(2, ctx:order_at(botbuf))
+    -- Commit selection (§13.4): the selected path is the emphasised set.
+    if ctx.sel.active then
+        ctx.view_state.cone = ctx:mark_path(top, bottom)
+        return
+    end
+    -- A packed marker line (§10.4): the selected head drives the cone.
+    if item and item.type == "markers" then
+        local sel_node
+        if ctx.selection_state.commit == item and ctx.selection_state.index then
+            local u = marker_units(item)[ctx.selection_state.index]
+            sel_node = u and u.marker
+        end
+        ctx.view_state.cone = sel_node and ctx:mark_node_cone(sel_node, top, bottom) or nil
+        return
+    end
+    if not (item and item.commit) then
+        ctx.view_state.cone = nil
+        return
+    end
+    ctx.view_state.cone = mark_reachable(ctx.repo.display, cur, top, bottom)
+end
+GRAPH_HELPERS.update_cone = update_cone
+
+-- Move the cursor onto the display row representing `hash` — a real commit row,
+-- the marker (head/packed) whose region contains it, or a junction (§2/§10.4).
+local function goto_hash(ctx, hash)
+    if not hash then return false end
+    local w = ctx:win()
+    if not w then return false end
+    for i, it in ipairs(ctx.repo.display or {}) do
+        local found = it.commit and it.commit.hash == hash
+        if not found and it.commit and it.commit.collapsed and it.commit.region then
+            for _, h in ipairs(it.commit.region) do
+                if h == hash then found = true; break end
+            end
+        end
+        if not found and it.type == "markers" then
+            for _, m in ipairs(it.markers or {}) do
+                if m.hash == hash then found = true; break end
+                for _, h in ipairs(m.region or {}) do
+                    if h == hash then found = true; break end
+                end
+                if found then break end
+            end
+        end
+        if found then
+            local lnum = (ctx.lv.controller.item_start and ctx.lv.controller.item_start(i)) or i
+            pcall(vim.api.nvim_win_set_cursor, w, { lnum, 0 })
+            return true
+        end
+    end
+    return false
+end
+GRAPH_HELPERS.goto_hash = goto_hash
+
+-- Park the cursor at the message (or the selected ref / marker label) on the
+-- current row (§2/§7/§13.2).
+local function place_cursor(ctx)
+    local w = ctx:win()
+    if not w then return end
+    local line = vim.api.nvim_win_get_cursor(w)[1]
+    if ctx.sel.active then
+        local item = ctx:order_at(line)
+        if item and item.type == "markers" and ctx.sel.cursor then
+            for _, u in ipairs(marker_units(item)) do
+                if u.marker == ctx.sel.cursor then
+                    local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
+                    local mcol = ref_byte_col(text, u.text)
+                    if mcol then
+                        pcall(vim.api.nvim_win_set_cursor, w, { line, mcol })
+                        return
+                    end
+                    break
+                end
+            end
+        end
+        local col = ctx.lv and ctx.lv.controller and ctx.lv.controller.col_offset
+            and ctx.lv.controller.col_offset(line, "line", COL.graph) or 0
+        pcall(vim.api.nvim_win_set_cursor, w, { line, col or 0 })
+        return
+    end
+    local item = ctx:order_at(line)
+    if item and item.type == "markers" then
+        local col = nil
+        if ctx.selection_state.commit == item and ctx.selection_state.index then
+            local u = marker_units(item)[ctx.selection_state.index]
+            if u then
+                local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
+                col = ref_byte_col(text, u.text)
+            end
+        end
+        if not col and ctx.lv and ctx.lv.controller and ctx.lv.controller.col_offset then
+            col = ctx.lv.controller.col_offset(line, "line", COL.flex)
+        end
+        pcall(vim.api.nvim_win_set_cursor, w, { line, col or 0 })
+        return
+    end
+    if not item or not item.commit then return end
+    local col = nil
+    if ctx.selection_state.commit == item.commit and ctx.selection_state.index then
+        local texts = decoration_texts(item.commit)
+        if ctx.selection_state.index <= #texts then
+            local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
+            col = ref_byte_col(text, texts[ctx.selection_state.index])
+        end
+    end
+    if not col and ctx.lv and ctx.lv.controller and ctx.lv.controller.col_offset then
+        col = ctx.lv.controller.col_offset(line, "line", COL.flex)
+    end
+    pcall(vim.api.nvim_win_set_cursor, w, { line, col or 0 })
+end
+GRAPH_HELPERS.place_cursor = place_cursor
+
+-- Center the view vertically on the cursor row (exactly `zz`; §2).
+local function center_view(ctx)
+    local w = ctx:win()
+    if not w then return end
+    pcall(vim.api.nvim_win_call, w, function() vim.cmd("normal! zz") end)
+end
+GRAPH_HELPERS.center_view = center_view
+
+-- The hash of the commit under the cursor at `line`, or nil on a row with no
+-- single commit; a packed marker line yields the selected (or first) tip (§2).
+local function cursor_hash(ctx, line)
+    local item = ctx:order_at(line)
+    if not item then return nil end
+    if item.commit then return item.commit.hash end
+    if item.type == "markers" then
+        local units = marker_units(item)
+        local u = units[ctx.selection_state.index] or units[1]
+        if u and u.marker and u.marker.tip then return u.marker.tip.hash end
+    end
+    return nil
+end
+GRAPH_HELPERS.cursor_hash = cursor_hash
+
+-- The "branch" the collapse interactions (§10.4) act on at a buffer line:
+-- resolved from the selection (a ref or a packed marker) or the region under the
+-- cursor via its signature.
+local function branch_under_cursor(ctx, line)
+    local item = ctx:order_at(line)
+    if not item then return nil end
+    if item.type == "markers" then
+        if ctx.selection_state.commit == item and ctx.selection_state.index then
+            local u = marker_units(item)[ctx.selection_state.index]
+            if u then
+                local owners = {}
+                for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
+                return { state = "collapsed", owners = owners,
+                    follow = u.marker.tip and u.marker.tip.hash, commit = u.marker.tip }
+            end
+        end
+        return { state = "collapsed" } -- packed line, no selection
+    end
+    local c = item.commit
+    if not c then return nil end
+    if ctx.selection_state.index and ctx.selection_state.commit == c then
+        local ids = selected_owner_ids(c, ctx.selection_state.index)
+        if ids then
+            local cur = ctx.view_state.effective[ids[1]] or "normal"
+            return { state = (cur == "collapsed") and "collapsed" or "expanded",
+                owners = ids, follow = c.hash, commit = c }
+        end
+    end
+    if c.collapsed then
+        local owners = {}
+        for oid in pairs(c.signature or {}) do
+            if (ctx.view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
+        end
+        return { state = "collapsed", owners = owners,
+            follow = c.tip and c.tip.hash, commit = c.tip }
+    end
+    local ids = collapse_owners(ctx.sig_cache.sig and ctx.sig_cache.sig[c.hash], ctx:effective_pinned(), ctx.view_state.effective)
+    if ids then
+        return { state = "expanded", owners = ids, follow = c.hash, commit = c }
+    end
+    return { state = "mainline", commit = c }
+end
+GRAPH_HELPERS.branch_under_cursor = branch_under_cursor
+
+-- The window title identifying the repository (§2.1): its name + current branch.
+local function graph_title(ctx)
+    local b = ctx.repo.head
+    return b and (" %s · %s "):format(ctx.repo_name, b) or (" %s "):format(ctx.repo_name)
+end
+GRAPH_HELPERS.graph_title = graph_title
+
+-- Apply a mode to a branch's owners, reflow, and keep the cursor on it (§10.4).
+local function set_branch(ctx, b, mode, follow)
+    for _, oid in ipairs(b.owners or {}) do ctx.view_state.modes[oid] = mode end
+    ctx:reflow()
+    ctx:update_footer()
+    if follow then ctx:goto_hash(follow) end
+    ctx:place_cursor()
+end
+GRAPH_HELPERS.set_branch = set_branch
 
 --- Drill into a submodule as a navigation FRAME in the current host window
 --- (§14.7): push a graph frame for `sub_folder`, focused on `focus_hash` with the
