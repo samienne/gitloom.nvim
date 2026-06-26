@@ -2667,11 +2667,11 @@ local function h_filter(ctx)
         end
     end
 
-    -- The graph view at overlay-open, restored on cancel (§16.4). Record this
-    -- position in the jumplist (`m'`) so that after a `<CR>` jump to a match the
-    -- hybrid `<C-o>` (§14.3) returns here — the pre-filter spot (§16.4).
+    -- The graph view at overlay-open, restored on cancel and used as the jumplist
+    -- anchor on `<CR>` (§16.4): select_dismiss restores this cursor then jumps to
+    -- the match with a real motion, so the pre-filter spot enters the jumplist and
+    -- the hybrid `<C-o>` (§14.3) returns here.
     local saved_view = vim.api.nvim_win_call(gwin, vim.fn.winsaveview)
-    pcall(vim.api.nvim_win_call, gwin, function() vim.cmd("normal! m'") end)
     -- The filter active before the overlay opened: nil from the base graph, or the
     -- stamped filter when re-opened over a stamped view (§16.5). Cancel restores it.
     local prev_filter = ctx.filter
@@ -2769,10 +2769,12 @@ local function h_filter(ctx)
         ctx.filter = nil
         close_input()
         ctx:reflow()
-        if hash and ctx:goto_hash(hash) then
+        -- Restore the pre-filter cursor, then **jump** to the match (a real jump
+        -- motion) so the pre-filter spot lands in the jumplist and `<C-o>` returns
+        -- there (§16.4). With no match, just stay at the restored position.
+        pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
+        if hash and ctx:goto_hash(hash, true) then
             ctx:center_view()
-        else
-            pcall(vim.api.nvim_win_call, gwin, function() vim.fn.winrestview(saved_view) end)
         end
         ctx:update_cone()
         ctx:update_panes()
@@ -5042,7 +5044,11 @@ GRAPH_HELPERS.update_cone = update_cone
 
 -- Move the cursor onto the display row representing `hash` — a real commit row,
 -- the marker (head/packed) whose region contains it, or a junction (§2/§10.4).
-local function goto_hash(ctx, hash)
+-- When `record` is set, the move is a **jump motion** (`{lnum}G`) so the prior
+-- cursor position lands in the jumplist — used by the filter `<CR>` so `<C-o>`
+-- returns to where you were (§16.4); other callers use a plain set_cursor that
+-- doesn't pollute the jumplist.
+local function goto_hash(ctx, hash, record)
     if not hash then return false end
     local w = ctx:win()
     if not w then return false end
@@ -5064,7 +5070,11 @@ local function goto_hash(ctx, hash)
         end
         if found then
             local lnum = (ctx.lv.controller.item_start and ctx.lv.controller.item_start(i)) or i
-            pcall(vim.api.nvim_win_set_cursor, w, { lnum, 0 })
+            if record then
+                pcall(vim.api.nvim_win_call, w, function() vim.cmd("normal! " .. lnum .. "G") end)
+            else
+                pcall(vim.api.nvim_win_set_cursor, w, { lnum, 0 })
+            end
             return true
         end
     end
