@@ -267,7 +267,9 @@ function nav.install_nav_keys(buf, root)
     vim.keymap.set("n", "<C-i>", function()
         local jl = vim.fn.getjumplist()
         local list, curidx = jl[1], jl[2]
-        local target = list[curidx + 1]
+        -- getjumplist: list[idx] is the <C-o> target, list[idx+1] the *current*
+        -- position, list[idx+2] the <C-i> forward target (verified empirically).
+        local target = list[curidx + 2]
         if target and target.bufnr == buf then
             vim.api.nvim_feedkeys(termcodes("<C-i>"), "n", false) -- in-buffer jump forward
         else
@@ -1034,7 +1036,8 @@ local function open_commit_view(opts, commit, range, root)
     vim.keymap.set("n", "<C-i>", function()
         local jl = vim.fn.getjumplist()
         local list, curidx = jl[1], jl[2]
-        local target = list[curidx + 1]
+        -- The forward target is list[idx+2] (idx = <C-o> target, idx+1 = current).
+        local target = list[curidx + 2]
         if target and target.bufnr == buf then
             vim.api.nvim_feedkeys(
                 vim.api.nvim_replace_termcodes("<C-i>", true, false, true), "n", false)
