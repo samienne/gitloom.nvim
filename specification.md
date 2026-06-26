@@ -67,7 +67,8 @@ gitloom's own topological order (reproducing git's `--topo-order`), or git's dat
 / author-date order — reordering in place and keeping the cursor on its commit.
 `V` enters **commit selection** (§13) — a modal range
 selection along one branch, fed to the diff provider and the commit view's range
-mode.
+mode. `/` opens a **commit search** (§15) — a fuzzy picker over commit subjects
+and authors that jumps the cursor to the chosen commit.
   `<leader>b` opens a **ref picker** (snacks.picker) listing every branch,
   remote-tracking branch, and tag, plus **HEAD**; selecting one moves the cursor
   to that ref's commit and **centers** the view on it (like the initial HEAD
@@ -860,7 +861,7 @@ status in the window footer.
 ```
 GraphOptions = { win, palette, merge_style, icons, branches, sort_mode, mirror,
                  highlight, date_format, date_mode, message_min, label_mode, diff,
-                 working_tree, scrolloff }
+                 working_tree, scrolloff, search }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 Diff         = { open: fun(range: DiffRange), label: string }
 DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
@@ -931,6 +932,11 @@ Endpoint     = Commit | "index" | "worktree"
 - `pin_upstream` — when pinning a local branch, also pin its tracked upstream
   remote-tracking ref as an anchor (§6.3, §10.6). **Default true.** Set false to
   pin only the local branch.
+- `search` — the commit-search picker (§15): `snippet` is the number of graph
+  rows shown around the commit in the preview (**default `7`**, odd so the commit
+  sits centered); `layout` is how the graph snippet and the commit detail are
+  arranged in the preview — `"horizontal"` (default, side by side) or
+  `"vertical"` (snippet above the detail).
 
 ### setup() wiring
 
@@ -1257,7 +1263,8 @@ the streaming path stays lean. The refs shown are the row's existing decorations
 
 The diff is fetched the same way, on demand, by a second `git show --format= -p`
 for the commit, chained after the metadata fetch; the view renders once both
-arrive.
+arrive. The same on-demand fetch and formatter are reused by the commit-search
+preview (§15.3).
 
 ### 11.2 Content
 
@@ -1981,3 +1988,67 @@ submodule update can never quietly mutate the submodule's saved layout.
 - **Modifier surface.** The concrete set of filters / scopes (file, path glob,
   author, …) and the keys that apply / clear them are enumerated as they are
   built; the machinery (§14.2–§14.5) is independent of which modifiers exist.
+
+## 15. Commit search
+
+`/` opens a **commit search** picker (snacks.picker) over the repository's
+commit set — a fuzzy finder across every commit in the model, with a preview
+that shows the commit (§11) alongside a snippet of the graph locating it.
+Selecting a result moves the cursor to that commit and centers the graph on it.
+Like everything else, it is read-only (§9). `:GitloomSearch` is the command
+equivalent.
+
+### 15.1 Entry point
+
+`/` (and `:GitloomSearch`) opens the picker immediately, populated from the
+in-memory commit model (§3, §4) — the same `--all` set the graph laid out, in
+`repo.order`. No git query is run: the searchable fields are already resident.
+The picker lists one entry per commit; result rows follow snacks' native
+`git_log` format (abbreviated hash, author date, author, subject) so the list
+reads like the familiar git-log picker.
+
+### 15.2 Matching
+
+The fuzzy match is over each commit's **subject and author name** — the two
+high-signal fields the model already carries (§3.1). It is snacks' client-side
+fuzzy matcher over the resident list (not a git-side `--grep`), so it is
+incremental and instant for any repository size, with no fetch and no cache.
+
+Searching commit **message bodies** is deliberately out of scope here: bodies
+are not in the model (§11.1), holding them resident does not scale, and body
+matches dilute the result list. A future body-search mode is sketched in §15.5.
+
+### 15.3 Preview
+
+The preview shows the selected commit's **commit view** (§11) — fetched on
+demand by the same `git show` queries (§11.1) and rendered by the same formatter
+(metadata, message, diffstat, diff), cached per hash for the picker session —
+**augmented with a graph snippet**: a fixed window of rows around the commit
+drawn from the already-laid-out projection (`repo.display`, §10), with the
+commit's own row marked, showing the real lanes in their graph colours so the
+snippet matches the main view exactly.
+
+The snippet and the commit detail are shown **side by side** by default; their
+arrangement is configurable (§8). The preview is **centered on the match**: the
+matched text is located in the rendered detail, scrolled to the center, and
+highlighted.
+
+### 15.4 Confirm / navigation
+
+Confirming a result moves the cursor to the commit and **centers** the graph on
+it — navigation **within** the current view (§14.2), not a new stack entry
+(§14.3). The jump resolves the commit to its visible row, so a collapsed branch
+lands on its collapsed head (§10.3); a commit that is currently hidden (§10.1)
+is a no-op with a notice — mirroring the ref picker (§2). Opening the full
+commit view (§11) remains its own action, reached with `<CR>` on the row after
+the jump.
+
+### 15.5 Open / deferred
+
+- **Body search** as a separate **live mode** — a toggle within the picker that
+  switches from the resident fuzzy match to a git-side `git log --grep` / `-G`
+  query, re-run per query (no resident corpus; regex, not fuzzy). This keeps body
+  text searchable without caching it or cluttering the default subject/author
+  list; not yet built.
+- **Additional fields / filters** (committer, date range, path) would compose as
+  further picker modes or as view modifiers (§14.2) as needed.
