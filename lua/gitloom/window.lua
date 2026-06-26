@@ -4304,7 +4304,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     local dn = ref and ref.commit and dnode[ref.commit.hash]
                     if dn and (order_of(dn) or math.huge) < seam.idx then tips[#tips + 1] = dn end
                 end
-                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx, coroutine.yield)
+                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx, coroutine.yield, lane_of)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
                 local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end

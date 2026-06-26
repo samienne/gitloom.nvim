@@ -567,25 +567,33 @@ Details not covered by the spec or architecture:
   layout core (boundary-line extraction; `continue`/`condense`/`footer` = the
   footer's down-rebuild; `continue_up` = the header's **minimal connecting subgraph**
   (only how the pinned anchors relate to each other + the lanes crossing the cutoff —
-  the "seeds"): a three-pass reachability over the **display** DAG, up-only —
-  **Pass 1** `seed_reach` (each boundary column + each pinned tip is a seed; walk up via
-  `children`; a node reached by ≥2 distinct seeds is a **confluence**), **Pass 2**
-  `useful` (walk down from confluences + pinned tips, marking ancestors that lead up to
-  one), **Pass 3** induce (walk up from useful seeds keeping only useful children; a
-  non-useful seed → a **seam head** that terminates at the seam; then each pinned anchor
-  is connected **down** its own first-parent spine to the seeded part — induct for
-  *edges only*, NOT re-walked up, or the up-walk pulls in every collapsed fork off the
-  trunk and balloons the header. That down-connect fixes the merge-at-cutoff anchor-severing bug:
-  when both boundary lanes begin at one merge at the cutoff, the up-walk's single
-  first-parent chain dead-ends at a collapsed node before reaching an anchor on a folded
-  branch, leaving it inducted-but-disconnected and rendered as a lone head on a fresh
-  lane id (HEAD jumped to id 39); the spine nodes are all `useful` so `condense` splices
-  them and the header stays minimal. So an unpinned branch
-  forking off the trunk that reconnects to nothing is **pruned** (no stray feature
-  heads — the stray-fork regression); a branch that only merges back condenses to a node-less
-  junction; ≥2 useful children → junction, 1 → collapse, 0 → head (a dead-ending
-  confluence caps). Invariant: every above-seam boundary `begin` is in the node set
-  (useful node or seam head) so no seam lane drops; `condense(up)`; the **direct seam-up
+  the "seeds"): a **tracked-lane induce** over the **display** DAG, up-only. The
+  **tracked** lanes (`lane_of(n).id`, the main-graph lane identity threaded in — the
+  projected first-parent is unreliable) are the lanes crossing the seam plus the pinned
+  anchors' own lanes. **Pass 1** `seed_reach` finds **confluences** (a node reached up by
+  ≥2 seeds = where ≥2 tracked lanes meet); **Pass 2** `useful` walks **down** from
+  confluences + pinned tips marking ancestors that lead up to one — but only **through
+  tracked nodes** (else a node useful via an *untracked* path the induce can't follow
+  caps as a stray head); **Pass 3** induce walks up from the seeds keeping a child iff it
+  is **on a tracked lane AND useful**. Tracked drops the merge/fork plumbing of every
+  feature branch that touched the trunk off-screen (spec §6.2); useful caps an isolated
+  crossing lane at the seam (a bare ◍) instead of drawing it up to its own feature tip;
+  merges fall out where two followed lanes meet one node (a node-less junction). This
+  also fixes the merge-at-cutoff anchor-severing bug (HEAD jumping to a fresh id): the
+  anchor's lane is **tracked**, so the crossing lane on it follows the spine by id
+  unbroken up to the anchor — a collapsed continuation's `lane_of` is its
+  `parent_lanes[1]` (the trunk lane), keyed by the tip hash, so a recycled tip-own lane
+  never severs it. A **divergent** anchor (tip ahead of the trunk, lane never crossing the
+  seam, up-walk never reaching it) is then **connected down its first-parent spine** to
+  the already-inducted part (edges only, no re-walk up), so it relates to the trunk
+  instead of rendering as a floating labelled head (the `(feature/repo-targeting)`
+  regression). So an unpinned branch forking off the trunk that reconnects to nothing
+  is **pruned** (no stray feature heads); a branch that only merges back is the single
+  node-less junction; ≥2 kept children → junction, 1 → collapse, 0 → head. Real-repo
+  headers shrank from ~11 nodes to 2–6 (a possible **shortest-path** dedup for
+  redundant parallel routes to one anchor is deferred — none observed). Invariant: every
+  above-seam boundary `begin` is in the node set (inducted or a seam head) so no seam
+  lane drops; `condense(up)`; the **direct seam-up
   grid** `header` — a bottom-up sweep seeded from the boundary so the seam is the
   bottom row, columns never reused, each lane drawn in **its own colour**
   (`lane_of`, the main-view colour; the pivot continuation keeps the pivot's colour,

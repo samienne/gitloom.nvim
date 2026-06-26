@@ -538,36 +538,30 @@ end
 --- summarises exactly what is on screen, and `order_of` is always defined), bounded
 --- above the seam by `order_of < seam_idx`.
 ---
---- Three passes:
----   1. **seed_reach** — each boundary column is a distinct seed (a fork seam yields
----      ≥2 columns; they are different lanes, so seed identity is the *column*, not the
----      begin hash), plus each pinned tip. From every seed walk **up** via `children`,
----      recording the set of seed-ids reaching each node. A node reached by **≥2
----      distinct seeds** is a **confluence** (two seeds converge there going up).
----   2. **useful** — from every confluence and every pinned tip walk **down** via
----      `parents`, marking the above-seam ancestors `useful` (= "leads up to a
----      confluence or an anchor"). Seeding the pinned tips is what keeps a lone
----      anchor's full spine visible; over-marking is harmless because the induction
----      below is seed-driven.
----   3. **induce** — walk up from each *useful* seed keeping only *useful* children
----      (first-parent child first, so the pivot keeps the branch colour). A seed that
----      is **not** useful becomes a **seam head** (a childless node → it terminates at
----      the seam). The induced node's restricted children/parents drive `condense`'s
----      role: ≥2 kept children → junction, 1 → collapse (spliced away), 0 → head — so a
----      confluence whose merged output dead-ends caps with a head (the merge is shown,
----      the dangling continuation is not).
+--- **Tracked-lane induce** (spec §6.2). The **tracked** lanes are the lanes crossing
+--- the seam plus the pinned anchors' own lanes (by **lane id** — the stable rendered
+--- identity from the main graph, since the projected first-parent is unreliable). From
+--- each seed (a boundary `begin` or a pinned tip) walk **up** via `children`, keeping a
+--- child iff it is on a tracked lane: the lane's own continuation (same id) or a
+--- merge/split with another seam lane or an anchor. A fork onto an *untracked* feature
+--- branch's lane is dropped, so the header never fans into the merge/fork plumbing of
+--- every branch that touched the trunk off-screen. **Merges** fall out where two
+--- followed lanes reach the same node — that is the only kept junction (≥2 tracked
+--- lanes meet), drawn node-less by `condense`/`M.header`.
 ---
---- **Invariant:** every above-seam boundary `begin` ends up in the node set handed to
---- `condense` (a useful node or a seam head), so no seam lane is ever dropped and the
---- header's bottom row always matches the main view's top edge. Then `condense(up)`.
----@param boundary table<integer, table>  -- col → lane with `.begin` (the DisplayNode above)
+--- **Invariant:** every seed `begin` is inducted directly, so no seam lane is ever
+--- dropped and the header's bottom row always matches the main view's top edge. The
+--- induced node's restricted children/parents drive `condense`'s role: ≥2 kept children
+--- → junction, 1 → collapse (spliced away), 0 → head. Then `condense(up)`.
+---@param boundary table<integer, table>  -- col → lane with `.begin` (DisplayNode) and `.id`
 ---@param tips table[]  -- pinned anchor tip DisplayNodes above the seam
 ---@param anchor_names table<string, boolean>?
 ---@param order_of (fun(node: table): integer|nil)?  -- node → index (newer = smaller)
 ---@param seam_idx integer  -- only nodes with a smaller index are above the seam
 ---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY units of work
+---@param lane_of (fun(node: table): table?)?  -- node → its main-view lane { id, color } (§6.2)
 ---@return table
-function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
+function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield, lane_of)
     local step = chunker(yield)
     local function above(n)
         -- Working-tree virtual commits (§4.2) are the live state, not topology, so
@@ -580,15 +574,13 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     end
     local function pos_of(n) return (order_of and order_of(n)) or 0 end
 
-    -- Seeds — each boundary column is its own seed; plus each pinned anchor tip. A
-    -- seed's `begin`/tip node is its **floor**: always eligible even if it sits exactly
-    -- on the seam row (the crossing itself), while everything else must be strictly
-    -- above. (Fixes the seam off-by-one — a begin at `seam_idx` is still seeded.)
+    -- Seeds — each boundary column (a crossing lane) and each pinned anchor tip, each
+    -- a DISTINCT seed id (two columns of a fork seam are different lanes). A seed is
+    -- inducted directly, so it is eligible even on the seam row; only its children are
+    -- gated by `above`. Skip a crossing lane born on a virtual commit (§4.2).
     local seeds = {}
-    local seed_floor = {} -- hash → true
+    local seed_floor = {} -- hash → true (a seed begin/tip is eligible even at seam_idx)
     for col, lane in pairs(boundary) do
-        -- Skip a crossing lane that begins on a virtual commit (§4.2): its only
-        -- above-seam content is the live working-tree state, which the header omits.
         if lane.begin and not lane.begin.virtual then
             seeds[#seeds + 1] = { id = "c" .. tostring(col), node = lane.begin }
             seed_floor[lane.begin.hash] = true
@@ -600,14 +592,22 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     end
     local function in_region(n) return n and (seed_floor[n.hash] or above(n)) end
 
-    -- Pass 1 — seed_reach: multi-source walk UP via children. `reach[hash]` is the SET
-    -- of seed-ids that reach the node; ≥2 distinct ⇒ a confluence.
-    local reach = {}   -- hash → { seed-id → true }
+    -- The **tracked** lane ids: the lanes crossing the seam plus the pinned anchors' own
+    -- lanes (by **lane id** — the stable rendered identity from the main graph, since the
+    -- projected first-parent is unreliable; spec §6.2). A child is kept only if it is on a
+    -- tracked lane, so the header never follows an untracked feature branch's lane — only
+    -- the anchors' spines and the merges/splits BETWEEN tracked lanes survive.
+    local function lane_id(n) local l = lane_of and lane_of(n); return l and l.id end
+    local tracked = {}
+    for _, lane in pairs(boundary) do if lane.id ~= nil then tracked[lane.id] = true end end
+    for _, t in ipairs(tips) do local id = lane_id(t); if id ~= nil then tracked[id] = true end end
+
+    -- Pass 1 — confluence: walk UP from each seed, recording the set of seed ids reaching
+    -- each node. ≥2 distinct ⇒ a **confluence** — where ≥2 tracked lanes converge.
+    local reach = {}
     for _, s in ipairs(seeds) do
-        local n0 = s.node
-        reach[n0.hash] = reach[n0.hash] or {}
-        reach[n0.hash][s.id] = true
-        local seen, stack = { [n0.hash] = true }, { n0 }
+        reach[s.node.hash] = reach[s.node.hash] or {}; reach[s.node.hash][s.id] = true
+        local seen, stack = { [s.node.hash] = true }, { s.node }
         while #stack > 0 do
             step()
             local c = stack[#stack]; stack[#stack] = nil
@@ -627,21 +627,12 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
         return false
     end
 
-    -- Pass 2 — useful: walk DOWN via parents from every confluence and every pinned
-    -- tip, marking the above-seam ancestors that lead up to one of them.
+    -- Pass 2 — useful: a node is useful iff going UP it leads to a confluence or a pinned
+    -- anchor. Walk DOWN (via parents) from every confluence and pinned tip, marking the
+    -- above-seam ancestors. An isolated crossing lane (leads to neither) is NOT useful, so
+    -- it caps at the seam with a head instead of being drawn up to its own feature tip.
     local useful, stack2 = {}, {}
-    local function mark_useful(n)
-        if n and not useful[n.hash] then useful[n.hash] = true; stack2[#stack2 + 1] = n end
-    end
-    local function walk_useful()
-        while #stack2 > 0 do
-            step()
-            local c = stack2[#stack2]; stack2[#stack2] = nil
-            for _, p in ipairs(c.parents or {}) do
-                if in_region(p) then mark_useful(p) end
-            end
-        end
-    end
+    local function mark_useful(n) if n and not useful[n.hash] then useful[n.hash] = true; stack2[#stack2 + 1] = n end end
     for _, s in ipairs(seeds) do
         if s.pinned then mark_useful(s.node) end
         local seen, stack = { [s.node.hash] = true }, { s.node }
@@ -654,70 +645,53 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
             end
         end
     end
-    walk_useful()
-
-    -- Pass 3 — induce: the kept commits are the useful seeds and the useful nodes
-    -- reachable UP from them (keeping only useful children).
-    local inducted, stack3 = {}, {}
-    local function induct(n)
-        if not inducted[n.hash] then inducted[n.hash] = n; stack3[#stack3 + 1] = n end
-    end
-    for _, s in ipairs(seeds) do
-        if useful[s.node.hash] then induct(s.node) end
-    end
-    -- Connect each pinned anchor DOWN to the already-seeded part along its own
-    -- first-parent spine. The up-walk below climbs ONE first-parent chain from each
-    -- boundary lane and can dead-end at a collapsed node before it reaches a pinned
-    -- anchor that sits on a folded branch — the anchor is then inducted (Pass 2 marks it
-    -- useful) but left DISCONNECTED, so M.header renders it as a lone head on a fresh id,
-    -- severed from its crossing lane (the merge-at-cutoff anchor-severing bug: HEAD jumps to id 39).
-    -- Walking the anchor's spine down until it meets a seed (or crosses the seam) keeps
-    -- the anchor on its real lane. Every spliced spine node is `useful`, so condense
-    -- collapses the linear run back to a single edge — the header does not grow.
-    for _, s in ipairs(seeds) do
-        if s.pinned and inducted[s.node.hash] then
-            local c = s.node
-            while c do
-                local p = c.parents and c.parents[1]
-                if not (p and above(p) and useful[p.hash]) then break end
-                local met = inducted[p.hash]
-                -- Induct for EDGES only — do NOT feed the spine node back into the up-walk
-                -- (stack3). Both boundary lanes start at the same merge, so every commit
-                -- above it is a confluence; letting the up-walk's else-branch process a
-                -- non-confluence spine node would pull in every collapsed fork off the
-                -- trunk as a stray head and balloon the header. The spine's only relevant
-                -- up-child is the next spine node, already inducted here.
-                inducted[p.hash] = inducted[p.hash] or p
-                if met then break end -- reached the connected part — done
-                c = p
-            end
+    while #stack2 > 0 do
+        step()
+        local c = stack2[#stack2]; stack2[#stack2] = nil
+        -- Propagate useful DOWN only through a **tracked** node: a parent p is useful
+        -- only if it can reach the confluence/anchor going up via a tracked child (here
+        -- `c`). Otherwise p would be "useful" via an untracked path the induce can't
+        -- follow, and would cap as a stray head mid-graph.
+        local lc = lane_id(c)
+        if lc ~= nil and tracked[lc] then
+            for _, p in ipairs(c.parents or {}) do if in_region(p) then mark_useful(p) end end
         end
     end
+
+    -- Pass 3 — induce: from each seed walk UP, keeping a child iff it is on a tracked lane
+    -- AND useful. Tracked drops the feature plumbing; useful caps an isolated lane. Merges
+    -- fall out where two followed lanes reach one node (condense renders the junction; the
+    -- seam-parent sentinel below keeps a merge whose parents cross the cutoff a junction).
+    local inducted, stack3 = {}, {}
+    local function induct(n) if not inducted[n.hash] then inducted[n.hash] = n; stack3[#stack3 + 1] = n end end
+    for _, s in ipairs(seeds) do induct(s.node) end
     while #stack3 > 0 do
         step()
         local c = stack3[#stack3]; stack3[#stack3] = nil
-        -- Follow each lane's OWN continuation, not the whole shared future.
-        --   * Below a confluence, a lane goes up via its **first-parent child** (its
-        --     identity); the only other child worth taking is a **confluence** — a
-        --     commit where this lane MEETS another (a real merge of two tracked lanes).
-        --     Everything else (forks off to unrelated tips) is left out.
-        --   * AT/above a confluence the lanes have already merged into one, so follow a
-        --     SINGLE continuation (its first-parent child) up to the tip — the shared
-        --     future may itself fork into dozens of branches, but none of them relate to
-        --     the crossing lanes, so they are dropped. (This is the shared-future blowup:
-        --     every branch of the shared future was being pulled in as its own head.)
-        if is_confluence(c.hash) then
-            for _, ch in ipairs(c.children or {}) do
-                if useful[ch.hash] and above(ch) and ch.parents and ch.parents[1] == c then
-                    induct(ch); break -- one merged lane, not every fork above it
-                end
+        for _, ch in ipairs(c.children or {}) do
+            if above(ch) and useful[ch.hash] then
+                local id = lane_id(ch)
+                if id ~= nil and tracked[id] then induct(ch) end
             end
-        else
-            for _, ch in ipairs(c.children or {}) do
-                if useful[ch.hash] and above(ch)
-                    and ((ch.parents and ch.parents[1] == c) or is_confluence(ch.hash)) then
-                    induct(ch)
-                end
+        end
+    end
+
+    -- Connect each pinned anchor DOWN its first-parent spine to the already-inducted
+    -- part (the trunk / the seam), so a **divergent or unmerged** anchor — whose lane
+    -- does not cross the seam and whose up-walk reaches no spine (its tip is ahead of the
+    -- trunk) — is not left as a floating labelled head. Induct for *edges only* (do NOT
+    -- re-walk up, or the up-walk pulls in every fork off the spine), stopping on meeting
+    -- the inducted set or the seam (a parent at/below the cutoff → a seam sentinel below).
+    for _, s in ipairs(seeds) do
+        if s.pinned then
+            local c = s.node
+            while c do
+                local p = c.parents and c.parents[1]
+                if not (p and above(p)) then break end
+                local met = inducted[p.hash]
+                inducted[p.hash] = inducted[p.hash] or p
+                if met then break end
+                c = p
             end
         end
     end
@@ -768,9 +742,9 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
         end
     end
 
-    -- Non-useful seeds terminate at the seam with a head (a childless node → a kept
-    -- tip → a bare ◍ on the seam row). A pinned but disconnected anchor is always
-    -- useful via Pass 2, so it lands in the inducted set as a lone labelled head.
+    -- Every seed is inducted, so this is a safety net: a seed with no inducted
+    -- node (e.g. one whose lane reaches nothing tracked) still ends at the seam as a
+    -- childless node — a bare ◍ head — so no crossing lane is dropped.
     for _, s in ipairs(seeds) do
         if not node[s.node.hash] then ensure(s.node) end
     end

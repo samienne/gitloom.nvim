@@ -426,11 +426,13 @@ local function header_of(items, opts, seam_pos, pinned)
             end
         end
     end
-    local cond = pane.continue_up(boundary, tips, pinned, function(n) return idx[n.hash] end, seam_pos)
     -- main-view lane { id, color } per node's branch (its tip), so each branch keeps
-    -- its own distinct colour (matching the graph) — mirrors graph.lua's lane_of.
+    -- its own distinct colour (matching the graph) — mirrors graph.lua's lane_of. Passed
+    -- into continue_up too: the tracked-lane induce matches lanes by id (§6.2).
     local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
     local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
+    local cond = pane.continue_up(boundary, tips, pinned, function(n) return idx[n.hash] end, seam_pos,
+        nil, lane_of)
     return pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of), boundary, cond, idx, lane_of, col_of
 end
 
@@ -1086,8 +1088,11 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         M.parents = { p1, p2 }; p1.children = { M }; p2.children = { M }
         local disp = { HEAD = 1, t = 2, M = 3, p1 = 4, p2 = 4 } -- p1,p2 at/below the cutoff (4)
         local function order_of(n) return disp[n.hash] end
+        -- trunk HEAD..t..M all on lane id 1, so the tracked-lane walk follows it (§6.2).
+        local lm = { HEAD = { id = 1, color = 1 }, t = { id = 1, color = 1 }, M = { id = 1, color = 1 } }
+        local function lane_of(n) return n and lm[n.hash] end
         local boundary = { [1] = { id = 1, color = 1, begin = M }, [2] = { id = 2, color = 2, begin = M } }
-        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 4)
+        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 4, nil, lane_of)
         local present = {}
         for _, it in ipairs(cond.items) do present[it.commit.hash] = it.commit end
         assert.is_not_nil(present.M, "the merge at the cutoff must be kept (a junction), not spliced")
@@ -1118,7 +1123,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         local function lane_of(n) return n and lm[n.hash] end
         local function col_of() return 1 end
         local boundary = { [1] = { id = 1, color = 1, begin = M }, [2] = { id = 38, color = 8, begin = M } }
-        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 4)
+        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 4, nil, lane_of)
         local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
         local opts = h.big_opts()
         opts.palette = opts.palette or {}
@@ -1146,11 +1151,10 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
 
     it("keeps the trunk id through a COLLAPSED continuation at a merge (merge-at-cutoff) (§6.2)", function()
         -- The merge-at-cutoff anchor-severing bug: a merge M just above the cutoff continues up to HEAD
-        -- through a COLLAPSED node whose tip's main-view lane was RECYCLED to a different id
-        -- (99). The old logic saw mv ≠ the seam id and switched the trunk to a fresh id —
-        -- lane 1 "terminated" at the merge and HEAD got a brand-new id, so dev had no lane 1
-        -- to branch off. Topologically the collapsed node IS the trunk continuing (its first
-        -- parent is M), so the seam id must run unbroken to HEAD.
+        -- through a COLLAPSED node. Its `lane_of` is the **collapsed head's first-parent lane**
+        -- (its `parent_lanes[1]`, the trunk id 1) — keyed by the tip hash, NOT the tip's own
+        -- (recycled) lane — so the tracked-lane walk (§6.2) follows it: lane 1 is tracked, ct
+        -- is on it, and the seam id runs unbroken to HEAD.
         local HEAD = { hash = "HEAD", refs = { { name = "HEAD" } }, parents = {}, children = {} }
         local ct = { hash = "collapsed:trunk", collapsed = true, tip = { hash = "ct_tip" }, refs = {}, parents = {}, children = {} }
         local M = { hash = "M", refs = {}, parents = {}, children = {} }
@@ -1159,14 +1163,14 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         HEAD.parents = { ct }; ct.children = { HEAD }; ct.parents = { M }
         M.children = { ct }; M.parents = { F, bump }; bump.children = { M }; bump.parents = { F }; F.children = { M, bump }
         local disp = { HEAD = 1, ["collapsed:trunk"] = 50, M = 118, ["collapsed:bump"] = 119, F = 120 }
-        -- ct's TIP main-view lane is recycled to 99 (≠ the seam id 1); HEAD's is 1.
-        local lm = { HEAD = { id = 1, color = 1 }, ct_tip = { id = 99, color = 9 },
+        -- ct's lane (keyed by tip hash) is the trunk's first-parent lane (id 1); bump's is 38.
+        local lm = { HEAD = { id = 1, color = 1 }, ct_tip = { id = 1, color = 1 },
             M = { id = 1, color = 1 }, bp_tip = { id = 38, color = 8 } }
         local function order_of(n) return disp[n.hash] end
         local function lane_of(n) return n and lm[(n.tip and n.tip.hash) or n.hash] end
         local function col_of() return 1 end
         local boundary = { [1] = { id = 1, color = 1, begin = M }, [2] = { id = 38, color = 8, begin = bump } }
-        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 119)
+        local cond = pane.continue_up(boundary, { HEAD }, { HEAD = true }, order_of, 119, nil, lane_of)
         local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
         local head_id
         for _, r in ipairs(res.rows) do
@@ -1181,6 +1185,34 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert.equals(1, head_id, "HEAD must keep the trunk id (1), not switch to a fresh id at the merge")
         assert_seam_match(res.rows, boundary)
         assert_continuous(res.rows)
+    end)
+
+    it("connects a divergent pinned anchor DOWN its spine — never a floating head (§6.2)", function()
+        -- dev (pinned) is divergent/ahead of master: its tip d1's first-parent spine
+        -- d1->x->trunk reaches the trunk through `x` on a THIRD (untracked) lane, so the
+        -- up-walk from the master crossing lane never reaches d1. The anchor down-connect
+        -- must walk d1's spine to the trunk so dev renders connected, not as a floating
+        -- labelled head (the regression behind the disconnected `(feature/repo-targeting)`).
+        local d1 = { hash = "d1", refs = { { name = "dev" } }, parents = {}, children = {} }
+        local x = { hash = "x", parents = {}, children = {} }
+        local m1 = { hash = "m1", refs = { { name = "master" } }, parents = {}, children = {} }
+        local trunk = { hash = "trunk", parents = {}, children = {} }
+        local base = { hash = "base", parents = {}, children = {} }
+        d1.parents = { x }; x.children = { d1 }; x.parents = { trunk }
+        trunk.children = { m1, x }; m1.parents = { trunk }; trunk.parents = { base }; base.children = { trunk }
+        local disp = { d1 = 1, m1 = 2, x = 3, trunk = 4, base = 5 }
+        local lm = { d1 = { id = 2, color = 2 }, m1 = { id = 1, color = 1 },
+            x = { id = 3, color = 3 }, trunk = { id = 1, color = 1 } }
+        local function order_of(n) return disp[n.hash] end
+        local function lane_of(n) return n and lm[n.hash] end
+        local boundary = { [1] = { id = 1, color = 1, begin = trunk } } -- only the trunk crosses
+        local cond = pane.continue_up(boundary, { m1, d1 }, { master = true, dev = true }, order_of, 5, nil, lane_of)
+        local present = {}
+        for _, it in ipairs(cond.items) do present[it.commit.hash] = it.commit end
+        assert.is_not_nil(present.d1, "the dev anchor must be shown")
+        assert.is_not_nil(present.m1, "the master anchor must be shown")
+        assert.is_true(present.d1.parents and #present.d1.parents >= 1,
+            "the divergent anchor must connect down its spine, not float")
     end)
 
     it("gives a pinned anchor a labelled head; an unpinned crossing lane a bare ◍", function()

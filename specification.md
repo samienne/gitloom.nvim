@@ -699,23 +699,36 @@ the smallest graph that connects those endpoints. The build is a reachability ov
 the **display** DAG (the projected nodes the main view shows), **up-only** (toward
 children/newer):
 
-- **Seeds** are the lanes crossing the cutoff (each boundary column is its own seed)
-  plus the pinned anchor tips.
-- A **confluence** is a commit reached, going up, by **≥2 distinct seeds** — the place
-  two crossing lanes (or a crossing lane and an anchor) actually converge. A commit is
-  **useful** if going up it leads to a confluence or a pinned anchor.
-- A seed whose up-cone contains **no** confluence and reaches no anchor is unrelated to
-  everything else, so it **terminates immediately at the seam with a head** — it is not
-  walked up. Otherwise it is drawn up to its first confluence; at a fork only the
-  children that lead somewhere useful continue (≥2 → junction, 1 → silent collapse,
-  0 → head). A confluence whose merged lane then dead-ends also caps with a head.
+- **Seeds** are the lanes crossing the cutoff (each boundary column is its own seed,
+  carrying its **lane id**) plus the pinned anchor tips.
+- Each crossing lane is **followed up by its lane id** — the stable rendered-lane
+  identity from the main graph, *not* a first-child guess (in the projected DAG the
+  first child is unreliable) — to where it ends: its own tip (a **head**) or a point
+  where it **merges** into another lane. Two lanes that converge merge into one,
+  drawn as a node-less junction. **Merges are always kept** — lanes connecting is the
+  useful, legible case.
+- A **split** — a fork where a *new* lane diverges off the one being followed — is
+  drawn **only if that diverging lane is a *tracked* lane** (matched by **lane id**):
+  a lane crossing the seam, or a pinned anchor's lane. Equivalently, the header keeps a
+  junction only where **≥2 tracked lanes meet** — two seam lanes converging, a seam
+  lane merging into an anchor, or two anchors diverging / rejoining. A fork onto any
+  *untracked* lane — an unpinned feature branch's own lane — is **dropped**: the
+  followed lane simply continues past it as if the fork were not there. ("Leads up to
+  an anchor" is too weak — followed upward, *every* branch eventually reaches the trunk,
+  so it would prune nothing; the test is "*is* a tracked lane".) So the header never
+  fans out into the merge/fork plumbing of every feature branch that touched the trunk
+  off-screen — the back-and-forth crossings that make a busy header unreadable. (If
+  purely-parallel redundant routes to one anchor remain, a shortest-path pass may later
+  keep only the nearest; the tracked-lane rule already keeps any longer route that
+  passes another tracked junction.)
 
-So an unpinned branch that forks off the trunk and reconnects to nothing — a stray
-feature head — **never appears**; only the connective tissue between anchors and
-crossing lanes is drawn. (A branch that only **merges back** into another above the
-cutoff condenses to a node-less junction rather than a stray head. When many lanes
-genuinely interconnect off-screen the header can still grow; it is capped with a
-`+N above` overflow.)
+So the header is the anchors' spines, the **merges** where crossing lanes join them
+(or each other), and the splits that lead to another anchor — plus every other
+crossing lane drawn straight up to its bare head. An unpinned branch that forks off
+the trunk and reconnects to nothing — a stray feature head — **never appears**; a
+feature branch that merges back into the trunk is shown as that single merge, not as
+its whole sub-tree. (When anchors genuinely interconnect off-screen the header can
+still grow; it is capped with a `+N above` overflow.)
 
 **Virtual commits never appear in a pane.** The working-tree virtual commits
 (§4.2) are the live state, not topology; the header's up-walk stops before
@@ -734,9 +747,12 @@ topology — never arrow-capped:
   **node-less 3-way crossing** (box-drawing only, no commit glyph).
 
 Pinned **anchors** keep a labelled row (the anchor's spine, tip → seam); every
-other head is a **bare `◍`** (no label). A fully-disconnected pinned anchor
-(multi-root, with no seed reaching it) shows as a lone labelled head (its spine is not
-drawn — the up-only walk does not descend to its separate root). A **linear run** (a
+other head is a **bare `◍`** (no label). A **divergent** anchor — one whose tip is
+ahead of the trunk so its lane never crosses the seam and the up-walk never reaches it —
+is **connected down its own first-parent spine** to the trunk (the already-built part),
+so it relates to the trunk visibly instead of floating as a stray labelled head. (A
+truly disconnected anchor — a separate root nothing reaches — still shows as a lone
+labelled head.) A **linear run** (a
 lane stretch with no head, junction, or anchor on it) costs **zero** rows — it is pure
 vertical continuation. This is the same "wires must connect" grid invariant (§5.1)
 lifted to the window edge: no lane dangles, none stops in mid-air.
