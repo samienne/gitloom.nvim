@@ -717,10 +717,15 @@ children/newer):
   an anchor" is too weak — followed upward, *every* branch eventually reaches the trunk,
   so it would prune nothing; the test is "*is* a tracked lane".) So the header never
   fans out into the merge/fork plumbing of every feature branch that touched the trunk
-  off-screen — the back-and-forth crossings that make a busy header unreadable. (If
-  purely-parallel redundant routes to one anchor remain, a shortest-path pass may later
-  keep only the nearest; the tracked-lane rule already keeps any longer route that
-  passes another tracked junction.)
+  off-screen — the back-and-forth crossings that make a busy header unreadable.
+- A **parallel-merge declutter** resolves the remaining redundant case: when two
+  crossing lanes both fork up to the **same two children** — e.g. a trunk-merge and a
+  collapsed head each merging the same two lanes (a 2×2 "parallel merge") — drawing all
+  four edges crisscrosses the header with rake arms. The header resolves it to a
+  **matching**: each child keeps its **first-parent** edge and drops the redundant
+  cross-arm *when the other parent stays connected through its own child*, so the two
+  crossing lanes render as clean **parallel lanes**. A genuine confluence — where the
+  dropped parent has no other child and would be orphaned — is preserved.
 
 So the header is the anchors' spines, the **merges** where crossing lanes join them
 (or each other), and the splits that lead to another anchor — plus every other

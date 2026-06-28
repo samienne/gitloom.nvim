@@ -271,7 +271,9 @@ Coverage:
   meeting at a **confluence** render a junction (incl. a confluence dead-end head and
   nested confluences), an unpinned branch forking off the trunk/an anchor that
   reconnects to nothing is **pruned** (the stray-fork regression), a bubble on a pinned spine
-  → node-less junction but an unrelated bubble is pruned, a pinned anchor a labelled
+  → node-less junction but an unrelated bubble is pruned, a **2×2 parallel-merge diamond**
+  (two crossing lanes both forking to the same two children) declutters to clean parallel
+  lanes — neither merge stays a junction, a genuine confluence preserved, a pinned anchor a labelled
   `◍` even when isolated, isolated seam heads packed onto a shared row — laid out by the
   direct seam-up grid with the seam as the bottom row matching the main view's top
   edge. Each lane keeps its own colour (`lane_of`, the main-view colour so the
@@ -567,31 +569,34 @@ Details not covered by the spec or architecture:
   layout core (boundary-line extraction; `continue`/`condense`/`footer` = the
   footer's down-rebuild; `continue_up` = the header's **minimal connecting subgraph**
   (only how the pinned anchors relate to each other + the lanes crossing the cutoff —
-  the "seeds"): a **tracked-lane induce** over the **display** DAG, up-only. The
-  **tracked** lanes (`lane_of(n).id`, the main-graph lane identity threaded in — the
-  projected first-parent is unreliable) are the lanes crossing the seam plus the pinned
-  anchors' own lanes. **Pass 1** `seed_reach` finds **confluences** (a node reached up by
-  ≥2 seeds = where ≥2 tracked lanes meet); **Pass 2** `useful` walks **down** from
-  confluences + pinned tips marking ancestors that lead up to one — but only **through
-  tracked nodes** (else a node useful via an *untracked* path the induce can't follow
-  caps as a stray head); **Pass 3** induce walks up from the seeds keeping a child iff it
-  is **on a tracked lane AND useful**. Tracked drops the merge/fork plumbing of every
-  feature branch that touched the trunk off-screen (spec §6.2); useful caps an isolated
-  crossing lane at the seam (a bare ◍) instead of drawing it up to its own feature tip;
-  merges fall out where two followed lanes meet one node (a node-less junction). This
-  also fixes the merge-at-cutoff anchor-severing bug (HEAD jumping to a fresh id): the
-  anchor's lane is **tracked**, so the crossing lane on it follows the spine by id
-  unbroken up to the anchor — a collapsed continuation's `lane_of` is its
-  `parent_lanes[1]` (the trunk lane), keyed by the tip hash, so a recycled tip-own lane
-  never severs it. A **divergent** anchor (tip ahead of the trunk, lane never crossing the
-  seam, up-walk never reaching it) is then **connected down its first-parent spine** to
-  the already-inducted part (edges only, no re-walk up), so it relates to the trunk
-  instead of rendering as a floating labelled head (the `(feature/repo-targeting)`
-  regression). So an unpinned branch forking off the trunk that reconnects to nothing
-  is **pruned** (no stray feature heads); a branch that only merges back is the single
+  the "seeds"): a **meaningful-head induce** over the **display** DAG, up-only (lanes
+  matched by `lane_of(n).id`, the main-graph lane identity threaded in — the projected
+  first-parent is unreliable). From each seed walk up via `children`, following a child
+  edge iff it is **not a loop-back** AND the branch **reaches a meaningful head** — a
+  pinned anchor tip, or a **seam-to-seam confluence** (the first meeting of two distinct
+  crossing lanes, the anchor/trunk lane excluded). The loop-back test carries a **per-path
+  `visited` set of every lane id each commit touches** (`lanes_at`): re-entering a burned
+  lane — or `merged_reentry`, stepping onto a **non-first (merged-in) parent's** lane the
+  node already touched from below — is a loop-back, so the split-then-merge-back diamond
+  is pruned. Two cleanup passes follow: a **redundant-arm reduction** drops a fork arm
+  whose reachable meaningful heads are all already claimed by a higher-priority sibling (a
+  feature that forks off the trunk and merges back into a pinned head the trunk already
+  reaches), GC-ing the orphaned interior; and a **parallel-merge declutter** resolves a
+  2×2 diamond — two crossing lanes both forking to the SAME two children — by keeping each
+  child's first-parent edge and dropping the redundant cross-arm when the other parent
+  stays connected (spec §6.2). This drops the merge/fork plumbing of every feature branch
+  that touched the trunk off-screen, caps an isolated crossing lane at the seam (a bare ◍)
+  instead of drawing it to its own feature tip, and renders a parallel-merge as clean
+  parallel lanes; merges fall out where two followed lanes meet one node (a node-less
+  junction). It also fixes the merge-at-cutoff anchor-severing bug (HEAD jumping to a
+  fresh id): the anchor's lane id follows its spine unbroken up to the anchor — a
+  collapsed continuation's `lane_of` is its `parent_lanes[1]` (the trunk lane), keyed by
+  the tip hash, so a recycled tip-own lane never severs it; a **divergent** anchor
+  connects via the meaningful split reaching its pinned tip (no separate spine
+  down-connect). So an unpinned branch forking off the trunk that reconnects to nothing is
+  **pruned** (no stray feature heads); a branch that only merges back is the single
   node-less junction; ≥2 kept children → junction, 1 → collapse, 0 → head. Real-repo
-  headers shrank from ~11 nodes to 2–6 (a possible **shortest-path** dedup for
-  redundant parallel routes to one anchor is deferred — none observed). Invariant: every
+  headers shrank from ~11 nodes to 2–6. Invariant: every
   above-seam boundary `begin` is in the node set (inducted or a seam head) so no seam
   lane drops; `condense(up)`; the **direct seam-up
   grid** `header` — a bottom-up sweep seeded from the boundary so the seam is the

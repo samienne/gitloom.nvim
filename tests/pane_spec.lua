@@ -688,6 +688,44 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         assert.same({}, header_grid_errors(opts, res.rows))
     end)
 
+    it("declutters a 2x2 parallel-merge diamond — clean parallel lanes, no crisscross (§6.2)", function()
+        -- Two crossing lanes (P1, P2) both fork up to the SAME two children — two anchor
+        -- merges TM (-> master) and FH (-> feat) — so drawing all four edges crisscrosses the
+        -- header with rake arms (the feature/repo-switching case). The declutter keeps each
+        -- child's FIRST-parent edge and drops the redundant cross-arm: TM connects via P1,
+        -- FH via P2 -> two clean parallel lanes. The regression keeps all four edges, leaving
+        -- TM/FH as junctions — caught here by asserting NEITHER merge stays a junction.
+        local items = h.dag({
+            { "master", { "TM" } },
+            { "feat", { "FH" } },
+            { "TM", { "P1", "P2" } }, -- trunk merge: first parent P1
+            { "FH", { "P2", "P1" } }, -- feature merge: first parent P2
+            { "P1", { "base" } }, -- crossing lane
+            { "P2", { "base" } }, -- crossing lane
+            { "base", {} },
+        })
+        items[1].commit.refs = { { name = "master" } }
+        items[2].commit.refs = { { name = "feat" } }
+        local opts = h.big_opts()
+        local res, boundary, cond = header_of(items, opts, 7, { master = true, feat = true }) -- seam at base
+        local present, junctions = {}, {}
+        for _, it in ipairs(cond.items) do
+            present[it.commit.hash] = true
+            -- a real junction = a node-bearing row with ≥2 kept parents/children
+            local c = it.commit
+            if (#(c.parents or {}) >= 2) or (#(c.children or {}) >= 2) then junctions[c.hash] = true end
+        end
+        assert.is_true(present.master, "the master anchor is shown")
+        assert.is_true(present.feat, "the feat anchor is shown")
+        -- The declutter resolves the diamond to a matching — each merge keeps ONE parent, so
+        -- NEITHER TM nor FH stays a junction. (Without it both have 2 parents -> crisscross.)
+        assert.is_nil(junctions.TM, "TM declutters to one parent — not a junction")
+        assert.is_nil(junctions.FH, "FH declutters to one parent — not a junction")
+        assert_seam_match(res.rows, boundary)
+        assert_continuous(res.rows)
+        assert.same({}, header_grid_errors(opts, res.rows))
+    end)
+
     it("colours each shown branch distinctly (matching the graph)", function()
         -- Three PINNED branches fork from a common ancestor; the cutoff is below it, so
         -- the single crossing lane diverges up into all three anchors. Each anchor head
