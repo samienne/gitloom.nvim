@@ -4473,11 +4473,17 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- dnode (hash → node), lane_main (hash → its branch's main-view {id,color})
             -- and node_col (hash → the COLUMN the node sits in, i.e. its left-right
             -- position in the graph) so the header can order forks to match the graph.
-            local dnode, lane_main, node_col = {}, {}, {}
+            -- lane_main: the node's primary (first-parent) lane { id, color }. lane_set:
+            -- the **all-lanes** id set the commit touches — every parent_lanes + child_lanes
+            -- id — for the header's per-path loop-back visited list (§6.2).
+            local dnode, lane_main, node_col, lane_set = {}, {}, {}, {}
             for _, it in ipairs(repo.display) do
                 py()
                 local pl = it.parent_lanes
                 local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color }
+                local lset
+                for _, l in ipairs(it.parent_lanes or {}) do lset = lset or {}; lset[l.id] = true end
+                for _, l in ipairs(it.child_lanes or {}) do lset = lset or {}; lset[l.id] = true end
                 local hcol = {} -- this row's rendered nodes → their column
                 for j, cell in ipairs(it.columns or {}) do
                     if cell.has_commit and cell.commit then hcol[cell.commit.hash] = j end
@@ -4487,15 +4493,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     local col = hcol[n.hash]
                     dnode[n.hash] = n
                     if main then lane_main[n.hash] = main end
+                    if lset then lane_set[n.hash] = lset end
                     if col then node_col[n.hash] = col end
                     if n.tip then
                         dnode[n.tip.hash] = n
                         if main then lane_main[n.tip.hash] = main end
+                        if lset then lane_set[n.tip.hash] = lset end
                         if col then node_col[n.tip.hash] = col end
                     end
                     for _, hh in ipairs(n.region or {}) do
                         dnode[hh] = n
                         if main then lane_main[hh] = main end
+                        if lset then lane_set[hh] = lset end
                         if col then node_col[hh] = col end
                     end
                 end
@@ -4504,6 +4513,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             end
             local function order_of(n) return n and didx[(n.tip and n.tip.hash) or n.hash] end
             local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
+            local function lanes_at(n) return n and lane_set[(n.tip and n.tip.hash) or n.hash] end
             local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
 
             -- The lanes crossing one edge of whichever RENDERED line sits at
@@ -4621,7 +4631,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     local dn = ref and ref.commit and dnode[ref.commit.hash]
                     if dn and (order_of(dn) or math.huge) < seam.idx then tips[#tips + 1] = dn end
                 end
-                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx, coroutine.yield)
+                local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx, coroutine.yield,
+                    lane_of, lanes_at)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
                 local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end

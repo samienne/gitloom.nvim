@@ -81,7 +81,7 @@ local function header_anchor_ids(ctx, si)
         local dn = r and r.commit and ctx.dnode_of(r.commit.hash)
         if dn and (ctx.order_of(dn) or math.huge) < si then tips[#tips + 1] = dn end
     end
-    local cond = pane.continue_up(boundary, tips, ctx.pinned, ctx.order_of, si)
+    local cond = pane.continue_up(boundary, tips, ctx.pinned, ctx.order_of, si, nil, ctx.lane_of)
     local res = pane.header(cond.items, boundary, cond.node_of_hash, ctx.lane_of, ctx.col_of)
     local ids = {}
     for _, r in ipairs(res.rows) do

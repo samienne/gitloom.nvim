@@ -538,36 +538,33 @@ end
 --- summarises exactly what is on screen, and `order_of` is always defined), bounded
 --- above the seam by `order_of < seam_idx`.
 ---
---- Three passes:
----   1. **seed_reach** — each boundary column is a distinct seed (a fork seam yields
----      ≥2 columns; they are different lanes, so seed identity is the *column*, not the
----      begin hash), plus each pinned tip. From every seed walk **up** via `children`,
----      recording the set of seed-ids reaching each node. A node reached by **≥2
----      distinct seeds** is a **confluence** (two seeds converge there going up).
----   2. **useful** — from every confluence and every pinned tip walk **down** via
----      `parents`, marking the above-seam ancestors `useful` (= "leads up to a
----      confluence or an anchor"). Seeding the pinned tips is what keeps a lone
----      anchor's full spine visible; over-marking is harmless because the induction
----      below is seed-driven.
----   3. **induce** — walk up from each *useful* seed keeping only *useful* children
----      (first-parent child first, so the pivot keeps the branch colour). A seed that
----      is **not** useful becomes a **seam head** (a childless node → it terminates at
----      the seam). The induced node's restricted children/parents drive `condense`'s
----      role: ≥2 kept children → junction, 1 → collapse (spliced away), 0 → head — so a
----      confluence whose merged output dead-ends caps with a head (the merge is shown,
----      the dangling continuation is not).
+--- **Meaningful-head induce with per-path loop-back** (spec §6.2). From each seed (a
+--- boundary `begin` or a pinned tip) walk **up** via `children`. A child edge is followed
+--- iff its lane is not a **loop-back** AND the branch **reaches a meaningful head** — a
+--- pinned anchor tip, or a **seam-to-seam merge** (the first meeting of two distinct
+--- crossing lanes). The loop-back check carries a **per-path `visited` set of ALL the lane
+--- ids each commit touches** (`lanes_at`, not just its primary lane): stepping onto a lane
+--- already burned on this path is a loop-back, so the split-then-merge-back diamond — and
+--- any detour that re-enters a lane it already crossed (even a merged-in one) — is pruned.
+--- Lanes only *merge* upward; a lane that reaches nothing meaningful caps with a floating
+--- head. So master never splits off to a feature whose only route to a pinned head loops
+--- back through master, and a divergent anchor connects via the split that reaches its
+--- pinned tip. Each followed edge is marked `kept`; the re-pointing draws only those.
 ---
---- **Invariant:** every above-seam boundary `begin` ends up in the node set handed to
---- `condense` (a useful node or a seam head), so no seam lane is ever dropped and the
---- header's bottom row always matches the main view's top edge. Then `condense(up)`.
----@param boundary table<integer, table>  -- col → lane with `.begin` (the DisplayNode above)
+--- **Invariant:** every seed `begin` is inducted directly, so no seam lane is ever
+--- dropped and the header's bottom row always matches the main view's top edge. The
+--- induced node's restricted children/parents drive `condense`'s role: ≥2 kept children
+--- → junction, 1 → collapse (spliced away), 0 → head. Then `condense(up)`.
+---@param boundary table<integer, table>  -- col → lane with `.begin` (DisplayNode) and `.id`
 ---@param tips table[]  -- pinned anchor tip DisplayNodes above the seam
 ---@param anchor_names table<string, boolean>?
 ---@param order_of (fun(node: table): integer|nil)?  -- node → index (newer = smaller)
 ---@param seam_idx integer  -- only nodes with a smaller index are above the seam
 ---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY units of work
+---@param lane_of (fun(node: table): table?)?  -- node → its main-view lane { id, color } (§6.2)
+---@param lanes_at (fun(node: table): table<integer,boolean>?)?  -- node → ALL its edge lane ids (§6.2)
 ---@return table
-function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
+function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield, lane_of, lanes_at)
     local step = chunker(yield)
     local function above(n)
         -- Working-tree virtual commits (§4.2) are the live state, not topology, so
@@ -580,34 +577,35 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
     end
     local function pos_of(n) return (order_of and order_of(n)) or 0 end
 
-    -- Seeds — each boundary column is its own seed; plus each pinned anchor tip. A
-    -- seed's `begin`/tip node is its **floor**: always eligible even if it sits exactly
-    -- on the seam row (the crossing itself), while everything else must be strictly
-    -- above. (Fixes the seam off-by-one — a begin at `seam_idx` is still seeded.)
+    -- Seeds — each boundary column (a crossing lane) and each pinned anchor tip, each
+    -- a DISTINCT seed id (two columns of a fork seam are different lanes). A seed is
+    -- inducted directly, so it is eligible even on the seam row; only its children are
+    -- gated by `above`. Skip a crossing lane born on a virtual commit (§4.2).
     local seeds = {}
-    local seed_floor = {} -- hash → true
+    local cross_begin = {} -- crossing seed id → its begin hash (for distinct-begin confluences)
     for col, lane in pairs(boundary) do
-        -- Skip a crossing lane that begins on a virtual commit (§4.2): its only
-        -- above-seam content is the live working-tree state, which the header omits.
         if lane.begin and not lane.begin.virtual then
-            seeds[#seeds + 1] = { id = "c" .. tostring(col), node = lane.begin }
-            seed_floor[lane.begin.hash] = true
+            local id = "c" .. tostring(col)
+            seeds[#seeds + 1] = { id = id, node = lane.begin }
+            cross_begin[id] = lane.begin.hash
         end
     end
     for ti, t in ipairs(tips) do
         seeds[#seeds + 1] = { id = "t" .. tostring(ti), node = t, pinned = true }
-        seed_floor[t.hash] = true
     end
-    local function in_region(n) return n and (seed_floor[n.hash] or above(n)) end
 
-    -- Pass 1 — seed_reach: multi-source walk UP via children. `reach[hash]` is the SET
-    -- of seed-ids that reach the node; ≥2 distinct ⇒ a confluence.
-    local reach = {}   -- hash → { seed-id → true }
+    -- A node's primary lane id (the **lane id** — the stable rendered identity from the
+    -- main graph, since the projected first-parent is unreliable; spec §6.2). The induce
+    -- gates on *reaching a meaningful head* and the *loop-back* check, not on a fixed lane
+    -- set, so it can follow a feature lane up to its pinned tip while still pruning detours.
+    local function lane_id(n) local l = lane_of and lane_of(n); return l and l.id end
+
+    -- Pass 1 — reach: walk UP from each seed, recording the seed ids reaching each node.
+    -- The crossing-begin sets behind those ids drive the seam-to-seam confluence test.
+    local reach = {}
     for _, s in ipairs(seeds) do
-        local n0 = s.node
-        reach[n0.hash] = reach[n0.hash] or {}
-        reach[n0.hash][s.id] = true
-        local seen, stack = { [n0.hash] = true }, { n0 }
+        reach[s.node.hash] = reach[s.node.hash] or {}; reach[s.node.hash][s.id] = true
+        local seen, stack = { [s.node.hash] = true }, { s.node }
         while #stack > 0 do
             step()
             local c = stack[#stack]; stack[#stack] = nil
@@ -620,105 +618,232 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
             end
         end
     end
-    local function is_confluence(hash)
-        local r, n = reach[hash], 0
-        if not r then return false end
-        for _ in pairs(r) do n = n + 1; if n >= 2 then return true end end
+    -- A **meaningful head** (spec §6.2): a pinned anchor tip, or a **seam-to-seam merge** —
+    -- the *meeting point* where two separate crossing lanes converge. That meeting point is
+    -- a node with **≥2 parents each carrying a crossing begin** and **≥2 distinct begins**
+    -- across them. Checking the PARENTS (not the node's own up-cone) is what keeps the test
+    -- at the actual merge: a descendant in the shared future above has a single parent, so
+    -- it is not falsely meaningful — the shared future collapses to one continuation.
+    local pinned_tip = {}
+    local anchor_lane = {} -- the pinned anchors' own lane ids (their spines)
+    for _, t in ipairs(tips) do
+        pinned_tip[t.hash] = true
+        local id = lane_id(t); if id ~= nil then anchor_lane[id] = true end
+    end
+    local function meaningful(node)
+        if pinned_tip[node.hash] then return true end
+        -- The **first meeting** of two separate crossing lanes: two parents whose
+        -- crossing-begin sets are DISJOINT (lanes that have not met yet). Above a real merge
+        -- both parents carry the SAME begins, so they are not disjoint and the shared future
+        -- is not falsely a confluence. A parent on an **anchor lane** (the trunk / a pinned
+        -- spine) is excluded — a feature merging into the trunk, or the trunk splitting off
+        -- to a dead-end merge, is NOT an interesting seam-to-seam confluence (§6.2).
+        local psets = {}
+        for _, p in ipairs(node.parents or {}) do
+            local rp, set = reach[p.hash], nil
+            local lp = lane_id(p)
+            if rp and not (lp ~= nil and anchor_lane[lp]) then
+                for id in pairs(rp) do
+                    local b = cross_begin[id]
+                    if b then set = set or {}; set[b] = true end
+                end
+            end
+            if set then psets[#psets + 1] = set end
+        end
+        for i = 1, #psets do
+            for j = i + 1, #psets do
+                local disjoint = true
+                for b in pairs(psets[i]) do if psets[j][b] then disjoint = false; break end end
+                if disjoint then return true end
+            end
+        end
         return false
     end
 
-    -- Pass 2 — useful: walk DOWN via parents from every confluence and every pinned
-    -- tip, marking the above-seam ancestors that lead up to one of them.
-    local useful, stack2 = {}, {}
-    local function mark_useful(n)
-        if n and not useful[n.hash] then useful[n.hash] = true; stack2[#stack2 + 1] = n end
+    -- All lane ids a node touches (its parent + child edges); the per-path loop-back
+    -- visited list burns these as the walk passes (§6.2). Falls back to the single primary
+    -- lane when the all-lanes map is absent (older callers / tests).
+    local function lanes_of(n)
+        local set = lanes_at and lanes_at(n)
+        if set then return set end
+        local id = lane_id(n)
+        return id ~= nil and { [id] = true } or {}
     end
-    local function walk_useful()
-        while #stack2 > 0 do
-            step()
-            local c = stack2[#stack2]; stack2[#stack2] = nil
-            for _, p in ipairs(c.parents or {}) do
-                if in_region(p) then mark_useful(p) end
-            end
-        end
-    end
-    for _, s in ipairs(seeds) do
-        if s.pinned then mark_useful(s.node) end
-        local seen, stack = { [s.node.hash] = true }, { s.node }
-        while #stack > 0 do
-            step()
-            local c = stack[#stack]; stack[#stack] = nil
-            if is_confluence(c.hash) then mark_useful(c) end
-            for _, ch in ipairs(c.children or {}) do
-                if above(ch) and not seen[ch.hash] then seen[ch.hash] = true; stack[#stack + 1] = ch end
-            end
-        end
-    end
-    walk_useful()
 
-    -- Pass 3 — induce: the kept commits are the useful seeds and the useful nodes
-    -- reachable UP from them (keeping only useful children).
-    local inducted, stack3 = {}, {}
-    local function induct(n)
-        if not inducted[n.hash] then inducted[n.hash] = n; stack3[#stack3 + 1] = n end
+    -- The lanes a path **burns** stepping from `c` (current lane `lc`) onto child lane
+    -- `lch`: every lane `c` touches, plus the lane arrived on, MINUS the lane taken. So a
+    -- fork/merge arm not taken — and the lane diverged off — are burned; re-entering any
+    -- later is a loop-back. The lane continued on stays open. (Per-path: "add all the
+    -- commit's lanes to visited as we traverse", §6.2.)
+    local function step_visited(visited, c, lc, lch)
+        local v = {}
+        for k in pairs(visited) do v[k] = true end
+        for l in pairs(lanes_of(c)) do if l ~= lch then v[l] = true end end
+        if lc ~= nil and lc ~= lch then v[lc] = true end
+        return v
     end
-    for _, s in ipairs(seeds) do
-        if useful[s.node.hash] then induct(s.node) end
+
+    -- A **merged-in re-entry**: a child edge `c -> ch` whose lane is the lane of one of
+    -- `c`'s **non-first parents** (a branch `c` merged in from below), other than the lane
+    -- the walk arrived on (`lc`). `c` already touched that lane — a commit that merged the
+    -- trunk in (its 2nd parent on the trunk lane) and now merges back into it — so stepping
+    -- onto it going up is a loop-back. Using the parent NODE's primary lane (not the merge
+    -- edge's own lane) is what catches it: the projection collapses the merge to a single
+    -- edge, but the parent node still carries the trunk lane. The mainline (first) parent is
+    -- excluded — it is the lane `c` descends, not a merge — as is `lc`, so the trunk passing
+    -- through a merge is not flagged. (§6.2 — the split + merge-back diamond.)
+    local function merged_reentry(c, lch, lc)
+        if lch == lc then return false end
+        local ps = c.parents
+        for i = 2, ps and #ps or 0 do
+            if lane_id(ps[i]) == lch then return true end
+        end
+        return false
     end
-    -- Connect each pinned anchor DOWN to the already-seeded part along its own
-    -- first-parent spine. The up-walk below climbs ONE first-parent chain from each
-    -- boundary lane and can dead-end at a collapsed node before it reaches a pinned
-    -- anchor that sits on a folded branch — the anchor is then inducted (Pass 2 marks it
-    -- useful) but left DISCONNECTED, so M.header renders it as a lone head on a fresh id,
-    -- severed from its crossing lane (the merge-at-cutoff anchor-severing bug: HEAD jumps to id 39).
-    -- Walking the anchor's spine down until it meets a seed (or crosses the seam) keeps
-    -- the anchor on its real lane. Every spliced spine node is `useful`, so condense
-    -- collapses the linear run back to a single edge — the header does not grow.
-    for _, s in ipairs(seeds) do
-        if s.pinned and inducted[s.node.hash] then
-            local c = s.node
-            while c do
-                local p = c.parents and c.parents[1]
-                if not (p and above(p) and useful[p.hash]) then break end
-                local met = inducted[p.hash]
-                -- Induct for EDGES only — do NOT feed the spine node back into the up-walk
-                -- (stack3). Both boundary lanes start at the same merge, so every commit
-                -- above it is a confluence; letting the up-walk's else-branch process a
-                -- non-confluence spine node would pull in every collapsed fork off the
-                -- trunk as a stray head and balloon the header. The spine's only relevant
-                -- up-child is the next spine node, already inducted here.
-                inducted[p.hash] = inducted[p.hash] or p
-                if met then break end -- reached the connected part — done
-                c = p
+
+    -- Per-path DFS: can a branch reach a meaningful head over non-loop-back edges
+    -- (a child whose lane is already burned on this path — or a merged-in re-entry — is a
+    -- loop-back)?
+    local function reaches_meaningful(c, visited)
+        step()
+        if meaningful(c) then return true end
+        local lc = lane_id(c)
+        for _, ch in ipairs(c.children or {}) do
+            if above(ch) then
+                local lch = lane_id(ch)
+                if lch ~= nil and not visited[lch] and not merged_reentry(c, lch, lc)
+                    and reaches_meaningful(ch, step_visited(visited, c, lc, lch)) then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- Induce (spec §6.2): DFS up from each seed carrying the per-path burned-lane
+    -- `visited`. Follow a child edge iff its lane is not already burned (not a loop-back)
+    -- AND the branch reaches a meaningful head; mark every followed edge `kept`. The
+    -- re-pointing draws only kept edges, so loop-back arms (the split + merge-back diamond,
+    -- now caught even through merged-in lanes) and dead-end detours never appear. A
+    -- divergent anchor connects via the meaningful split that reaches its pinned tip — no
+    -- separate spine down-connect needed.
+    local inducted = {}
+    local kept = {} -- kept[parentHash][childHash] = the edge survives
+    local function induct(n) inducted[n.hash] = inducted[n.hash] or n end
+    local function induce(c, visited)
+        induct(c)
+        local lc = lane_id(c)
+        for _, ch in ipairs(c.children or {}) do
+            if above(ch) then
+                local lch = lane_id(ch)
+                if lch ~= nil and not visited[lch] and not merged_reentry(c, lch, lc) then
+                    local v2 = step_visited(visited, c, lc, lch)
+                    if reaches_meaningful(ch, v2) then
+                        kept[c.hash] = kept[c.hash] or {}
+                        kept[c.hash][ch.hash] = true
+                        if not inducted[ch.hash] then induce(ch, v2) end
+                    end
+                end
             end
         end
     end
-    while #stack3 > 0 do
+    for _, s in ipairs(seeds) do induce(s.node, {}) end
+
+    -- Redundant-arm reduction (spec §6.2): at a FORK in the kept up-graph (a node with ≥2
+    -- kept children), drop an arm whose reachable meaningful heads are ALL already claimed
+    -- by a higher-priority sibling. The first-parent (trunk) arm wins, so a feature that
+    -- forks off the trunk and merges back into a pinned head the trunk already reaches — a
+    -- bubble that adds no new destination — is pruned. This is the "only VISIBLE lanes must
+    -- terminate" relaxation: such an arm is subsumed by its sibling, which already carries
+    -- the visual continuity, so it needs no ending of its own and would otherwise render as
+    -- the spurious split-off-then-merge-back lane raked across the header. Confluences of two
+    -- SEPARATE crossing lanes are unaffected (they share no fork). After dropping arms, a
+    -- garbage pass removes nodes no longer reachable from any crossing lane.
+    do
+        -- meaningful heads reachable from a node via kept edges (incl. itself if meaningful).
+        local mreach = {}
+        local function mreach_of(n)
+            local r = mreach[n.hash]
+            if r then return r end
+            r = {}; mreach[n.hash] = r
+            if meaningful(n) then r[n.hash] = true end
+            if kept[n.hash] then
+                for chh in pairs(kept[n.hash]) do
+                    local ch = inducted[chh]
+                    if ch then for g in pairs(mreach_of(ch)) do r[g] = true end end
+                end
+            end
+            return r
+        end
+        for xh, kids in pairs(kept) do
+            local nk = 0; for _ in pairs(kids) do nk = nk + 1 end
+            if nk >= 2 then
+                step()
+                local x = inducted[xh]
+                local list = {}
+                for chh in pairs(kids) do if inducted[chh] then list[#list + 1] = inducted[chh] end end
+                local function nheads(n) local k = 0; for _ in pairs(mreach_of(n)) do k = k + 1 end; return k end
+                -- A superset arm must claim BEFORE its subsets, so order by reachable-head
+                -- count descending (the trunk, reaching the most heads, goes first); break
+                -- ties toward the first-parent continuation, then the nearer-seam arm.
+                table.sort(list, function(a, b)
+                    local na, nb = nheads(a), nheads(b)
+                    if na ~= nb then return na > nb end
+                    local af = (a.parents and a.parents[1] == x) and 0 or 1
+                    local bf = (b.parents and b.parents[1] == x) and 0 or 1
+                    if af ~= bf then return af < bf end
+                    return pos_of(a) < pos_of(b)
+                end)
+                local claimed = {}
+                for _, y in ipairs(list) do
+                    local mr, fresh = mreach_of(y), false
+                    for h in pairs(mr) do if not claimed[h] then fresh = true; break end end
+                    if fresh then
+                        for h in pairs(mr) do claimed[h] = true end
+                    else
+                        kept[xh][y.hash] = nil -- subsumed by a sibling — drop the bubble
+                    end
+                end
+            end
+        end
+        -- Garbage-collect: keep only nodes still reachable UP from a crossing lane (or a
+        -- pinned tip itself); a dropped bubble's interior nodes are no longer drawn.
+        local keepset, stack = {}, {}
+        for _, s in ipairs(seeds) do
+            if not keepset[s.node.hash] then keepset[s.node.hash] = true; stack[#stack + 1] = s.node.hash end
+        end
+        while #stack > 0 do
+            local h = stack[#stack]; stack[#stack] = nil
+            if kept[h] then
+                for c in pairs(kept[h]) do
+                    if not keepset[c] then keepset[c] = true; stack[#stack + 1] = c end
+                end
+            end
+        end
+        for h in pairs(inducted) do
+            if not keepset[h] then inducted[h] = nil; kept[h] = nil end
+        end
+    end
+
+    -- Declutter diamonds (spec §6.2): a "parallel merge" — two crossing lanes both forking
+    -- to the SAME two children (e.g. the trunk-merge plus a collapsed head, each merging the
+    -- same two parents) — would draw all four edges and crisscross the header with rake arms.
+    -- For a node with ≥2 kept parents, keep only its FIRST-parent edge and drop a
+    -- non-first-parent edge P→C when P still has ANOTHER kept child (so P stays connected via
+    -- that child). Each child then connects via one lane → clean parallel lanes, no rakes. A
+    -- genuine confluence is preserved: there the 2nd parent's ONLY child is C, so dropping it
+    -- would orphan that crossing lane, and the edge is kept.
+    for _, c in pairs(inducted) do
         step()
-        local c = stack3[#stack3]; stack3[#stack3] = nil
-        -- Follow each lane's OWN continuation, not the whole shared future.
-        --   * Below a confluence, a lane goes up via its **first-parent child** (its
-        --     identity); the only other child worth taking is a **confluence** — a
-        --     commit where this lane MEETS another (a real merge of two tracked lanes).
-        --     Everything else (forks off to unrelated tips) is left out.
-        --   * AT/above a confluence the lanes have already merged into one, so follow a
-        --     SINGLE continuation (its first-parent child) up to the tip — the shared
-        --     future may itself fork into dozens of branches, but none of them relate to
-        --     the crossing lanes, so they are dropped. (This is the shared-future blowup:
-        --     every branch of the shared future was being pulled in as its own head.)
-        if is_confluence(c.hash) then
-            for _, ch in ipairs(c.children or {}) do
-                if useful[ch.hash] and above(ch) and ch.parents and ch.parents[1] == c then
-                    induct(ch); break -- one merged lane, not every fork above it
-                end
-            end
-        else
-            for _, ch in ipairs(c.children or {}) do
-                if useful[ch.hash] and above(ch)
-                    and ((ch.parents and ch.parents[1] == c) or is_confluence(ch.hash)) then
-                    induct(ch)
-                end
-            end
+        local kparents = {}
+        for _, p in ipairs(c.parents or {}) do
+            if p.hash and kept[p.hash] and kept[p.hash][c.hash] then kparents[#kparents + 1] = p.hash end
+        end
+        for i = 2, #kparents do
+            local ph = kparents[i]
+            local other = false
+            for chh in pairs(kept[ph]) do if chh ~= c.hash then other = true; break end end
+            if other then kept[ph][c.hash] = nil end
         end
     end
 
@@ -740,7 +865,10 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
         local m = node[c.hash]
         local kids = {}
         for _, ch in ipairs(c.children or {}) do
-            if inducted[ch.hash] then kids[#kids + 1] = ch end
+            -- Only **kept** edges survive (§6.2): the induce marked each non-loop-back,
+            -- meaningful edge it followed, so the loop-back arms of a split/merge diamond
+            -- (and dead-end detours) are dropped here.
+            if inducted[ch.hash] and kept[c.hash] and kept[c.hash][ch.hash] then kids[#kids + 1] = ch end
         end
         table.sort(kids, function(a, b)
             local af = (a.parents and a.parents[1] == c) and 0 or 1
@@ -750,8 +878,10 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
         end)
         for _, ch in ipairs(kids) do m.children[#m.children + 1] = node[ch.hash] end
         for _, p in ipairs(c.parents or {}) do
-            if inducted[p.hash] then
+            if inducted[p.hash] and kept[p.hash] and kept[p.hash][c.hash] then
                 m.parents[#m.parents + 1] = node[p.hash]
+            elseif inducted[p.hash] then
+                -- inducted but the p→c edge was not kept (a loop-back / detour) — drop it
             elseif not above(p) then
                 -- A SEAM parent (it crosses the cutoff, so it has no kept node of its own).
                 -- Keep a UNIQUE per-edge sentinel terminal so `condense` still counts this
@@ -763,14 +893,15 @@ function M.continue_up(boundary, tips, anchor_names, order_of, seam_idx, yield)
                 -- the whole connection up to the pinned anchors is dropped. Re-pointing
                 -- discards the sentinel (no kept copy); M.header wires the lane in from the
                 -- boundary.
+                --
                 m.parents[#m.parents + 1] = { seam = true }
             end
         end
     end
 
-    -- Non-useful seeds terminate at the seam with a head (a childless node → a kept
-    -- tip → a bare ◍ on the seam row). A pinned but disconnected anchor is always
-    -- useful via Pass 2, so it lands in the inducted set as a lone labelled head.
+    -- Every seed is inducted, so this is a safety net: a seed with no inducted
+    -- node (e.g. one whose lane reaches nothing meaningful) still ends at the seam as a
+    -- childless node — a bare ◍ head — so no crossing lane is dropped.
     for _, s in ipairs(seeds) do
         if not node[s.node.hash] then ensure(s.node) end
     end

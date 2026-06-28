@@ -191,41 +191,47 @@ to each other and to the lanes crossing the cutoff:
    single mainline lane on the columns line — otherwise a fork sitting right below
    the viewport hides every branch that forks from it.
 2. **Rebuild the focused sub-DAG** — `pane.continue_up(boundary, tips, anchors,
-   order_of, seam)` runs a three-pass reachability over the **display** DAG (the
-   projected nodes, so `order_of` is always defined), up-only, bounded above the seam.
-   **Working-tree virtual commits (§4.2) are excluded:** `above()` treats a virtual
+   order_of, seam, yield, lane_of)` runs a **tracked-lane induce** over the **display**
+   DAG (the projected nodes, so `order_of` is always defined), up-only, bounded above the
+   seam. **Working-tree virtual commits (§4.2) are excluded:** `above()` treats a virtual
    node as not-above, and a boundary lane that begins on one is not seeded — so the
    up-walk stops at the topmost **real** commit (the live state is never drawn in a
    pane; spec §6.2). A virtual-only off-screen region therefore yields an empty rebuild
    and the header is hidden.
-   - **Pass 1 — `seed_reach`.** Each boundary column is a distinct **seed** (a fork
-     seam yields ≥2 columns on one commit — different lanes, so seed identity is the
-     *column*, not the begin hash); each pinned tip is a seed too. From every seed walk
-     **up** via `children`, recording the **set** of seed-ids reaching each node. A node
-     reached by **≥2 distinct seeds** is a **confluence**.
-   - **Pass 2 — `useful`.** From every confluence and every pinned tip walk **down** via
-     `parents`, marking the above-seam ancestors that lead up to one of them. (Seeding
-     pinned tips keeps a lone anchor's full spine; over-marking is harmless because the
-     induction is seed-driven.)
-   - **Pass 3 — induce.** Walk up from each *useful* seed keeping only *useful*
-     children (first-parent child first, for colour-pivot continuity). A seed that is
-     **not** useful becomes a **seam head** (a childless node → it terminates at the
-     seam). The induced node's restricted `children`/`parents` then drive `condense`'s
-     role: ≥2 kept children → junction, 1 → collapse, 0 → head (so a confluence whose
-     merged output dead-ends caps with a head). Each pinned anchor is then connected
-     **down** its own first-parent spine to the already-seeded part (induct for *edges
-     only* — the spine nodes are not re-walked up, or the up-walk would pull in every
-     collapsed fork off the trunk and balloon the header). When both boundary lanes begin
-     at one merge sitting at the cutoff, the up-walk's single first-parent chain can
-     dead-end at a collapsed node before it reaches an anchor on a folded branch; without
-     this step the anchor is inducted but **disconnected**, and `M.header` renders it as a
-     lone head on a fresh lane id, severed from its crossing lane (the merge-at-cutoff
-     bug — HEAD jumped to id 39). Every spliced spine node is `useful`, so `condense`
-     collapses the linear run back to one edge and the header does not grow.
+
+   The **tracked** lanes are the lanes crossing the seam plus the pinned anchors' own
+   lanes, by **lane id** (`lane_of(n).id`, the main-graph lane identity — the projected
+   first-parent is unreliable). The header keeps a junction only where **≥2 tracked lanes
+   meet**:
+   - **Pass 1 — `seed_reach`.** Each boundary column is a distinct **seed** (different
+     lanes, so seed identity is the *column*); each pinned tip too. Walk **up** via
+     `children`, recording the seed-id set reaching each node; ≥2 distinct ⇒ a
+     **confluence** (≥2 tracked lanes converge).
+   - **Pass 2 — `useful`.** Walk **down** (via `parents`) from every confluence and pinned
+     tip, marking above-seam ancestors that lead up to one — but only **through tracked
+     nodes**, else a node useful via an *untracked* path the induce can't follow caps as a
+     stray head.
+   - **Pass 3 — induce.** Walk up from the seeds keeping a child iff it is **on a tracked
+     lane AND useful**. Tracked drops the merge/fork plumbing of every feature branch that
+     touched the trunk off-screen; useful caps an isolated crossing lane at the seam (a
+     bare ◍) instead of drawing it up to its own feature tip. Merges fall out where two
+     followed lanes meet one node; the per-edge seam sentinel keeps a merge whose parents
+     cross the cutoff a junction. The restricted `children`/`parents` then drive
+     `condense`'s role: ≥2 kept children → junction, 1 → collapse, 0 → head. This also
+     fixes the merge-at-cutoff anchor-severing bug (HEAD jumping to a fresh id): the
+     anchor's lane is **tracked**, so the crossing lane on it follows the spine by id
+     unbroken to the anchor; a collapsed continuation's `lane_of` is its `parent_lanes[1]`
+     (the trunk lane, keyed by the tip hash), so a recycled tip-own lane never severs it.
+     Finally each pinned anchor is connected **down** its first-parent spine to the
+     already-inducted trunk (edges only), so a **divergent** anchor whose tip is ahead of
+     the trunk — its lane never crossing the seam, the up-walk never reaching it — relates
+     to the trunk instead of floating as a stray labelled head.
 
    So an unpinned branch that forks off the trunk and reconnects to nothing is
    **pruned** (the stray-fork regression — no stray feature heads); a branch that only merges
-   back condenses to a node-less junction. **Invariant:** every above-seam boundary
+   back is the single node-less junction (real-repo headers shrank from ~11 nodes to 2–6;
+   a **shortest-path** dedup for redundant parallel routes to one anchor is deferred —
+   none observed). **Invariant:** every above-seam boundary
    `begin` ends up in the node set handed to `condense` (a useful node or a seam head),
    so no seam lane is dropped and the header's bottom row matches the main view's top
    edge. `condense(up=true)` then splices linear runs.

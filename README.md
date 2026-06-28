@@ -233,11 +233,12 @@ whole off-screen graph. The **footer** (below) continues the lanes active at the
 bottom of the view down to where they merge into the main branch and reach the
 root, with a marker for any pinned ref below the cutoff. The **header** (above)
 shows the **minimal** off-screen-newer picture: only how the pinned anchors relate to
-each other and to the lanes crossing the cutoff. Two crossing lanes that meet above
-the view draw a node-less junction where they converge; an anchor gets its own
-labelled row; a crossing lane that connects to nothing terminates at its own bare `◍`.
-An unpinned branch that forks off the trunk and reconnects to nothing is **not shown**
-— no stray feature heads. Every lane crossing the bottom edge always continues (so the
+each other and to the lanes crossing the cutoff. It follows those lanes by id and keeps
+a junction only where two of them meet — two crossing lanes, or a crossing lane merging
+into an anchor, drawn as a node-less junction; an anchor gets its own labelled row; a
+crossing lane that connects to nothing terminates at its own bare `◍`. The merge/fork
+plumbing of every other feature branch that touched the trunk off-screen is **not
+followed** — no stray feature heads, no back-and-forth crossings. Every lane crossing the bottom edge always continues (so the
 bottom row lines up with the graph's top with no broken lanes), and the header
 vanishes when you scroll to the top. Each lane keeps **the same colour it has in the
 graph**, so branches stay distinct, and isolated `◍` tips pack onto as few rows as
