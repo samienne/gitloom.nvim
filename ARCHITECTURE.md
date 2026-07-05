@@ -125,7 +125,9 @@ bespoke seam-up grid. `pane.lua` is the pure, window-agnostic core; `update_pane
 in `gitloom.window` does the windowing.
 
 The rebuild is **scroll-gated and async**. The cursor/scroll debounce calls
-`maybe_update_panes`, which rebuilds only when the scroll position (`line("w0")`)
+`maybe_update_panes`, which rebuilds only when the scroll key (`winsaveview().topline`
++ `topfill` — `topfill` catches a sub-scroll through a line's virtual rows that
+`line("w0")` alone misses)
 changed — the panes are a function of the scroll, not the cursor row, so a cursor
 move within the window costs nothing. Forced callers (reflow, the `M`/`B`/`F`/…
 toggles) call `update_panes` directly. `update_panes` runs `build_panes` as a

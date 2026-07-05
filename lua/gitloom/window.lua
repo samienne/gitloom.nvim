@@ -3082,9 +3082,16 @@ local function refresh_worktree(ctx, silent)
         local keep
         local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
         if ok then keep = ctx:cursor_hash(pos[1]) end
+        -- Save the full view (topline AND topfill) so an auto-refresh (FocusGained /
+        -- BufWritePost) doesn't jitter the view: `reflow` re-renders the buffer, which
+        -- resets the virtual-line sub-scroll (`topfill` -> 0, a ~1-line jump); restoring
+        -- it afterwards holds the scroll, then `goto_hash` only corrects the cursor if its
+        -- row actually shifted (same discipline as `resync`).
+        local vok, view = pcall(vim.api.nvim_win_call, hw, vim.fn.winsaveview)
         local res = ctx:apply_worktree(state)
         ctx:reflow()
         ctx:update_footer()
+        if vok and view then pcall(vim.api.nvim_win_call, hw, function() vim.fn.winrestview(view) end) end
         if keep then ctx:goto_hash(keep) end
         ctx:place_cursor()
         ctx:update_cone()
@@ -3963,8 +3970,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Async-pane-build state (assigned/used by update_panes, below). `pane_gen`
         -- is the cancellation token: bumping it abandons any in-flight chunked
         -- build (so a scroll mid-calculation drops the stale panes). `pane_topline`
-        -- is the scroll position the panes were last built for, the gate for
-        -- `maybe_update_panes`. Declared here so the scroll autocmd can cancel.
+        -- is the **scroll key** (`topline:topfill`, see `pane_scroll_key`) the panes were
+        -- last built for — the gate for `maybe_update_panes`. Declared here so the scroll
+        -- autocmd can cancel.
         local pane_gen = 0
         local pane_topline = nil
 
@@ -5033,11 +5041,25 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- in-flight one. The first chunk runs synchronously, so small panes (the
         -- common case) still complete in this tick with no visible delay; only a
         -- long history-walk spills onto later ticks.
+        -- The scroll key the pane rebuild gate compares (spec §6.2). It must change iff
+        -- the visible window REGION moves — including a **sub-scroll through virtual
+        -- lines**, where nvim shows more/fewer of the topline's `virt_lines_above` rows and
+        -- `line('w0')` stays the same while `winsaveview().topfill` changes. Gating on
+        -- `line('w0')` alone left the footer STALE across such a sub-scroll (a
+        -- direction-dependent discontinuity that `F`-`F`/refocus "fixed" by tripping a real
+        -- topline change). `topline + topfill` captures the true top edge.
+        local function pane_scroll_key()
+            return vim.api.nvim_win_call(win, function()
+                local v = vim.fn.winsaveview()
+                return v.topline .. ":" .. (v.topfill or 0)
+            end)
+        end
+
         update_panes = function()
             if not vim.api.nvim_win_is_valid(win) then return end
             -- Record the scroll this build targets so maybe_update_panes can skip a
             -- rebuild while the view only moves the cursor.
-            pane_topline = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+            pane_topline = pane_scroll_key()
             pane_gen = pane_gen + 1
             drive_panes(coroutine.create(build_panes), pane_gen)
         end
@@ -5045,12 +5067,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Gated entry for the cursor/scroll debounce. The panes' topology is
         -- independent of the cursor row, so a move that doesn't scroll never rebuilds
         -- them — but the reachability cone DOES follow the cursor, so the panes still
-        -- need a cheap re-dim (spec §6.2): rebuild on a real scroll, otherwise just
-        -- repaint the existing rows for the new cone.
+        -- need a cheap re-dim (spec §6.2): rebuild on a real scroll (incl. a virtual-line
+        -- sub-scroll), otherwise just repaint the existing rows for the new cone.
         maybe_update_panes = function()
             if not vim.api.nvim_win_is_valid(win) then return end
-            local top = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-            if top ~= pane_topline then update_panes() else repaint_panes() end
+            if pane_scroll_key() ~= pane_topline then update_panes() else repaint_panes() end
         end
         -- Kept nested (closes over the pane machinery + win); exposed so the
         -- extracted reflow / handlers can call ctx:update_panes() / ctx:maybe_update_panes().

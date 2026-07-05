@@ -681,9 +681,14 @@ Details not covered by the spec or architecture:
   bumps `pane_gen` to abandon the in-flight coroutine; both panes are computed
   before any overlay mutation (a no-yield tail), so a cancelled build leaves the
   previous panes intact. The rebuild is also **scroll-gated**: the cursor/scroll
-  debounce calls `maybe_update_panes`, which rebuilds only when `line("w0")`
-  changed (the panes are independent of the cursor row); forced callers (reflow /
-  `M`/`B`/`F`/… toggles) call `update_panes` directly. The repo.order hash→index
+  debounce calls `maybe_update_panes`, which rebuilds only when the **scroll key**
+  changed (`pane_scroll_key` = `winsaveview().topline .. ":" .. topfill`; the panes are
+  independent of the cursor row). The `topfill` is essential: a **sub-scroll through a
+  line's `virt_lines_above` rows** moves the visible region by one screen row while
+  `line("w0")` stays constant — gating on `line("w0")` alone left the footer stale
+  (a direction-dependent discontinuity `F`-`F`/refocus "fixed"; see
+  `tests/pane_scroll_gate_spec`). Forced callers (reflow / `M`/`B`/`F`/… toggles) call
+  `update_panes` directly. The repo.order hash→index
   map is cached (`order_idx`), rebuilt only when the order length changes. Full
   cross-level head packing (all unpinned heads on ONE row, vs. today's consecutive
   packing) is pending. listview.lua is a git-agnostic reusable widget.
