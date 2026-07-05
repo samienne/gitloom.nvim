@@ -362,6 +362,7 @@ local KEYBINDS = {
     { "F", "Toggle the off-screen context panes (header + footer)" },
     { "K", "Lane breakdown for the commit under the cursor" },
     { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
+    { "<leader>wD", "Write a pane debug dump (seam/boundary) to stdpath('data')" },
     { "?", "Show this help" },
 }
 
@@ -2898,6 +2899,17 @@ local function h_panes(ctx)
     ctx:place_cursor()
 end
 
+-- <leader>wD: write a topology-only debug dump of the live header/footer seam,
+-- boundary, condensed graph and rendered overlay buffers to
+-- `stdpath('data')/gitloom_pane_dump.txt`, then force a pane rebuild so the dump
+-- reflects the current scroll. Diagnostics only (seam-alignment debugging).
+local function h_dump(ctx)
+    local path = vim.fn.stdpath("data") .. "/gitloom_pane_dump.txt"
+    vim.g.gitloom_pane_debug = path
+    ctx:update_panes()
+    vim.notify("gitloom: pane dump -> " .. path, vim.log.levels.INFO)
+end
+
 -- ?: float listing all keybindings.
 local function h_help(ctx)
     vim.lsp.util.open_floating_preview(help_lines(), "", {
@@ -2943,6 +2955,7 @@ local GRAPH_KEYS = {
     ["P"] = h_pin,
     ["i"] = h_laneids,
     ["F"] = h_panes,
+    ["<leader>wD"] = h_dump,
     ["?"] = h_help,
     ["V"] = h_select,
     ["<Esc>"] = h_esc,
@@ -4308,7 +4321,17 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     end
                 end
             else
-                if rows[1] then lines[#lines + 1] = glyph_line(sep_row(rows[1], "up")) end
+                -- Seam separator on TOP, then the rows descending to the root at the
+                -- bottom. Pad the slack between the seam and the rows with extra straight
+                -- seam bars so the overlay is exactly `height` tall and its top butts the
+                -- last visible line (mirror of the header's bottom seam-bar pad). Sizing
+                -- the overlay to the seam's whole-commit cover — not the row count — is
+                -- what fixes the seam-misalignment when a covered commit has a virtual line.
+                local seams = math.max(1, (height or (#rows + 1)) - #rows)
+                if rows[1] then
+                    local sep = sep_row(rows[1], "up")
+                    for _ = 1, seams do lines[#lines + 1] = glyph_line(sep) end
+                end
                 for _, row in ipairs(rows) do lines[#lines + 1] = body_line(row) end
             end
             if #lines == 0 then lines = { "" } end
@@ -4516,94 +4539,78 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local function lanes_at(n) return n and lane_set[(n.tip and n.tip.hash) or n.hash] end
             local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
 
-            -- The lanes crossing one edge of whichever RENDERED line sits at
-            -- absolute screen row `target` — a commit's columns line, or its split
-            -- (above) / merge (below) virtual line. The cutoff can fall on a
-            -- split/merge virtual line, which has no buffer line, so reading the
-            -- nearest buffer line's lanes was wrong. `up` reads the top edge
-            -- (ascending lanes — for the header); default the bottom (footer).
-            -- Returns the lanes, a debug tag, the seam's DISPLAY index (header
-            -- slice), and its repo.order index (footer cutoff tests).
-            local function boundary_at(target, up)
-                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-                local last = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
-                for l = last, w0, -1 do
-                    local r = vim.fn.screenpos(win, l, 1).row
-                    if r > 0 then
-                        local item, disp_idx = ctx:order_at(l)
-                        -- The item's rendered block spans `r-1` (split, above), `r`
-                        -- (columns), `r+1` (merge, below). The seam may fall on any.
-                        if item and (r == target or (item.split and r - 1 == target)
-                                or (item.merge and r + 1 == target)) then
-                            if up then
-                                -- HEADER: read the TOP edge of whichever rendered
-                                -- sub-line of the item actually sits AT the seam (the
-                                -- first *uncovered* screen row). The seam item's block
-                                -- spans r-1 (split), r (columns), r+1 (merge); reading
-                                -- the wrong one is an off-by-one into the COVERED region.
-                                --   • merge at the seam (r+1==target): the commit row is
-                                --     covered and only its merge (virtual) line shows —
-                                --     read the merge's top edge (the lane up into the
-                                --     commit), NOT the covered columns line above it.
-                                --   • otherwise (columns/split at the seam): read the
-                                --     split when present so a fork right below the
-                                --     viewport shows all its off-screen children.
-                                local line, suff
-                                if item.merge and r + 1 == target then
-                                    line, suff = item.merge, "m"
-                                else
-                                    line, suff = (item.split or item.columns), (item.split and "s" or "c")
-                                end
-                                return pane.boundary_of(line, true), l .. suff, disp_idx, item_order(item)
-                            elseif r == target and item.columns then
-                                return pane.boundary_of(item.columns), l .. "c", disp_idx, item_order(item)
-                            elseif item.merge and r + 1 == target then
-                                return pane.boundary_of(item.merge), l .. "m", disp_idx, item_order(item)
-                            elseif item.split and r - 1 == target then
-                                return pane.boundary_of(item.split), l .. "s", disp_idx, item_order(item)
-                            end
-                        end
-                    end
-                end
-                return {}, "?"
+            -- The SCREEN-ROW model of the whole display: the flat sequence of rendered
+            -- lines (real columns lines PLUS virtual split/merge fan lines), so the footer
+            -- seam is computed in screen rows — what the user actually sees — instead of
+            -- real buffer lines. A virtual line has no real line number, so `line('w$')`
+            -- cannot address it; reasoning in real lines drifted the seam by a partial
+            -- virtual row at the window bottom (§6.2). Built once per pane rebuild.
+            -- Per-item virtual-row counts (above/below) + columns height, matching what the
+            -- listview actually renders (§6.1): today a fork's split fan is one row above, a
+            -- merge fan one below, dual label mode two columns rows. Count-based so future
+            -- multi-row strategies (and both above+below on one commit) just work.
+            local function rows_of(it)
+                return {
+                    above = it.split and 1 or 0,
+                    height = dual_two_line(opts, it and it.commit) and 2 or 1,
+                    below = it.merge and 1 or 0,
+                }
             end
+            local footer_sm = pane.screen_lines(repo.display, rows_of)
 
-            -- The absolute screen row of the seam — the main row adjacent to an
-            -- `sh`-tall overlay. Anchored on the window's own position so it is
-            -- independent of w0's virtual lines. `top` (header): the row just below
-            -- the top overlay; default (footer): the row just above the bottom one.
-            local function seam_for(sh, top)
+            -- The bottom visible SCREEN row of the window (a `footer_sm` model row), anchored
+            -- on the **cursor** via `winline()`. `winline()` (cursor's screen row within the
+            -- window) and the window height are BOTH window-relative, so they need no
+            -- `win_screenpos` and are border/winbar-robust — the bottom is simply
+            -- `cols[cursor] + (win_height - winline())`. (The earlier `w0`/`win_screenpos`
+            -- form drifted: `win_screenpos` is the FRAME top, and `line('w0')` can't address a
+            -- split rendered above its columns. Verified against real nvim rendering in
+            -- tests/screen_window_spec.) The cursor sits on a real columns row; in dual mode
+            -- its `sub` offset shifts `winline()` back to the item's FIRST columns row.
+            local function footer_bottom_screen()
                 return vim.api.nvim_win_call(win, function()
-                    local r0 = vim.fn.win_screenpos(win)[1]
-                    if top then return r0 + sh end
-                    return r0 + vim.api.nvim_win_get_height(win) - sh
+                    local cur = vim.fn.line(".")
+                    local _, cdisp, sub = ctx:order_at(cur)
+                    if not cdisp or not footer_sm.cols[cdisp] then return nil end
+                    local anchor_screen = vim.fn.winline() - (sub or 0)
+                    local wh = vim.api.nvim_win_get_height(win)
+                    return pane.footer_bs(footer_sm, cdisp, anchor_screen, wh)
                 end)
             end
 
-            -- Build the footer for a seam screen row: continue ONLY the lanes
-            -- crossing it down their first-parent chains to a root
-            -- (`pane.continue`), condensed, seeded and laid out — every active lane
-            -- reaches a root, no non-active branch introduced. Returns rows, tag on
-            -- success; nil, reason on failure.
-            local function build_footer(target)
-                local boundary, tag, _, seam_idx = boundary_at(target)
-                if not next(boundary) then return nil, "no lanes@" .. target end
+            -- Build the footer for an overlay covering at least `cover` screen rows
+            -- (off-screen-OLDER topology, below). `pane.footer_seam` rounds `bs` to a whole
+            -- commit block; the seam item's bottom line (its merge fan, else columns) seeds
+            -- the footer.
+            local function build_footer(cover)
+                local bs = footer_bottom_screen()
+                if not bs then return nil, "no bs" end
+                local seam = pane.footer_seam(footer_sm, bs, cover)
+                if not seam then return nil, "past top@" .. cover end
+                local line = (seam.kind == "merge") and seam.item.merge or seam.item.columns
+                local boundary = pane.boundary_of(line)
+                if not next(boundary) then return nil, "no lanes@" .. seam.idx end
                 -- Pinned-ref tips below the cutoff that aren't on an active lane —
                 -- add them so a divergent pinned branch still shows as a marker.
+                local seam_ord = item_order(seam.item)
                 local extra = {}
-                if seam_idx then
+                if seam_ord then
                     for name in pairs(pinned) do
                         local ref = repo.refs[name]
-                        if ref and ref.commit and (idx[ref.commit.hash] or 0) > seam_idx then
+                        if ref and ref.commit and (idx[ref.commit.hash] or 0) > seam_ord then
                             extra[#extra + 1] = ref.commit
                         end
                     end
                 end
                 local cond = pane.continue(boundary, pinned, extra,
                     function(n) return idx[n.hash] end, coroutine.yield)
-                if #cond.items == 0 then return nil, "empty graph@" .. target end
+                if #cond.items == 0 then return nil, "empty graph@" .. seam.idx end
                 local res = pane.footer(pane_opts, cond.items, boundary, cond.node_of_hash)
-                return res.rows, tag, cond, boundary
+                -- `seam.cover` is the WHOLE-COMMIT screen height the overlay must occupy
+                -- for its seam separator to butt the last visible line (it can exceed the
+                -- requested `cover` when a covered commit has a split/merge virtual line).
+                -- The overlay height is sized to it, NOT to the content row count.
+                return res.rows, seam.idx .. (seam.kind == "merge" and "m" or "c"), cond, boundary, seam.cover
             end
 
             -- Build the HEADER for an overlay covering at least `cover` screen rows
@@ -4644,18 +4651,24 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- screen height is `#rows + 1`. Grow the row count until it stabilises
             -- (§6.2 sizing), bounded by PANE_MAX. The final rows + seam come from the
             -- SAME build so the overlay height and the boundary line up.
+            -- Size the FOOTER by a **min-fit search**, the mirror of `converge_header`:
+            -- grow the requested `cover` until the condensed rows + the seam separator fit
+            -- in the overlay, whose true height is the seam's **whole-commit cover**
+            -- (`seam.cover` ≥ the request). Sizing the overlay to that cover — NOT to the
+            -- content row count — is what keeps the seam separator butting the last visible
+            -- line: when a covered commit carries a split/merge virtual line the cover jumps
+            -- by one, and a content-sized overlay would sit a row short (the seam-misalign
+            -- discontinuity). Returns rows, tag, overlay-height (cover), cond, boundary.
             local function converge_footer()
-                local R, rows, seam_tag, cond, boundary = 0, nil, nil, nil, nil
-                for i = 1, PANE_MAX do
-                    if i > 1 then py() end -- yield between sizing passes (each re-walks)
-                    local r, tag, c, b = build_footer(seam_for(R + 1))
+                local rows, seam_tag, height, cond, boundary
+                for cover = 1, PANE_MAX do
+                    if cover > 1 then py() end -- yield between sizing passes (each re-walks)
+                    local r, tag, c, b, sc = build_footer(cover)
                     if not r then return nil, tag end
-                    rows, seam_tag, cond, boundary = r, tag, c, b
-                    local nr = math.min(#r, PANE_MAX)
-                    if nr == R then break end -- converged
-                    R = nr
+                    rows, seam_tag, height, cond, boundary = r, tag, sc, c, b
+                    if #r + 1 <= (sc or (#r + 1)) then break end -- content + separator fits
                 end
-                return rows, seam_tag, cond, boundary
+                return rows, seam_tag, height, cond, boundary
             end
 
             -- Size the HEADER by a **min-fit search** (spec §6.2): start at the
@@ -4713,7 +4726,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- any editor-state mutation so a build abandoned mid-walk (the view
             -- scrolled — `pane_gen` bumped) leaves BOTH previous overlays intact,
             -- never a new footer beside a stale header.
-            local frows, ftag, fcond, fboundary = converge_footer()
+            local frows, ftag, fH, fcond, fboundary = converge_footer()
             local hrows, htag, H, ovf, ovf_names, hclipped, hcond, hboundary = converge_header()
 
             -- ===== no-yield tail: all editor-state mutation happens below =====
@@ -4728,15 +4741,20 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 footer_dbg = ftag or "no rows"; close_pane(footer); footer_seam, footer_height = nil, nil
                 footer.state = nil
             else
-                frows = pane.cap(frows, PANE_MAX) -- keep the seam-nearest rows AND the root
-                footer_seam, footer_height, footer_dbg = ftag, #frows + 1, nil
-                ensure_pane_win(footer, false, #frows + 1)
+                frows = pane.cap(frows, PANE_MAX - 1) -- room for the seam separator; keep the root
+                -- The overlay height is the seam's whole-commit cover (so the separator
+                -- butts the last visible line), clamped to at least the content it must
+                -- show (separator + rows) and the cap. `render_pane` pads any slack
+                -- between the seam and the rows with straight seam bars.
+                local fheight = math.min(PANE_MAX, math.max(fH or (#frows + 1), #frows + 1))
+                footer_seam, footer_height, footer_dbg = ftag, fheight, nil
+                ensure_pane_win(footer, false, fheight)
                 -- Stash everything a cheap cone repaint needs (spec §6.2): the laid-out
                 -- rows, the condensed node graph, the seam crossing-lanes (with live
                 -- `edges` refs for current cone state), the walk direction and the render
                 -- offsets — so a cursor move re-dims without rebuilding the layout.
                 footer.state = { buf = footer.buf, rows = frows, dir = "down",
-                    node_of = fcond and fcond.node_of_hash,
+                    node_of = fcond and fcond.node_of_hash, H = fheight,
                     boundary = fboundary, goff = goff, foff = foff, is_header = false }
                 paint_pane(footer.state)
             end
@@ -4856,6 +4874,126 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                                 (it.split and " SPLIT" or "") .. (it.merge and " MERGE" or ""))
                         end
                     end
+                    -- ===== FOOTER (off-screen-OLDER topology, below) =====
+                    local w_last = vim.api.nvim_win_call(win, function() return vim.fn.line("w$") end)
+                    local w0f = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
+                    local _, wdisp = ctx:order_at(w_last)
+                    local dbg_sm = pane.screen_lines(repo.display, function(it)
+                        return { above = it.split and 1 or 0,
+                            height = dual_two_line(opts, it and it.commit) and 2 or 1,
+                            below = it.merge and 1 or 0 }
+                    end)
+                    -- Cursor-anchored bottom (production formula) vs the old w0/win_screenpos one.
+                    local dbg_cur = vim.api.nvim_win_call(win, function() return vim.fn.line(".") end)
+                    local _, dbg_cdisp, dbg_sub = ctx:order_at(dbg_cur)
+                    local dbg_wl = vim.api.nvim_win_call(win, function() return vim.fn.winline() end)
+                    local dbg_wh = vim.api.nvim_win_get_height(win)
+                    local dbg_anchor = dbg_wl - (dbg_sub or 0)
+                    local dbg_bs = dbg_cdisp and dbg_sm.cols[dbg_cdisp]
+                        and pane.footer_bs(dbg_sm, dbg_cdisp, dbg_anchor, dbg_wh)
+                    out[#out + 1] = ("\n==== FOOTER  w0=%d cursor=%d(%s) winline=%s sub=%s wh=%d w$=%d bs=%s fh=%s ftag=%s ===="):format(
+                        w0f, dbg_cur, tostring(dbg_cdisp), tostring(dbg_wl), tostring(dbg_sub), dbg_wh, w_last,
+                        tostring(dbg_bs), tostring(footer_height), tostring(ftag))
+                    local fseam = dbg_bs and pane.footer_seam(dbg_sm, dbg_bs, (footer_height or 2))
+                    out[#out + 1] = ("footer_seam -> idx=%s kind=%s cover=%s seam_bottom=%s"):format(
+                        tostring(fseam and fseam.idx), tostring(fseam and fseam.kind),
+                        tostring(fseam and fseam.cover), tostring(fseam and fseam.seam_bottom))
+                    local fb = fboundary or {}
+                    local fbcols = {}
+                    for col in pairs(fb) do fbcols[#fbcols + 1] = col end
+                    table.sort(fbcols)
+                    out[#out + 1] = ("footer boundary (%d lanes):"):format(#fbcols)
+                    for _, col in ipairs(fbcols) do
+                        local l = fb[col]
+                        local p = l.parent
+                        out[#out + 1] = ("  col=%d id=%s color=%s begin=%s@%s -> parent=%s@%s collapsed=%s"):format(
+                            col, tostring(l.id), tostring(l.color),
+                            tostring(l.begin and l.begin.hash and l.begin.hash:sub(1, 10)),
+                            tostring(l.begin and order_of(l.begin)),
+                            tostring(p and p.hash and p.hash:sub(1, 10)), tostring(p and order_of(p)),
+                            tostring(p and p.collapsed))
+                    end
+                    out[#out + 1] = ("footer condensed (%d nodes):"):format(#((fcond and fcond.items) or {}))
+                    for _, it in ipairs((fcond and fcond.items) or {}) do
+                        local c = it.commit
+                        local pars = {}
+                        for _, pp in ipairs(c.parents or {}) do pars[#pars + 1] = pp.hash and pp.hash:sub(1, 8) end
+                        out[#out + 1] = ("  %s collapsed=%s junction=%s parents=[%s] refs=%d"):format(
+                            tostring(c.hash and c.hash:sub(1, 8)), tostring(c.collapsed), tostring(c.junction),
+                            table.concat(pars, ","), #(c.refs or {}))
+                    end
+                    out[#out + 1] = ("footer rows = %d:"):format(#(frows or {}))
+                    for ri, r in ipairs(frows or {}) do
+                        local parts = {}
+                        for ci, cell in ipairs(r.columns or {}) do
+                            local ids = {}
+                            for _, s in ipairs(cell.lanes or {}) do
+                                local c = s.connectivity or {}
+                                ids[#ids + 1] = ("%s%s%s%s%s"):format(tostring(s.id),
+                                    c.up and "^" or "", c.down and "v" or "", c.left and "<" or "", c.right and ">" or "")
+                            end
+                            local node = cell.has_commit and "[O]" or ""
+                            if #ids > 0 or node ~= "" then parts[#parts + 1] = ("c%d:%s%s"):format(ci, table.concat(ids, "/"), node) end
+                        end
+                        out[#out + 1] = ("  R%02d %s"):format(ri, table.concat(parts, "  "))
+                        local ok, g = pcall(get_column_chars, opts, r.columns, false)
+                        if ok and g then out[#out + 1] = ("      render=[%s]"):format(g.text or "") end
+                    end
+                    -- The ACTUAL rendered overlay buffers (post padding/mirror/separator),
+                    -- with |..| markers so leading/trailing spaces are visible — the true
+                    -- on-screen alignment. `mirror=%s` flags right-alignment mode.
+                    out[#out + 1] = ("overlay offsets: goff=%s foff=%s mirror=%s"):format(
+                        tostring(goff), tostring(foff), tostring(opts.mirror))
+                    local function dump_buf(label, p)
+                        if p and p.buf and vim.api.nvim_buf_is_valid(p.buf) then
+                            out[#out + 1] = label .. " buffer lines:"
+                            for _, bl in ipairs(vim.api.nvim_buf_get_lines(p.buf, 0, -1, false)) do
+                                out[#out + 1] = ("  |%s|"):format(bl)
+                            end
+                        end
+                    end
+                    dump_buf("FOOTER", footer)
+                    dump_buf("HEADER", header)
+                    -- The main-view lines around the footer seam, as actually rendered in
+                    -- the graph window — so the seam's on-screen columns can be compared to
+                    -- the overlay's top row directly.
+                    if fseam and fseam.idx then
+                        out[#out + 1] = "main-view lines around the footer seam (buffer):"
+                        local sstart = lv.controller.item_start and lv.controller.item_start(fseam.idx)
+                        if sstart then
+                            local lo2 = math.max(1, sstart - 1)
+                            local hi2 = math.min(vim.api.nvim_buf_line_count(buf), sstart + 5)
+                            for _, bl in ipairs(vim.api.nvim_buf_get_lines(buf, lo2 - 1, hi2, false)) do
+                                out[#out + 1] = ("  |%s|"):format(bl)
+                            end
+                        end
+                        -- disp -> buffer-line-start + split/merge flags + block height, so
+                        -- the footer_seam block model can be checked against the render.
+                        out[#out + 1] = "footer seam region (disp: start srow .split .merge collapsed  hash):"
+                        for di = math.max(1, fseam.idx - 2), math.min(#repo.display, wdisp) do
+                            local it = repo.display[di]
+                            local st = lv.controller.item_start and lv.controller.item_start(di)
+                            local srow = st and vim.fn.screenpos(win, st, 1).row
+                            local c = it and it.commit
+                            out[#out + 1] = ("  d%d: start=%s srow=%s split=%s merge=%s collapsed=%s hash=%s"):format(
+                                di, tostring(st), tostring(srow), tostring(it and it.split ~= nil),
+                                tostring(it and it.merge ~= nil), tostring(c and c.collapsed),
+                                tostring(c and c.hash and c.hash:sub(1, 8)))
+                        end
+                        -- The main window's screen extent + the footer overlay's own screen
+                        -- position/size, so the overlay's top row can be compared to the
+                        -- seam item's screen row directly.
+                        local wpos = vim.fn.win_screenpos(win)
+                        local wh = vim.api.nvim_win_get_height(win)
+                        out[#out + 1] = ("win screen: top=%d height=%d bottom=%d  footer_height=%s"):format(
+                            wpos[1], wh, wpos[1] + wh - 1, tostring(footer_height))
+                        if footer.win and vim.api.nvim_win_is_valid(footer.win) then
+                            local fp = vim.fn.win_screenpos(footer.win)
+                            out[#out + 1] = ("footer overlay screen: top=%d height=%d"):format(
+                                fp[1], vim.api.nvim_win_get_height(footer.win))
+                        end
+                    end
+
                     local fh = io.open(vim.g.gitloom_pane_debug, "w")
                     if fh then fh:write(table.concat(out, "\n") .. "\n"); fh:close() end
                 end)

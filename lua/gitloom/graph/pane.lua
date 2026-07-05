@@ -69,8 +69,10 @@ end
 ---@param anchor_names table<string, boolean>?  -- ref names that count as markers
 ---@param up boolean?  -- header orientation (keep tips, splice seam pass-throughs)
 ---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY units of work
+---@param keep table<string, boolean>?  -- hashes forced kept as a convergence junction (§6.2)
 ---@return table  -- { items = OrderItem[], node_of_hash = table<string, table> }
-function M.condense(nodes, anchor_names, up, yield)
+function M.condense(nodes, anchor_names, up, yield, keep)
+    keep = keep or {}
     local step = chunker(yield)
     -- Refs on a node that count as markers (anchor refs, or all when unfiltered). The
     -- HEAD marker (kind == "head") is ALWAYS kept: the pinned set is keyed by the BRANCH
@@ -127,12 +129,12 @@ function M.condense(nodes, anchor_names, up, yield)
         changed = false
         for _, n in ipairs(nodes) do
             step()
-            if not transp[n] and #marker_refs(n) == 0 then
+            if not transp[n] and #marker_refs(n) == 0 and not keep[n.hash] then
                 local kc, kp = #reach(n, "children"), #reach(n, "parents")
                 -- Kept endpoints: the header keeps a tip (no child), the footer a root
                 -- (no parent). A true junction has ≥2 distinct terminals on a side.
-                local keep = (up and kc == 0) or (not up and kp == 0) or kc >= 2 or kp >= 2
-                if not keep then transp[n] = true; changed = true end
+                local keepn = (up and kc == 0) or (not up and kp == 0) or kc >= 2 or kp >= 2
+                if not keepn then transp[n] = true; changed = true end
             end
         end
     end
@@ -188,7 +190,11 @@ function M.condense(nodes, anchor_names, up, yield)
         if c then
             if #c.refs > 0 then
                 c.collapsed, c.junction = true, false
-            elseif #reach(n, "parents") >= 2 or #reach(n, "children") >= 2 then
+            elseif keep[n.hash] or #reach(n, "parents") >= 2 or #reach(n, "children") >= 2 then
+                -- A forced convergence node (crossing lanes landing on it) has fp
+                -- child-degree <2 in this graph, so render it as a node-less junction —
+                -- the lanes merge there on the seam row rather than through a fan line
+                -- (a seam-adjacent convergence that is also a root reads as this join).
                 c.collapsed, c.junction = false, true
             else
                 c.collapsed, c.junction = false, false
@@ -246,7 +252,16 @@ function M.continue(boundary, anchor_names, extra, order_of, yield)
     local inset, fp_child = {}, {} -- hash → Commit ; hash → in-set first-parent children
     local queue = {}
     local function push(c) if c and not inset[c.hash] then inset[c.hash] = c; queue[#queue + 1] = c end end
-    for _, lane in pairs(boundary) do push(lane.parent) end
+    -- How many boundary lanes LAND directly on each parent commit. A commit two
+    -- crossing lanes land on (a fork below the seam whose branches are both visible
+    -- above) is where they converge — but the landing is not a first-parent edge, so
+    -- fp_child alone under-counts it. `land[hash]` restores those incoming lanes so a
+    -- pure convergence point survives condense instead of collapsing to the root.
+    local land = {}
+    for _, lane in pairs(boundary) do
+        push(lane.parent)
+        if lane.parent then land[lane.parent.hash] = (land[lane.parent.hash] or 0) + 1 end
+    end
     for _, c in ipairs(extra or {}) do push(c) end
     -- BFS down first-parents. A commit is discovered (queued) after the children
     -- that reach it, so `queue` is children-before-parents (newest-first) — the
@@ -288,7 +303,16 @@ function M.continue(boundary, anchor_names, extra, order_of, yield)
         -- and yielding across it errors. The walk above is already chunked.
         table.sort(nodes, function(a, b) return (order_of(a) or 0) < (order_of(b) or 0) end)
     end
-    return M.condense(nodes, anchor_names, nil, yield)
+    -- Convergence junctions: a commit whose in-set first-parent children PLUS the
+    -- boundary lanes landing on it total ≥2 is where crossing lanes meet. Force it
+    -- kept so those lanes converge there rather than run on to the root as one
+    -- over-collapsed lane (the footer seam-discontinuity bug).
+    local keep = {}
+    for _, c in ipairs(queue) do
+        local fpc = fp_child[c.hash] and #fp_child[c.hash] or 0
+        if fpc + (land[c.hash] or 0) >= 2 then keep[c.hash] = true end
+    end
+    return M.condense(nodes, anchor_names, nil, yield, keep)
 end
 
 --- Cap a pane's rows to `max` (spec §6.2). A **header** (`keep_first` on) runs
@@ -372,6 +396,126 @@ function M.header_seam(items, top, cover, height_of)
         row = row + ((i > top and it.split) and 1 or 0) + height_of(it) + (it.merge and 1 or 0)
     end
     return nil
+end
+
+--- The footer **seam** (spec §6.2), computed in **screen-row space** on the flattened
+--- `screen_lines` model. Given `sm` (the screen model), `bs` (the bottom visible
+--- **screen row** — what the user actually sees at the window's last row, virtual lines
+--- included), and an overlay that should cover at least `cover` screen rows, returns the
+--- last **fully-visible** commit above the overlay and which of its lines is the seam.
+--- The footer's lanes are seeded from that line's **down** edge.
+---
+--- Working in screen rows (not real buffer lines / display indices) is the fix for the
+--- whole class of footer virtual-line bugs. The bottom visible screen row can be a
+--- **virtual split line** of the item whose real columns line is scrolled off below —
+--- which `line('w$')` (a REAL line) cannot address, so the earlier display-index walk
+--- undercounted the cover by that partial row and the overlay drifted one row too low.
+--- Here `bs` is a true screen row, so the seam lands exactly.
+---
+--- The overlay covers **whole commit blocks** — it never splits a commit across the seam.
+--- Walking up from just above `bs`, the seam is the first **block boundary** (the last
+--- screen row of some item's block) that leaves ≥ `cover` rows below it, so no partial
+--- commit shows above the overlay. The seam item's bottom rendered line is its `merge`
+--- fan (if any, `kind = "merge"`), else its `columns` line — the edge the footer butts.
+---
+--- Pure — no `screenpos`. The live glue supplies `bs` from `line('w0')` + the window
+--- height via the same `screen_lines` model (which counts virtual lines).
+---@param sm { lines: table[], cols: integer[] }  -- from `M.screen_lines`
+---@param bs integer               -- the bottom visible SCREEN row
+---@param cover integer            -- the overlay's requested screen-row budget
+---@return table?  -- { item, kind = "merge"|"columns", idx, cover, seam_bottom } or nil past the top
+function M.footer_seam(sm, bs, cover)
+    local n = #sm.lines
+    if not bs or bs < 1 then return nil end
+    bs = math.min(bs, n)
+    for r = bs - 1, 1, -1 do
+        -- `r` is a block boundary when it is the last screen row of its item's block
+        -- (the next screen row belongs to a different item, or `r` is the very last row).
+        local at_boundary = (r == n) or (sm.lines[r].idx ~= sm.lines[r + 1].idx)
+        if at_boundary and (bs - r) >= cover then
+            local ln = sm.lines[r]
+            -- The seam item's bottom rendered row seeds the footer: a **below** virtual row
+            -- is the merge fan (`item.merge` in the single-below graph; `virt` addresses the
+            -- k-th below row for future multi-row layouts), otherwise the columns line.
+            return {
+                item = ln.item,
+                kind = (ln.virt and ln.virt > 0) and "merge" or "columns",
+                virt = ln.virt or 0,
+                idx = ln.idx,
+                cover = bs - r,   -- whole commit blocks covered (≥ the requested budget)
+                seam_bottom = r,  -- the seam's bottom screen row
+            }
+        end
+    end
+    return nil
+end
+
+--- Flatten display OrderItems into the actual sequence of **rendered screen lines**
+--- (spec §6.2). A commit renders as a block of `[above…] columns [below…]` screen rows;
+--- the `above`/`below` fan rows are **virtual** (decoration-provider `virt_lines`) — they
+--- take a screen row but NOT a real buffer line, so a real buffer line number
+--- (`line('w0')`, `line('w$')`) does not address them. This builds the ground-truth screen
+--- model so callers can reason in **screen rows** (what the user actually sees) instead of
+--- mixing real-line arithmetic with per-item block heights (the footer virtual-line bugs).
+---
+--- **Count-based, not boolean.** Each item may render **any number** of virtual rows above
+--- and below its columns block (a fork's split fan, a merge fan, dual-mode continuation,
+--- or future layout strategies — and both above AND below on one commit). `rows_of(item)`
+--- returns `{ above = <n>, height = <columns rows, ≥1>, below = <n> }`; the default reads
+--- the single `.split`/`.merge` fans (the current graph). This generalises the old
+--- `virt_lines_above` boolean so more/other virtual rows just work.
+---
+--- Returns `{ lines, cols }`:
+---   * `lines[sr]` = `{ idx = <display index>, kind = "above"|"columns"|"below",
+---     virt = <signed offset>, item = <OrderItem> }` for screen row `sr` (1-based, top to
+---     bottom). `virt`: `0` = a columns row; `-k` = the k-th row **above** the columns
+---     (`-1` nearest the columns, matching nvim's `virt_lines_above` stacking); `+k` = the
+---     k-th row **below** it.
+---   * `cols[di]` = the screen row of display item `di`'s **first columns** row (its real /
+---     addressable anchor; a real buffer line maps here).
+---@param items table[]
+---@param rows_of (fun(item: table): { above: integer?, height: integer?, below: integer? })?
+---@return { lines: table[], cols: integer[] }
+function M.screen_lines(items, rows_of)
+    rows_of = rows_of or function(it)
+        return { above = it.split and 1 or 0, height = 1, below = it.merge and 1 or 0 }
+    end
+    local lines, cols = {}, {}
+    for di, it in ipairs(items) do
+        local r = rows_of(it) or {}
+        local above, height, below = r.above or 0, math.max(1, r.height or 1), r.below or 0
+        for k = above, 1, -1 do lines[#lines + 1] = { idx = di, kind = "above", virt = -k, item = it } end
+        cols[di] = #lines + 1
+        for _ = 1, height do lines[#lines + 1] = { idx = di, kind = "columns", virt = 0, item = it } end
+        for k = 1, below do lines[#lines + 1] = { idx = di, kind = "below", virt = k, item = it } end
+    end
+    return { lines = lines, cols = cols }
+end
+
+--- The bottom visible **screen row** (a `screen_lines` model row) of the window, from an
+--- **anchor** whose columns row renders at window screen row `anchor_screen` and the
+--- window's bottom screen row `win_bottom`. The model↔screen offset is constant (the model
+--- mirrors the render), so shift the window bottom into model rows:
+--- `bs = cols[anchor] + (win_bottom - anchor_screen)`.
+---
+--- **Anchor on the CURSOR** in production: `anchor_disp` = the cursor's display item,
+--- `anchor_screen` = `winline()` (its screen row within the window, minus the dual-mode
+--- sub-row offset so it names the item's FIRST columns row), `win_bottom` = the window
+--- height. Both `winline()` and the window height are **window-relative**, so this needs no
+--- `win_screenpos` and is border/winbar-robust. That is the fix for the footer virtual-line
+--- bugs: `line('w0')`/`line('w$')` are REAL lines that can't address a split fan rendered
+--- above an off-screen columns line, and `win_screenpos` is the frame top (drifts by the
+--- border). Verified against real nvim rendering in tests/screen_window_spec. (The formula
+--- works with absolute screen coords too, as long as the two arguments share a frame.)
+---@param sm { lines: table[], cols: integer[] }
+---@param anchor_disp integer     -- the anchor display item (its first columns row)
+---@param anchor_screen integer   -- that columns row's window screen row (e.g. `winline()`)
+---@param win_bottom integer      -- the window's bottom screen row (e.g. window height)
+---@return integer  -- the bottom visible model screen row (clamped to the model length)
+function M.footer_bs(sm, anchor_disp, anchor_screen, win_bottom)
+    local base = sm.cols[anchor_disp]
+    if not base then return #sm.lines end
+    return math.max(1, math.min(base + win_bottom - anchor_screen, #sm.lines))
 end
 
 --- Every lane crossing one edge of a single rendered line (a commit's columns
