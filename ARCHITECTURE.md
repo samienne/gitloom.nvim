@@ -125,7 +125,9 @@ bespoke seam-up grid. `pane.lua` is the pure, window-agnostic core; `update_pane
 in `gitloom.window` does the windowing.
 
 The rebuild is **scroll-gated and async**. The cursor/scroll debounce calls
-`maybe_update_panes`, which rebuilds only when the scroll position (`line("w0")`)
+`maybe_update_panes`, which rebuilds only when the scroll key (`winsaveview().topline`
++ `topfill` — `topfill` catches a sub-scroll through a line's virtual rows that
+`line("w0")` alone misses)
 changed — the panes are a function of the scroll, not the cursor row, so a cursor
 move within the window costs nothing. Forced callers (reflow, the `M`/`B`/`F`/…
 toggles) call `update_panes` directly. `update_panes` runs `build_panes` as a
@@ -140,7 +142,7 @@ still land in the same tick. The repo.order index is cached (`order_idx`).
 
 **The footer pipeline** (`build_panes`, gated by `opts.panes`), per rebuild:
 
-1. **Seam by screen rows.** The footer is a **borderless overlay** over the
+1. **Seam by whole commit blocks.** The footer is a **borderless overlay** over the
    bottom rows of the main window (relative="win") — the sticky-scroll pattern,
    so its lanes butt directly against the seam with no border between. Its
    `zindex` sits just above the host window's content but below the transient
@@ -151,18 +153,42 @@ still land in the same tick. The repo.order index is cached (`order_idx`).
    header) and `float_zindex` (= host + 10: the `?`/`K` floats and the pickers).
    Each reads the host's *live* zindex (it can hide and re-show with a new id),
    so the panes always layer correctly over whichever window the host currently
-   is. The seam is the screen row just above the overlay (`seam_for` = window position +
-   height − overlay height). `boundary_at(target)` then reads the **down-lanes of
-   whichever *rendered line*** sits at that screen row — a commit's columns line,
-   or its split/merge **virtual** line (found via `screenpos`, since a fan has no
-   buffer line of its own). This is what makes the cutoff correct across all
-   merge styles.
+   is. The seam is computed in **screen-row space** on the flattened `screen_lines`
+   model. **`pane.screen_lines(display, rows_of)`** flattens the display OrderItems
+   into the actual sequence of rendered **screen rows** — real `columns` lines PLUS the
+   **virtual** fan rows (`virt_lines`; each takes a screen row but *no* real buffer line,
+   so `line('w0')`/`line('w$')` cannot address it). It is **count-based**:
+   `rows_of(item)` returns `{ above, height, below }` (default reads the single
+   `.split`/`.merge` fans), so any number of virtual rows above/below — and both on one
+   commit — just work. Each screen row carries a signed `virt` (`0` columns, `-k` the
+   k-th row above, `+k` below); `cols[di]` maps a display item to its first columns
+   screen row. The live glue derives `bs`, the **bottom visible screen row (a model
+   row)**, by anchoring on the **CURSOR** via **`pane.footer_bs(sm, cursor_disp,
+   winline(), win_height)`** = `cols[cursor] + (win_height − winline())`. `winline()`
+   (the cursor's screen row within the window, minus the dual-mode sub-row offset) and
+   the window height are **both window-relative**, so this needs no `win_screenpos` and
+   is border/winbar-robust. This is the fix for the whole class of footer virtual-line
+   bugs: `line('w0')`/`line('w$')` are REAL lines that can't address a split fan rendered
+   above an off-screen columns line, and `win_screenpos` is the **frame** top (drifts by
+   the border). Verified against nvim's actual rendering — a real bordered window with
+   `virt_lines` — in `tests/screen_window_spec`.
+   **`pane.footer_seam(sm, bs, cover)`** then walks up from `bs` to the first
+   **block boundary** (the last screen row of a commit's block) leaving ≥ `cover` rows
+   below it, so the overlay covers **whole commit blocks** and its top butts the seam
+   item's bottom line (a **below** fan row, else `columns`) exactly. Pure (no `screenpos`),
+   unit-tested; the invariant is swept over every window position (`footer_window_spec`).
 2. **Continue only the active lanes.** `pane.continue(boundary, anchors, extra)`
    walks each boundary lane's **first-parent chain** down to a root, plus any
    pinned-ref tips below the cutoff (`extra`) so a divergent pinned branch still
    shows. Lanes converge at the commits where they actually meet; every lane
    reaches a root (never dangling); a merge's second parent is never followed, so
-   **no non-active branch is introduced**.
+   **no non-active branch is introduced**. A commit that ≥2 boundary lanes **land
+   on** (a fork below the seam whose branches are both visible above) is where they
+   converge, but the landing is not a first-parent edge — so `continue` counts
+   those landings alongside the first-parent children and force-keeps such a commit
+   as a convergence junction (passed to `condense` as `keep`). Without this the
+   whole seam→root stretch condenses to the lone root and the extra lanes strand at
+   the seam (the footer seam-discontinuity bug).
 3. **Condense + render.** `pane.condense` contracts each linear stretch to an
    edge, keeping only ref heads (`◍` markers — anchor refs only), fork/merge
    **junctions** (node-less join glyphs), and roots/tips (real nodes); `node_of`
@@ -184,12 +210,14 @@ that behaviour if the panes' scrolling misbehaves.
 *not* a reduction of the whole off-screen graph): only how the pinned anchors relate
 to each other and to the lanes crossing the cutoff:
 
-1. **Seam.** `boundary_at(target, up=true)` reads the **up-lanes** of the rendered
-   line at the seam screen row and its *display* index. **Virtual lines matter:**
-   when the seam item is a fork its children diverge on its **split** (virtual) line,
-   so for the header the boundary is read from `item.split` (the divergence), not the
-   single mainline lane on the columns line — otherwise a fork sitting right below
-   the viewport hides every branch that forks from it.
+1. **Seam.** `pane.header_seam(items, top, cover, height_of)` (pure, no `screenpos`)
+   rounds the cutoff to **whole commit blocks** and returns the seam item + its display
+   index; `pane.boundary_of(line, up=true)` then reads the **up-lanes** of that line.
+   **Virtual lines matter:** when the seam item is a fork its children diverge on its
+   **split** (virtual) line, so the boundary is read from `item.split` (the divergence),
+   not the single mainline lane on the columns line — otherwise a fork sitting right
+   below the viewport hides every branch that forks from it. (The footer is the exact
+   mirror: `pane.footer_seam` + the seam item's **merge** fan; see the footer pipeline.)
 2. **Rebuild the focused sub-DAG** — `pane.continue_up(boundary, tips, anchors,
    order_of, seam, yield, lane_of)` runs a **tracked-lane induce** over the **display**
    DAG (the projected nodes, so `order_of` is always defined), up-only, bounded above the

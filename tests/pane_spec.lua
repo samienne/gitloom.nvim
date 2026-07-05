@@ -1331,6 +1331,73 @@ describe("pane.header_seam — whole-commit cutoff (§6.2)", function()
     end)
 end)
 
+describe("pane.footer_seam — whole-commit cutoff in SCREEN rows (§6.2)", function()
+    -- footer_seam now works on the `screen_lines` model (real columns lines + virtual
+    -- split/merge rows) and a bottom visible SCREEN row `bs`, so it addresses virtual
+    -- lines directly. The overlay covers whole commit blocks up from `bs`; the seam is
+    -- the first block boundary leaving ≥ cover rows below it. `bs` is a screen row.
+    local function items(specs)
+        local out = {}
+        for i, s in ipairs(specs) do
+            out[i] = { commit = { hash = "n" .. i }, split = s.split or nil, merge = s.merge or nil }
+        end
+        return out
+    end
+    local function sm(specs, rows_of) return pane.screen_lines(items(specs), rows_of) end
+
+    it("rounds to a commit boundary with no virtual lines", function()
+        -- 5 columns-only items → screen rows 1..5. bs=5, cover=3 covers rows 3,4,5.
+        local s = assert(pane.footer_seam(sm({ {}, {}, {}, {}, {} }), 5, 3))
+        assert.equals(2, s.idx)       -- seam item 2, whose bottom (screen row 2) is above the overlay
+        assert.equals("columns", s.kind)
+        assert.equals(3, s.cover)
+        assert.equals(2, s.seam_bottom)
+    end)
+
+    it("covers a covered commit's MERGE line with it (whole-block coverage)", function()
+        -- item 3 has a merge (block = screen rows 3,4). Screen: 1,2,[3,4],5,6. bs=6,
+        -- cover=3: the overlay can't split item 3's block, so it grows to cover rows
+        -- 3..6 (item 3 whole + 4,5) → seam at item 2, cover 4.
+        local s = assert(pane.footer_seam(sm({ {}, {}, { merge = {} }, {}, {} }), 6, 3))
+        assert.equals(2, s.idx)
+        assert.equals(4, s.cover)
+        assert.equals(2, s.seam_bottom)
+    end)
+
+    it("reads the seam commit's own MERGE line as its bottom edge", function()
+        -- item 2 has a merge. Screen: 1,[2,3],4,5,6. bs=6, cover=3 covers rows 4,5,6;
+        -- the seam is item 2 whose BOTTOM rendered row is its merge (screen 3) → kind=merge.
+        local s = assert(pane.footer_seam(sm({ {}, { merge = {} }, {}, {}, {} }), 6, 3))
+        assert.equals(2, s.idx)
+        assert.equals("merge", s.kind)
+        assert.equals(3, s.seam_bottom)
+    end)
+
+    it("a window bottom on a VIRTUAL SPLIT line seams at the last full commit (the bug)", function()
+        -- item 4 has a split. Screen: 1,2,3,[split=4,cols=5]. If the window bottom lands
+        -- on item 4's SPLIT (screen row 4, its columns scrolled off below), the seam must
+        -- be item 3 (the last fully-visible commit) with the split covered — NOT drift up.
+        local s = assert(pane.footer_seam(sm({ {}, {}, {}, { split = {} } }), 4, 1))
+        assert.equals(3, s.idx)
+        assert.equals("columns", s.kind)
+        assert.equals(3, s.seam_bottom) -- item 3's columns (screen 3); the split (4) is covered
+        assert.equals(1, s.cover)
+    end)
+
+    it("honours a per-commit height (dual label mode = 2 rows)", function()
+        -- height 2 each → screen rows: c1[1,2] c2[3,4] c3[5,6] c4[7,8]. bs=8, cover=3
+        -- covers rows 6,7,8 but item 3's block is 5,6 → grows to 5..8 → seam item 2.
+        local s = assert(pane.footer_seam(sm({ {}, {}, {}, {} }, function() return { height = 2 } end), 8, 3))
+        assert.equals(2, s.idx)
+        assert.equals(4, s.cover)
+        assert.equals(4, s.seam_bottom)
+    end)
+
+    it("returns nil past the first commit (footer would cover everything)", function()
+        assert.is_nil(pane.footer_seam(sm({ {}, {} }), 2, 99))
+    end)
+end)
+
 describe("pane.cap — header keeps a continuous seam-adjacent slice (§6.2)", function()
     it("keeps the contiguous bottom rows (no torn middle), reports the elided tips", function()
         local rows = {}
@@ -1598,6 +1665,102 @@ describe("pane.continue — active lanes reach a root (§6.2)", function()
         local n = by_hash(cond.items)
         assert.is_nil(n.b1)   -- the non-active branch is not introduced
         assert.is_not_nil(n.t3) -- the trunk reaches its root
+    end)
+
+    -- The footer seam-discontinuity bug: two crossing lanes land on the SAME
+    -- parent commit P (P forks: A and B are both children of P), then P descends
+    -- linearly P->M->root. P is where the two lanes converge, but its
+    -- first-parent child-degree is 0 (both lanes *land on* it, not through it), so
+    -- the naive condense splices the whole P->M->root stretch to the root, leaving
+    -- the two lanes nowhere to meet — they strand at the seam. P must be kept as
+    -- the convergence junction.
+    it("keeps the meeting commit when two crossing lanes land on the SAME parent", function()
+        local items = h.dag({
+            { "A", { "P" } },
+            { "B", { "P" } },
+            { "P", { "M" } },
+            { "M", { "root" } },
+            { "root", {} },
+        })
+        local map = {}
+        for _, it in ipairs(items) do map[it.commit.hash] = it.commit end
+        local boundary = {
+            [1] = { id = 1, color = 1, parent = map.P, begin = map.A },
+            [2] = { id = 2, color = 2, parent = map.P, begin = map.B },
+        }
+        local cond = pane.continue(boundary)
+        local n = by_hash(cond.items)
+        assert.is_not_nil(n.P)                    -- the meeting commit survives
+        assert.is_true(n.P.junction)              -- rendered as the convergence join
+        assert.equals(n.P, cond.node_of_hash.P)   -- both lanes' parent maps to it
+        assert.is_not_nil(n.root)                 -- and the root is still reached
+        assert.equals(0, #n.root.parents)
+    end)
+
+    -- End to end through pane.footer: both crossing lanes must enter the seam
+    -- (rendered `up` at row 1) and neither may be reported as terminating — a
+    -- terminated crossing lane is the dangling-at-the-seam discontinuity.
+    it("footer: two lanes on the same parent both reach the seam (none dangle)", function()
+        local items, opts = h.dag({
+            { "A", { "P" } },
+            { "B", { "P" } },
+            { "P", { "M" } },
+            { "M", { "root" } },
+            { "root", {} },
+        }), h.big_opts()
+        local map = {}
+        for _, it in ipairs(items) do map[it.commit.hash] = it.commit end
+        local boundary = {
+            [1] = { id = 1, color = 1, parent = map.P, begin = map.A },
+            [2] = { id = 2, color = 2, parent = map.P, begin = map.B },
+        }
+        local cond = pane.continue(boundary)
+        local res = pane.footer(opts, cond.items, boundary, cond.node_of_hash)
+        assert.is_nil(next(res.terminate)) -- no crossing lane strands at the seam
+        -- both boundary columns enter from above at the seam row
+        assert.is_true(res.rows[1].columns[1] and res.rows[1].columns[1].connectivity.up)
+        assert.is_true(res.rows[1].columns[2] and res.rows[1].columns[2].connectivity.up)
+        assert_continuous(res.rows)
+    end)
+end)
+
+describe("pane.footer — fuzz: no crossing lane strands at the seam (§6.2)", function()
+    -- Feed random DAGs through the real layout, build a footer at every cutoff, and
+    -- assert the seam-discontinuity invariant: an uncapped footer strands NO crossing
+    -- lane. Every boundary lane's parent is queued by `continue`, so it maps to a kept
+    -- node and must both continue (empty `terminate`) and appear at the seam row with
+    -- its own id (up-connected), lane-continuous down to a root. Guards the footer
+    -- against the over-collapse that dropped lanes when they converged on a shared node.
+    it("holds across a random sweep", function()
+        for seed = 1, 60 do
+            local n = 8 + (seed % 13) -- 8..20 commits — many branches, deep footers
+            local items = h.dag(h.random_dag(n, seed))
+            local opts = h.big_opts()
+            local main = columns.layout(opts, items)
+            for cut = 1, #items - 1 do
+                local boundary = pane.boundary_below(main, cut)
+                if next(boundary) then
+                    local ctx = ("seed=%d n=%d cut=%d"):format(seed, n, cut)
+                    local cond = pane.continue(boundary)
+                    local res = pane.footer(opts, cond.items, boundary, cond.node_of_hash)
+                    -- Uncapped: no crossing lane may terminate (strand) at the seam.
+                    assert.is_nil(next(res.terminate), ctx .. " a crossing lane stranded at the seam")
+                    -- Every boundary lane id enters from above at the seam row (row 1),
+                    -- so none was dropped when lanes converged.
+                    local up_ids = {}
+                    for _, cell in ipairs(res.rows[1].columns) do
+                        for _, s in ipairs(cell.lanes or {}) do
+                            if s.connectivity.up then up_ids[s.id] = true end
+                        end
+                    end
+                    for _, lane in pairs(boundary) do
+                        assert.is_true(up_ids[lane.id],
+                            ctx .. (" boundary lane id %s missing at the seam"):format(tostring(lane.id)))
+                    end
+                    assert_continuous(res.rows)
+                end
+            end
+        end
     end)
 end)
 
