@@ -158,6 +158,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
+| `<leader>wD` | Write a context-pane debug dump — seam, boundary, condensed graph and rendered overlay — to `stdpath('data')/gitloom_pane_dump.txt` (debug) |
 | `?` | Float listing all keybindings |
 
 **Branch modes.** A branch can be **normal**, **collapsed** (contracted to a
