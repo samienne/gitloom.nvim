@@ -25,10 +25,9 @@
 --- incoming, outgoing, and survivor lane handled) is empty; a pass that makes no
 --- progress errors (the loop guard), and a structural oracle then verifies the
 --- emitted lines realise the ledger. Shell steps (classify / spawn_lanes /
---- decide_style) run before the loop; the stage list is `place` (all column
---- placement + advancing active/blocked) then `emit` (draw the split/commit/merge
---- lines). Peeled apart over time. See ARCHITECTURE.md ("Layout as a staged
---- pipeline").
+--- decide_style) run before the loop; the stage list is place_commit -> compact
+--- -> fan_out (column placement + advancing active/blocked) -> emit (draw the
+--- split/commit/merge lines). See ARCHITECTURE.md ("Layout as a staged pipeline").
 local M = {}
 
 ---@param t table
@@ -287,74 +286,80 @@ function M.layout(opts, items, seed)
             inline_junction, sep_split, sep_merge, fan_line
     end
 
-    -- PLACE (stage): every column-placement decision for the item — commit
-    -- column, the split reduction's occupancy, the linear-commit slide, survivor
-    -- compaction, and the outgoing fan-out columns — plus advancing `active` and
-    -- `blocked` for the next row. It draws NOTHING; it records a draw plan on
-    -- `state` for the emit stage. This is the mode-specific part of the pipeline.
-    local function place(state)
-        if state.placed then return end
-        local incoming, survivors, outgoing = state.incoming, state.survivors, state.outgoing
-        local sep_split, sep_merge, fan_line = state.sep_split, state.sep_merge, state.fan_line
+    -- PLACE_COMMIT (stage): the commit's column. cc0 = the leftmost incoming
+    -- child's column, or the leftmost free column for a tip. With a separate split
+    -- line only the trunk reaches the commit line (`commit_incoming`); the full
+    -- fan-in (`orig_incoming`) is kept for the split line + child_lanes. `occ0` is
+    -- the row-start occupancy the compaction stages honour — computed directly (no
+    -- transient mutation of `active`, which fan_out rebuilds).
+    local function place_commit(state)
+        if state.cc0 then return end
+        local incoming, survivors = state.incoming, state.survivors
+        local sep_split = state.sep_split
 
-        -- Commit column: the leftmost incoming child, or the leftmost free column
-        -- for a tip.
-        local cc
+        local cc0
         if #incoming > 0 then
-            cc = incoming[1].col
+            cc0 = incoming[1].col
         else
-            cc = 1
-            while active[cc] or blocked[cc] do cc = cc + 1 end
+            cc0 = 1
+            while active[cc0] or blocked[cc0] do cc0 = cc0 + 1 end
         end
-        local cc0 = cc -- the pre-slide column; the split line draws here
 
-        -- Split reduction (occupancy only, no drawing): with a separate split line
-        -- the non-trunk children terminate above, so only the trunk reaches the
-        -- commit line — and the children's vacated columns become the gaps the
-        -- commit line compacts into. `commit_incoming` is what reaches the commit
-        -- line; `orig_incoming` (the full fan-in) is kept for the split line + the
-        -- child_lanes.
-        local orig_incoming = incoming
-        local trunk = incoming[1]
         local commit_incoming = incoming
         if sep_split then
-            active = { [cc0] = trunk.lane }
-            for _, s in ipairs(survivors) do active[s.col] = s.lane end
-            commit_incoming = { { col = cc0, lane = trunk.lane } }
+            commit_incoming = { { col = cc0, lane = incoming[1].lane } }
         end
 
-        -- Row-start occupancy: compaction may only move a lane into a column empty
-        -- *here*, never one another lane vacates on this same line — that keeps two
-        -- turns out of one cell (allow_merge_on_split aside).
+        -- Row-start occupancy: with a separate split line the non-trunk children
+        -- have terminated above, so the occupied set is the trunk column plus the
+        -- survivors (the children's vacated columns are the gaps the commit line
+        -- compacts into); inline it is just the current active lanes.
         local occ0 = {}
-        for j in pairs(active) do occ0[j] = true end
+        if sep_split then
+            occ0[cc0] = true
+            for _, s in ipairs(survivors) do occ0[s.col] = true end
+        else
+            for j in pairs(active) do occ0[j] = true end
+        end
 
-        -- Compact a *linear* commit leftward through the run of row-start gaps,
-        -- stopping at the first occupied column — never reaching past it into a
-        -- farther gap (the no-cross rule). Suppressed on a fan line and on a seeded
-        -- first row (the pane seam must not jog).
-        if #commit_incoming == 1 and not (first_row and seed) and not fan_line then
+        state.cc0, state.cc = cc0, cc0
+        state.occ0 = occ0
+        state.orig_incoming = incoming
+        state.commit_incoming = commit_incoming
+        state.trunk = incoming[1]
+    end
+
+    -- COMPACT (stage): slide the linear commit and the survivors left into the run
+    -- of row-start gaps, stopping at the first occupied/used column (never crossing
+    -- a lane). Suppressed on a fan line and on a seeded first row (the pane seam
+    -- must not jog). Produces the final commit column (cc) and each survivor's out
+    -- column, reserving every jog span in `used`.
+    local function compact(state)
+        if state.used then return end
+        local survivors = state.survivors
+        local occ0, cc = state.occ0, state.cc
+        local commit_incoming = state.commit_incoming
+        local fan_line = state.fan_line
+        local frozen = first_row and seed
+
+        if #commit_incoming == 1 and not frozen and not fan_line then
             for c = cc - 1, 1, -1 do
                 if occ0[c] or blocked[c] then break end
                 cc = c
             end
         end
 
-        -- Reserve the commit's incoming jog span (cc0..cc) so no survivor jogs
-        -- across it.
+        -- Reserve the commit's incoming jog span (cc0..cc) before the survivors
+        -- compact, so none of them jogs across it.
         local used = {}
         do
             local a = (commit_incoming[1] and commit_incoming[1].col) or cc
             for c = math.min(a, cc), math.max(a, cc) do used[c] = true end
         end
 
-        -- Gentle left compaction of survivors: each shifts into the clear run of
-        -- row-start gaps to its left (stopping at the first occupied/used column,
-        -- never crossing it), else stays put. Suppressed on a fan line / seeded
-        -- first row. Each reserves its whole jog span in `used`.
         for _, s in ipairs(survivors) do
             local k = s.col
-            if not (first_row and seed) and not fan_line then
+            if not frozen and not fan_line then
                 for c = s.col - 1, 1, -1 do
                     if occ0[c] or used[c] or blocked[c] then break end
                     k = c
@@ -364,13 +369,23 @@ function M.layout(opts, items, seed)
             s.out = k
         end
 
-        -- Outgoing columns: the first parent continues at the commit column; each
-        -- extra parent takes the leftmost interior gap free since before this row
-        -- (`occ0`/`used`/`blocked`). A terminating child's freed column is reused
-        -- first (`freed`) only when that stacks no two-turn cell — under
-        -- allow_merge_on_split (the sanctioned inline two-turn) or a separate merge
-        -- line (the child already ended on the commit line above). Reusing it keeps
-        -- a merge staircase narrow instead of leaving an empty gap.
+        state.cc = cc
+        state.used = used
+    end
+
+    -- FAN_OUT (stage): the outgoing parents' columns — the first parent at the
+    -- commit column, each extra parent at the leftmost interior gap free since
+    -- before this row (`occ0`/`used`/`blocked`). A terminating child's freed column
+    -- is reused first (`freed`) only when that stacks no two-turn cell — under
+    -- allow_merge_on_split or a separate merge line. Then advance `active`/`blocked`
+    -- for the next row (a root's column is blocked for one row).
+    local function fan_out(state)
+        if state.fanned then return end
+        local survivors, outgoing = state.survivors, state.outgoing
+        local occ0, used, cc = state.occ0, state.used, state.cc
+        local commit_incoming = state.commit_incoming
+        local sep_merge = state.sep_merge
+
         local freed = {}
         if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #commit_incoming do freed[#freed + 1] = commit_incoming[i].col end
@@ -389,9 +404,6 @@ function M.layout(opts, items, seed)
             used[k] = true
         end
 
-        -- Advance `active` for the next row: survivors at their compacted column,
-        -- the first parent at the commit column, every extra parent at its fan-out
-        -- column. Block a root's column for one row so nothing stacks under it.
         active = {}
         for _, s in ipairs(survivors) do active[s.out] = s.lane end
         if outgoing[1] then active[cc] = outgoing[1].lane end
@@ -399,13 +411,7 @@ function M.layout(opts, items, seed)
         blocked = {}
         if #outgoing == 0 then blocked[cc] = true end
         first_row = false
-
-        -- The draw plan for emit.
-        state.cc0, state.cc = cc0, cc
-        state.trunk = trunk
-        state.orig_incoming = orig_incoming
-        state.commit_incoming = commit_incoming
-        state.placed = true
+        state.fanned = true
     end
 
     -- EMIT (stage): draw the item's lines from the plan `place` recorded — the
@@ -503,7 +509,7 @@ function M.layout(opts, items, seed)
     -- The stage list: placement then emission. The shell steps (classify /
     -- spawn_lanes / decide_style) run before the driver loop; these two stages
     -- draw and discharge the ledger.
-    local stages = { place, emit }
+    local stages = { place_commit, compact, fan_out, emit }
 
     local function active_contains(lane)
         for _, l in pairs(active) do
