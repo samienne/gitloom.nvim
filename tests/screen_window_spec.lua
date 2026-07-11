@@ -77,6 +77,27 @@ local function nvim_bottom(win, spec, bottom_abs)
     return nil -- bottom is somewhere the simple model doesn't expect
 end
 
+-- nvim's ACTUAL (line, virt) at the window TOP screen row `top_abs`, derived from
+-- `line('w0')` (the first visible-columns real line), its screenpos, and the known virt
+-- structure — the upward mirror of `nvim_bottom`. Above W's columns nvim renders, nearest
+-- first: W's own split fan (`virt_lines_above`), then the PRIOR item's merge fan.
+local function nvim_top(win, spec, top_abs)
+    local W = vim.fn.line("w0")
+    local wr = vim.fn.screenpos(win, W, 1).row -- W's columns screen row
+    if wr == 0 then return nil end
+    if top_abs == wr then return W, 0 end
+    local r = wr
+    if spec[W] and spec[W].split then
+        r = r - 1
+        if top_abs == r then return W, -1 end
+    end
+    if spec[W - 1] and spec[W - 1].merge then
+        r = r - 1
+        if top_abs == r then return W - 1, 1 end
+    end
+    return nil -- top is somewhere the simple model doesn't expect
+end
+
 local SPEC = {
     {}, {}, { split = true }, { merge = true }, {},
     { split = true }, {}, { merge = true }, { split = true }, {},
@@ -205,5 +226,95 @@ describe("screen coordinates vs real nvim rendering (§6.2)", function()
             ("cursor-anchored footer_bs was wrong %d/%d times"):format(cursor_wrong, compared))
         assert.is_true(prod_wrong > 0,
             "the production w0/win_screenpos formula was never wrong — the bug was not reproduced")
+    end)
+
+    -- HEADER MIRROR: the header's top-edge seam had the SAME class of bug as the footer's
+    -- bottom — it anchored on `line('w0')` (a real line, can't address a split fan rendered
+    -- ABOVE its columns). The fix anchors the window TOP on the cursor:
+    -- `pane.header_ts(sm, cursor, winline()) = cols[cursor] - (winline() - 1)`. These assert
+    -- it names the SAME (line, virt) nvim renders at the window's top screen row, including
+    -- when the top is a virtual SPLIT line whose columns line is scrolled off just below.
+    it("cursor-anchored header_ts matches nvim's actual window top (line, virt)", function()
+        local sm = pane.screen_lines(items_of(SPEC))
+        local total = #sm.lines
+        local bad, split_tops, merge_tops, checked = {}, 0, 0, 0
+        for _, WH in ipairs({ 6, 8, 11, 14 }) do
+            for _, border in ipairs({ "none", "rounded" }) do
+                local buf, win, cleanup = render(SPEC, WH, border)
+                for cursor = 1, #SPEC do
+                    for _, z in ipairs({ "zt", "zz", "zb" }) do
+                        vim.api.nvim_win_set_cursor(win, { cursor, 0 })
+                        vim.api.nvim_win_call(win, function() vim.cmd("normal! " .. z) end)
+                        vim.api.nvim_win_call(win, function()
+                            local wl = vim.fn.winline()
+                            local cur_abs = vim.fn.screenpos(win, cursor, 1).row
+                            local top_abs = cur_abs - (wl - 1)
+                            -- nvim's independent truth (w0-anchored):
+                            local nl, nv = nvim_top(win, SPEC, top_abs)
+                            if not nl then return end -- edge the simple oracle skips
+                            checked = checked + 1
+                            if nv == -1 then split_tops = split_tops + 1 end
+                            if nv == 1 then merge_tops = merge_tops + 1 end
+                            -- our cursor-anchored model computation:
+                            local ts = pane.header_ts(sm, cursor, wl)
+                            local pos = (ts >= 1 and ts <= total) and sm.lines[ts] or nil
+                            local mv = pos and pos.virt
+                            if not pos or pos.idx ~= nl or mv ~= nv then
+                                bad[#bad + 1] = ("WH=%d %s cursor=%d %s: model ts=%d -> (L%s,%s) but nvim top=(L%d,virt%d)")
+                                    :format(WH, border, cursor, z, ts,
+                                        pos and tostring(pos.idx) or "?", pos and pos.kind or "?", nl, nv)
+                            end
+                        end)
+                    end
+                end
+                cleanup()
+            end
+        end
+        assert.equals(0, #bad,
+            ("%d/%d top mismatches:\n  "):format(#bad, checked)
+            .. table.concat(bad, "\n  ", 1, math.min(#bad, 20)))
+        assert.is_true(split_tops > 0, "never exercised a window top on a virtual SPLIT line")
+        assert.is_true(merge_tops > 0, "never exercised a window top on a virtual MERGE line")
+    end)
+
+    it("the OLD header w0/win_screenpos top formula is wrong where the cursor-anchored one is right", function()
+        local sm = pane.screen_lines(items_of(SPEC))
+        local total = #sm.lines
+        local cursor_wrong, prod_wrong, compared = 0, 0, 0
+        for _, WH in ipairs({ 6, 8, 11, 14 }) do
+            local buf, win, cleanup = render(SPEC, WH, "rounded") -- bordered host, like the graph
+            for cursor = 1, #SPEC do
+                for _, z in ipairs({ "zt", "zz", "zb" }) do
+                    vim.api.nvim_win_set_cursor(win, { cursor, 0 })
+                    vim.api.nvim_win_call(win, function() vim.cmd("normal! " .. z) end)
+                    vim.api.nvim_win_call(win, function()
+                        local wl = vim.fn.winline()
+                        local cur_abs = vim.fn.screenpos(win, cursor, 1).row
+                        local top_abs = cur_abs - (wl - 1)
+                        local nl, nv = nvim_top(win, SPEC, top_abs)
+                        if not nl then return end
+                        compared = compared + 1
+                        local function pos_virt(ts)
+                            local p = (ts >= 1 and ts <= total) and sm.lines[ts] or nil
+                            if not p then return nil end
+                            return p.idx, p.virt
+                        end
+                        -- cursor-anchored (the fix): winline, window-relative.
+                        local ci, cv = pos_virt(pane.header_ts(sm, cursor, wl))
+                        if ci ~= nl or cv ~= nv then cursor_wrong = cursor_wrong + 1 end
+                        -- the OLD header assumption: the window top IS w0's columns line
+                        -- (`ts = cols[w0]`), ignoring any split fan rendered above it.
+                        local w0 = vim.fn.line("w0")
+                        local pi, pv = pos_virt(sm.cols[w0])
+                        if pi ~= nl or pv ~= nv then prod_wrong = prod_wrong + 1 end
+                    end)
+                end
+            end
+            cleanup()
+        end
+        assert.equals(0, cursor_wrong,
+            ("cursor-anchored header_ts was wrong %d/%d times"):format(cursor_wrong, compared))
+        assert.is_true(prod_wrong > 0,
+            "the old w0-columns top formula was never wrong — the header bug was not reproduced")
     end)
 end)

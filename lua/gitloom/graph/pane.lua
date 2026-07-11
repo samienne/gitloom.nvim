@@ -360,42 +360,74 @@ function M.cap(rows, max, keep_first)
     return out, #rows - max, names
 end
 
---- The header **seam** (spec §6.2): which rendered line is the cutoff for an overlay
---- that should cover at least `cover` screen rows, given the display `items` and the
---- top visible one (`top`, whose split line is scrolled off above the viewport).
+--- The header **seam** (spec §6.2), computed in **screen-row space** on the flattened
+--- `screen_lines` model — the upward mirror of `M.footer_seam`. Given `sm` (the screen
+--- model), `ts` (the top visible **screen row** — what the user actually sees at the
+--- window's first row, virtual lines included), and an overlay that should cover at least
+--- `cover` screen rows, returns the first **fully-visible** commit BELOW the header overlay
+--- and which of its lines is the seam. The header's lanes are seeded from that line's **up**
+--- edge.
 ---
---- A commit renders as a block of `[split?] columns [merge?]` screen rows. The overlay
---- covers **whole commit blocks** — it never splits a commit across the seam — so the
---- cutoff rounds **up** to the top of the first commit whose block lies entirely below
---- the covered region. A covered commit's trailing **merge** line is part of it, so it
---- is covered too (the "+1 padding" a naive screen-row cutoff left dangling, reading
---- the covered commit's columns line instead of the visible row below it).
+--- Working in screen rows (not real buffer lines / display indices) is the fix for the same
+--- class of virtual-line bugs the footer had. The top visible screen row can be a **virtual
+--- split line** of the item whose real columns line is scrolled off *above* it — which
+--- `line('w0')` (a REAL line) cannot address, so the earlier display-index walk assumed the
+--- top item's columns line was the window top and drifted by those partial split rows.
+--- Here `ts` is a true screen row, so the seam lands exactly.
 ---
---- Pure — no `screenpos` — so the cutoff is **unit-testable** (the live glue only
---- supplies `top` via `line('w0')` and the per-item height). `height_of(item)` gives a
---- commit's columns rows (default 1; the dual label mode is 2).
----@param items table[]            -- the display OrderItems (with `.split`/`.merge`)
----@param top integer              -- index of the top visible item (its split is off-screen)
+--- The overlay covers **whole commit blocks** — it never splits a commit across the seam.
+--- Walking down from just below `ts`, the seam is the first **block start** (the first
+--- screen row of some item's block) that leaves ≥ `cover` rows above it, so no partial
+--- commit shows below the overlay. The seam item's top rendered line is its `split` fan
+--- (if any, `kind = "split"`), else its `columns` line — the edge the header butts.
+---
+--- Pure — no `screenpos`. The live glue supplies `ts` from the cursor anchor + the window
+--- top via the same `screen_lines` model (which counts virtual lines).
+---@param sm { lines: table[], cols: integer[] }  -- from `M.screen_lines`
+---@param ts integer               -- the top visible SCREEN row
 ---@param cover integer            -- the overlay's requested screen-row budget
----@param height_of (fun(item: table): integer)?  -- a commit's columns rows (default 1)
----@return table?  -- { item, kind = "split"|"columns", idx, cover } or nil past the end
-function M.header_seam(items, top, cover, height_of)
-    height_of = height_of or function() return 1 end
-    local row = 0
-    for i = top, #items do
-        if row >= cover then
-            local it = items[i]
+---@return table?  -- { item, kind = "split"|"columns", idx, cover, seam_top } or nil past the end
+function M.header_seam(sm, ts, cover)
+    local n = #sm.lines
+    if not ts or ts > n then return nil end
+    ts = math.max(ts, 1)
+    for r = ts + 1, n do
+        -- `r` is a block START when the previous screen row belongs to a different item
+        -- (so `r` is the first rendered line of a fresh commit block).
+        if sm.lines[r].idx ~= sm.lines[r - 1].idx and (r - ts) >= cover then
+            local ln = sm.lines[r]
+            -- The seam item's top rendered row seeds the header: an **above** virtual row is
+            -- its split fan (`virt < 0`), otherwise its columns line.
             return {
-                item = it,
-                kind = (i > top and it.split) and "split" or "columns",
-                idx = i,
-                cover = row, -- whole commit blocks covered (≥ the requested budget)
+                item = ln.item,
+                kind = (ln.virt and ln.virt < 0) and "split" or "columns",
+                virt = ln.virt or 0,
+                idx = ln.idx,
+                cover = r - ts,   -- whole commit blocks covered (≥ the requested budget)
+                seam_top = r,     -- the seam's top screen row (first fully-visible line)
             }
         end
-        local it = items[i]
-        row = row + ((i > top and it.split) and 1 or 0) + height_of(it) + (it.merge and 1 or 0)
     end
     return nil
+end
+
+--- The top visible **screen row** (a `screen_lines` model row) of the window — the upward
+--- mirror of `M.footer_bs`. Given `sm`, an **anchor** whose columns row renders at window
+--- screen row `anchor_screen` (window-relative, e.g. the cursor's `winline()`), returns the
+--- model screen row shown at the window's first row. The window top sits `anchor_screen - 1`
+--- rows above the anchor's columns, so `ts = cols[anchor] - (anchor_screen - 1)`.
+---
+--- Both `winline()` and the window top (row 1, window-relative) are **window-relative**, so
+--- this needs no `win_screenpos` and is border/winbar-robust — the same anchor discipline
+--- that fixed the footer's `line('w0')`/`win_screenpos` drift.
+---@param sm { lines: table[], cols: integer[] }
+---@param anchor_disp integer     -- the anchor display item (its first columns row)
+---@param anchor_screen integer   -- that columns row's window screen row (e.g. `winline()`)
+---@return integer  -- the top visible model screen row (clamped to the model)
+function M.header_ts(sm, anchor_disp, anchor_screen)
+    local base = sm.cols[anchor_disp]
+    if not base then return 1 end
+    return math.max(1, math.min(base - (anchor_screen - 1), #sm.lines))
 end
 
 --- The footer **seam** (spec §6.2), computed in **screen-row space** on the flattened

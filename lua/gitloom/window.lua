@@ -4548,11 +4548,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
 
             -- The SCREEN-ROW model of the whole display: the flat sequence of rendered
-            -- lines (real columns lines PLUS virtual split/merge fan lines), so the footer
-            -- seam is computed in screen rows — what the user actually sees — instead of
-            -- real buffer lines. A virtual line has no real line number, so `line('w$')`
-            -- cannot address it; reasoning in real lines drifted the seam by a partial
-            -- virtual row at the window bottom (§6.2). Built once per pane rebuild.
+            -- lines (real columns lines PLUS virtual split/merge fan lines), so BOTH pane
+            -- seams are computed in screen rows — what the user actually sees — instead of
+            -- real buffer lines. A virtual line has no real line number, so `line('w0')`/
+            -- `line('w$')` cannot address it; reasoning in real lines drifted the seam by a
+            -- partial virtual row at the window edge (§6.2). Built once per pane rebuild and
+            -- shared by the footer (bottom edge) and the header (top edge).
             -- Per-item virtual-row counts (above/below) + columns height, matching what the
             -- listview actually renders (§6.1): today a fork's split fan is one row above, a
             -- merge fan one below, dual label mode two columns rows. Count-based so future
@@ -4564,9 +4565,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     below = it.merge and 1 or 0,
                 }
             end
-            local footer_sm = pane.screen_lines(repo.display, rows_of)
+            local pane_sm = pane.screen_lines(repo.display, rows_of)
 
-            -- The bottom visible SCREEN row of the window (a `footer_sm` model row), anchored
+            -- The bottom visible SCREEN row of the window (a `pane_sm` model row), anchored
             -- on the **cursor** via `winline()`. `winline()` (cursor's screen row within the
             -- window) and the window height are BOTH window-relative, so they need no
             -- `win_screenpos` and are border/winbar-robust — the bottom is simply
@@ -4579,10 +4580,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 return vim.api.nvim_win_call(win, function()
                     local cur = vim.fn.line(".")
                     local _, cdisp, sub = ctx:order_at(cur)
-                    if not cdisp or not footer_sm.cols[cdisp] then return nil end
+                    if not cdisp or not pane_sm.cols[cdisp] then return nil end
                     local anchor_screen = vim.fn.winline() - (sub or 0)
                     local wh = vim.api.nvim_win_get_height(win)
-                    return pane.footer_bs(footer_sm, cdisp, anchor_screen, wh)
+                    return pane.footer_bs(pane_sm, cdisp, anchor_screen, wh)
                 end)
             end
 
@@ -4593,7 +4594,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local function build_footer(cover)
                 local bs = footer_bottom_screen()
                 if not bs then return nil, "no bs" end
-                local seam = pane.footer_seam(footer_sm, bs, cover)
+                local seam = pane.footer_seam(pane_sm, bs, cover)
                 if not seam then return nil, "past top@" .. cover end
                 local line = (seam.kind == "merge") and seam.item.merge or seam.item.columns
                 local boundary = pane.boundary_of(line)
@@ -4621,19 +4622,35 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 return res.rows, seam.idx .. (seam.kind == "merge" and "m" or "c"), cond, boundary, seam.cover
             end
 
+            -- The top visible SCREEN row of the window (a `pane_sm` model row), anchored on
+            -- the **cursor** via `winline()` — the upward mirror of `footer_bottom_screen`.
+            -- The window top sits `winline() - 1` rows above the cursor's columns row, both
+            -- window-relative (no `win_screenpos`, so border/winbar-robust). This is the fix
+            -- for the header's virtual-line drift: the true window top can be a split fan
+            -- rendered ABOVE its columns line, which `line('w0')` (a REAL line) cannot address.
+            local function header_top_screen()
+                return vim.api.nvim_win_call(win, function()
+                    local cur = vim.fn.line(".")
+                    local _, cdisp, sub = ctx:order_at(cur)
+                    if not cdisp or not pane_sm.cols[cdisp] then return nil end
+                    local anchor_screen = vim.fn.winline() - (sub or 0)
+                    return pane.header_ts(pane_sm, cdisp, anchor_screen)
+                end)
+            end
+
             -- Build the HEADER for an overlay covering at least `cover` screen rows
-            -- (off-screen-NEWER topology). The seam is computed from the display items
-            -- directly (`pane.header_seam` — NO screenpos, so it's testable and never
-            -- splits a commit across the seam: a covered commit's trailing merge line is
-            -- covered with it). `pane.continue_up` then rebuilds the focused sub-DAG and
-            -- `pane.header` lays it out seam-up. Returns rows, tag, actual-cover on
-            -- success; nil, reason on failure. `actual cover` ≥ `cover` (rounded up to
-            -- the commit boundary) is the overlay height the rows must fit in.
+            -- (off-screen-NEWER topology). The seam is computed in SCREEN rows from the
+            -- cursor-anchored window top (`pane.header_seam` — NO screenpos, so it's testable
+            -- and never splits a commit across the seam: a covered commit's trailing merge
+            -- line is covered with it, and a partial split fan at the window top is handled).
+            -- `pane.continue_up` then rebuilds the focused sub-DAG and `pane.header` lays it
+            -- out seam-up. Returns rows, tag, actual-cover on success; nil, reason on failure.
+            -- `actual cover` ≥ `cover` (rounded up to the commit boundary) is the overlay
+            -- height the rows must fit in.
             local function build_header(cover)
-                local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-                local _, w0disp = ctx:order_at(w0)
-                if not w0disp or w0disp <= 1 then return nil, "at top" end
-                local seam = pane.header_seam(repo.display, w0disp, cover)
+                local ts = header_top_screen()
+                if not ts or ts <= 1 then return nil, "at top" end
+                local seam = pane.header_seam(pane_sm, ts, cover)
                 if not seam then return nil, "past end" end
                 local line = (seam.kind == "split") and seam.item.split or seam.item.columns
                 local boundary = pane.boundary_of(line, true)
@@ -4790,10 +4807,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 pcall(function()
                     local w0 = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
                     local _, w0disp = ctx:order_at(w0)
-                    local out = { ("w0=%d w0disp=%s H=%s seam_tag=%s ovf=%s"):format(
-                        w0, tostring(w0disp), tostring(H), tostring(htag), tostring(ovf)) }
+                    -- The cursor-anchored top visible SCREEN row (production formula) — the
+                    -- header seam is computed from it, not from `w0disp` (which can't address
+                    -- a split fan at the window top).
+                    local hdr_ts = header_top_screen()
+                    local out = { ("w0=%d w0disp=%s ts=%s H=%s seam_tag=%s ovf=%s"):format(
+                        w0, tostring(w0disp), tostring(hdr_ts), tostring(H), tostring(htag), tostring(ovf)) }
                     -- The boundary the header was built from (the whole-commit seam).
-                    local seam = w0disp and pane.header_seam(repo.display, w0disp, H or 2)
+                    local seam = hdr_ts and pane.header_seam(pane_sm, hdr_ts, H or 2)
                     local disp_idx = seam and seam.idx
                     local boundary = seam
                         and pane.boundary_of((seam.kind == "split") and seam.item.split or seam.item.columns, true)
