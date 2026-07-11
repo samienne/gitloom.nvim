@@ -853,97 +853,140 @@ entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
 the existing `OrderItem`s (the view holds references). Both go through
 `columns.layout` — there is no separate incremental algorithm.
 
-### Future direction: layout policies and lookahead (not yet built)
+### Layout as a staged pipeline (in progress)
 
-This is a recorded design intent, **not** implemented. Today there is one
-layout algorithm. The note exists so that *if* we add alternative layout modes
-(below), we already agree on the shape; until then the current single-pass code
-stays as-is. Do not refactor toward this speculatively — revisit it when a
-second algorithm is actually wanted.
+Status: **being built** on `feature/layout-pipeline`. Today `columns.layout` is
+the single monolithic per-commit loop described above; it is being decomposed —
+behaviour-preserving, no change to rendering or any test output — into a
+**pipeline of stages**. This section is the target design. It supersedes the
+earlier "one replaceable `place(ctx)` policy" note: a layout policy is now simply
+a chosen *set of stages*, which is a strictly more granular seam.
 
-**What varies by mode, and what never does.** Reading `columns.layout`'s
-per-commit loop, the steps sort cleanly into two buckets:
+**Why.** The alternative layouts (spread, lookahead — below) and the interactive
+reflow views all want to vary *placement* while keeping the DAG-driven machinery
+(lane lifecycle, colour, edge attribution) fixed. A pipeline of uniform
+`stage : state -> state` steps makes each layout strategy a recomposable stage
+list, and turns "is this row fully and correctly built" into an explicit,
+testable property instead of an implicit consequence of one loop's control flow.
 
-- *Mode-invariant machinery* — lane lifecycle (id/trunk reuse,
-  `parent_lanes`/`child_lanes`), the colour free list, DAG classification
-  (incoming / survivors / outgoing), and Segment emission
-  (`new_line`/`draw`/`assemble` + the continuity validation). All driven by the
-  *DAG*, never by where a lane is drawn.
-- *Mode-specific policy* — **only** the column-placement decisions: the commit
-  column `cc`, the survivor compaction, the outgoing fan-out assignment (incl.
-  the `allow_merge_on_split` freed-column reuse), and the occupancy/blocking
-  model.
-
-So alternative layouts are not separate algorithms reusing shared pieces; they
-are **one driver with a replaceable placement policy**. The seam is a pure
-function:
+**The per-item state.** `columns.layout` still sweeps the order top-to-bottom
+carrying `active` (col → Lane flowing down). For each commit it builds a
+`LayoutState`:
 
 ```
-place(ctx) -> { cc, survivor_cols, outgoing_cols, blocked_next }
-   ctx = { active (col -> lane), incoming, survivors, outgoing, blocked,
-           opts, hints? }
+LayoutState = {
+  opts,
+  -- sweep memory (the imperative shell, carried across items):
+  active, blocked, new_id(), alloc_color(), free_color(),
+  -- the current item:
+  commit,
+  above = {},   -- virtual lines above the commit (fan-in / split rows)
+  main,         -- the one REAL line; carries the commit node
+  below = {},   -- virtual lines below the commit (fan-out / merge rows)
+  ledger,       -- the obligations still to discharge (below)
+}
 ```
 
-The driver does lifecycle + colour + emission and calls `place`; today's
-behaviour becomes the default `compact` policy. This is **functional core,
-imperative shell**: purify the part that varies (placement), and leave the
-inherently-stateful lifecycle (persistent Lane objects threaded row-to-row, the
-colour FIFO) as the shell — threading those through pure functions buys nothing.
-Decoupling lane id/colour from column placement (they are already DAG-driven,
-not column-driven) is what makes a placement policy expressible in isolation,
-and is the prerequisite for the lookahead work below.
+A **line** is a `GraphColumn[]` — the exact shape Phase 2 consumes — so the
+existing invariant validators double as the per-stage validity check with no
+translation. An item's lines form **three sections**: zero-or-more `above`
+(virtual), exactly one `main` (real, carries the node), zero-or-more `below`
+(virtual). Render order is `above` top-to-bottom, then `main`, then `below`.
+Lines are **append-only**: a stage may append a new line to a section and mutate
+only the line it is currently extending; once it moves on, that line is frozen.
+(Today's styles emit ≤1 above and ≤1 below; the sections are *lists* so a future
+strategy can spread one wide fan over several rows.)
 
-**Candidate modes.**
+**The obligation ledger** is the explicit "what is left to do for this commit,"
+carried stage to stage so the driver knows when an item is done:
 
-- *Spread* — keep empty columns between occupied ones, with a restoring
-  "pressure" pulling lanes back toward the boundary. Static slack: a free
-  neighbour is usually nearby, so crossings are cheap to avoid locally. A local
-  policy; needs no lookahead.
-- *Lookahead crossing-minimization* — anticipate an incoming fan (e.g. an
-  octopus merge several rows below) and **make space early**, spreading the
-  horizontal travel over many rows (gentle diagonals) instead of one sharp cut
-  at the fan row. The current algorithm cannot do this: every decision sees only
-  the current `active` lanes and the current commit's parents — it is online,
-  greedy, single-pass.
+- `commit_placed` — the node sits on exactly one (the main) line.
+- `incoming` — the child edges terminating at C; each must be routed *into* C's
+  column.
+- `outgoing` — one lane per parent; each must fan *out* of C and enter the next
+  row's `active`.
+- `survivors` — each pass-through lane carried down and into the next `active`.
 
-  Lookahead still fits the seam **without** breaking single-pass control flow:
-  add a mode-independent **annotation pass** that runs once and precomputes
-  forward-looking hints (lane lifespans = the row each lane's parent lands on;
-  upcoming fan widths; near-term column demand), fed into `ctx.hints`. A greedy
-  policy ignores `hints`; a lookahead policy consumes them. So lookahead is
-  "what is in `ctx`", not new control structure.
+A **stage** is a guarded `state -> state` transform that discharges ledger
+entries (route an incoming lane, place the node, fan out a parent) and may append
+an above/below line when the current line cannot hold what it needs (e.g. a fan
+the style puts on its own line — that is the "insert a virtual line and continue"
+case). Lane id/colour minting, `parent_lanes`/`child_lanes` wiring, and DAG
+classification stay in the shell, shared by every stage set.
 
-Spread and lookahead are the same spectrum — spread is *static* slack, lookahead
-is *dynamic* anticipation — and may combine (spread + a small lookahead window).
+**The driver + loop guard.** The driver runs the stage list until the ledger is
+empty. To make an unhandleable item fail loudly rather than spin, it tracks
+progress: if a full pass over the stages discharges **no** obligation *and*
+appends **no** new line, the item cannot be completed, so the driver `error()`s
+with the commit hash. The algorithm therefore either finishes an item or fails
+explicitly — it never loops forever.
 
-**Hard constraints that bound the ambition.**
+**Completeness test.** A new per-OrderItem invariant (in `graph_helpers.lua`, and
+asserted inside the driver) checks that a finished item's ledger is empty *and*
+that the emitted lines realize it: the node appears exactly once, every incoming
+Lane is drawn with `up` into C's column, every outgoing with `down`, every
+survivor is continuous. This is stronger than the existing `check_commits` (which
+only asserts each commit appears once) and is what makes "stop when the ledger is
+empty" trustworthy.
 
-- *Streaming* — commits arrive incrementally from `jobstart`; you cannot look
-  past the stream frontier (those commits are not loaded). Lookahead must be
-  **bounded to a window** of already-known rows, not global.
-- *Reflow stability* — the planned interactive views (§10: collapse / pin /
-  toggle *with reflow*) rerun layout and must stay predictable: a small input
-  change must not reshuffle the whole graph. Global crossing-minimization
-  (iterative barycenter/median, Sugiyama-style) is both expensive and jumpy.
-  Prefer **bounded, local heuristics**.
-- *Determinism* — layout must be deterministic for stable rendering and testing
-  (no randomness).
+**Target stage set (reproducing today's output).** `classify` → `seed_bars` (a
+`│` for every active lane on a fresh main line) → `split_line?` (append an above
+line when a separate split is due; reduce incoming to the trunk) → `place_commit`
+(node at the leftmost incoming column, or the leftmost free / non-blocked column
+for a tip; the linear-commit left-slide) → `fan_out` (outgoing columns; append a
+below merge line when due) → `horizontals` (draw + validate the fan connectors:
+no two horizontals running together except at a split, no cell both-left-and-
+right) → `compact` (slide the linear commit + survivors into row-start gaps,
+suppressed on a fan line) → `finalize` (assemble, wire `parent_lanes`/
+`child_lanes`, advance `active`, set `blocked`). The column-placement stages
+(`place_commit`, `fan_out`, `compact`, and the occupancy/blocking model) are the
+*mode-specific* part; everything else is the shell.
 
-**Testing.** The invariant harness (`graph_helpers.lua`) tests *correctness*
-(wires connect, continuity). Crossing minimization is *quality*, so it needs a
-new kind of test: a **crossing counter** over the rendered grid, asserting a
-smart policy yields ≤ the greedy policy's count on the same DAGs (a comparative
-quality test) **while** the existing invariants still hold (a smart layout must
-still be a *valid* layout). The grid-building fuzz harness already exists, so the
-counter is a natural addition and doubles as a quality regression guard.
+**Output boundary (behaviour-preserving).** `finalize` maps `above[]` / `main` /
+`below[]` back to the existing `OrderItem` contract `row.split` / `row.columns` /
+`row.merge` (current styles produce ≤1 of each), so Phase 2, the panes,
+`display_item`, and every test stay byte-identical. Generalising the `OrderItem`
+to true `above[]` / `below[]` lists is a *later*, spec-gated change — only when a
+strategy actually emits more than one — and it touches `render.lua` /
+`display_item` and the panes.
 
-**Sequencing, when we do this.** (1) Extract the placement-policy seam with
-current behaviour as `compact`, proven behaviour-preserving by the fuzz suite.
-(2) Add `spread` — a local policy, no lookahead — as the second real consumer
-that validates the seam's shape. (3) Add the `annotate` pass + a bounded
-lookahead policy last, against a seam already proven by a real second consumer.
-Steps 1–2 are behaviour-preserving refactors (within spec); step 3 introduces
-new layout behaviour and needs a specification.md §5 amendment first.
+**How it is built (strangler, not rewrite).** The only way to keep the fuzz suite
+and rendering byte-identical is to peel, not rewrite:
+
+1. Stand up the driver, `LayoutState`, ledger, loop guard, and completeness check
+   with the **entire** current per-item body wrapped as a single `legacy_place`
+   stage — green by construction.
+2. Peel one stage at a time off `legacy_place` (in the order above), running
+   `make test` + `make lint` after each. A peel that changes any rendered grid is
+   wrong and is reverted in isolation.
+
+The panes and `pack_markers` consume `columns.layout`'s output (including the
+`seed` / `first_row` seam semantics, kept in the shell), so they are unaffected as
+long as its output is preserved.
+
+**Future stage sets (not yet built).** With the pipeline in place, alternative
+layouts become new stage sets, not new algorithms:
+
+- *Spread* — a placement stage that keeps empty columns between occupied lanes
+  with a restoring "pressure" toward the boundary. Local; no lookahead.
+- *Lookahead crossing-minimization* — anticipate an incoming fan (an octopus
+  merge several rows below) and make space early, spreading horizontal travel
+  over gentle diagonals instead of one sharp cut at the fan row. This needs a
+  mode-independent **annotation pass**, run once, precomputing forward hints (lane
+  lifespans = the row each lane's parent lands on; upcoming fan widths; near-term
+  column demand) into the state; a greedy stage set ignores them, a lookahead one
+  consumes them.
+
+The hard constraints still bound the ambition: **streaming** (you cannot look
+past the stream frontier — lookahead is windowed, not global), **reflow
+stability** (a small input change must not reshuffle the whole graph — prefer
+bounded local heuristics over global barycenter/Sugiyama-style minimization), and
+**determinism** (no randomness). Quality — crossing count — needs its own test
+beyond the correctness invariants: a **crossing counter** over the rendered grid
+asserting a smart stage set yields ≤ the greedy set's crossings on the same DAGs
+while the invariants still hold. Introducing genuinely new layout *behaviour*
+(spread/lookahead) needs a specification.md §5 amendment first; the decomposition
+itself is a behaviour-preserving refactor within the current spec.
 
 ### Rendering to glyphs — Phase 2
 

@@ -19,6 +19,14 @@
 --- child_lanes }, each track { connectivity, lanes (Segment[]), has_commit,
 --- commit, id, color, begin, parent }. `id` is the lane's stable identity;
 --- `color` is its palette slot, allocated from a recycling free list (below).
+---
+--- **Staged driver (in progress).** `M.layout` runs each item through a list of
+--- `stage(state) -> state` steps until an obligation ledger (commit placed; every
+--- incoming, outgoing, and survivor lane handled) is empty; a pass that makes no
+--- progress errors (the loop guard), and a structural oracle then verifies the
+--- emitted lines realise the ledger. Today the list is one `legacy_place` stage
+--- carrying the whole algorithm; it is peeled apart over time. See ARCHITECTURE.md
+--- ("Layout as a staged pipeline").
 local M = {}
 
 ---@param t table
@@ -214,11 +222,10 @@ function M.layout(opts, items, seed)
         return columns
     end
 
-    for _, item in ipairs(items) do
-        local C = item.commit
-
-        -- Classify the active (incoming-from-above) lanes: those terminating at C
-        -- (its child edges) versus those passing through (survivors).
+    -- CLASSIFY (shell stage): read the active lanes into incoming/survivors and
+    -- seed this item's obligation ledger. A pure read of `active`.
+    local function classify(state)
+        local C = state.commit
         local incoming, survivors = {}, {}
         for j, lane in pairs(active) do
             if lane.parent == C then
@@ -229,6 +236,23 @@ function M.layout(opts, items, seed)
         end
         table.sort(incoming, function(a, b) return a.col < b.col end)
         table.sort(survivors, function(a, b) return a.col < b.col end)
+        state.incoming, state.survivors = incoming, survivors
+        local led = { commit_placed = false, incoming = {}, survivors = {}, outgoing = {} }
+        local iset, sset = {}, {}
+        for _, e in ipairs(incoming) do led.incoming[e.lane] = true; iset[e.lane] = true end
+        for _, e in ipairs(survivors) do led.survivors[e.lane] = true; sset[e.lane] = true end
+        for i = 1, #(C.parents or {}) do led.outgoing[i] = true end
+        state.ledger, state.incoming_lanes, state.survivor_lanes = led, iset, sset
+    end
+
+    -- LEGACY_PLACE (stage): the entire current per-item placement + emission,
+    -- wrapped as a single stage. It is peeled apart incrementally into the
+    -- smaller stages described in ARCHITECTURE.md ("Layout as a staged
+    -- pipeline"); until then it discharges the whole ledger in one pass.
+    local function legacy_place(state)
+        local item = state.item
+        local C = state.commit
+        local incoming, survivors = state.incoming, state.survivors
 
         -- Outgoing lanes: one per parent. The first parent continues the commit's
         -- column, so it *reuses the track id* of the lane flowing in there (the
@@ -466,7 +490,135 @@ function M.layout(opts, items, seed)
         if #outgoing == 0 then blocked[cc] = true end
 
         first_row = false
-        rows[#rows + 1] = row
+
+        -- Record the emitted sections and the born outgoing lanes, then mark
+        -- every obligation discharged: this single stage handled the whole item.
+        state.main = row.columns
+        state.above = row.split and { row.split } or {}
+        state.below = row.merge and { row.merge } or {}
+        state.row = row
+        state.outgoing_lanes = {}
+        for _, o in ipairs(outgoing) do
+            state.outgoing_lanes[#state.outgoing_lanes + 1] = o.lane
+        end
+        state.ledger.commit_placed = true
+        state.ledger.incoming, state.ledger.survivors, state.ledger.outgoing = {}, {}, {}
+    end
+
+    -- The stage list. Today a single stage; peeled apart over time.
+    local stages = { legacy_place }
+
+    local function active_contains(lane)
+        for _, l in pairs(active) do
+            if l == lane then return true end
+        end
+        return false
+    end
+
+    local function open_count(led)
+        local n = led.commit_placed and 0 or 1
+        for _ in pairs(led.incoming) do n = n + 1 end
+        for _ in pairs(led.survivors) do n = n + 1 end
+        for _ in pairs(led.outgoing) do n = n + 1 end
+        return n
+    end
+
+    local function line_count(state)
+        return #state.above + (state.main and 1 or 0) + #state.below
+    end
+
+    -- Structural oracle (spec: "check that everything has been handled"): the
+    -- emitted lines actually realise every obligation. Independent of the ledger
+    -- flags the stages flip — it reads the output, like the test invariants — and
+    -- errors on any violation.
+    local function complete_check(state)
+        local C = state.commit
+        local hash = tostring(C.hash)
+        local sections = {}
+        for _, l in ipairs(state.above) do sections[#sections + 1] = l end
+        if state.main then sections[#sections + 1] = state.main end
+        for _, l in ipairs(state.below) do sections[#sections + 1] = l end
+
+        local nodes, on_main, drawn = 0, false, {}
+        for _, line in ipairs(sections) do
+            for _, col in ipairs(line) do
+                if col.has_commit then
+                    nodes = nodes + 1
+                    if col.commit ~= C then
+                        error(("gitloom layout: commit %s node carries the wrong commit"):format(hash))
+                    end
+                    if line == state.main then on_main = true end
+                end
+                for _, seg in ipairs(col.lanes or {}) do
+                    for _, e in ipairs(seg.edges or {}) do drawn[e] = true end
+                end
+            end
+        end
+        if nodes ~= 1 then
+            error(("gitloom layout: commit %s placed %d times, expected 1"):format(hash, nodes))
+        end
+        if not on_main then
+            error(("gitloom layout: commit %s node is not on the main line"):format(hash))
+        end
+        for lane in pairs(state.incoming_lanes) do
+            if not drawn[lane] then
+                error(("gitloom layout: commit %s has an undrawn incoming edge"):format(hash))
+            end
+            if active_contains(lane) then
+                error(("gitloom layout: commit %s left an incoming edge unterminated"):format(hash))
+            end
+        end
+        for lane in pairs(state.survivor_lanes) do
+            if not drawn[lane] then
+                error(("gitloom layout: commit %s has an undrawn survivor"):format(hash))
+            end
+            if not active_contains(lane) then
+                error(("gitloom layout: commit %s dropped a survivor"):format(hash))
+            end
+        end
+        for _, lane in ipairs(state.outgoing_lanes) do
+            if not drawn[lane] then
+                error(("gitloom layout: commit %s has an undrawn outgoing edge"):format(hash))
+            end
+            if not active_contains(lane) then
+                error(("gitloom layout: commit %s did not carry an outgoing edge forward"):format(hash))
+            end
+        end
+        if #state.outgoing_lanes ~= #(C.parents or {}) then
+            error(("gitloom layout: commit %s emitted %d outgoing edges, expected %d")
+                :format(hash, #state.outgoing_lanes, #(C.parents or {})))
+        end
+    end
+
+    -- Driver: run the stage list until the ledger is empty. Loop guard — a full
+    -- pass that discharges no obligation AND appends no line means the item cannot
+    -- be completed, so error rather than spin. Then the oracle verifies the
+    -- emitted lines realise the obligations.
+    local function run_item(item)
+        local state = { item = item, commit = item.commit, above = {}, below = {} }
+        classify(state)
+        local hash = tostring(state.commit.hash)
+        local budget = #state.incoming + #state.survivors
+            + #(state.commit.parents or {}) + 8
+        local passes = 0
+        while open_count(state.ledger) > 0 do
+            local before_open = open_count(state.ledger)
+            local before_lines = line_count(state)
+            for _, stage in ipairs(stages) do stage(state) end
+            passes = passes + 1
+            if open_count(state.ledger) >= before_open and line_count(state) == before_lines then
+                error(("gitloom layout: commit %s could not be fully handled"):format(hash))
+            end
+            if passes > budget then
+                error(("gitloom layout: commit %s exceeded the layout pass budget"):format(hash))
+            end
+        end
+        complete_check(state)
+        rows[#rows + 1] = state.row
+    end
+
+    for _, item in ipairs(items) do
+        run_item(item)
     end
 
     return rows
