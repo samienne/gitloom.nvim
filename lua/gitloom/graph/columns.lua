@@ -267,6 +267,24 @@ function M.layout(opts, items, seed)
         state.outgoing = outgoing
     end
 
+    -- DECIDE_STYLE (shell step): the merge-style flags for this item. A node-less
+    -- junction with a *single* fan collapses inline (no separate line); with both
+    -- a fork and a merge it follows merge_style like a normal commit (§10.4/§5.1).
+    -- sep_split/sep_merge put a fan on its own line; fan_line = the commit line
+    -- itself carries a fan (which suppresses compaction). Pure function of
+    -- #incoming/#outgoing/opts/C.junction.
+    local function decide_style(state)
+        local C = state.commit
+        local ni, no = #state.incoming, #state.outgoing
+        local inline_junction = C.junction and (opts.junction_markers ~= false)
+            and not (ni > 1 and no > 1)
+        local sep_split = opts.merge_style.split_on_separate_line and ni > 1 and not inline_junction
+        local sep_merge = opts.merge_style.merge_on_separate_line and no > 1 and not inline_junction
+        local fan_line = (ni > 1 and not sep_split) or (no > 1 and not sep_merge)
+        state.inline_junction, state.sep_split, state.sep_merge, state.fan_line =
+            inline_junction, sep_split, sep_merge, fan_line
+    end
+
     -- LEGACY_PLACE (stage): the entire current per-item placement + emission,
     -- wrapped as a single stage. It is peeled apart incrementally into the
     -- smaller stages described in ARCHITECTURE.md ("Layout as a staged
@@ -296,28 +314,10 @@ function M.layout(opts, items, seed)
         for _, o in ipairs(outgoing) do row.parent_lanes[#row.parent_lanes + 1] = o.lane end
         for _, inc in ipairs(incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
 
-        -- A node-less junction (spec §10.4) carries no message, so a *single* fan
-        -- needs no separate line — render it inline so the join is one row, not a
-        -- fan line plus an empty lane row. The exception is a junction that is
-        -- **both** a fork (≥2 children) and a merge (≥2 parents): collapsing both
-        -- funnels onto one Line would lay two independent fans across it, which
-        -- §5.1 forbids (two separated lanes share a horizontal only at a *single*
-        -- fan). So it follows `merge_style` like a normal commit — its fan-in goes
-        -- to a split Line above — keeping the two funnels on separate Lines.
-        local inline_junction = C.junction and (opts.junction_markers ~= false)
-            and not (#incoming > 1 and #outgoing > 1)
-        local sep_split = opts.merge_style.split_on_separate_line and #incoming > 1 and not inline_junction
-        local sep_merge = opts.merge_style.merge_on_separate_line and #outgoing > 1 and not inline_junction
-
-        -- Does the commit Line itself carry a fan? An *inline* split (≥2 children
-        -- converging) or merge (≥2 parents diverging) shares the commit Line with
-        -- the survivors. On such a Line a pass-through lane must cross the fan
-        -- **vertically** — never compact horizontally along it — since two
-        -- separated lanes may share a horizontal only at a fan they belong to. So
-        -- all compaction (the linear-commit slide and the survivor shift) is
-        -- suppressed on a fan Line; only the fan's own lanes draw the horizontal.
-        local fan_line = (#incoming > 1 and not sep_split)
-            or (#outgoing > 1 and not sep_merge)
+        -- Merge-style flags (computed by the decide_style shell step). fan_line
+        -- suppresses compaction: a pass-through lane crosses an inline fan
+        -- vertically, and only the fan's own lanes draw the horizontal.
+        local sep_split, sep_merge, fan_line = state.sep_split, state.sep_merge, state.fan_line
 
         -- SPLIT LINE (above): the non-trunk children converge into the commit
         -- column and terminate; the leftmost child (the trunk) continues straight
@@ -600,6 +600,7 @@ function M.layout(opts, items, seed)
         local state = { item = item, commit = item.commit, above = {}, below = {} }
         classify(state)
         spawn_lanes(state)
+        decide_style(state)
         local hash = tostring(state.commit.hash)
         local budget = #state.incoming + #state.survivors
             + #(state.commit.parents or {}) + 8
