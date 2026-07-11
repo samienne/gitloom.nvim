@@ -245,20 +245,15 @@ function M.layout(opts, items, seed)
         state.ledger, state.incoming_lanes, state.survivor_lanes = led, iset, sset
     end
 
-    -- LEGACY_PLACE (stage): the entire current per-item placement + emission,
-    -- wrapped as a single stage. It is peeled apart incrementally into the
-    -- smaller stages described in ARCHITECTURE.md ("Layout as a staged
-    -- pipeline"); until then it discharges the whole ledger in one pass.
-    local function legacy_place(state)
-        local item = state.item
+    -- SPAWN_LANES (shell step): mint one outgoing Lane per parent — the first
+    -- parent reuses the trunk child's id + colour (a straight chain keeps one
+    -- colour), every other lane is born with a fresh id + free-list slot — then
+    -- return the ended incoming children's colours. Pure lane lifecycle, driven
+    -- by the DAG, never by placement; must run before any later colour alloc so
+    -- a slot freed here cannot be reused by a lane born on the same line.
+    local function spawn_lanes(state)
         local C = state.commit
-        local incoming, survivors = state.incoming, state.survivors
-
-        -- Outgoing lanes: one per parent. The first parent continues the commit's
-        -- column, so it *reuses the track id* of the lane flowing in there (the
-        -- trunk child) — a straight chain keeps one colour. A new id is minted only
-        -- where a lane is genuinely born: a branch head (a tip's first parent) and
-        -- every extra parent of a merge.
+        local incoming = state.incoming
         local trunk_id = incoming[1] and incoming[1].lane.id
         local trunk_color = incoming[1] and incoming[1].lane.color
         local outgoing = {}
@@ -267,13 +262,20 @@ function M.layout(opts, items, seed)
             local color = (i == 1 and trunk_color) or alloc_color()
             outgoing[#outgoing + 1] = { lane = { id = id, color = color, begin = C, parent = p, highlighted = false } }
         end
-
-        -- Return ended lanes' colours *after* allocating the outgoing ones above,
-        -- so a slot freed here cannot be reused by a lane born on the same line.
-        -- Every non-trunk incoming child terminates at C; the trunk terminates
-        -- too only when C has no parents (no first-parent lane continues it).
         for i = 2, #incoming do free_color(incoming[i].lane.color) end
         if #incoming > 0 and #outgoing == 0 then free_color(incoming[1].lane.color) end
+        state.outgoing = outgoing
+    end
+
+    -- LEGACY_PLACE (stage): the entire current per-item placement + emission,
+    -- wrapped as a single stage. It is peeled apart incrementally into the
+    -- smaller stages described in ARCHITECTURE.md ("Layout as a staged
+    -- pipeline"); until then it discharges the whole ledger in one pass.
+    local function legacy_place(state)
+        local item = state.item
+        local C = state.commit
+        local incoming, survivors = state.incoming, state.survivors
+        local outgoing = state.outgoing
 
         -- The commit sits where its leftmost child arrives, or the leftmost free
         -- column for a tip.
@@ -597,6 +599,7 @@ function M.layout(opts, items, seed)
     local function run_item(item)
         local state = { item = item, commit = item.commit, above = {}, below = {} }
         classify(state)
+        spawn_lanes(state)
         local hash = tostring(state.commit.hash)
         local budget = #state.incoming + #state.survivors
             + #(state.commit.parents or {}) + 8
