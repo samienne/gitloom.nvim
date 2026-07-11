@@ -291,13 +291,17 @@ Coverage:
   a large real-world topology (every cutoff, 0 problems) during verification, the
   header `cap`
   (`keep_first`: keep the tip + seam-nearest rows, report the elided `+N above`
-  count), the pure **whole-commit seam** functions `header_seam` (walk down, top edge,
-  display-index space) and its mirror `footer_seam(sm, bs, cover)` which works in
-  **screen-row space** on the `screen_lines` model — walk up from the bottom visible
-  **screen row** `bs` to the first block boundary leaving ≥ cover rows below; seam =
-  that item's **merge** fan else columns; covers whole commit blocks so a virtual
-  split/merge line is never split across the seam (the fix for the footer-seam
-  virtual-line drift), plus `screen_lines` (flatten display → real columns + virtual
+  count), the pure **whole-commit seam** functions — both in **screen-row space** on the
+  `screen_lines` model, exact mirrors: `header_seam(sm, ts, cover)` walks **down** from the
+  top visible **screen row** `ts` to the first block **start** leaving ≥ cover rows above
+  (seam = that item's **split** fan else columns; the header butts its top edge), and
+  `footer_seam(sm, bs, cover)` walks **up** from the bottom visible **screen row** `bs` to
+  the first block boundary leaving ≥ cover rows below (seam = that item's **merge** fan else
+  columns). Both cover whole commit blocks so a virtual split/merge line is never split
+  across the seam (the fix for the seam virtual-line drift — the header once used a
+  display-index walk that assumed the top item's columns was the window top and drifted by
+  a partial split fan above it), plus `header_ts`/`footer_bs` (the cursor-anchored
+  top/bottom screen row) and `screen_lines` (flatten display → real columns + virtual
   split/merge rows, with display-index↔screen-row translation),
   `condense` (the topological condensed graph, both down and `up` modes:
   fork/merge junctions, roots/tips and anchor-ref heads kept, linear pass-throughs
@@ -336,14 +340,25 @@ Coverage:
   same `(line, virt)` nvim renders at the window bottom — cross-checked independently via
   `line('w$')`+`screenpos` (non-tautological), incl. split-at-bottom AND merge-at-bottom;
   (3) it **catches the bug** — the old `w0`+`win_screenpos` formula is wrong in real cases
-  (`prod_wrong > 0`) while the cursor-anchored one is always right. Documents the nvim facts:
+  (`prod_wrong > 0`) while the cursor-anchored one is always right. The **header mirror**:
+  the cursor-anchored `header_ts(sm, cursor, winline())` names the same `(line, virt)` nvim
+  renders at the window **top** — cross-checked via `line('w0')`+`screenpos`, incl.
+  split-**above**-columns AND merge-above tops — and catches the header bug (the old
+  `ts = cols[w0]` assumption is wrong where the cursor-anchored one is right, `prod_wrong > 0`).
+  Documents the nvim facts:
   `winline`/height are window-relative (border-robust), `win_screenpos` is the frame top,
-  `line('w$')` is the last visible-**columns** line (a split at the bottom belongs to `w$+1`)
+  `line('w$')`/`line('w0')` are the last/first visible-**columns** line (a split at the top
+  belongs to `w0`'s own fan above its columns)
 - `tests/footer_window_spec.lua` (+ `tests/large_topo.lua`) — the **count-based** screen model
   (§6.2): `pane.screen_lines` is exercised for the default single split/merge AND for
   **MULTIPLE** virtual rows above/below + dual-mode 2-row columns (count-based, signed `virt`
   offsets, not a boolean). Plus the sliding-window `footer_bs` bottom-derivation over the
   full-projection gitloom topology (pure synthetic frame) and a seam-visibility pipeline check
+- `tests/header_window_spec.lua` (+ `tests/large_topo.lua`) — the **header** counterpart of
+  the footer window sweep: the same full-projection gitloom topology, sliding the window
+  **top** down every screen row (columns AND split-above-columns), asserting `header_ts`
+  returns the true top (naive `cols[w0]` wrong where a split sits above, `naive_wrong > 0`)
+  and the `header_seam` it implies rounds to a whole commit block that is fully visible
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
@@ -652,18 +667,21 @@ Details not covered by the spec or architecture:
   possible (`pack_heads`/`overlay_rows` — pinned anchors and junctions keep their own
   line); `cap`; §6.2). **Both panes are wired** via
   graph.lua `update_panes` (gated by `opts.panes`, toggled by `F`): borderless
-  overlays (footer at the bottom, header at the top). Each seam is computed by a
-  **pure, virtual-line-aware** seam function that rounds to **whole commit blocks** so
-  a commit is never split across the seam — `pane.header_seam(items, top, cover, ..)`
-  (display-index space, walks down from `line('w0')`, reads the seam item's **top** edge
-  — its split fan when present) and its mirror `pane.footer_seam(sm, bs, cover)` which
-  works in **screen-row space**: the footer builds `pane.screen_lines(display)` (the flat
-  real-columns + virtual split/merge screen sequence), derives `bs` = the bottom visible
-  **screen row** from `line('w0')` + window height (NOT `line('w$')`, a real line that
-  can't address a partial split at the window bottom), and walks up to the first block
-  boundary — reading the seam item's **bottom** edge (its merge fan when present). No
-  `screenpos`. This screen-row model is the fix for the footer virtual-line drift (a
-  split at the window bottom pushed the overlay a row too low). The footer
+  overlays (footer at the bottom, header at the top). Both seams are computed by
+  **pure, virtual-line-aware** seam functions that round to **whole commit blocks** so
+  a commit is never split across the seam — exact mirrors, both in **screen-row space** on
+  the shared `pane.screen_lines(display)` model (the flat real-columns + virtual split/merge
+  screen sequence). The footer derives `bs` = the bottom visible **screen row** (cursor-
+  anchored via `pane.footer_bs`), then `pane.footer_seam(sm, bs, cover)` walks up to the
+  first block boundary, reading the seam item's **bottom** edge (its merge fan when present).
+  The header derives `ts` = the top visible **screen row** (cursor-anchored via
+  `pane.header_ts` = `cols[cursor] − (winline() − 1)`), then `pane.header_seam(sm, ts, cover)`
+  walks **down** to the first block **start**, reading the seam item's **top** edge (its
+  split fan when present). No `screenpos`; both need only window-relative measures (`winline`
+  + window height). This screen-row model is the fix for the pane virtual-line drift — a
+  split at the window **bottom** once pushed the footer a row too low, and a split at the
+  window **top** (which `line('w0')`, a real line, can't address) once drifted the header's
+  seam off the main view's first visible line. The footer
   continues the seam lanes down to the roots (pinned refs below the cutoff
   included); the header rebuilds the focused up-sub-DAG (`dnode`/`order_of` resolve
   the projected nodes; `lane_main[hash]` from each item's `parent_lanes[1]` gives

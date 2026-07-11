@@ -210,14 +210,26 @@ that behaviour if the panes' scrolling misbehaves.
 *not* a reduction of the whole off-screen graph): only how the pinned anchors relate
 to each other and to the lanes crossing the cutoff:
 
-1. **Seam.** `pane.header_seam(items, top, cover, height_of)` (pure, no `screenpos`)
-   rounds the cutoff to **whole commit blocks** and returns the seam item + its display
-   index; `pane.boundary_of(line, up=true)` then reads the **up-lanes** of that line.
-   **Virtual lines matter:** when the seam item is a fork its children diverge on its
-   **split** (virtual) line, so the boundary is read from `item.split` (the divergence),
-   not the single mainline lane on the columns line — otherwise a fork sitting right
-   below the viewport hides every branch that forks from it. (The footer is the exact
-   mirror: `pane.footer_seam` + the seam item's **merge** fan; see the footer pipeline.)
+1. **Seam.** Computed in **screen-row space** on the same `screen_lines` model as the
+   footer — the exact upward mirror. The live glue derives `ts`, the **top visible screen
+   row (a model row)**, by anchoring on the **CURSOR** via **`pane.header_ts(sm,
+   cursor_disp, winline())`** = `cols[cursor] − (winline() − 1)` (both window-relative, so
+   border/winbar-robust — the mirror of `footer_bs`). This is the fix for the header's
+   virtual-line drift: `line('w0')` is a REAL line that can't address a **split** fan
+   rendered *above* an off-screen columns line, so the earlier display-index walk assumed
+   the top item's columns line was the window top and the seam drifted by those partial
+   split rows. **`pane.header_seam(sm, ts, cover)`** (pure, no `screenpos`) then walks down
+   from `ts` to the first **block start** (the first screen row of a commit's block)
+   leaving ≥ `cover` rows above it, so the overlay covers **whole commit blocks** and its
+   bottom butts the seam item's top line exactly; `pane.boundary_of(line, up=true)` reads
+   the **up-lanes** of that line. **Virtual lines matter:** when the seam item is a fork its
+   children diverge on its **split** (virtual) line, so the boundary is read from
+   `item.split` (`kind = "split"`) — not the single mainline lane on the columns line —
+   otherwise a fork sitting right below the viewport hides every branch that forks from it.
+   Verified against nvim's actual rendering in `tests/screen_window_spec` and swept over
+   every window top position in `tests/header_window_spec`. (The footer is the exact
+   mirror: `pane.footer_bs`/`pane.footer_seam` + the seam item's **merge** fan; see the
+   footer pipeline.)
 2. **Rebuild the focused sub-DAG** — `pane.continue_up(boundary, tips, anchors,
    order_of, seam, yield, lane_of)` runs a **tracked-lane induce** over the **display**
    DAG (the projected nodes, so `order_of` is always defined), up-only, bounded above the

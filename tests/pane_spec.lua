@@ -1276,9 +1276,12 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
     end)
 end)
 
-describe("pane.header_seam — whole-commit cutoff (§6.2)", function()
-    -- Items as the display layer sees them: each may carry a `split` (above) and/or
-    -- `merge` (below) virtual line. The top item's split is scrolled off.
+describe("pane.header_seam — whole-commit cutoff in SCREEN rows (§6.2)", function()
+    -- header_seam works on the `screen_lines` model (real columns lines + virtual
+    -- split/merge rows) and a top visible SCREEN row `ts` — the upward mirror of
+    -- footer_seam. The overlay covers whole commit blocks DOWN from `ts`; the seam is
+    -- the first block START leaving ≥ cover rows above it. `ts` is a screen row, so a
+    -- split fan at the window top is addressed directly (the header virtual-line bug).
     local function items(specs)
         local out = {}
         for i, s in ipairs(specs) do
@@ -1286,48 +1289,66 @@ describe("pane.header_seam — whole-commit cutoff (§6.2)", function()
         end
         return out
     end
+    local function sm(specs, rows_of) return pane.screen_lines(items(specs), rows_of) end
 
     it("rounds to a commit boundary with no virtual lines", function()
-        local it = items({ {}, {}, {}, {}, {} })
-        local s = assert(pane.header_seam(it, 1, 3))
-        assert.equals(4, s.idx)       -- covered 1,2,3 (3 rows); seam at 4
+        -- 5 columns-only items → screen rows 1..5. ts=1, cover=3 covers rows 1,2,3.
+        local s = assert(pane.header_seam(sm({ {}, {}, {}, {}, {} }), 1, 3))
+        assert.equals(4, s.idx)       -- covered 1,2,3 (3 rows); seam item 4 (screen row 4)
         assert.equals("columns", s.kind)
         assert.equals(3, s.cover)
+        assert.equals(4, s.seam_top)
     end)
 
-    it("covers a commit's trailing MERGE line with it (the off-by-one regression)", function()
-        -- commit 3 has a merge line (block height 2). A naive screen-row cutoff at 3
-        -- rows would land ON commit 3's merge line, leaving its commit covered but its
-        -- merge dangling. The seam must instead cover commit 3 whole → seam at 4.
-        local it = items({ {}, {}, { merge = {} }, {}, {} })
-        local s = assert(pane.header_seam(it, 1, 3))
-        assert.equals(4, s.idx)   -- 1,2 (2 rows) then 3+merge (2 rows) = 4 ≥ 3 ⇒ seam at 4
-        assert.equals(4, s.cover) -- the overlay grows by the merge line (the +1 padding)
-    end)
-
-    it("reads the SPLIT line when the seam commit forks (its children are off-screen)", function()
-        local it = items({ {}, {}, {}, { split = {} }, {} })
-        local s = assert(pane.header_seam(it, 1, 3))
+    it("covers a covered commit's trailing MERGE line with it (the off-by-one regression)", function()
+        -- item 3 has a merge (block = screen rows 3,4). Screen: 1,2,[3,4],5,6. ts=1,
+        -- cover=3: the overlay can't split item 3's block, so it grows to cover rows 1..4
+        -- (items 1,2 whole + item 3 whole) → seam at item 4 (screen row 5), cover 4.
+        local s = assert(pane.header_seam(sm({ {}, {}, { merge = {} }, {}, {} }), 1, 3))
         assert.equals(4, s.idx)
-        assert.equals("split", s.kind) -- commit 4's split (its diverging children) is the seam
+        assert.equals(4, s.cover)     -- the overlay grows by item 3's merge line (the +1 padding)
+        assert.equals(5, s.seam_top)
     end)
 
-    it("ignores the top item's split (scrolled off above the viewport)", function()
-        local it = items({ { split = {} }, {}, {} })
-        local s = assert(pane.header_seam(it, 1, 1))
-        assert.equals(2, s.idx) -- top's split does not count; one row (top's columns) covered
+    it("reads the seam commit's own SPLIT line as its top edge", function()
+        -- item 4 has a split (block = screen rows 4,5). Screen: 1,2,3,[split=4,cols=5],6.
+        -- ts=1, cover=3 covers rows 1,2,3; the seam is item 4 whose TOP rendered row is
+        -- its split fan (screen 4) → kind=split.
+        local s = assert(pane.header_seam(sm({ {}, {}, {}, { split = {} }, {} }), 1, 3))
+        assert.equals(4, s.idx)
+        assert.equals("split", s.kind) -- item 4's split (its diverging children) is the seam
+        assert.equals(4, s.seam_top)
+    end)
+
+    it("a window top on a VIRTUAL SPLIT line seams past that commit (the bug)", function()
+        -- item 2 has a split. Screen: 1,[split=2,cols=3],4,5. If the window top lands on
+        -- item 2's SPLIT (screen row 2, its columns just below), that split is part of the
+        -- covered region — the seam must round the whole item 2 block into the header.
+        local s = assert(pane.header_seam(sm({ {}, { split = {} }, {}, {} }), 2, 1))
+        assert.equals(3, s.idx)        -- item 2 (split+cols) covered whole; seam at item 3
+        assert.equals("columns", s.kind)
+        assert.equals(2, s.cover)      -- rows 2 (split) and 3 (cols) covered
+        assert.equals(4, s.seam_top)
+    end)
+
+    it("ignores a split scrolled off above the viewport (ts on the columns line)", function()
+        -- item 1 has a split but it is scrolled off; ts is item 1's columns row (screen 2).
+        local s = assert(pane.header_seam(sm({ { split = {} }, {}, {} }), 2, 1))
+        assert.equals(2, s.idx) -- top's split does not count; one row (item 1's columns) covered
+        assert.equals(1, s.cover)
     end)
 
     it("honours a per-commit height (dual label mode = 2 rows)", function()
-        local it = items({ {}, {}, {}, {} })
-        local s = assert(pane.header_seam(it, 1, 3, function() return 2 end))
-        assert.equals(3, s.idx) -- 1,2 cover 4 rows ≥ 3 ⇒ seam at 3
+        -- height 2 each → screen rows: c1[1,2] c2[3,4] c3[5,6] c4[7,8]. ts=1, cover=3
+        -- covers rows 1,2,3 but item 2's block is 3,4 → grows to 1..4 → seam item 3.
+        local s = assert(pane.header_seam(sm({ {}, {}, {}, {} }, function() return { height = 2 } end), 1, 3))
+        assert.equals(3, s.idx)
         assert.equals(4, s.cover)
+        assert.equals(5, s.seam_top)
     end)
 
     it("returns nil past the last commit", function()
-        local it = items({ {}, {} })
-        assert.is_nil(pane.header_seam(it, 1, 99))
+        assert.is_nil(pane.header_seam(sm({ {}, {} }), 1, 99))
     end)
 end)
 
