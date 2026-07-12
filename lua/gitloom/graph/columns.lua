@@ -20,16 +20,16 @@
 --- commit, id, color, begin, parent }. `id` is the lane's stable identity;
 --- `color` is its palette slot, allocated from a recycling free list (below).
 ---
---- **Staged driver (in progress).** `M.layout` runs each item through a list of
---- `stage(state) -> state` steps until an obligation ledger (commit placed; every
---- incoming, outgoing, and survivor lane handled) is empty; a pass that makes no
---- progress errors (the loop guard), and a structural oracle then verifies the
---- emitted lines realise the ledger. Shell steps (classify / spawn_lanes /
---- decide_style) run before the loop; the stage list writes segments into a live
---- column grid on `state.g` — seed_bars -> place_commit -> fan_in -> compact ->
---- fan_out -> finalize — reading occupancy back from the grid between stages.
---- Reordering / swapping these is the layout-strategy seam. See ARCHITECTURE.md
---- ("Layout as a staged pipeline").
+--- **Staged layout.** `M.layout` lays out each item with shell setup steps
+--- (classify / spawn_lanes / decide_style) then a **layout strategy** — a plain
+--- function that chains the grid stages in order, each called once: seed_bars ->
+--- place_commit -> fan_in -> compact -> fan_out -> finalize. Each writes segments
+--- into a live column grid on `state.g` and reads occupancy back between stages. A
+--- structural oracle (`complete_check`) then verifies the emitted lines (node once;
+--- every incoming/survivor/outgoing lane drawn and carried correctly). A different
+--- strategy is a different chain (reorder / swap / add stages) — the layout-strategy
+--- seam; there is no generic runner. See ARCHITECTURE.md ("Layout as a staged
+--- pipeline").
 local M = {}
 
 ---@param t table
@@ -225,8 +225,10 @@ function M.layout(opts, items, seed)
         return columns
     end
 
-    -- CLASSIFY (shell stage): read the active lanes into incoming/survivors and
-    -- seed this item's obligation ledger. A pure read of `active`.
+    -- CLASSIFY (shell step): read the active lanes into incoming (terminating at C)
+    -- and survivors (passing through). A pure read of `active`. `incoming_lanes` /
+    -- `survivor_lanes` are the immutable sets the completeness oracle verifies
+    -- against (each incoming must terminate, each survivor must carry forward).
     local function classify(state)
         local C = state.commit
         local incoming, survivors = {}, {}
@@ -240,12 +242,10 @@ function M.layout(opts, items, seed)
         table.sort(incoming, function(a, b) return a.col < b.col end)
         table.sort(survivors, function(a, b) return a.col < b.col end)
         state.incoming, state.survivors = incoming, survivors
-        local led = { commit_placed = false, incoming = {}, survivors = {}, outgoing = {} }
         local iset, sset = {}, {}
-        for _, e in ipairs(incoming) do led.incoming[e.lane] = true; iset[e.lane] = true end
-        for _, e in ipairs(survivors) do led.survivors[e.lane] = true; sset[e.lane] = true end
-        for i = 1, #(C.parents or {}) do led.outgoing[i] = true end
-        state.ledger, state.incoming_lanes, state.survivor_lanes = led, iset, sset
+        for _, e in ipairs(incoming) do iset[e.lane] = true end
+        for _, e in ipairs(survivors) do sset[e.lane] = true end
+        state.incoming_lanes, state.survivor_lanes = iset, sset
     end
 
     -- SPAWN_LANES (shell step): mint one outgoing Lane per parent — the first
@@ -302,7 +302,6 @@ function M.layout(opts, items, seed)
     -- SEED_BARS (stage): open the main line; every survivor enters from above as a
     -- straight vertical bar.
     local function seed_bars(state)
-        if state.g then return end
         local cells, draw = new_line()
         local g = { cells = cells, draw = draw, occ0 = {}, used = {} }
         for _, s in ipairs(state.survivors) do
@@ -317,7 +316,6 @@ function M.layout(opts, items, seed)
     -- split line reduce the fan-in to the trunk (the children's columns stay free
     -- gaps); then slide a linear commit left through the free run.
     local function place_commit(state)
-        if state.cc0 then return end
         local g, incoming = state.g, state.incoming
         local cc0
         if #incoming > 0 then
@@ -350,7 +348,6 @@ function M.layout(opts, items, seed)
     -- bus) — and the node's first parent continues straight down. Written before the
     -- survivors compact so they see the reserved commit jog.
     local function fan_in(state)
-        if state.fanned_in then return end
         local g = state.g
         local incoming, survivors, outgoing = state.incoming, state.survivors, state.outgoing
         local cc0, cc, commit_incoming = state.cc0, state.cc, state.commit_incoming
@@ -373,7 +370,6 @@ function M.layout(opts, items, seed)
             g.draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
         end
         if outgoing[1] then g.draw(outgoing[1].lane, cc, cc, nil, cc) end
-        state.fanned_in = true
     end
 
     -- COMPACT (stage): each survivor slides into the run of free columns to its
@@ -381,7 +377,6 @@ function M.layout(opts, items, seed)
     -- turn; its jog span is reserved in `used`. Suppressed on a fan line / seeded
     -- first row, where a pass-through crosses the fan vertically instead.
     local function compact(state)
-        if state.compacted then return end
         local g = state.g
         local frozen = first_row and seed
         for _, s in ipairs(state.survivors) do
@@ -399,7 +394,6 @@ function M.layout(opts, items, seed)
             for c = k, s.col do g.used[c] = true end
             s.out = k
         end
-        state.compacted = true
     end
 
     -- FAN_OUT (stage): the first parent continues at the commit column; each extra
@@ -409,7 +403,6 @@ function M.layout(opts, items, seed)
     -- the diverging bus). Inline parents draw here; a separate merge line draws them
     -- below. Then advance active/blocked for the next row.
     local function fan_out(state)
-        if state.fanned_out then return end
         local g = state.g
         local survivors, outgoing = state.survivors, state.outgoing
         local cc, commit_incoming, sep_merge = state.cc, state.commit_incoming, state.sep_merge
@@ -462,13 +455,11 @@ function M.layout(opts, items, seed)
         blocked = {}
         if #outgoing == 0 then blocked[state.cc] = true end
         first_row = false
-        state.fanned_out = true
     end
 
     -- FINALIZE (stage): assemble the main line from the grid, build the OrderItem
     -- (split/columns/merge + parent/child lanes), and discharge the ledger.
     local function finalize(state)
-        if state.main then return end
         local C = state.commit
         local main = assemble(state.g.cells, state.cc, C)
         local row = {
@@ -486,32 +477,26 @@ function M.layout(opts, items, seed)
         state.main = main
         state.outgoing_lanes = {}
         for _, o in ipairs(state.outgoing) do state.outgoing_lanes[#state.outgoing_lanes + 1] = o.lane end
-        state.ledger.commit_placed = true
-        state.ledger.incoming, state.ledger.survivors, state.ledger.outgoing = {}, {}, {}
     end
 
-    -- The stage list. Shell steps (classify / spawn_lanes / decide_style) run
-    -- before the driver loop; these six grid stages write the item's lines and
-    -- discharge the ledger. Reordering / swapping them is the layout-strategy seam.
-    local stages = { seed_bars, place_commit, fan_in, compact, fan_out, finalize }
+    -- A layout STRATEGY is just a function that chains the grid stages in order,
+    -- each called once. A different strategy reorders / swaps / adds stages (or adds
+    -- its own control flow, if one is ever needed) — that is the layout-strategy
+    -- seam. No generic runner: the sequence is the algorithm.
+    local function layout_compact(state)
+        seed_bars(state)
+        place_commit(state)
+        fan_in(state)
+        compact(state)
+        fan_out(state)
+        finalize(state)
+    end
 
     local function active_contains(lane)
         for _, l in pairs(active) do
             if l == lane then return true end
         end
         return false
-    end
-
-    local function open_count(led)
-        local n = led.commit_placed and 0 or 1
-        for _ in pairs(led.incoming) do n = n + 1 end
-        for _ in pairs(led.survivors) do n = n + 1 end
-        for _ in pairs(led.outgoing) do n = n + 1 end
-        return n
-    end
-
-    local function line_count(state)
-        return #state.above + (state.main and 1 or 0) + #state.below
     end
 
     -- Structural oracle (spec: "check that everything has been handled"): the
@@ -577,31 +562,13 @@ function M.layout(opts, items, seed)
         end
     end
 
-    -- Driver: run the stage list until the ledger is empty. Loop guard — a full
-    -- pass that discharges no obligation AND appends no line means the item cannot
-    -- be completed, so error rather than spin. Then the oracle verifies the
-    -- emitted lines realise the obligations.
+    -- Lay out one item: shell setup, run the layout strategy, verify, keep the row.
     local function run_item(item)
         local state = { item = item, commit = item.commit, above = {}, below = {} }
         classify(state)
         spawn_lanes(state)
         decide_style(state)
-        local hash = tostring(state.commit.hash)
-        local budget = #state.incoming + #state.survivors
-            + #(state.commit.parents or {}) + 8
-        local passes = 0
-        while open_count(state.ledger) > 0 do
-            local before_open = open_count(state.ledger)
-            local before_lines = line_count(state)
-            for _, stage in ipairs(stages) do stage(state) end
-            passes = passes + 1
-            if open_count(state.ledger) >= before_open and line_count(state) == before_lines then
-                error(("gitloom layout: commit %s could not be fully handled"):format(hash))
-            end
-            if passes > budget then
-                error(("gitloom layout: commit %s exceeded the layout pass budget"):format(hash))
-            end
-        end
+        layout_compact(state)
         complete_check(state)
         rows[#rows + 1] = state.row
     end

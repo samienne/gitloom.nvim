@@ -853,148 +853,136 @@ entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
 the existing `OrderItem`s (the view holds references). Both go through
 `columns.layout` — there is no separate incremental algorithm.
 
-### Layout as a staged pipeline (in progress)
+### Layout as a staged pipeline
 
 Status: **built** on `feature/layout-pipeline`. `columns.layout`'s per-commit loop
-is decomposed into a **pipeline of stages**, behaviour-preserving — byte-identical
-rendering (verified over a large DAG × merge-style × mirror characterization
-matrix) and every test green. This supersedes the earlier "one replaceable
-`place(ctx)` policy" note: a layout policy is now simply a chosen *set of placement
-stages*, a strictly more granular seam.
+is a **pipeline of grid stages**, behaviour-preserving — byte-identical rendering
+(verified over a large DAG × merge-style × mirror characterization matrix) and
+every test green. This supersedes the earlier "one replaceable `place(ctx)` policy"
+note: a layout **strategy** is a plain function that chains the stages, and
+reordering / swapping / adding stages is the seam.
 
-The realization is **compute-then-render**: the placement stages decide columns
-and draw nothing; a single `emit` stage renders the lines from their plan. So a
-layout strategy swaps the placement stages while `emit` (and the shell) stays
-fixed — the mode-invariant / mode-specific split falls on the stage boundary.
-
-**Why.** The alternative layouts (spread, lookahead — below) and the interactive
-reflow views all want to vary *placement* while keeping the DAG-driven machinery
-(lane lifecycle, colour, edge attribution) fixed. A pipeline of uniform
-`stage : state -> state` steps makes each layout strategy a recomposable stage
-list, and turns "is this row fully and correctly built" into an explicit,
-testable property instead of an implicit consequence of one loop's control flow.
-
-**The per-item state.** `columns.layout` still sweeps the order top-to-bottom
-carrying `active` (col → Lane flowing down). For each commit it builds a
-`LayoutState`:
+**The model.** Each stage **writes segments into a live column grid and reads
+occupancy back from it** — the grid *is* the working state, not an abstract plan
+rendered at the end. `columns.layout` sweeps the order top-to-bottom carrying the
+imperative shell (`active` col → Lane flowing down, `blocked`, `first_row`, the
+id/colour minters). For each commit it builds a per-item `state`:
 
 ```
-LayoutState = {
-  opts,
-  -- sweep memory (the imperative shell, carried across items):
-  active, blocked, new_id(), alloc_color(), free_color(),
-  -- the current item:
-  commit,
-  above = {},   -- virtual lines above the commit (fan-in / split rows)
-  main,         -- the one REAL line; carries the commit node
-  below = {},   -- virtual lines below the commit (fan-out / merge rows)
-  ledger,       -- the obligations still to discharge (below)
+state = {
+  item, commit,
+  incoming, survivors, outgoing,     -- the DAG split + the born parent lanes
+  sep_split, sep_merge, fan_line,    -- merge-style flags
+  g = { cells, draw, occ0, used },   -- the live main-line grid + occupancy
+  above = {}, main, below = {},      -- the three line sections
+  row,                               -- the finished OrderItem
 }
 ```
 
-A **line** is a `GraphColumn[]` — the exact shape Phase 2 consumes — so the
-existing invariant validators double as the per-stage validity check with no
-translation. An item's lines form **three sections**: zero-or-more `above`
-(virtual), exactly one `main` (real, carries the node), zero-or-more `below`
-(virtual). Render order is `above` top-to-bottom, then `main`, then `below`.
-Lines are **append-only**: a stage may append a new line to a section and mutate
-only the line it is currently extending; once it moves on, that line is frozen.
-(Today's styles emit ≤1 above and ≤1 below; the sections are *lists* so a future
-strategy can spread one wide fan over several rows.)
+**Lines and sections.** A **line** is a `GraphColumn[]` — the exact shape Phase 2
+consumes — so the invariant validators apply to it directly. An item's lines form
+**three sections**: zero-or-more `above` (virtual, fan-in rows), exactly one `main`
+(real, carries the node), zero-or-more `below` (virtual, fan-out rows). Render
+order is `above` top-to-bottom, then `main`, then `below`. Today's styles emit ≤1
+above and ≤1 below; the sections are lists so a future strategy can spread one wide
+fan over several rows.
 
-**The obligation ledger** is the explicit "what is left to do for this commit,"
-carried stage to stage so the driver knows when an item is done:
+**Grid occupancy.** The stages read occupancy from two reservations on `state.g`,
+which together encode the one rule that keeps the graph legible — *a fan's
+horizontal bus is shared by its lanes; nothing else may overlap a horizontal*:
 
-- `commit_placed` — the node sits on exactly one (the main) line.
-- `incoming` — the child edges terminating at C; each must be routed *into* C's
-  column.
-- `outgoing` — one lane per parent; each must fan *out* of C and enter the next
-  row's `active`.
-- `survivors` — each pass-through lane carried down and into the next `active`.
+- `occ0` — a **vertical** (a bar / node / down-going lane) occupies the column;
+  frozen at row start, so a column a lane vacates mid-row is not silently reused.
+- `used` — a **non-shareable horizontal** occupies the column: a survivor's
+  compaction jog, or the trunk's jog into the node. A fan's own bus is **not**
+  reserved — every lane of a fan emanates from the same commit's hub, so they
+  overlap freely and only each lane's turn-down **endpoint** is claimed (as a
+  vertical). `grid_taken(c)` = neither slot free.
 
-A **stage** is a guarded `state -> state` transform that discharges ledger
-entries (route an incoming lane, place the node, fan out a parent) and may append
-an above/below line when the current line cannot hold what it needs (e.g. a fan
-the style puts on its own line — that is the "insert a virtual line and continue"
-case). Lane id/colour minting, `parent_lanes`/`child_lanes` wiring, and DAG
-classification stay in the shell, shared by every stage set.
+(A first grid attempt reserved whole fan spans and pushed inline merges wider;
+reserving only endpoints restores fan sharing and byte-identity — a good
+confirmation the sharing rule is the right one.)
 
-**The driver + loop guard.** The driver runs the stage list until the ledger is
-empty. To make an unhandleable item fail loudly rather than spin, it tracks
-progress: if a full pass over the stages discharges **no** obligation *and*
-appends **no** new line, the item cannot be completed, so the driver `error()`s
-with the commit hash. The algorithm therefore either finishes an item or fails
-explicitly — it never loops forever.
+**The stages.** Three **shell steps** run first (setup): `classify` (read `active`
+into incoming/survivors), `spawn_lanes` (mint one outgoing Lane per parent — the
+id/colour lifecycle), `decide_style` (the sep_split / sep_merge / inline_junction /
+fan_line flags). Then the **layout strategy** chains six grid stages:
 
-**Completeness test.** A structural oracle (`complete_check`, asserted inside the
-driver after the loop) checks that a finished item's ledger is empty *and* that
-the emitted lines realize it: the node appears exactly once and on the main line;
-every incoming lane is drawn and has **terminated** (is absent from the next
-`active`); every survivor is drawn and **carried** into the next `active`; every
-outgoing lane is drawn and carried forward, and the outgoing count equals the
-parent count. It reads the emitted lines like the test invariants — stronger than
-the existing `check_commits` (which only asserts each commit appears once) — and is
-what makes "stop when the ledger is empty" trustworthy.
-
-**The stage set (as built).** Three **shell steps** run before the driver loop:
-`classify` (read `active` into incoming/survivors and seed the ledger),
-`spawn_lanes` (mint one outgoing Lane per parent — the id/colour lifecycle), and
-`decide_style` (the sep_split / sep_merge / inline_junction / fan_line flags).
-Then the driver runs four **stages**:
-
+- `seed_bars` — open the main line; write every survivor's bar (a vertical).
 - `place_commit` — the commit column (leftmost incoming, or the leftmost free /
-  non-blocked column for a tip), the split reduction (only the trunk reaches the
-  commit line), and the row-start occupancy `occ0` (computed directly, no
-  transient `active` mutation).
-- `compact` — the linear-commit left-slide + the survivor compaction, producing
-  the final commit column and each survivor's out column, reserving jog spans in
-  `used`.
-- `fan_out` — the outgoing parents' columns (freed-column reuse / interior-gap
-  scan) and advancing `active` / `blocked` for the next row.
-- `emit` — draw the split (above), commit (main), and merge (below) lines from the
-  plan the placement stages recorded, build the `OrderItem`, and discharge the
-  ledger.
+  non-blocked column for a tip), the incoming reservation, the split reduction
+  (only the trunk reaches the commit line under `sep_split`), and the linear slide.
+- `fan_in` — the split line above (when scheduled); reserve the commit jog; write
+  the fan-in converging into the node (crossing survivors, sharing the bus) and the
+  first parent's descent.
+- `compact` — slide each survivor left into free columns, redrawn as a turn,
+  reserving its jog in `used` (suppressed on a fan line / seeded first row, where a
+  pass-through crosses the fan vertically).
+- `fan_out` — the diverging parents' columns (endpoint-only reservation,
+  freed-column reuse), drawn inline or on the merge line below; then advance
+  `active` / `blocked`.
+- `finalize` — assemble the main line, build the `OrderItem` (`split` / `columns` /
+  `merge` + parent/child lanes).
 
-The placement stages (`place_commit` / `compact` / `fan_out`) are the
-*mode-specific* seam a future strategy replaces; the shell steps and `emit` are
-invariant. Because placement draws nothing, the ledger's drawing obligations are
-discharged atomically by `emit` (the completeness oracle then verifies them).
+The draw order — survivors, then fan-in, then the moved survivors, then fan-out —
+is what keeps the grid byte-identical to the old algorithm.
 
-**Output boundary (behaviour-preserving).** `emit` maps `above[]` / `main` /
-`below[]` back to the existing `OrderItem` contract `row.split` / `row.columns` /
-`row.merge` (current styles produce ≤1 of each), so Phase 2, the panes,
-`display_item`, and every test stay byte-identical. Generalising the `OrderItem`
-to true `above[]` / `below[]` lists is a *later*, spec-gated change — only when a
-strategy actually emits more than one — and it touches `render.lua` /
-`display_item` and the panes.
+**No generic runner.** A strategy is *just a function calling the stages in order*
+— there is no loop, no ledger, no driver:
 
-**How it was built (strangler, not rewrite).** Peeled, not rewritten — each step
-proven byte-identical over the characterization matrix plus `make test` /
-`make lint`, and reverted in isolation if any rendered grid changed:
+```
+local function layout_compact(state)
+  seed_bars(state); place_commit(state); fan_in(state)
+  compact(state); fan_out(state); finalize(state)
+end
+```
 
-1. the driver + `LayoutState` + ledger + loop guard + completeness oracle, with
-   the whole algorithm wrapped as a single `legacy_place` stage (green by
-   construction);
-2. peel `spawn_lanes` (the lane lifecycle) out;
-3. peel `decide_style` (the style flags) out;
-4. split `legacy_place` into `place` (all placement) + `emit` (all drawing) — the
-   one reorder: the split line is deferred to `emit` and drawn at the pre-slide
-   column with the full fan-in, so placement runs first;
-5. subdivide `place` into `place_commit` / `compact` / `fan_out`.
+An earlier version had a ledger-driven loop (run the stages until an obligation
+ledger emptied, with a no-progress guard). It was **removed as speculative
+generality** once it was clear the stage set always completes in one pass — the
+loop, the ledger, the per-stage run-once guards, and the pass budget all only
+served that generality. If a future strategy genuinely needs iteration (append a
+line and re-run), it adds its *own* control flow. The obligation framing was not
+wasted: it pinned down what "handled" means, which is now encoded in the oracle.
+
+**Completeness oracle.** `complete_check(state)` runs after the strategy and
+verifies the emitted lines: the node appears exactly once and on the main line;
+every incoming lane is drawn and has **terminated** (absent from the next
+`active`); every survivor is drawn and **carried** forward; every outgoing lane is
+drawn and carried, and the outgoing count equals the parent count. It reads the
+output like the test invariants — stronger than `check_commits` — and it catches a
+strategy that skips a stage (`state.main` would be nil). This is the safety net
+that replaces the loop's guard, and it is what makes "the sequence ran" trustworthy
+without a runtime driver.
+
+**Output boundary.** `finalize` maps `above[]` / `main` / `below[]` back to the
+existing `OrderItem` contract `row.split` / `row.columns` / `row.merge` (current
+styles produce ≤1 of each), so Phase 2, the panes, `display_item`, and every test
+are unaffected. Generalising the `OrderItem` to true `above[]` / `below[]` lists is
+a later, spec-gated change — only when a strategy emits more than one — and it
+touches `render.lua` / `display_item` and the panes.
+
+**How it was built.** Peeled, then rebuilt, each step proven byte-identical over
+the characterization matrix plus `make test` / `make lint`:
+
+1. wrap the whole algorithm as a single stage behind a ledger-driven driver;
+2. peel `spawn_lanes` and `decide_style` (the shell) out;
+3. split into `place` (placement) + `emit` (drawing), then subdivide `place` into
+   `place_commit` / `compact` / `fan_out`;
+4. **rebuild onto the live grid** — replace compute-then-render with a routine
+   whose steps write segments into `state.g` and read occupancy back (the fan-bus
+   sharing fix keeps it byte-identical);
+5. split that routine into the six composable grid stages
+   (`seed_bars` … `finalize`);
+6. **drop the runner** — replace the ledger + loop + guards with a plain strategy
+   function plus the oracle.
 
 The panes and `pack_markers` consume `columns.layout`'s output (including the
 `seed` / `first_row` seam semantics, kept in the shell), so they are unaffected as
 long as its output is preserved.
 
-**Not (yet) split: `emit`.** The original design sketch had `emit` further broken
-into progressive draw stages (seed the verticals → replace the node → draw
-horizontals). It is left as one stage deliberately: compute-then-render puts the
-whole strategy seam at the *placement* stages, and progressive drawing would
-entangle the draw logic with placement for no strategic gain. Revisit only if a
-strategy needs to vary the *drawing* (not just the columns).
-
-**Future stage sets (not yet built).** With the pipeline in place, alternative
-layouts become new stage sets, not new algorithms:
+**Future strategies (not yet built).** With the pipeline in place, alternative
+layouts become new strategies (a different chain of stages), not new algorithms:
 
 - *Spread* — a placement stage that keeps empty columns between occupied lanes
   with a restoring "pressure" toward the boundary. Local; no lookahead.
