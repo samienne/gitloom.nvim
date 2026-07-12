@@ -1349,7 +1349,10 @@ function M.header(items, boundary, node_of, lane_of, col_of)
 
     local lines = {} -- { columns, commit }, bottom-up
 
-    for _, N in ipairs(order) do
+    -- One condensed node's row, seam-first. The arriving lanes (active columns whose
+    -- lane ascends toward N) drive it; a node with none but pinned is a disconnected
+    -- anchor. The body is the up-sweep's per-node stage chain (place / emit / advance).
+    local function header_node(N)
         local arriving = {}
         for col, a in pairs(active) do if a.node == N then arriving[#arriving + 1] = col end end
         if #arriving > 0 then
@@ -1543,6 +1546,8 @@ function M.header(items, boundary, node_of, lane_of, col_of)
             }
         end
     end
+
+    for _, N in ipairs(order) do header_node(N) end
 
     -- Bottom-up → newest-first (tip on top).
     local rows = {}
