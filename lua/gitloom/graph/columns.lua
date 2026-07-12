@@ -286,62 +286,67 @@ function M.layout(opts, items, seed)
             inline_junction, sep_split, sep_merge, fan_line
     end
 
-    -- PLACE_COMMIT (stage): the commit's column. cc0 = the leftmost incoming
-    -- child's column, or the leftmost free column for a tip. With a separate split
-    -- line only the trunk reaches the commit line (`commit_incoming`); the full
-    -- fan-in (`orig_incoming`) is kept for the split line + child_lanes. `occ0` is
-    -- the row-start occupancy the compaction stages honour — computed directly (no
-    -- transient mutation of `active`, which fan_out rebuilds).
-    local function place_commit(state)
-        if state.cc0 then return end
-        local incoming, survivors = state.incoming, state.survivors
-        local sep_split = state.sep_split
+    -- LAYOUT_ITEM (grid stage): build the item's lines by writing segments into a
+    -- LIVE column grid and reading occupancy back from it — the model where each
+    -- stage takes space that later stages must work around. Occupancy is two slots
+    -- per column: `voc` (a vertical / node occupies it) and `hoc` (a horizontal run
+    -- occupies it); `taken` = neither free. A fan may cross a vertical (a crossing);
+    -- nothing may merge into an occupied slot. Steps: seed the incoming bars, place
+    -- the node, write the fan-in (crossing survivors) and fan-out horizontals, and
+    -- compact survivors into free space — emitting a separate above/below line when
+    -- the merge style schedules a fan onto its own line. (This is the single-routine
+    -- form; it is re-split into seed_bars / place_commit / fan_in / compact / fan_out
+    -- stages next — see ARCHITECTURE.md "Layout as a staged pipeline".)
+    local function layout_item(state)
+        if state.main then return end
+        local C = state.commit
+        local incoming, survivors, outgoing = state.incoming, state.survivors, state.outgoing
+        local sep_split, sep_merge, fan_line = state.sep_split, state.sep_merge, state.fan_line
+        local frozen = first_row and seed
 
+        local mcells, mdraw = new_line()
+
+        -- Occupancy is read from the grid as two reservations. `occ0` = a vertical
+        -- (a bar / node / down-going lane) sits in the column; frozen at row start
+        -- so a column a lane vacates is not silently reused mid-row. `used` = a
+        -- **non-shareable** horizontal occupies the column: a survivor's jog and the
+        -- trunk's jog into the node. A fan's own bus is NOT reserved — every lane of
+        -- a fan shares the same commit's hub, so they overlap freely and only each
+        -- lane's turn-down endpoint is claimed (as a vertical). `taken` = neither
+        -- slot free.
+        local occ0, used = {}, {}
+        local function taken(c) return occ0[c] or used[c] or blocked[c] end
+
+        -- SEED_BARS: every survivor enters from above as a straight vertical bar.
+        for _, s in ipairs(survivors) do
+            mdraw(s.lane, s.col, s.col, s.col, s.col)
+            occ0[s.col] = true
+        end
+
+        -- Commit column cc0: the leftmost incoming child, or the leftmost free
+        -- column for a tip.
         local cc0
         if #incoming > 0 then
             cc0 = incoming[1].col
         else
             cc0 = 1
-            while active[cc0] or blocked[cc0] do cc0 = cc0 + 1 end
+            while occ0[cc0] or blocked[cc0] do cc0 = cc0 + 1 end
         end
 
+        -- Incoming columns are reserved too. With a separate split line only the
+        -- trunk reaches the commit line; the non-trunk children live on the split
+        -- line above, so their columns stay free gaps the commit line compacts into.
         local commit_incoming = incoming
         if sep_split then
             commit_incoming = { { col = cc0, lane = incoming[1].lane } }
-        end
-
-        -- Row-start occupancy: with a separate split line the non-trunk children
-        -- have terminated above, so the occupied set is the trunk column plus the
-        -- survivors (the children's vacated columns are the gaps the commit line
-        -- compacts into); inline it is just the current active lanes.
-        local occ0 = {}
-        if sep_split then
             occ0[cc0] = true
-            for _, s in ipairs(survivors) do occ0[s.col] = true end
         else
-            for j in pairs(active) do occ0[j] = true end
+            for _, inc in ipairs(incoming) do occ0[inc.col] = true end
         end
 
-        state.cc0, state.cc = cc0, cc0
-        state.occ0 = occ0
-        state.orig_incoming = incoming
-        state.commit_incoming = commit_incoming
-        state.trunk = incoming[1]
-    end
-
-    -- COMPACT (stage): slide the linear commit and the survivors left into the run
-    -- of row-start gaps, stopping at the first occupied/used column (never crossing
-    -- a lane). Suppressed on a fan line and on a seeded first row (the pane seam
-    -- must not jog). Produces the final commit column (cc) and each survivor's out
-    -- column, reserving every jog span in `used`.
-    local function compact(state)
-        if state.used then return end
-        local survivors = state.survivors
-        local occ0, cc = state.occ0, state.cc
-        local commit_incoming = state.commit_incoming
-        local fan_line = state.fan_line
-        local frozen = first_row and seed
-
+        -- Linear-commit left slide through the run of free columns, suppressed on a
+        -- fan line / seeded first row.
+        local cc = cc0
         if #commit_incoming == 1 and not frozen and not fan_line then
             for c = cc - 1, 1, -1 do
                 if occ0[c] or blocked[c] then break end
@@ -349,43 +354,63 @@ function M.layout(opts, items, seed)
             end
         end
 
-        -- Reserve the commit's incoming jog span (cc0..cc) before the survivors
-        -- compact, so none of them jogs across it.
-        local used = {}
-        do
-            local a = (commit_incoming[1] and commit_incoming[1].col) or cc
-            for c = math.min(a, cc), math.max(a, cc) do used[c] = true end
+        -- SPLIT LINE (above): the non-trunk children converge and terminate; the
+        -- trunk descends into the commit; the shared descent carries every child.
+        -- Survivors pass through at their own column.
+        local above, below = {}, {}
+        if sep_split then
+            local trunk = incoming[1]
+            local cells, draw, add_seg = new_line()
+            add_seg(cc0, { up = true }, { trunk.lane }, trunk.lane.id, trunk.lane.color)
+            local descent = {}
+            for _, inc in ipairs(incoming) do descent[#descent + 1] = inc.lane end
+            add_seg(cc0, { down = true }, descent, trunk.lane.id, trunk.lane.color)
+            for i = 2, #incoming do
+                local inc = incoming[i]
+                draw(inc.lane, math.min(inc.col, cc0), math.max(inc.col, cc0), inc.col, nil)
+            end
+            for _, s in ipairs(survivors) do draw(s.lane, s.col, s.col, s.col, s.col) end
+            above[#above + 1] = assemble(cells, nil, nil)
         end
 
+        -- Reserve the commit's own jog (the trunk turning into the node) so no
+        -- survivor crosses it, then write the fan-in — the incoming children
+        -- converge into the commit column (just the trunk when the split was
+        -- separate; the whole fan-in inline, crossing survivors, sharing the bus) —
+        -- and the node's first parent continues straight down. Written before the
+        -- survivors compact so they see the reserved commit jog.
+        for c = math.min(cc0, cc), math.max(cc0, cc) do used[c] = true end
+        for _, inc in ipairs(commit_incoming) do
+            mdraw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
+        end
+        if outgoing[1] then mdraw(outgoing[1].lane, cc, cc, nil, cc) end
+
+        -- COMPACT: each survivor slides into the run of free columns to its left,
+        -- stopping at the first taken column (never crossing a lane), redrawn as a
+        -- turn; its jog span is reserved in `used`. Suppressed on a fan line / seeded
+        -- first row, where a pass-through crosses the fan vertically instead.
         for _, s in ipairs(survivors) do
             local k = s.col
             if not frozen and not fan_line then
                 for c = s.col - 1, 1, -1 do
-                    if occ0[c] or used[c] or blocked[c] then break end
+                    if taken(c) then break end
                     k = c
                 end
+            end
+            if k ~= s.col then
+                mcells[s.col] = nil
+                mdraw(s.lane, k, s.col, s.col, k)
             end
             for c = k, s.col do used[c] = true end
             s.out = k
         end
 
-        state.cc = cc
-        state.used = used
-    end
-
-    -- FAN_OUT (stage): the outgoing parents' columns — the first parent at the
-    -- commit column, each extra parent at the leftmost interior gap free since
-    -- before this row (`occ0`/`used`/`blocked`). A terminating child's freed column
-    -- is reused first (`freed`) only when that stacks no two-turn cell — under
-    -- allow_merge_on_split or a separate merge line. Then advance `active`/`blocked`
-    -- for the next row (a root's column is blocked for one row).
-    local function fan_out(state)
-        if state.fanned then return end
-        local survivors, outgoing = state.survivors, state.outgoing
-        local occ0, used, cc = state.occ0, state.used, state.cc
-        local commit_incoming = state.commit_incoming
-        local sep_merge = state.sep_merge
-
+        -- FAN_OUT: the first parent continues at the commit column; each extra
+        -- parent takes the leftmost free column, reusing a terminating child's freed
+        -- column first when that stacks no two-turn cell (allow_merge_on_split, or a
+        -- separate merge line below). Only the endpoint is claimed (the parents
+        -- share the diverging bus). Inline parents draw here; a separate merge line
+        -- draws them below.
         local freed = {}
         if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #commit_incoming do freed[#freed + 1] = commit_incoming[i].col end
@@ -398,12 +423,38 @@ function M.layout(opts, items, seed)
                 k = freed[fi]; fi = fi + 1
             else
                 k = 1
-                while occ0[k] or used[k] or blocked[k] do k = k + 1 end
+                while taken(k) do k = k + 1 end
             end
             outgoing[i].out = k
             used[k] = true
+            if not sep_merge then
+                mdraw(outgoing[i].lane, math.min(k, cc), math.max(k, cc), nil, k)
+            end
         end
 
+        local main = assemble(mcells, cc, C)
+
+        -- MERGE LINE (below): the first parent continues at the commit column; the
+        -- shared ascent carries every parent; the extra parents fan out. Survivors
+        -- pass through at their compacted column.
+        if sep_merge then
+            local mcells2, mdraw2, madd2 = new_line()
+            for _, s in ipairs(survivors) do mdraw2(s.lane, s.out, s.out, s.out, s.out) end
+            if outgoing[1] then
+                local ascent = {}
+                for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
+                madd2(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
+                madd2(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
+            end
+            for i = 2, #outgoing do
+                local o = outgoing[i]
+                mdraw2(o.lane, math.min(o.out, cc), math.max(o.out, cc), nil, o.out)
+            end
+            below[#below + 1] = assemble(mcells2, nil, nil)
+        end
+
+        -- Advance active / blocked for the next row (a root's column is blocked for
+        -- one row so nothing stacks under it).
         active = {}
         for _, s in ipairs(survivors) do active[s.out] = s.lane end
         if outgoing[1] then active[cc] = outgoing[1].lane end
@@ -411,79 +462,8 @@ function M.layout(opts, items, seed)
         blocked = {}
         if #outgoing == 0 then blocked[cc] = true end
         first_row = false
-        state.fanned = true
-    end
 
-    -- EMIT (stage): draw the item's lines from the plan `place` recorded — the
-    -- split line (above), the commit line (main), the merge line (below) — build
-    -- the OrderItem, and discharge the ledger. Drawing only; no placement.
-    local function emit(state)
-        if state.main then return end
-        local C = state.commit
-        local survivors, outgoing = state.survivors, state.outgoing
-        local sep_split, sep_merge = state.sep_split, state.sep_merge
-        local cc0, cc = state.cc0, state.cc
-        local trunk = state.trunk
-        local orig_incoming, commit_incoming = state.orig_incoming, state.commit_incoming
-        local above, below = {}, {}
-
-        -- SPLIT LINE (above): the non-trunk children converge into the commit
-        -- column and terminate; the trunk continues straight down. The single
-        -- descent is shared by every converging child (lights if any is in the
-        -- cone). Survivors pass through unchanged, drawn at their own column.
-        if sep_split then
-            local cells, draw, add_seg = new_line()
-            add_seg(cc0, { up = true }, { trunk.lane }, trunk.lane.id, trunk.lane.color)
-            local descent = {}
-            for _, inc in ipairs(orig_incoming) do descent[#descent + 1] = inc.lane end
-            add_seg(cc0, { down = true }, descent, trunk.lane.id, trunk.lane.color)
-            for i = 2, #orig_incoming do
-                local inc = orig_incoming[i]
-                draw(inc.lane, math.min(inc.col, cc0), math.max(inc.col, cc0), inc.col, nil)
-            end
-            for _, s in ipairs(survivors) do draw(s.lane, s.col, s.col, s.col, s.col) end
-            above[#above + 1] = assemble(cells, nil, nil)
-        end
-
-        -- COMMIT LINE (main): survivors jog to their compacted column; incoming
-        -- children converge into the commit column (the trunk's `up` alone when the
-        -- split was separate, the whole fan-in inline); the first parent continues
-        -- straight down; inline extra parents fan out here.
-        local cells, draw = new_line()
-        for _, s in ipairs(survivors) do
-            draw(s.lane, math.min(s.col, s.out), math.max(s.col, s.out), s.col, s.out)
-        end
-        for _, inc in ipairs(commit_incoming) do
-            draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
-        end
-        if outgoing[1] then draw(outgoing[1].lane, cc, cc, nil, cc) end
-        if not sep_merge then
-            for i = 2, #outgoing do
-                local o = outgoing[i]
-                draw(o.lane, math.min(o.out, cc), math.max(o.out, cc), nil, o.out)
-            end
-        end
-        local main = assemble(cells, cc, C)
-
-        -- MERGE LINE (below): the first parent continues at the commit column; the
-        -- single ascent is shared by every parent; the extra parents fan out from
-        -- it. Survivors pass through unchanged.
-        if sep_merge then
-            local mcells, mdraw, madd = new_line()
-            for _, s in ipairs(survivors) do mdraw(s.lane, s.out, s.out, s.out, s.out) end
-            if outgoing[1] then
-                local ascent = {}
-                for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
-                madd(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
-                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
-            end
-            for i = 2, #outgoing do
-                local o = outgoing[i]
-                mdraw(o.lane, math.min(o.out, cc), math.max(o.out, cc), nil, o.out)
-            end
-            below[#below + 1] = assemble(mcells, nil, nil)
-        end
-
+        -- Build the OrderItem and discharge the ledger.
         local row = {
             type = state.item.type or "commit",
             commit = C,
@@ -494,8 +474,7 @@ function M.layout(opts, items, seed)
             merge = below[1],
         }
         for _, o in ipairs(outgoing) do row.parent_lanes[#row.parent_lanes + 1] = o.lane end
-        for _, inc in ipairs(orig_incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
-
+        for _, inc in ipairs(incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
         state.row = row
         state.main = main
         state.above = above
@@ -506,10 +485,10 @@ function M.layout(opts, items, seed)
         state.ledger.incoming, state.ledger.survivors, state.ledger.outgoing = {}, {}, {}
     end
 
-    -- The stage list: placement then emission. The shell steps (classify /
-    -- spawn_lanes / decide_style) run before the driver loop; these two stages
-    -- draw and discharge the ledger.
-    local stages = { place_commit, compact, fan_out, emit }
+    -- The stage list. Shell steps (classify / spawn_lanes / decide_style) run
+    -- before the driver loop; layout_item writes the grid and discharges the
+    -- ledger. Being re-split into finer grid stages next.
+    local stages = { layout_item }
 
     local function active_contains(lane)
         for _, l in pairs(active) do
