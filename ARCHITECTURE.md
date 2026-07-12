@@ -906,18 +906,20 @@ confirmation the sharing rule is the right one.)
 **The stages.** Three **shell steps** run first (setup): `classify` (read `active`
 into incoming/survivors), `spawn_lanes` (mint one outgoing Lane per parent — the
 id/colour lifecycle), `decide_style` (the sep_split / sep_merge / inline_junction /
-fan_line flags). Then the **layout strategy** chains six grid stages:
+fan_line flags). Then the **layout strategy** chains the grid stages:
 
 - `seed_bars` — open the main line; write every survivor's bar (a vertical).
-- `place_commit` — the commit column (leftmost incoming, or the leftmost free /
-  non-blocked column for a tip), the incoming reservation, the split reduction
-  (only the trunk reaches the commit line under `sep_split`), and the linear slide.
+- `place_commit` — the commit column `cc0` (leftmost incoming, or the leftmost free
+  / non-blocked column for a tip), the incoming reservation, and the split reduction
+  (only the trunk reaches the commit line under `sep_split`). `cc` starts at `cc0`.
+- `slide` — compact a *linear* commit leftward through the free run (a no-op on a
+  fan line). Its own stage so the seam strategy can drop it (below).
 - `fan_in` — the split line above (when scheduled); reserve the commit jog; write
   the fan-in converging into the node (crossing survivors, sharing the bus) and the
   first parent's descent.
 - `compact` — slide each survivor left into free columns, redrawn as a turn,
-  reserving its jog in `used` (suppressed on a fan line / seeded first row, where a
-  pass-through crosses the fan vertically).
+  reserving its jog in `used` (suppressed on a fan line, where a pass-through crosses
+  the fan vertically).
 - `fan_out` — the diverging parents' columns (endpoint-only reservation,
   freed-column reuse), drawn inline or on the merge line below; then advance
   `active` / `blocked`.
@@ -931,8 +933,8 @@ is what keeps the grid byte-identical to the old algorithm.
 — there is no loop, no ledger, no driver:
 
 ```
-local function layout_compact(state)
-  seed_bars(state); place_commit(state); fan_in(state)
+local function layout_compact(state)  -- the main view, and a pane's body rows
+  seed_bars(state); place_commit(state); slide(state); fan_in(state)
   compact(state); fan_out(state); finalize(state)
 end
 ```
@@ -944,6 +946,26 @@ loop, the ledger, the per-stage run-once guards, and the pass budget all only
 served that generality. If a future strategy genuinely needs iteration (append a
 line and re-run), it adds its *own* control flow. The obligation framing was not
 wasted: it pinned down what "handled" means, which is now encoded in the oracle.
+
+**A second strategy: the pane seam.** A context pane (§6.2) is laid out by the same
+`M.layout`, seeded with the boundary lanes crossing in from above (the `seed`
+param → pre-populated `active`). Its **first row is the seam** and must match the
+seeded columns exactly, so the pane meets the main view without a jog. That is the
+footer's *one* layout-level special rule, and it is now a distinct strategy rather
+than a flag: `layout_seam` **drops `slide` and swaps `compact` for `carry`** (which
+holds every survivor in its column). The sweep picks it for the seeded first row:
+
+```
+for i, item in ipairs(items) do
+  run_item(item, (seed and i == 1) and layout_seam or layout_compact)
+end
+```
+
+So the seam rule reads as *which stages run*, not a `first_row and seed` conditional
+threaded through `place_commit` and `compact` (both now flag-free). Everything else
+that makes the footer a footer lives outside `columns.layout`: building the
+sub-DAG (`pane.continue` / `condense` — projection) and the dashed / dimmed drawing
+(`render_pane` / `paint_pane` — render).
 
 **Completeness oracle.** `complete_check(state)` runs after the strategy and
 verifies the emitted lines: the node appears exactly once and on the main line;

@@ -22,14 +22,15 @@
 ---
 --- **Staged layout.** `M.layout` lays out each item with shell setup steps
 --- (classify / spawn_lanes / decide_style) then a **layout strategy** — a plain
---- function that chains the grid stages in order, each called once: seed_bars ->
---- place_commit -> fan_in -> compact -> fan_out -> finalize. Each writes segments
---- into a live column grid on `state.g` and reads occupancy back between stages. A
---- structural oracle (`complete_check`) then verifies the emitted lines (node once;
---- every incoming/survivor/outgoing lane drawn and carried correctly). A different
---- strategy is a different chain (reorder / swap / add stages) — the layout-strategy
---- seam; there is no generic runner. See ARCHITECTURE.md ("Layout as a staged
---- pipeline").
+--- function that chains the grid stages in order, each called once. `layout_compact`
+--- (main view + pane body) is seed_bars -> place_commit -> slide -> fan_in ->
+--- compact -> fan_out -> finalize; each writes segments into a live column grid on
+--- `state.g` and reads occupancy back between stages. A structural oracle
+--- (`complete_check`) then verifies the emitted lines. A different strategy is a
+--- different chain: `layout_seam` (a context pane's boundary row) drops `slide` and
+--- swaps `compact` for `carry`, so the seam matches the seeded columns without a
+--- jog. There is no generic runner — the sequence is the algorithm. See
+--- ARCHITECTURE.md ("Layout as a staged pipeline").
 local M = {}
 
 ---@param t table
@@ -168,12 +169,6 @@ function M.layout(opts, items, seed)
     -- it), which offsets the next history and breaks the line; consecutive
     -- stacked roots then simply alternate columns (spec §5.1 "root column break").
     local blocked = {}
-
-    -- The first row is a context pane's **seam** when seeding (spec §6.2): its
-    -- columns must equal the seeded ones exactly so the pane meets the main view
-    -- without a jog, so no compaction runs on it. (Without a seed it is just the
-    -- newest row, compacted normally.)
-    local first_row = true
 
     -- A fresh line buffer: `add` appends a Segment, `draw` lays one lane across
     -- columns lo..hi with `up`/`down` at the given columns (the bus connects them).
@@ -314,7 +309,7 @@ function M.layout(opts, items, seed)
     -- PLACE_COMMIT (stage): the commit column cc0 (leftmost incoming, or the
     -- leftmost free column for a tip); reserve the incoming columns; with a separate
     -- split line reduce the fan-in to the trunk (the children's columns stay free
-    -- gaps); then slide a linear commit left through the free run.
+    -- gaps). `cc` starts at cc0; the `slide` stage may move it left.
     local function place_commit(state)
         local g, incoming = state.g, state.incoming
         local cc0
@@ -331,14 +326,21 @@ function M.layout(opts, items, seed)
         else
             for _, inc in ipairs(incoming) do g.occ0[inc.col] = true end
         end
-        local cc = cc0
-        if #commit_incoming == 1 and not (first_row and seed) and not state.fan_line then
-            for c = cc - 1, 1, -1 do
-                if g.occ0[c] or blocked[c] then break end
-                cc = c
-            end
+        state.cc0, state.cc, state.commit_incoming = cc0, cc0, commit_incoming
+    end
+
+    -- SLIDE (stage): compact a *linear* commit leftward through the run of free
+    -- columns, stopping at the first occupied column (never crossing a lane). A
+    -- no-op on a fan line (the commit shares its line with its fan). The `layout_seam`
+    -- strategy omits this stage so a pane's seam row matches the seeded columns.
+    local function slide(state)
+        if #state.commit_incoming ~= 1 or state.fan_line then return end
+        local g, cc = state.g, state.cc
+        for c = cc - 1, 1, -1 do
+            if g.occ0[c] or blocked[c] then break end
+            cc = c
         end
-        state.cc0, state.cc, state.commit_incoming = cc0, cc, commit_incoming
+        state.cc = cc
     end
 
     -- FAN_IN (stage): the split line above (when the style schedules one); reserve
@@ -374,14 +376,13 @@ function M.layout(opts, items, seed)
 
     -- COMPACT (stage): each survivor slides into the run of free columns to its
     -- left, stopping at the first taken column (never crossing a lane), redrawn as a
-    -- turn; its jog span is reserved in `used`. Suppressed on a fan line / seeded
-    -- first row, where a pass-through crosses the fan vertically instead.
+    -- turn; its jog span is reserved in `used`. Suppressed on a fan line, where a
+    -- pass-through crosses the fan vertically instead.
     local function compact(state)
         local g = state.g
-        local frozen = first_row and seed
         for _, s in ipairs(state.survivors) do
             local k = s.col
-            if not frozen and not state.fan_line then
+            if not state.fan_line then
                 for c = s.col - 1, 1, -1 do
                     if grid_taken(g, c) then break end
                     k = c
@@ -393,6 +394,17 @@ function M.layout(opts, items, seed)
             end
             for c = k, s.col do g.used[c] = true end
             s.out = k
+        end
+    end
+
+    -- CARRY (stage): the seam variant of `compact` — every survivor stays in its
+    -- column (no leftward search) so the seam row matches the seeded boundary
+    -- exactly. Used by `layout_seam`.
+    local function carry(state)
+        local g = state.g
+        for _, s in ipairs(state.survivors) do
+            s.out = s.col
+            g.used[s.col] = true
         end
     end
 
@@ -454,7 +466,6 @@ function M.layout(opts, items, seed)
         for i = 2, #outgoing do active[outgoing[i].out] = outgoing[i].lane end
         blocked = {}
         if #outgoing == 0 then blocked[state.cc] = true end
-        first_row = false
     end
 
     -- FINALIZE (stage): assemble the main line from the grid, build the OrderItem
@@ -483,11 +494,27 @@ function M.layout(opts, items, seed)
     -- each called once. A different strategy reorders / swaps / adds stages (or adds
     -- its own control flow, if one is ever needed) — that is the layout-strategy
     -- seam. No generic runner: the sequence is the algorithm.
+    --
+    -- `layout_compact` is the main view and a pane's body rows. `layout_seam` is a
+    -- pane's boundary (seam) row: it omits `slide` and swaps `compact` for `carry`,
+    -- so the seam's columns equal the seeded boundary exactly and the pane meets the
+    -- main view without a jog. That is the footer's one layout-level special rule,
+    -- expressed as a strategy rather than a per-row "is this the seam?" flag threaded
+    -- through the shared stages.
     local function layout_compact(state)
         seed_bars(state)
         place_commit(state)
+        slide(state)
         fan_in(state)
         compact(state)
+        fan_out(state)
+        finalize(state)
+    end
+    local function layout_seam(state)
+        seed_bars(state)
+        place_commit(state)
+        fan_in(state)
+        carry(state)
         fan_out(state)
         finalize(state)
     end
@@ -562,19 +589,22 @@ function M.layout(opts, items, seed)
         end
     end
 
-    -- Lay out one item: shell setup, run the layout strategy, verify, keep the row.
-    local function run_item(item)
+    -- Lay out one item: shell setup, run the given strategy, verify, keep the row.
+    local function run_item(item, strategy)
         local state = { item = item, commit = item.commit, above = {}, below = {} }
         classify(state)
         spawn_lanes(state)
         decide_style(state)
-        layout_compact(state)
+        strategy(state)
         complete_check(state)
         rows[#rows + 1] = state.row
     end
 
-    for _, item in ipairs(items) do
-        run_item(item)
+    -- A seeded sweep is a context pane: its first row is the seam, laid out so it
+    -- meets the main view without a jog (`layout_seam`). Every other row — and the
+    -- whole main view — uses `layout_compact`.
+    for i, item in ipairs(items) do
+        run_item(item, (seed and i == 1) and layout_seam or layout_compact)
     end
 
     return rows
