@@ -52,6 +52,31 @@ local LABEL_MODES = {
 }
 local label_mode_index = 1
 
+-- Lane layout policies the viewer cycles through with `C` (spec §5.6): which
+-- lanes may move sideways to close a gap. NOTE, deliberately unlike the three
+-- cycles above: there is **no module-level index**. Those share one index across
+-- every open graph, which is wrong for a comparison feature — the whole point is
+-- to hold two repositories' windows at two different policies side by side. The
+-- index is derived from `ctx.opts.layout_policy` at each keypress instead, so the
+-- cycle is per-window. (The others are left alone; changing them is out of scope.)
+local LAYOUT_POLICIES = {
+    { name = "compact",   policy = "compact" },
+    { name = "survivors", policy = "survivors" },
+    { name = "linear",    policy = "linear" },
+    { name = "straight",  policy = "straight" },
+}
+
+--- The cycle index of a policy id, defaulting to 1 (`compact`) for an unknown or
+--- absent value — the same degrade-don't-error rule `columns.layout` applies.
+---@param policy string?
+---@return integer
+local function layout_policy_index(policy)
+    for i, p in ipairs(LAYOUT_POLICIES) do
+        if p.policy == policy then return i end
+    end
+    return 1
+end
+
 
 -- Remembered cursor position per repository, keyed by the repository root
 -- (repo.root, §2.1 — the repo the graph reflects). The value is the hash of the
@@ -342,6 +367,7 @@ local KEYBINDS = {
     { "q", "Hide the graph (<leader>wg returns; <C-w>q destroys)" },
     { "<C-o> / <C-i>", "Navigate back / forward through the view history" },
     { "m", "Cycle the merge/split rendering style" },
+    { "C", "Cycle the lane layout policy (compact / survivors / linear / straight)" },
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
     { "<Space>", "Collapse / expand the branch under the cursor (toggle)" },
@@ -372,11 +398,18 @@ local KEYBINDS = {
 ---@param modes table<string, string>?  -- explicit branch-mode overrides (§10)
 ---@param focus boolean?  -- the first-parent focus default is on (§10.7)
 ---@param sort_label string?  -- the active sort mode's label (§3.1)
-local function footer_text(mirror, modes, focus, nanchors, sort_label, track_str)
+---@param layout_label string?  -- the active layout policy id (§5.6)
+local function footer_text(mirror, modes, focus, nanchors, sort_label, track_str, layout_label)
     local status = ("Mode: %s | Refs: %s"):format(
         MERGE_STYLES[merge_style_index].name, LABEL_MODES[label_mode_index].name)
     if sort_label then
         status = status .. " | Sort: " .. sort_label
+    end
+    -- The layout policy (§5.6) shows only when it is NOT the default, so the
+    -- ordinary footer is unchanged and a non-default policy is always visible —
+    -- the same rule as `(mirrored)` and the collapsed/hidden counts below.
+    if layout_label and layout_label ~= "compact" then
+        status = status .. " | Layout: " .. layout_label
     end
     -- Current branch's upstream divergence (§6.3), e.g. "master ⇡2⇣3" / "… gone";
     -- omitted when in sync or untracked.
@@ -1357,6 +1390,7 @@ end
 ---@field palette GraphPalette
 -----@field merge_style "compact"|"normal"|"merge"
 ---@field merge_style MergeStyle
+---@field layout_policy? "compact"|"survivors"|"linear"|"straight"  lane layout policy (default "compact", cycled by `C`); §5.6
 ---@field branches? string|string[]
 ---@field sort_mode? string  initial row sort mode id (§3.1): "topo" | "date" | "author"
 ---@field icons Icons
@@ -2138,6 +2172,30 @@ local function h_merge_style(ctx)
     ctx.opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
     ctx:reflow()
     ctx:update_footer()
+    ctx:place_cursor()
+end
+
+-- C: cycle the lane layout policy (§5.6) — full reflow.
+--
+-- The index is derived from the window's OWN `ctx.opts.layout_policy` (not a
+-- module-level counter), so two graphs can sit at two policies at once — the
+-- point of the feature. `reflow()` rather than `refresh()`: a different placement
+-- can change which markers pack (§10.4), so the display item count can change and
+-- the listview needs `set_items`. `goto_hash` is not optional either — without
+-- re-anchoring on the same commit the two renderings can't be compared row for
+-- row, which is the whole reason the toggle exists.
+local function h_layout_policy(ctx)
+    local keep
+    local ok, pos = pcall(vim.api.nvim_win_get_cursor, ctx:win())
+    if ok then keep = ctx:cursor_hash(pos[1]) end
+    local i = layout_policy_index(ctx.opts.layout_policy) % #LAYOUT_POLICIES + 1
+    ctx.opts.layout_policy = LAYOUT_POLICIES[i].policy
+    -- The panes hold a shallow copy of `opts` frozen at window creation, so the
+    -- footer would silently keep the open-time policy and read as a pane bug.
+    if ctx.pane_opts then ctx.pane_opts.layout_policy = ctx.opts.layout_policy end
+    ctx:reflow()
+    ctx:update_footer()
+    if keep then ctx:goto_hash(keep) end
     ctx:place_cursor()
 end
 
@@ -2935,6 +2993,7 @@ local GRAPH_KEYS = {
     ["q"] = h_q,
     ["<C-w>q"] = h_destroy,
     ["m"] = h_merge_style,
+    ["C"] = h_layout_policy,
     ["M"] = h_mirror,
     ["B"] = h_label_mode,
     ["<Space>"] = h_space,
@@ -3290,6 +3349,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         },
         --merge_style = "merge"
         merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style),
+        -- Lane layout policy (§5.6): which lanes may move sideways to close a
+        -- gap. `compact` is today's behaviour. Cycle live with `C`.
+        layout_policy = "compact",
         -- Render the graph mirrored (lane 1 at the right, nearest the message)
         -- by default. Toggle live with M.
         mirror = true,
@@ -3392,6 +3454,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field repo_key string            keys saved_positions / recent_refs (== repo.root)
     ---@field repo_name string           the repo's display name (title; § 2.1)
     ---@field opts GraphOptions          the (copied) options table, mutated live by toggles
+    ---@field pane_opts? GraphOptions    the panes' shallow copy of opts, frozen at window
+    ---                                  creation except for fields a live toggle syncs (§5.6)
     ---@field repo Repo                  commits / order / display / refs / head
     ---@field palette table             == opts.palette
     ---@field seed_pin_names table<string,boolean>  pointer marks pinned by default (§11.7.6)
@@ -3712,7 +3776,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if lbl ~= "" then track_str = repo.head .. lbl end
             end
             local status = footer_text(opts.mirror, view_state.modes,
-                opts.collapse_merged ~= false, nanchors, SORT_MODES[sort_mode_index].label, track_str)
+                opts.collapse_merged ~= false, nanchors, SORT_MODES[sort_mode_index].label, track_str,
+                opts.layout_policy)
             -- Commit selection (§13): show the mode + the selected row count.
             if sel.active then
                 status = status .. (" | SELECT %d"):format(#(sel.path or {}))
@@ -4108,6 +4173,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             merge_on_separate_line = false,
             split_on_separate_line = false,
         }
+        -- This copy is FROZEN at window creation, so anything toggled on
+        -- `ctx.opts` afterwards never reaches the panes. The layout policy (§5.6)
+        -- is toggled live by `C`, so publish the copy on ctx and let the handler
+        -- keep this one field in step — otherwise the footer silently keeps the
+        -- open-time policy while the main view changes, which reads as a pane bug.
+        ctx.pane_opts = pane_opts
 
         local function close_pane(p)
             if p.win and vim.api.nvim_win_is_valid(p.win) then

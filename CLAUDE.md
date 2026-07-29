@@ -242,7 +242,12 @@ Coverage:
   keeps a non-trunk cone lane connected through the hub
 - `tests/columns_spec.lua` — Phase 1 (`columns.layout`) directly: per-cell
   well-formedness (≤1 vertical, the turn cap), vertical continuity, and a fuzz
-  sweep across all five styles; plus track-id reuse (a straight chain is one id;
+  sweep across all five styles **× all four layout policies** (§5.6); plus the
+  policy reclassification — the linear-slide test ("compacts an expanded inline
+  branch next to the trunk") is pinned to the **sliding** policies only, while
+  root column break and compact column reuse run the whole matrix (they are a
+  universal invariant and a fan-out-placement rule, not compaction);
+  plus track-id reuse (a straight chain is one id;
   a new id only at a branch head or an extra merge parent); plus free-list
   colouring (spec §5.5): each lane keeps one colour for life, concurrent lanes
   get distinct colours, a first-parent chain is one colour, and an ended lane's
@@ -382,7 +387,15 @@ Coverage:
   column into a farther gap); and **a fan line carries no compaction** — on an
   inline-fan commit line a pure survivor (begin ≠ C and parent ≠ C) draws no
   horizontal segment, i.e. it crosses the fan vertically instead of compacting
-  along it (fuzzed over the inline / split-line / merge-line styles).
+  along it (fuzzed over the inline / split-line / merge-line styles). The whole
+  STYLES × FIXTURES sweep and **both** compaction guards run across all four
+  layout policies (§5.6) — the guards are violation counts, so they hold unchanged
+  (vacuously under `straight`). Plus a `layout policy (§5.6)` block: the
+  linear-commit slide changes the layout on only a small minority of DAGs while
+  survivor compaction dominates (asserted as a wide-margin relation, not a count),
+  under `straight` no lane ever changes column, and an unknown/absent policy falls
+  back to `compact`. The `inline+mergesplit` characterization snapshot is pinned
+  to `compact` explicitly (a golden snapshot is a picture of one policy).
 - `tests/graph_mirror_spec.lua` — the `mirror` render transform (spec §5.4):
   the same invariant suite must pass on mirrored output, the mirrored grid must
   equal the horizontal flip of the normal grid (reverse + glyph swap), and the
@@ -491,6 +504,26 @@ Details not covered by the spec or architecture:
   continuity. **Phase 2** `get_column_chars` (in graph.lua) renders glyphs and
   colour from those Segments. `build_graph`/`refresh_columns` are Phase 1 entry
   points (both go through `columns.layout`).
+- **Layout policy** (`opts.layout_policy`, default `"compact"`, cycled by `C`;
+  spec §5.6): lane placement is a named enum — `compact` (linear-commit slide +
+  survivor compaction, today's behaviour), `survivors` (no slide), `linear` (no
+  survivor compaction), `straight` (neither; every lane holds its column for
+  life). All four are **chains of the existing stages** in `columns.lua` — no new
+  stage code — dispatched through a `POLICY` record `{ body, seam }` (+ a reserved
+  `prepass` hook for a future `interval` placement policy). `straight` reuses
+  `layout_seam` verbatim, so "straight is the no-move chain" holds by
+  construction. An unknown/absent value falls back to `compact`. §5.1's invariants
+  are classified accordingly: **universal** (hold under every policy),
+  **conditional guards** (constrain any jog a policy makes — written as violation
+  counts, so they go vacuous rather than false), **policy-specific** (only the
+  linear-commit slide), and **fan-out placement** (a separate axis in `fan_out`,
+  which every chain runs). Unlike `merge_style_index`/`sort_mode_index`/
+  `label_mode_index`, the cycle index is derived from `ctx.opts.layout_policy`
+  per keypress — deliberately per-window, since the point is comparing two
+  windows at two policies. `ctx.pane_opts` (the panes' shallow copy of `opts`,
+  frozen at window creation) is kept in step by the handler. The **footer** pane
+  follows the policy; the **header** does not (it is the direct seam-up grid,
+  never `columns.layout`).
 - **Branch modes — the view builder** (`view.lua`, spec §10): a pure
   pre-Phase-1 stage projecting the immutable commit DAG + a view state (per-ref
   `normal`/`collapsed`/`hidden`) into an **OrderItem graph** of DisplayNodes that
