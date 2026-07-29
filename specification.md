@@ -453,11 +453,40 @@ The graph is walked top to bottom (newest heads on top, roots at the bottom), so
 a Lane's `begin` (child) is always already placed when its `end` (parent) is
 reached. A Column's rendered **glyph** is a function of the union of its
 Segments' connectivity; its **colour** is one carried Lane's `color`, chosen by
-a "top" strategy that prefers a highlighted Lane (§12). A commit's first parent
-continues in the commit's column and **reuses the incoming lane's `id` and
-`color`**, so a straight first-parent chain reads as one colour; a fresh `id`
-and a free-list `color` (§5.5) are taken only where a lane is born — a branch
-head, or a merge's second-and-later parent.
+a "top" strategy that prefers a highlighted Lane (§12).
+
+#### Lane identity — which chain continues
+
+A commit's first parent continues the identity of the incoming Lane whose child
+**has this commit as its FIRST parent** — the child that genuinely continues *into*
+it — so a first-parent chain reads as one `id` and one `color` end to end. The
+choice is **semantic**, made from the DAG and the row order alone:
+
+- **Several children qualify** (a fork where more than one child's first parent is
+  this commit): the **most senior** wins — the smallest `id`. Ids are minted in row
+  order and carried along a whole first-parent chain, so the smallest id is the
+  chain that started highest; a topic forking off a trunk is always junior to it.
+- **No child qualifies** (every child reached this commit through a merge, as a
+  second-or-later parent): no incoming wire is a continuation, so the first parent
+  **starts a new chain** — a fresh `id` and a fresh free-list `color` (§5.5). It is
+  a distinct line of history and says so.
+
+A fresh `id` and `color` are therefore taken where a lane is born: a branch head, a
+merge's second-and-later parent, and a first parent with nothing continuing into it.
+
+**Identity never depends on placement.** No column, and no ordering by column, may
+influence an `id`, a `color`, or the order in which colours are returned to the free
+list. This is what makes lane identity **invariant across layout policies** (§5.6):
+the same commits in the same row order produce the same lane ids and colours under
+every policy, which differ only in *where* the lanes are drawn. Switching policy
+with `C` moves the graph; it never recolours it.
+
+> The rule was previously "reuse the **leftmost** incoming lane's id and colour" — a
+> positional proxy for "the trunk", sound only while the trunk happened to sit
+> leftmost. It failed wherever a topic lane landed left of the trunk: the merge and
+> the whole spine below it were drawn as the topic. Any layout that constrains
+> columns (§5.6 `gutter`) turns that from an edge case into the common one, which is
+> how it was found — but it was never gutter-specific.
 
 ### 5.1 Invariants
 
@@ -688,8 +717,18 @@ curated palette is **shared** on exhaustion (a slot reused, reference-counted so
 it returns only when its last holder ends; a lane is never recoloured, since that
 would break its colour continuity).
 
-A first-parent continuation keeps the trunk's slot (one colour per first-parent
-chain, §5); only a branch head or a merge's extra parent allocates.
+A first-parent continuation keeps the continued chain's slot (one colour per
+first-parent chain, §5). Allocation happens at the three places a lane is born: a
+branch head, a merge's extra parent, and a first parent with **no** incoming child
+that continues into it (§5 lane identity) — the last of these returns every incoming
+colour and takes a fresh one, since nothing it inherits would be truthful.
+
+**The free list is order-sensitive, so the return order is fixed by identity too.**
+A returned slot goes to the back of the FIFO, so *which* colour a later lane receives
+depends on the order the ended lanes were returned in. That order is therefore taken
+from the lanes' `id`s — row order — never from their columns; otherwise colour would
+depend on placement through the back door, and two layout policies (§5.6) would
+diverge on colour even with identical identity rules.
 
 **Reserved slots.** A slot may be **held out of the free list entirely** for as
 long as something owns it: it is dropped from the FIFO, counted in use, and
@@ -782,19 +821,14 @@ glyph**. The claim rule is what makes it work: only a lane whose parent is the n
 subject-owning commit may enter the gutter, so the gutter is guaranteed free when
 the fan-in arrives.
 
-**One behavioural consequence, and it is not cosmetic.** A commit's first parent
-inherits the id and colour of its **leftmost incoming** lane (§5). At a commit with
-several children that means *which child's colour continues downward* is decided by
-column order — and this policy changes column order. Under `gutter` the colour
-continues along whichever branch was in the gutter, i.e. the one being read, rather
-than whichever happened to sit leftmost in an unconstrained layout. Both satisfy §5;
-they pick different lanes. The practical effect is that a first-parent chain's
-colour can change at a **split** in a different place than it would under the other
-policies, and a pinned anchor's tip lane is therefore not always the same lane id
-that crosses a given cutoff (the context header renders the lane it can actually
-track, which stays consistent with the main view).
+**Colour and identity are the same under this policy as under every other.** Lane
+identity is chosen from the DAG and the row order alone (§5), so constraining columns
+cannot change it: the same history renders the same lane ids and colours under
+`compact` and under `gutter`, differing only in where each lane is drawn. That is a
+guarantee, asserted across policies, not an accident — and it is what makes `C` a
+comparison tool rather than a repaint.
 
-Three further consequences worth stating:
+Three consequences worth stating:
 
 - A **newly born lane can claim the gutter for free.** At a merge, the parent
   starting the merged-in lineage is the next subject commit, so it is placed
