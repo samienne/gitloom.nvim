@@ -451,8 +451,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   reading to a **fixed column** beside the message, so it is always obvious which
   branch a message belongs to; a run of commits on one branch draws a straight
   vertical with the nodes on it, and the column changes hands only where the next
-  commit belongs to a different branch. It costs no extra rows and almost no extra
-  ink; it does draw more crossings on the rows where the column changes hands.
+  commit belongs to a different branch. Each handover is drawn on rows of its own —
+  one lane moves out, then one moves in — so no row ever carries two wires along the
+  same run. It costs those extra rows (a few percent in the default focused view,
+  more with every branch expanded) and the crossings they draw.
   Cycle live with `C` to compare them on a real repository; the
   live value is per-window and resets to this option on reopen. See
   [specification.md](specification.md) §5.6.

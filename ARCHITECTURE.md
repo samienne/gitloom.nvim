@@ -162,8 +162,8 @@ still land in the same tick. The repo.order index is cached (`order_idx`).
    into the actual sequence of rendered **screen rows** — real `columns` lines PLUS the
    **virtual** fan rows (`virt_lines`; each takes a screen row but *no* real buffer line,
    so `line('w0')`/`line('w$')` cannot address it). It is **count-based**:
-   `rows_of(item)` returns `{ above, height, below }` (default reads the single
-   `.split`/`.merge` fans), so any number of virtual rows above/below — and both on one
+   `rows_of(item)` returns `{ above, height, below }` (default counts the item's `.above`
+   LIST and its single `.merge` fan), so any number of virtual rows above/below — and both on one
    commit — just work. Each screen row carries a signed `virt` (`0` columns, `-k` the
    k-th row above, `+k` below); `cols[di]` maps a display item to its first columns
    screen row. The live glue derives `bs`, the **bottom visible screen row (a model
@@ -228,8 +228,11 @@ to each other and to the lanes crossing the cutoff:
    bottom butts the seam item's top line exactly; `pane.boundary_of(line, up=true)` reads
    the **up-lanes** of that line. **Virtual lines matter:** when the seam item is a fork its
    children diverge on its **split** (virtual) line, so the boundary is read from
-   `item.split` (`kind = "split"`) — not the single mainline lane on the columns line —
-   otherwise a fork sitting right below the viewport hides every branch that forks from it.
+   the item's topmost **above**-line (`kind = "above"`; the caller resolves it with
+   `pane.seam_line`, which decodes the seam's `virt` against the `above` list — `virt = -1`
+   is the row NEAREST the columns line, so the topmost of `n` is `virt = -n` = `above[1]`)
+   — not the single mainline lane on the columns line — otherwise a fork sitting right
+   below the viewport hides every branch that forks from it.
    Verified against nvim's actual rendering in `tests/screen_window_spec` and swept over
    every window top position in `tests/header_window_spec`. (The footer is the exact
    mirror: `pane.footer_bs`/`pane.footer_seam` + the seam item's **merge** fan; see the
@@ -908,11 +911,15 @@ state = {
 
 **Lines and sections.** A **line** is a `GraphColumn[]` — the exact shape Phase 2
 consumes — so the invariant validators apply to it directly. An item's lines form
-**three sections**: zero-or-more `above` (virtual, fan-in rows), exactly one `main`
-(real, carries the node), zero-or-more `below` (virtual, fan-out rows). Render
-order is `above` top-to-bottom, then `main`, then `below`. Today's styles emit ≤1
-above and ≤1 below; the sections are lists so a future strategy can spread one wide
-fan over several rows.
+**three sections**: zero-or-more `above` (virtual), exactly one `main` (real,
+carries the node), zero-or-more `below` (virtual, fan-out rows). Render order is
+`above` top-to-bottom, then `main`, then `below`. The merge style contributes at
+most one above (the split fan) and one below (the merge fan); the `gutter` policy
+adds its two handover rows above, so **`above` really can hold three lines** and
+`OrderItem.above` is a list end to end (spec §5 *Line*) — there is no single
+`.split` slot. A virtual line takes a screen row but no real buffer line, so the
+listview's line counting, `order_at` and the cone viewport are unaffected by how
+many there are; `pane.screen_lines` counts them.
 
 **Grid occupancy.** The stages read occupancy from two reservations on `state.g`,
 which together encode the one rule that keeps the graph legible — *a fan's
@@ -970,8 +977,8 @@ fan_line flags). Then the **layout strategy** chains the grid stages:
 - `fan_out` — the diverging parents' columns (endpoint-only reservation,
   freed-column reuse), drawn inline or on the merge line below; then advance
   `active` / `blocked`.
-- `finalize` — assemble the main line, build the `OrderItem` (`split` / `columns` /
-  `merge` + parent/child lanes).
+- `finalize` — assemble the main line, build the `OrderItem` (`above` list /
+  `columns` / `merge` + parent/child lanes).
 
 The draw order — survivors, then fan-in, then the moved survivors, then fan-out —
 is what keeps the grid byte-identical to the old algorithm.
@@ -1019,7 +1026,7 @@ code**: they are chains of the stages already here, differing only in whether
 `slide` runs and whether the compaction slot holds `compact` or `carry`.
 `layout_seam` *is* the no-slide/no-compact chain already, byte-identical to what
 `straight` needs. `gutter` is the one policy that changes **placement** rather than
-movement, so it brings one new stage.
+movement, so it brings three new stages.
 
 | Policy | Body chain (after the shell steps) |
 |--------|------------------------------------|
@@ -1027,7 +1034,7 @@ movement, so it brings one new stage.
 | `survivors` | `seed_bars` `place_commit` `fan_in` `compact` `fan_out` `finalize` |
 | `linear` | `seed_bars` `place_commit` `slide` `fan_in` `carry` `fan_out` `finalize` |
 | `straight` | `seed_bars` `place_commit` `fan_in` `carry` `fan_out` `finalize` |
-| `gutter` | `seed_bars` **`place_gutter`** `fan_in` `carry` `fan_out` `finalize` |
+| `gutter` | **`evict_gutter`** **`claim_gutter`** `seed_bars` **`place_gutter`** `fan_in` `carry` `fan_out` `finalize` |
 
 A policy is therefore a **record carrying both chains**, not a single strategy —
 `{ body, seam }` — because the seam row's requirement (every seeded lane keeps its
@@ -1047,15 +1054,19 @@ plus one placement constraint: the **lane** owning the current subject row is he
 in model column 1, so its commits' nodes land there without anything moving. It
 does three things.
 
-*Claim.* At most one outgoing lane may enter the gutter — the one whose `parent` is
-the next **subject-owning** commit (`state.subject`, derived in `decide_style` from
-the same `collapsed` / `junction` test `inline_junction` makes). Everything else
-keeps out, so the gutter is always either the current subject lane or empty, and it
-is therefore guaranteed free when the next subject row's fan-in turns in. That
-lookahead is what the **`prepass`** hook is for: `gutter_prepass` walks `items`
-backwards once, returning "the next subject commit" per index. Its return value is
-threaded onto each row as `state.pre` (indexed by `state.index`) rather than
-annotated onto `items`, so a layout run writes nothing back to the caller.
+*Claim.* Only a **subject** row may claim the gutter (`state.subject`, derived in
+`decide_style` from the same `collapsed` / `junction` test `inline_junction`
+makes), and it claims for its **own** chain: the node goes there and its first
+parent continues there, full stop — no other parent may enter. Everything else
+keeps out, so the gutter is always either the current subject lane or empty.
+
+An earlier version had the *outgoing* lane whose `parent` was the next subject
+commit claim the gutter one row early, which needed a `prepass` lookahead. That was
+a bug, not an optimisation: a node's colour is read from its cell's downward
+segment, so a merge whose merged-in lineage had claimed the gutter rendered as the
+topic branch. The claim now happens on the row that uses it (below), and **no
+policy uses the `prepass` hook** — it is kept for the reserved `interval`
+placement (spec §5.6).
 
 *Node.* A subject row's node goes in the gutter; a marker or junction keeps its own
 lane column, and — because the claim rule keys on *subject* rows — a marker between
@@ -1082,15 +1093,41 @@ why adding this policy is provably inert for the other four (verified cell-for-c
 against both the pre-gutter and the shipped baseline, 12,340 cases each, 0
 differing).
 
-**The handover is two fans, not a swap.** When the next subject commit is on a
-different lane, the gutter changes hands — and deliberately *not* by transposing two
-lanes over one row. That would put both lanes' bends in the gutter cell, which
-renders `├─┤` (indistinguishable from a fan bus) with one colour for two wires: the
-§5.2 handoff. Instead the last commit of a run simply does not claim the gutter, so
-its continuation leaves as **its own fan-out** turn, and the next subject commit's
-lane turns in as **its own fan-in** — two ordinary fans on two different rows, each
-with at most one turning lane per cell, costing no extra row and no new glyph. This
-is why `gutter` needs no swap glyph and no virtual swap row.
+**The handover is two virtual rows, one move each** (spec §5.6). When a subject row
+belongs to a different lane than the one in the gutter, the column changes hands —
+and deliberately *not* by transposing the two lanes over one row. That would put
+both lanes' bends in the gutter cell, which renders `├─┤` (indistinguishable from a
+fan bus) with one colour for two wires: the §5.2 handoff. Putting either move on a
+**commit Line** is the same defect one step out — the move travels one way along a
+run and that commit's own fan travels the other, so a reader following the run
+cannot tell which wire is theirs, and it is exactly what the §5.1 horizontal-sharing
+checker flags. So the handover gets two virtual rows of its own, run *before*
+`seed_bars` (they patch the recorded columns, so every later stage sees the new
+ones) and appended to `state.above` in render order:
+
+- **`evict_gutter`** — the occupant (a survivor, not incident to this commit) leaves
+  the gutter for the nearest free column to its right.
+- **`claim_gutter`** — the arriving lane turns in from its own column to the gutter.
+  *Which* lane is `state.trunk_in`, the chain this commit continues (§5 lane
+  identity, chosen from the DAG in `spawn_lanes` — never from a column), so the
+  gutter cell's wire above the node and its wire below it are one Lane and one
+  colour. It declines when there is nothing to move: a tip; one of this commit's own
+  children already in the gutter (then the commit's *fan* converges there, which is
+  a fan and may legitimately share its Line); a survivor still holding it (eviction
+  declined, so the node falls back off-gutter); or a root-blocked gutter.
+
+Each row moves **exactly one lane**, so it carries one horizontal run in one
+direction and nothing else turns on it. The commit Line below then carries only
+that commit's own fan — which is why the §5.1 no-crossings corollary holds under
+`gutter` with counts identical to `straight`'s. The cost is rows: up to two extra
+virtual rows per handover, on 0.3–17.6 handovers per 100 rendered rows (spec §5.6
+measures it). No new glyph, and no swap cell.
+
+`above` being a **list** is what makes this expressible — it is why `OrderItem.split`
+became `OrderItem.above`. Before, a row whose own split fan occupied the single
+above-slot could not also carry an eviction row and silently degraded to placing its
+node off the gutter; now an eviction row, a claim row and a split fan coexist on one
+commit.
 
 `opts.layout_policy` selects the record; an unknown or absent value falls back to
 `compact`, since it is read from user config and must never error.
