@@ -121,38 +121,54 @@ local STYLES = {
     mergesplit = { split_on_separate_line = false, merge_on_separate_line = false, allow_merge_on_split = true },
 }
 
-for style, ms in pairs(STYLES) do
-    describe("columns.layout [" .. style .. "]", function()
-        local opts = h.big_opts(ms)
-        for name, rows_spec in pairs(FIXTURES) do
-            it("is well-formed for " .. name, function()
-                local rows = columns.layout(opts, h.dag(rows_spec))
-                local errs = check(opts, rows)
-                if #errs > 0 then
-                    print("\n=== " .. style .. "/" .. name .. " ===\n" .. render(opts, rows)
-                        .. "\n--- errors ---\n" .. table.concat(errs, "\n"))
-                end
-                assert.equals(0, #errs)
-            end)
-        end
+-- Layout policies (spec §5.6). Phase 1's per-cell well-formedness, continuity and
+-- colouring are all UNIVERSAL invariants (§5.1), so the whole style sweep runs
+-- under every policy.
+local POLICIES = { "compact", "survivors", "linear", "straight" }
+-- The policies that run the linear-commit slide — the one §5.6 policy-specific
+-- behaviour, so assertions about a *commit* moving belong to these two only.
+local SLIDING = { "compact", "linear" }
 
-        it("is well-formed across random DAGs", function()
-            local failures = {}
-            for seed = 1, 60 do
-                local n = 3 + (seed % 10)
-                local rows = columns.layout(opts, h.dag(h.random_dag(n, seed)))
-                local errs = check(opts, rows)
-                if #errs > 0 then
-                    failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s")
-                        :format(seed, n, render(opts, rows), table.concat(errs, "\n"))
-                    if #failures >= 3 then break end
+local function policy_opts(ms, policy)
+    local o = h.big_opts(ms)
+    o.layout_policy = policy
+    return o
+end
+
+for style, ms in pairs(STYLES) do
+    for _, policy in ipairs(POLICIES) do
+        describe("columns.layout [" .. style .. " / " .. policy .. "]", function()
+            local opts = policy_opts(ms, policy)
+            for name, rows_spec in pairs(FIXTURES) do
+                it("is well-formed for " .. name, function()
+                    local rows = columns.layout(opts, h.dag(rows_spec))
+                    local errs = check(opts, rows)
+                    if #errs > 0 then
+                        print("\n=== " .. style .. "/" .. policy .. "/" .. name .. " ===\n" .. render(opts, rows)
+                            .. "\n--- errors ---\n" .. table.concat(errs, "\n"))
+                    end
+                    assert.equals(0, #errs)
+                end)
+            end
+
+            it("is well-formed across random DAGs", function()
+                local failures = {}
+                for seed = 1, 60 do
+                    local n = 3 + (seed % 10)
+                    local rows = columns.layout(opts, h.dag(h.random_dag(n, seed)))
+                    local errs = check(opts, rows)
+                    if #errs > 0 then
+                        failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s")
+                            :format(seed, n, render(opts, rows), table.concat(errs, "\n"))
+                        if #failures >= 3 then break end
+                    end
                 end
-            end
-            if #failures > 0 then
-                assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
-            end
+                if #failures > 0 then
+                    assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
+                end
+            end)
         end)
-    end)
+    end
 end
 
 describe("columns.layout dumps", function()
@@ -208,26 +224,31 @@ describe("columns.layout root column break", function()
         end
     end
 
-    it("does not stack a branch head under a root", function()
-        -- Two independent chains: a1->a2(root), then b1(head)->b2(root). Without
-        -- the break, b1 reuses a2's column and the four nodes read as one lane.
-        local rows = columns.layout(h.big_opts(), h.dag({
-            { "a1", { "a2" } }, { "a2", {} },
-            { "b1", { "b2" } }, { "b2", {} },
-        }))
-        assert.is_true(commit_col(rows, "a2") ~= commit_col(rows, "b1"))
-    end)
+    -- UNIVERSAL (§5.1): the break lives in the sweep's own `blocked` bookkeeping —
+    -- read by tip placement and fan-out, never produced by a compaction move — so
+    -- it must survive a policy that moves nothing. Asserted across the matrix.
+    for _, policy in ipairs(POLICIES) do
+        it("does not stack a branch head under a root [" .. policy .. "]", function()
+            -- Two independent chains: a1->a2(root), then b1(head)->b2(root). Without
+            -- the break, b1 reuses a2's column and the four nodes read as one lane.
+            local rows = columns.layout(policy_opts(nil, policy), h.dag({
+                { "a1", { "a2" } }, { "a2", {} },
+                { "b1", { "b2" } }, { "b2", {} },
+            }))
+            assert.is_true(commit_col(rows, "a2") ~= commit_col(rows, "b1"))
+        end)
 
-    it("alternates columns for a run of stacked roots", function()
-        -- The block lasts one row, so consecutive single-commit roots zigzag
-        -- between two columns rather than marching ever rightward.
-        local rows = columns.layout(h.big_opts(), h.dag({
-            { "a", {} }, { "b", {} }, { "c", {} }, { "d", {} },
-        }))
-        local a, b, c = commit_col(rows, "a"), commit_col(rows, "b"), commit_col(rows, "c")
-        assert.is_true(a ~= b) -- b offset off a
-        assert.equals(a, c)    -- a's column free again by c
-    end)
+        it("alternates columns for a run of stacked roots [" .. policy .. "]", function()
+            -- The block lasts one row, so consecutive single-commit roots zigzag
+            -- between two columns rather than marching ever rightward.
+            local rows = columns.layout(policy_opts(nil, policy), h.dag({
+                { "a", {} }, { "b", {} }, { "c", {} }, { "d", {} },
+            }))
+            local a, b, c = commit_col(rows, "a"), commit_col(rows, "b"), commit_col(rows, "c")
+            assert.is_true(a ~= b) -- b offset off a
+            assert.equals(a, c)    -- a's column free again by c
+        end)
+    end
 end)
 
 describe("columns.layout compact column reuse (spec §5.1)", function()
@@ -256,63 +277,78 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
         return w
     end
 
-    it("keeps a staircase of merges bounded, not growing per merge", function()
-        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = false })
-        -- Width must not scale with the number of merges: a short and a long
-        -- staircase render the same bounded width (3: trunk + the alternating gap).
-        assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(3)))))
-        assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(12)))))
-    end)
+    -- Column reuse is the **fan-out placement** rule (§5.1) — a separate axis from
+    -- compaction: it decides where a newly diverging lane is PUT, not whether an
+    -- existing one moves, and it lives in `fan_out`, which every policy chain runs.
+    -- So the bounded widths must be identical under every policy; running the
+    -- matrix here is what keeps a future `interval` placement policy (§5.6) from
+    -- reading as a §5.1 violation.
+    for _, policy in ipairs(POLICIES) do
+        it("keeps a staircase of merges bounded, not growing per merge [" .. policy .. "]", function()
+            local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = false }, policy)
+            -- Width must not scale with the number of merges: a short and a long
+            -- staircase render the same bounded width (3: trunk + the alternating gap).
+            assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(3)))))
+            assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(12)))))
+        end)
 
-    it("stays well-formed and connected across the staircase", function()
-        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = false })
-        local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
-        assert.equals(0, #errs, table.concat(errs, "\n"))
-    end)
+        it("stays well-formed and connected across the staircase [" .. policy .. "]", function()
+            local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = false }, policy)
+            local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
+            assert.equals(0, #errs, table.concat(errs, "\n"))
+        end)
 
-    it("reuses a terminated child's column on a separate merge line", function()
-        -- merge_on_separate_line (split inline, the "merge on its own line" style):
-        -- a merge's fan-out is a row *below* the commit, where the just-merged
-        -- child has already ended — so the outgoing parent reuses that freed column
-        -- instead of leaving an empty-column gap. The gap made the width oscillate
-        -- (2 vs 3) and bounced a right-aligned mirror graph. Width must stay 2.
-        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = true })
-        assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(3)))))
-        assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(12)))))
-        local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
-        assert.equals(0, #errs, table.concat(errs, "\n"))
-    end)
+        it("reuses a terminated child's column on a separate merge line [" .. policy .. "]", function()
+            -- merge_on_separate_line (split inline, the "merge on its own line" style):
+            -- a merge's fan-out is a row *below* the commit, where the just-merged
+            -- child has already ended — so the outgoing parent reuses that freed column
+            -- instead of leaving an empty-column gap. The gap made the width oscillate
+            -- (2 vs 3) and bounced a right-aligned mirror graph. Width must stay 2.
+            local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = true }, policy)
+            assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(3)))))
+            assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(12)))))
+            local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
+            assert.equals(0, #errs, table.concat(errs, "\n"))
+        end)
+    end
 
-    it("compacts an expanded inline branch next to the trunk (no persistent gap)", function()
-        -- Inline mode, two-commit branches: each branch is born one column out (a
-        -- fork-merge can't reuse the just-freed inline cell, the gated handoff),
-        -- but its body must then compact next to the trunk via a single jog rather
-        -- than stranding an empty column its whole length. Every branch commit ends
-        -- up at column 2 (adjacent to the trunk at column 1), node and body alike.
-        local opts = h.big_opts({ split_on_separate_line = false, merge_on_separate_line = false })
-        local rows = {}
-        for k = 1, 4 do
-            rows[#rows + 1] = { "m" .. k, { "m" .. (k + 1), "g" .. k .. "b" } }
-            rows[#rows + 1] = { "g" .. k .. "b", { "g" .. k .. "a" } }
-            rows[#rows + 1] = { "g" .. k .. "a", { "m" .. (k + 1) } }
-        end
-        rows[#rows + 1] = { "m5", {} }
-        local laid = columns.layout(opts, h.dag(rows))
-        local function col(hash)
-            for _, row in ipairs(laid) do
-                if row.commit and row.commit.hash == hash then
-                    for j, t in ipairs(row.columns) do if t.has_commit then return j end end
+    -- POLICY-SPECIFIC (§5.6): this asserts the product of the `slide` stage — a
+    -- linear commit MOVING — which is the one genuine existence claim about
+    -- compaction. It is therefore pinned to the policies that run the slide, not
+    -- run across the matrix. Under `survivors` / `straight` the branch legitimately
+    -- stays in the column it was born in; that is the policy, not a regression.
+    for _, policy in ipairs(SLIDING) do
+        it("compacts an expanded inline branch next to the trunk [" .. policy .. "]", function()
+            -- Inline mode, two-commit branches: each branch is born one column out (a
+            -- fork-merge can't reuse the just-freed inline cell, the gated handoff),
+            -- but its body must then compact next to the trunk via a single jog rather
+            -- than stranding an empty column its whole length. Every branch commit ends
+            -- up at column 2 (adjacent to the trunk at column 1), node and body alike.
+            local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = false }, policy)
+            local rows = {}
+            for k = 1, 4 do
+                rows[#rows + 1] = { "m" .. k, { "m" .. (k + 1), "g" .. k .. "b" } }
+                rows[#rows + 1] = { "g" .. k .. "b", { "g" .. k .. "a" } }
+                rows[#rows + 1] = { "g" .. k .. "a", { "m" .. (k + 1) } }
+            end
+            rows[#rows + 1] = { "m5", {} }
+            local laid = columns.layout(opts, h.dag(rows))
+            local function col(hash)
+                for _, row in ipairs(laid) do
+                    if row.commit and row.commit.hash == hash then
+                        for j, t in ipairs(row.columns) do if t.has_commit then return j end end
+                    end
                 end
             end
-        end
-        -- g1 is born at column 2 (no preceding terminator); g2..g4 are born at
-        -- column 3 then jog to 2. All branch commits sit adjacent to the trunk.
-        for k = 1, 4 do
-            assert.equals(2, col("g" .. k .. "b"))
-            assert.equals(2, col("g" .. k .. "a"))
-        end
-        assert.equals(0, #check(opts, laid), "ill-formed")
-    end)
+            -- g1 is born at column 2 (no preceding terminator); g2..g4 are born at
+            -- column 3 then jog to 2. All branch commits sit adjacent to the trunk.
+            for k = 1, 4 do
+                assert.equals(2, col("g" .. k .. "b"))
+                assert.equals(2, col("g" .. k .. "a"))
+            end
+            assert.equals(0, #check(opts, laid), "ill-formed")
+        end)
+    end
 end)
 
 describe("columns.layout free-list colouring", function()

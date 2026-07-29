@@ -61,6 +61,20 @@ local STYLES = {
     { name = "inline+mergesplit", experimental = true, ms = { split_on_separate_line = false, merge_on_separate_line = false, allow_merge_on_split = true } },
 }
 
+-- Layout policies (spec §5.6) exercised for every fixture, alongside the merge
+-- styles. Every §5.1 UNIVERSAL invariant and both §5.1 GUARDS must hold under all
+-- of them — the guards are violation counts, so they simply go vacuous where a
+-- policy makes no jog. Only the linear-commit slide itself is policy-specific
+-- (§5.6), and it is asserted separately below.
+local POLICIES = { "compact", "survivors", "linear", "straight" }
+
+--- big_opts for a merge style, pinned to a layout policy.
+local function policy_opts(ms, policy)
+    local o = h.big_opts(ms)
+    o.layout_policy = policy
+    return o
+end
+
 local FIXTURES = {
     {
         name = "linear",
@@ -137,28 +151,31 @@ local function fuzz(opts, skip_color)
 end
 
 for _, style in ipairs(STYLES) do
-    describe("graph layout [" .. style.name .. "]", function()
-        for _, fx in ipairs(FIXTURES) do
-            it("lays out " .. fx.name, function()
-                -- big_opts => color is a 1:1 proxy for lane id, so the
-                -- color/id-continuity checks are exact (no palette-collision
-                -- masking). The experimental style skips color (lane handoff).
-                assert_ok(h.big_opts(style.ms), h.dag(fx.rows), style.name .. "/" .. fx.name, style.experimental)
-            end)
-        end
+    for _, policy in ipairs(POLICIES) do
+        describe("graph layout [" .. style.name .. " / " .. policy .. "]", function()
+            local opts = policy_opts(style.ms, policy)
+            for _, fx in ipairs(FIXTURES) do
+                it("lays out " .. fx.name, function()
+                    -- big_opts => color is a 1:1 proxy for lane id, so the
+                    -- color/id-continuity checks are exact (no palette-collision
+                    -- masking). The experimental style skips color (lane handoff).
+                    assert_ok(opts, h.dag(fx.rows), style.name .. "/" .. policy .. "/" .. fx.name, style.experimental)
+                end)
+            end
 
-        if style.experimental then
-            it("produces structurally well-formed graphs for random DAGs", function()
-                -- Color/id-continuity is intentionally not asserted here (lane
-                -- handoff at merges); structural well-formedness still must hold.
-                fuzz(h.big_opts(style.ms), true)
-            end)
-        else
-            it("produces well-formed graphs (incl. exact id-continuity) for random DAGs", function()
-                fuzz(h.big_opts(style.ms), false)
-            end)
-        end
-    end)
+            if style.experimental then
+                it("produces structurally well-formed graphs for random DAGs", function()
+                    -- Color/id-continuity is intentionally not asserted here (lane
+                    -- handoff at merges); structural well-formedness still must hold.
+                    fuzz(opts, true)
+                end)
+            else
+                it("produces well-formed graphs (incl. exact id-continuity) for random DAGs", function()
+                    fuzz(opts, false)
+                end)
+            end
+        end)
+    end
 end
 
 describe("compaction never crosses a lane (§5)", function()
@@ -186,23 +203,29 @@ describe("compaction never crosses a lane (§5)", function()
         return n
     end
 
-    it("lays out no commit-line crossing across a fuzz sweep (both-lines style)", function()
-        local opts = h.big_opts({ split_on_separate_line = true, merge_on_separate_line = true })
-        local bad = {}
-        for seed = 1, 250 do
-            local n = 3 + (seed % 12) -- sizes 3..14
-            local items = h.dag(h.random_dag(n, seed))
-            local rows = build_graph(opts, items)
-            for ri, row in ipairs(rows) do
-                local x = commit_line_crossings(row)
-                if x > 0 then
-                    bad[#bad + 1] = ("seed=%d row=%d crossings=%d"):format(seed, ri, x)
+    -- The guard is UNIVERSAL (§5.1): it constrains any jog a policy makes, so it
+    -- holds under every layout policy — vacuously under `straight`, which makes
+    -- none. Asserting it as a violation COUNT is what lets the same test body run
+    -- unchanged across the matrix.
+    for _, policy in ipairs(POLICIES) do
+        it("lays out no commit-line crossing across a fuzz sweep (both-lines / " .. policy .. ")", function()
+            local opts = policy_opts({ split_on_separate_line = true, merge_on_separate_line = true }, policy)
+            local bad = {}
+            for seed = 1, 250 do
+                local n = 3 + (seed % 12) -- sizes 3..14
+                local items = h.dag(h.random_dag(n, seed))
+                local rows = build_graph(opts, items)
+                for ri, row in ipairs(rows) do
+                    local x = commit_line_crossings(row)
+                    if x > 0 then
+                        bad[#bad + 1] = ("seed=%d row=%d crossings=%d"):format(seed, ri, x)
+                    end
                 end
+                if #bad >= 6 then break end
             end
-            if #bad >= 6 then break end
-        end
-        assert.equals(0, #bad, "\nillegal compaction crossings:\n" .. table.concat(bad, "\n"))
-    end)
+            assert.equals(0, #bad, "\nillegal compaction crossings:\n" .. table.concat(bad, "\n"))
+        end)
+    end
 end)
 
 describe("a fan line carries no compaction (§5)", function()
@@ -236,9 +259,18 @@ describe("a fan line carries no compaction (§5)", function()
         { name = "split-line", ms = { split_on_separate_line = true,  merge_on_separate_line = false } },
         { name = "merge-line", ms = { split_on_separate_line = false, merge_on_separate_line = true } },
     }
+    -- Like the crossing guard above, this is UNIVERSAL (§5.1) — a constraint on
+    -- compaction where it runs, vacuous where it does not — so it runs unchanged
+    -- under every policy.
+    local MATRIX = {}
     for _, style in ipairs(CASES) do
+        for _, policy in ipairs(POLICIES) do
+            MATRIX[#MATRIX + 1] = { name = style.name .. " / " .. policy, ms = style.ms, policy = policy }
+        end
+    end
+    for _, style in ipairs(MATRIX) do
         it("keeps survivors vertical across an inline fan [" .. style.name .. "]", function()
-            local opts = h.big_opts(style.ms)
+            local opts = policy_opts(style.ms, style.policy)
             local bad = {}
             for seed = 1, 250 do
                 local n = 3 + (seed % 12)
@@ -277,8 +309,119 @@ describe("graph layout [inline+mergesplit] characterization", function()
             merge_on_separate_line = false,
             allow_merge_on_split = true,
         })
+        -- A golden snapshot is a picture of ONE policy's output (§5.6), so pin it
+        -- explicitly rather than inheriting whatever the default happens to be —
+        -- otherwise changing the default silently re-blesses a characterization test.
+        opts.layout_policy = "compact"
         local items = h.dag(h.random_dag(7, 108))
         assert.equals(EXPECTED, h.snapshot(opts, items))
+    end)
+end)
+
+describe("layout policy (§5.6)", function()
+    local build_graph = require("gitloom.graph")._internal.build_graph
+
+    -- A compact, order-independent signature of one laid-out graph: enough to tell
+    -- two policies' output apart without pinning a rendering.
+    local function shape(rows)
+        local out = {}
+        for _, row in ipairs(rows) do
+            for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
+                if line then
+                    for j, col in ipairs(line) do
+                        for _, s in ipairs(col.lanes or {}) do
+                            local c = s.connectivity
+                            out[#out + 1] = ("%d:%s%s%s%s:%s"):format(j, c.up and "U" or "", c.down and "D" or "",
+                                c.left and "L" or "", c.right and "R" or "", tostring(s.id))
+                        end
+                    end
+                end
+            end
+            out[#out + 1] = "/"
+        end
+        return table.concat(out, ",")
+    end
+
+    local STYLE_MS = {
+        { split_on_separate_line = false, merge_on_separate_line = false },
+        { split_on_separate_line = true,  merge_on_separate_line = false },
+        { split_on_separate_line = false, merge_on_separate_line = true },
+        { split_on_separate_line = true,  merge_on_separate_line = true },
+    }
+
+    -- How many DAGs each policy renders differently from `compact`.
+    local function divergence()
+        local n, d = 0, { survivors = 0, linear = 0, straight = 0 }
+        for _, ms in ipairs(STYLE_MS) do
+            for seed = 1, 45 do
+                local size = 6 + (seed % 9) -- 6..14
+                local items = h.dag(h.random_dag(size, seed))
+                local base = shape(build_graph(policy_opts(ms, "compact"), items))
+                n = n + 1
+                for p in pairs(d) do
+                    if shape(build_graph(policy_opts(ms, p), items)) ~= base then d[p] = d[p] + 1 end
+                end
+            end
+        end
+        return n, d
+    end
+
+    it("the linear-commit slide almost never changes the layout", function()
+        -- The measured justification behind §5.6: dropping the slide (compact →
+        -- survivors) leaves the graph identical on the overwhelming majority of
+        -- DAGs, while dropping survivor compaction (compact → linear) changes a
+        -- large fraction. Asserted as a wide-margin RELATION, not an exact count,
+        -- so it stays stable as the fixtures/fuzz change.
+        local n, d = divergence()
+        assert.is_true(d.survivors > 0,
+            "the slide never fired at all — the `slide` stage may be dead")
+        assert.is_true(d.survivors < n * 0.25,
+            ("the slide changed the layout on %d/%d DAGs (expected a small minority)"):format(d.survivors, n))
+        assert.is_true(d.linear > d.survivors * 3,
+            ("survivor compaction (%d/%d) should dominate the slide (%d/%d)")
+            :format(d.linear, n, d.survivors, n))
+    end)
+
+    it("under `straight` a lane never changes column", function()
+        -- The defining property of the policy (§5.6): every lane holds its column
+        -- for life. Checked on the pass-through verticals — a jog would show the
+        -- same lane id as a vertical in two different columns.
+        for _, ms in ipairs(STYLE_MS) do
+            for seed = 1, 60 do
+                local size = 4 + (seed % 11)
+                local items = h.dag(h.random_dag(size, seed))
+                local rows = build_graph(policy_opts(ms, "straight"), items)
+                local col_of = {}
+                for ri, row in ipairs(rows) do
+                    for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
+                        if line then
+                            for j, col in ipairs(line) do
+                                for _, s in ipairs(col.lanes or {}) do
+                                    if s.connectivity.up and s.connectivity.down then
+                                        local prev = col_of[s.id]
+                                        assert(prev == nil or prev == j,
+                                            ("seed=%d row=%d lane %s moved column %s -> %d under `straight`")
+                                            :format(seed, ri, tostring(s.id), tostring(prev), j))
+                                        col_of[s.id] = j
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    it("an unknown or absent policy falls back to compact", function()
+        -- `layout_policy` is read from user config, so a typo must degrade, not error.
+        local items = h.dag(h.random_dag(11, 7))
+        local base = shape(build_graph(policy_opts({}, "compact"), items))
+        for _, bogus in ipairs({ "nonsense", "", "COMPACT", "slide" }) do
+            assert.equals(base, shape(build_graph(policy_opts({}, bogus), items)))
+        end
+        local plain = h.big_opts() -- no layout_policy field at all
+        assert.equals(base, shape(build_graph(plain, items)))
     end)
 end)
 
