@@ -861,12 +861,9 @@ the current row. For each commit `C`:
    `parent_lanes`/`child_lanes` to the `OrderItem` for reachability.
 
 Per-column well-formedness (validated by the tests): at most one vertical
-(`up+down`) Segment and at most one *turning* **lane** — counted by lane id, since
-the cap bounds how many separate wires bend in a cell that can render only one
-colour. Two turning Segments of the *same* lane are one wire passing through (the
-`gutter` policy's trunk, arriving from above and leaving below via the gutter). The
-exception is `allow_merge_on_split`, which permits the two-turn cell where an extra
-parent reuses a freed merge column — two *different* lanes, hence the handoff. Empty columns are allowed.
+(`up+down`) Segment and at most one *turning* Segment; the exception is
+`allow_merge_on_split`, which permits the two-turn cell where an extra parent
+reuses a freed merge column. Empty columns are allowed.
 
 `build_graph(opts, items)` lays out a whole ordered list from scratch (the test
 entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
@@ -1027,34 +1024,64 @@ A policy is therefore a **record carrying both chains**, not a single strategy �
 `{ body, seam }` — because the seam row's requirement (every seeded lane keeps its
 seeded column) is orthogonal to the body's placement and must hold under every
 policy. `seam` is `layout_seam` for the four compaction policies; the record is
-what lets `gutter` say otherwise, and it must: `layout_seam` would place the seam
-row's node back on its lane, so a pane's first row would disagree with its body
-about where nodes live. `gutter`'s body already keeps every seeded lane in its
-column (it moves nothing), so it is its own seam. The sweep's
+what lets `gutter` say otherwise, and it must: `layout_seam` does not apply the
+gutter's column constraint, so a pane's first row would place its node differently
+from its body. `gutter`'s body already keeps every seeded lane in its column (it
+moves nothing), so it is its own seam. The sweep's
 `(seed and i == 1) and policy.seam or policy.body` selection stays one expression.
 `straight`'s **body** is that same `layout_seam` function object — reused, not
 duplicated — so "`straight` is the no-move chain" is true by construction rather
 than by two copies staying in sync.
 
 **How `gutter` reaches into the shared stages.** `place_gutter` is `place_commit`
-for a reserved node column: it puts a **subject-owning** node (`state.subject`,
-derived in `decide_style` from the same `collapsed` / `junction` test
-`inline_junction` makes) in model column 1 and leaves a marker or junction node on
-its lane, reserves the gutter on every row so no lane is born into it, and reserves
-each incoming column so a lane born on this row cannot take one a terminating child
-just freed (the §5.1 fan-out placement rule — the trap that produced the
-unsanctioned lane handoff in the prototype). Because the node is then **not** on its
-own lane, two shared stages need to know where the first parent actually goes:
-`place_gutter` publishes it as **`state.kt`**, the trunk column, and `fan_in` /
-`fan_out` read `state.kt or cc`. `state.kt` is `nil` under every other policy, so
-those expressions reduce to the ones that were there before — which is why adding
-this policy is provably inert for the other four (verified cell-for-cell, 12,340
-cases, 0 differing). A reserved third field, `prepass`, is where a
-future `interval` policy (§5.6) hangs its `O(N)` lane-lifespan annotation: a
-`prepass(opts, items)` called once before the sweep, free to annotate `items` in
-place so no hint-plumbing threads through `state`. No current policy declares one,
-and the sweep simply skips it — exactly the annotation-pass shape the lookahead
-sketch below needs.
+plus one placement constraint: the **lane** owning the current subject row is held
+in model column 1, so its commits' nodes land there without anything moving. It
+does three things.
+
+*Claim.* At most one outgoing lane may enter the gutter — the one whose `parent` is
+the next **subject-owning** commit (`state.subject`, derived in `decide_style` from
+the same `collapsed` / `junction` test `inline_junction` makes). Everything else
+keeps out, so the gutter is always either the current subject lane or empty, and it
+is therefore guaranteed free when the next subject row's fan-in turns in. That
+lookahead is what the **`prepass`** hook is for: `gutter_prepass` walks `items`
+backwards once, returning "the next subject commit" per index. Its return value is
+threaded onto each row as `state.pre` (indexed by `state.index`) rather than
+annotated onto `items`, so a layout run writes nothing back to the caller.
+
+*Node.* A subject row's node goes in the gutter; a marker or junction keeps its own
+lane column, and — because the claim rule keys on *subject* rows — a marker between
+two commits of one lane triggers nothing. The one case where a subject node is not
+in the gutter is a **root** having occupied it on the previous row: the §5.1 root
+column break blocks the column, exactly as for any other policy. Measured on a
+1028-commit repository, that accounts for all 10 of the 1028 rows whose node is off
+the gutter, and the defensive "a foreign lane is passing through" fallback never
+fires.
+
+*Reservation.* Every incoming column is reserved for its own row, so a lane born
+here cannot take one a terminating child just freed (the §5.1 fan-out placement
+rule — the trap that produced an unsanctioned lane handoff during development), and
+the gutter itself is held against generic fan-out allocation whenever nothing has
+claimed it.
+
+Because the node may be off its own lane on a handover row, two shared stages need
+to know where the first parent actually goes: `place_gutter` publishes it as
+**`state.kt`**, and `fan_in` / `fan_out` read `state.kt or cc`; a parent pinned to
+the gutter is published by pre-setting its `out`, which the fan-out loop skips.
+`state.kt`, `state.gutter` and a pre-set `out` are all `nil` under every other
+policy, so those expressions reduce to the ones that were there before — which is
+why adding this policy is provably inert for the other four (verified cell-for-cell
+against both the pre-gutter and the shipped baseline, 12,340 cases each, 0
+differing).
+
+**The handover is two fans, not a swap.** When the next subject commit is on a
+different lane, the gutter changes hands — and deliberately *not* by transposing two
+lanes over one row. That would put both lanes' bends in the gutter cell, which
+renders `├─┤` (indistinguishable from a fan bus) with one colour for two wires: the
+§5.2 handoff. Instead the last commit of a run simply does not claim the gutter, so
+its continuation leaves as **its own fan-out** turn, and the next subject commit's
+lane turns in as **its own fan-in** — two ordinary fans on two different rows, each
+with at most one turning lane per cell, costing no extra row and no new glyph. This
+is why `gutter` needs no swap glyph and no virtual swap row.
 
 `opts.layout_policy` selects the record; an unknown or absent value falls back to
 `compact`, since it is read from user config and must never error.

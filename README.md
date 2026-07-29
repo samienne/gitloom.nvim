@@ -144,7 +144,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `q` | Hide the graph window (`<leader>wg` returns to it, `<C-w>q` destroys it) |
 | `<C-o>` / `<C-i>` | Navigate back / forward through the view history (graph ⇄ commit view ⇄ drilled-in submodule) |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
-| `C` | Cycle the lane layout policy (compact → survivors → linear → straight → gutter) — which lanes may move sideways to close a gap, and (gutter) whether the node sits in a fixed column beside the message |
+| `C` | Cycle the lane layout policy (compact → survivors → linear → straight → gutter) — which lanes may move sideways to close a gap, and (gutter) whether the current branch's lane is pinned to a fixed column beside the message |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
@@ -447,11 +447,13 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   survivor compaction, today's behaviour), `"survivors"` (compaction only),
   `"linear"` (slide only), or `"straight"` (neither — every lane holds its column
   for life, so the trunk never steps sideways, at the cost of leaving occasional
-  empty columns). `"gutter"` additionally moves the **node** out of the lanes into
-  a fixed column beside the message, so it is always obvious which row a message
-  belongs to — at the cost of a horizontal connector on every commit row (and so
-  more crossings), one extra column always, and markers sitting a column further
-  from their labels. Cycle live with `C` to compare them on a real repository; the
+  empty columns). `"gutter"` additionally pins the lane of the commit you are
+  reading to a **fixed column** beside the message, so it is always obvious which
+  branch a message belongs to; a run of commits on one branch draws a straight
+  vertical with the nodes on it, and the column changes hands only where the next
+  commit belongs to a different branch. It costs no extra rows and almost no extra
+  ink; it does draw more crossings on the rows where the column changes hands.
+  Cycle live with `C` to compare them on a real repository; the
   live value is per-window and resets to this option on reopen. See
   [specification.md](specification.md) §5.6.
 - **`branches`** — the ref arguments passed to `git log` (default `--all`).
