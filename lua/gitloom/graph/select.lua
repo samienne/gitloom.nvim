@@ -239,6 +239,188 @@ function M.collapse_owners(sig, pinned, effective)
     return (#out > 0) and out or nil
 end
 
+-- ── Pinned branches: the ordered pin list (spec §10.6) ──────────────────────
+--
+-- The pinned branches are ONE ordered list, and "holds a dedicated graph column"
+-- (§10.6.2) is a per-entry FLAG on it — not a second list. Two properties then
+-- hold by construction instead of by discipline: `reserved` ⊆ `pinned`, and
+-- **unpinning implies unreserving** (the flag leaves with its entry). Order is
+-- the anchor priority; it is *meaningful only among reserved entries*, so an
+-- unreserved entry's position is latent until it is reserved.
+--
+-- All of these are pure: they copy in and copy out, never mutating the input
+-- (like `bump_recent`), so the window glue assigns the result back.
+
+--- One entry of the pin list (spec §10.6).
+---@class PinEntry
+---@field id string        -- the ref-owner id (a ref name; §10)
+---@field reserved boolean -- holds a dedicated graph column (§10.6.2)
+---@field auto? string     -- pinned as the pair of this local branch (§6.3 pin-the-pair);
+---                       -- the entry is dropped when its source leaves the list
+
+---@param pins PinEntry[]?
+---@return PinEntry[]
+local function pin_copy(pins)
+    local out = {}
+    for i, e in ipairs(pins or {}) do
+        out[i] = { id = e.id, reserved = e.reserved and true or false, auto = e.auto }
+    end
+    return out
+end
+
+--- Resolve the effective pin list (spec §10.6): the user's explicitly ordered
+--- entries first, in their order, then the built-in default anchors that are not
+--- already on it. An **unpinned** id is suppressed wherever it would come from,
+--- and an entry naming a ref that no longer exists is dropped — so the list is
+--- deterministic for an untouched repository and stable once edited.
+---@param pins PinEntry[]?                     -- the stored, user-ordered entries
+---@param unpinned table<string, boolean>?     -- ids explicitly removed (suppress defaults)
+---@param defaults string[]?                   -- default anchor ids, in default order
+---@param exists table<string, any>?           -- live refs by id (nil = accept every id)
+---@return PinEntry[]
+function M.pin_resolve(pins, unpinned, defaults, exists)
+    unpinned = unpinned or {}
+    local out, seen = {}, {}
+    local function push(id, reserved, auto)
+        if not id or seen[id] or unpinned[id] then return end
+        if exists and exists[id] == nil then return end
+        seen[id] = true
+        out[#out + 1] = { id = id, reserved = reserved and true or false, auto = auto }
+    end
+    for _, e in ipairs(pins or {}) do push(e.id, e.reserved, e.auto) end
+    for _, id in ipairs(defaults or {}) do push(id, false) end
+    return out
+end
+
+--- Move the entry at `index` by `delta` places (spec §10.6.1, `<C-j>`/`<C-k>`),
+--- clamped at the ends — an out-of-range move is a no-op, so the key is safely
+--- repeatable. Returns the new list and the entry's new index.
+---@param pins PinEntry[]?
+---@param index integer
+---@param delta integer
+---@return PinEntry[], integer
+function M.pin_move(pins, index, delta)
+    local out = pin_copy(pins)
+    local target = index + delta
+    if not out[index] or target < 1 or target > #out then return out, index end
+    table.insert(out, target, table.remove(out, index))
+    return out, target
+end
+
+--- Toggle the entry's dedicated-lane flag (spec §10.6.1, `<Space>`).
+---@param pins PinEntry[]?
+---@param index integer
+---@return PinEntry[]
+function M.pin_toggle_reserved(pins, index)
+    local out = pin_copy(pins)
+    if out[index] then out[index].reserved = not out[index].reserved end
+    return out
+end
+
+--- Unpin the entry at `index` (spec §10.6.1, `D`). The reserve flag lives ON the
+--- entry, so unpin **implies** unreserve: there is nothing left behind to clear.
+---@param pins PinEntry[]?
+---@param index integer
+---@return PinEntry[]
+function M.pin_remove(pins, index)
+    local out = pin_copy(pins)
+    if out[index] then table.remove(out, index) end
+    return out
+end
+
+--- Append `id` to the pin list if it is not already on it (the "Pin new branch…"
+--- entry and the `P` key). A newly pinned branch is **not** reserved (§10.6).
+---@param pins PinEntry[]?
+---@param id string
+---@param reserved boolean?
+---@return PinEntry[]
+function M.pin_add(pins, id, reserved)
+    local out = pin_copy(pins)
+    for _, e in ipairs(out) do if e.id == id then return out end end
+    out[#out + 1] = { id = id, reserved = reserved and true or false }
+    return out
+end
+
+--- The membership set of a pin list — the anchor owner ids (§10.6), which is
+--- what `view.owners` / `collapse_owners` consume.
+---@param pins PinEntry[]?
+---@return table<string, boolean>
+function M.pin_ids(pins)
+    local set = {}
+    for _, e in ipairs(pins or {}) do set[e.id] = true end
+    return set
+end
+
+--- The **reserved** ids in pin-list order (spec §10.6.2): the branches that get
+--- a dedicated column, left to right, skipping the unreserved entries between
+--- them. This is the whole of what the list's order means to the layout, so
+--- moving an unreserved entry leaves it unchanged.
+---@param pins PinEntry[]?
+---@return string[]
+function M.reserved_order(pins)
+    local out = {}
+    for _, e in ipairs(pins or {}) do
+        if e.reserved then out[#out + 1] = e.id end
+    end
+    return out
+end
+
+--- The pinned-branches dialog's buffer lines (spec §10.6.1). Pure so the layout
+--- is testable without a window: the entry rows carry the priority number, the
+--- `◆` marker for a reserved entry (blank otherwise — which is what makes
+--- "order matters only among the reserved" visible), and the ref name; the
+--- static key help runs down the right; the last selectable row adds a branch.
+---
+--- The closing note is deliberate: the reserve flag is recorded before the
+--- layout honours it, and a control whose effect is not yet built must say so
+--- rather than appear to work.
+---@param pins PinEntry[]?
+---@return string[] lines
+---@return table<integer, integer|string> rows  -- 1-based line → entry index, or "new"
+function M.pin_dialog_lines(pins)
+    pins = pins or {}
+    local HELP = {
+        "<C-j>/<C-k>  move",
+        "<Space>      toggle lane",
+        "D            unpin",
+        "<CR>         jump to branch",
+        "q            close",
+    }
+    local NEW = "     + Pin new branch…"
+    local TITLE = "Pinned branches"
+    local LEGEND = "◆ = dedicated lane"
+    local NOTE = "◆ is recorded but the layout does not hold dedicated lanes yet."
+
+    local function width(s) return vim.fn.strdisplaywidth(s) end
+
+    -- The left column: one row per entry, then the "pin new" row.
+    local left, rows = {}, {}
+    for i, e in ipairs(pins) do
+        left[i] = ("  %d  %s  %s"):format(i, e.reserved and "◆" or " ", e.id)
+    end
+    left[#pins + 1] = NEW
+
+    local lw = width(TITLE)
+    for _, s in ipairs(left) do lw = math.max(lw, width(s)) end
+
+    local function row(l, r)
+        l = l or ""
+        local pad = (" "):rep(math.max(0, lw - width(l)))
+        return ((l .. pad .. "    " .. (r or "")):gsub("%s+$", ""))
+    end
+
+    local lines = { row(TITLE, LEGEND), "" }
+    for i = 1, math.max(#left, #HELP) do
+        lines[#lines + 1] = row(left[i], HELP[i])
+        if left[i] then
+            rows[#lines] = (i <= #pins) and i or "new"
+        end
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = NOTE
+    return lines, rows
+end
+
 --- Smartcase substring test (spec §16.2): `needle` matches `haystack`
 --- case-insensitively unless `needle` contains an uppercase letter, in which case
 --- the match is case-sensitive (like Neovim's 'smartcase'). A plain literal
