@@ -64,6 +64,7 @@ local LAYOUT_POLICIES = {
     { name = "survivors", policy = "survivors" },
     { name = "linear",    policy = "linear" },
     { name = "straight",  policy = "straight" },
+    { name = "gutter",    policy = "gutter" },
 }
 
 --- The cycle index of a policy id, defaulting to 1 (`compact`) for an unknown or
@@ -1391,7 +1392,7 @@ end
 ---@field palette GraphPalette
 -----@field merge_style "compact"|"normal"|"merge"
 ---@field merge_style MergeStyle
----@field layout_policy? "compact"|"survivors"|"linear"|"straight"  lane layout policy (default "compact", cycled by `C`); §5.6
+---@field layout_policy? "compact"|"survivors"|"linear"|"straight"|"gutter"  lane layout policy (default "compact", cycled by `C`); §5.6
 ---@field branches? string|string[]
 ---@field sort_mode? string  initial row sort mode id (§3.1): "topo" | "date" | "author"
 ---@field icons Icons

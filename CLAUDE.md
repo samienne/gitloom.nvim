@@ -241,12 +241,22 @@ Coverage:
   over-lighting), and the shared descent/ascent at a separate split/merge line
   keeps a non-trunk cone lane connected through the hub
 - `tests/columns_spec.lua` — Phase 1 (`columns.layout`) directly: per-cell
-  well-formedness (≤1 vertical, the turn cap), vertical continuity, and a fuzz
-  sweep across all five styles **× all four layout policies** (§5.6); plus the
+  well-formedness (≤1 vertical, the turn cap — counted by **lane id**, so the
+  `gutter` trunk's two same-lane turns are one wire), vertical continuity, and a
+  fuzz sweep across all five styles **× all five layout policies** (§5.6); plus the
   policy reclassification — the linear-slide test ("compacts an expanded inline
-  branch next to the trunk") is pinned to the **sliding** policies only, while
-  root column break and compact column reuse run the whole matrix (they are a
-  universal invariant and a fan-out-placement rule, not compaction);
+  branch next to the trunk") is pinned to the **sliding** policies only, the two
+  root-column-break tests to the **lane-column** policies (under `gutter` every
+  node is in the same column by definition, so they would assert the opposite of
+  the policy; a dedicated gutter test asserts the property that replaces it), and
+  the staircase widths carry a per-policy constant (`gutter` reserves one extra
+  column; the claim — bounded, identical for 3 and 12 merges — is unchanged), while
+  compact column reuse runs the whole matrix (a fan-out-placement rule, not
+  compaction); plus a **gutter policy** block (§5.6): subject-owning nodes in the
+  gutter and markers/junctions on their lanes (a working-tree node has a subject,
+  so it is a gutter node), no lane ever passing through the gutter between commits
+  (a commit's own hub does occupy it within its own block), and no lane ever moving
+  sideways;
   plus track-id reuse (a straight chain is one id;
   a new id only at a branch head or an extra merge parent); plus free-list
   colouring (spec §5.5): each lane keeps one colour for life, concurrent lanes
@@ -403,9 +413,12 @@ Coverage:
   inline-fan commit line a pure survivor (begin ≠ C and parent ≠ C) draws no
   horizontal segment, i.e. it crosses the fan vertically instead of compacting
   along it (fuzzed over the inline / split-line / merge-line styles). The whole
-  STYLES × FIXTURES sweep and **both** compaction guards run across all four
+  STYLES × FIXTURES sweep and **both** compaction guards run across all five
   layout policies (§5.6) — the guards are violation counts, so they hold unchanged
-  (vacuously under `straight`). Plus a `layout policy (§5.6)` block: the
+  (vacuously under `straight` and `gutter`, which move nothing). The both-lines **no-crossings corollary** is pinned
+  to the **lane-column** policies: under `gutter` the node connector is a fan of one
+  and does cross, so it is replaced by the anchored-run test (every horizontal on a
+  Line belongs to one contiguous run starting at the gutter). Plus a `layout policy (§5.6)` block: the
   linear-commit slide changes the layout on only a small minority of DAGs while
   survivor compaction dominates (asserted as a wide-margin relation, not a count),
   under `straight` no lane ever changes column, and an unknown/absent policy falls
@@ -415,7 +428,12 @@ Coverage:
   the same invariant suite must pass on mirrored output, the mirrored grid must
   equal the horizontal flip of the normal grid (reverse + glyph swap), and the
   per-cell color multiset must be preserved (connectors included — guards the
-  connector-color scan that flips direction under mirror).
+  connector-color scan that flips direction under mirror). Plus a **`gutter`
+  policy** block running all three checks over every merge style × mirrored and
+  unmirrored fuzz: mirroring is orthogonal to *movement*, so the four compaction
+  policies need no separate sweep, but `gutter` emits cell shapes the others never
+  do (a node cell whose only wire is a horizontal; a `┤` where one lane both
+  arrives and leaves) and mirrored is the orientation it exists for.
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
 only** (not the public API): `classify_ref`, `group_refs`, `bump_recent` /
@@ -528,11 +546,17 @@ Details not covered by the spec or architecture:
   spec §5.6): lane placement is a named enum — `compact` (linear-commit slide +
   survivor compaction, today's behaviour), `survivors` (no slide), `linear` (no
   survivor compaction), `straight` (neither; every lane holds its column for
-  life). All four are **chains of the existing stages** in `columns.lua` — no new
-  stage code — dispatched through a `POLICY` record `{ body, seam }` (+ a reserved
-  `prepass` hook for a future `interval` placement policy). `straight` reuses
-  `layout_seam` verbatim, so "straight is the no-move chain" holds by
-  construction. An unknown/absent value falls back to `compact`. §5.1's invariants
+  life), and `gutter` (`straight` plus the node moved out of the lanes into a
+  reserved column beside the message). The first four are **chains of the existing
+  stages** in `columns.lua` — no new stage code — dispatched through a `POLICY`
+  record `{ body, seam }` (+ a reserved `prepass` hook for a future `interval`
+  placement policy). `straight` reuses `layout_seam` verbatim, so "straight is the
+  no-move chain" holds by construction. `gutter` adds ONE stage (`place_gutter`)
+  and generalises `fan_in`/`fan_out` by `state.kt` (the trunk column, since the
+  node is no longer on its own lane); `state.kt` is nil under every other policy,
+  which is why the addition is provably inert for them (verified cell-for-cell,
+  12,340 cases). It is also the one policy whose `seam` is NOT `layout_seam` — that
+  chain would put the seam row's node back on its lane. An unknown/absent value falls back to `compact`. §5.1's invariants
   are classified accordingly: **universal** (hold under every policy),
   **conditional guards** (constrain any jog a policy makes — written as violation
   counts, so they go vacuous rather than false), **policy-specific** (only the
