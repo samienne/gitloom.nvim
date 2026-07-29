@@ -98,6 +98,18 @@ end
 --- non-first merge parent (an anonymous owner, keyed `merge:<hash>:<i>`) defaults
 --- **collapsed** — so the anchors show in full and everything else collapses
 --- (§10.6/§10.7). `modes` overrides the default per owner id.
+---
+--- **Owner coverage is total** (§10.2). Two anonymous families close it, and both
+--- are needed: a `merge:<hash>:<i>` owner per non-first merge parent (a path that
+--- leaves a mainline at a merge is picked up on the other side), and a
+--- `tip:<hash>` owner per **uncovered tip** — an in-set commit with no in-set
+--- child that no ref owner is tipped at. The tip family is the backstop for
+--- §3.1's commit set not being guaranteed to equal the ref-reachable set: `--all`
+--- walks namespaces the ref query does not, and without it those commits get an
+--- empty signature and fall through `mode_of`'s uncovered-⇒-normal rule as a run
+--- of fully expanded rows in an otherwise focused view. §4.2's working-tree
+--- virtual commits are childless by construction and must stay visible, so they
+--- are excluded — they are the case that rule exists for.
 ---@param items table[]
 ---@param ref_owners table[]  -- { {id, tip}, ... }
 ---@param pinned table<string, boolean>|nil  -- anchor owner ids (HEAD by default)
@@ -109,18 +121,33 @@ function M.owners(items, ref_owners, pinned, modes, collapse_merged)
     pinned = pinned or {}
     local on = collapse_merged and next(pinned) ~= nil
     local out = {}
+    local ref_tips = {} -- hashes a ref owner is tipped at
     for _, o in ipairs(ref_owners) do
         -- Under focus every owner is first-parent-only (see above); a pinned
         -- anchor is normal, every other ref collapsed by default.
         local default = (on and not pinned[o.id]) and "collapsed" or "normal"
         out[#out + 1] = { id = o.id, tip = o.tip, mode = modes[o.id] or default, fp_only = on }
+        ref_tips[o.tip.hash] = true
     end
     if on then
+        local in_set = {}
+        for _, it in ipairs(items) do in_set[it.commit.hash] = true end
         for _, it in ipairs(items) do
-            local ps = it.commit.parents or {}
+            local c = it.commit
+            local ps = c.parents or {}
             for i = 2, #ps do
-                local id = "merge:" .. it.commit.hash .. ":" .. i
+                local id = "merge:" .. c.hash .. ":" .. i
                 out[#out + 1] = { id = id, tip = ps[i], mode = modes[id] or "collapsed", fp_only = true }
+            end
+            if not ref_tips[c.hash] and not c.virtual then
+                local covered = false
+                for _, ch in ipairs(c.children or {}) do
+                    if in_set[ch.hash] then covered = true break end
+                end
+                if not covered then
+                    local id = "tip:" .. c.hash
+                    out[#out + 1] = { id = id, tip = c, mode = modes[id] or "collapsed", fp_only = true }
+                end
             end
         end
     end
