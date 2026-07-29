@@ -227,6 +227,29 @@ Using a dedicated, structured query rather than parsing `git log --decorate`
 makes ref discovery robust and makes remote branches and annotated tags
 first-class (the decorate field conflated them and dropped remotes).
 
+**Linked worktrees.** A third query, `git worktree list --porcelain`, reads the
+repository's **linked worktrees** — their path, checked-out `HEAD`, and whether
+that HEAD is on a branch or **detached**. This is not a convenience: the commit
+refspec (§3.1, `--all`) walks **every worktree's HEAD**, so without it the model
+would hold real commits that no ref covers. A detached worktree HEAD is
+genuinely alive — a worktree HEAD is a **gc root**, so those commits are exactly
+as permanent as any branch tip, and they are usually work in progress the user
+has deliberately checked out. They are given a ref (kind `worktree`, §4.1) so
+they are attributed like any other branch (§10.2) and survive the resync prune
+(§3.4).
+
+Two rules keep the labels from being noise:
+
+- **Skip the main worktree's HEAD** — it is already the `head` ref (§4.1).
+- **Skip a worktree whose HEAD commit any other ref already points at.** This
+  covers the common case (a worktree checked out on a branch — the branch ref
+  already labels that commit) and the incidental one (a detached HEAD parked
+  exactly on a branch tip or tag). Only a worktree HEAD that *nothing else names*
+  gets a label.
+
+A worktree's own `git log --all` may of course see commits this repository's
+worktrees do not; that is the general case §10.2's total owner coverage handles.
+
 ### 3.3 Working-tree state
 
 When the working tree is dirty, gitloom shows the uncommitted changes as up to
@@ -284,6 +307,13 @@ The working-tree refresh was the first case of this general refresh, so the
 history refresh extends it rather than replacing it: both re-resolve HEAD,
 reconcile against the identity-stable model (§4), and end in `reflow()`.
 
+**The prune and the open path must agree.** The orphan prune keeps only what is
+reachable from a ref, so anything the open path renders that no ref reaches would
+be silently deleted by the first `R`. The `worktree` refs of §3.2 are re-read and
+reconciled on every resync exactly like branch tips, which is what keeps a linked
+worktree's checked-out work — reachable from `--all` and from nothing else — from
+disappearing on refresh.
+
 ## 4. Data model
 
 ```
@@ -297,7 +327,7 @@ Timestamp = { epoch, offset, raw }
   date as Unix time (UTC), `offset` is the author's tz offset in seconds (so
   the author's local wall-clock is `epoch + offset`), and `raw` keeps the
   original `%ai` text. Formatting happens at render time (§6).
-- `Ref.kind` is one of `local`, `remote`, `tag`, `head`.
+- `Ref.kind` is one of `local`, `remote`, `tag`, `head`, `worktree`.
 - `Ref.commit` is the `Commit` the ref points at — a **direct reference, not a
   hash**. `Commit.refs` lists the refs pointing at it (the inverse). A
   name → `Ref` registry is kept on the repository.
@@ -320,10 +350,20 @@ Each ref is classified by its refname and resolved to its target commit:
 | `refs/remotes/<remote>/<name>`   | `remote` | `<remote>/<name>`     |
 | `refs/tags/<name>`               | `tag`    | `<name>` (annotated tags resolved to their commit via the dereferenced hash) |
 | HEAD (symbolic)                  | `head`   | marks the current branch's commit (drawn by colouring that branch's label in the HEAD colour, §6); a detached HEAD marks the checked-out commit directly |
+| a linked worktree's HEAD (§3.2)  | `worktree` | `wt:<dir>` — `<dir>` is the worktree directory's **basename** |
 
 `refs/remotes/<remote>/HEAD` (the remote's default-branch symref) is skipped.
 The target hash is looked up in the commit table; a missing target yields a
 sparse `Commit` placeholder (as above).
+
+A `worktree` ref is the one kind with **no refname**: it comes from
+`git worktree list --porcelain`, not from `for-each-ref`, so it is *constructed*
+rather than classified. Its name is prefixed `wt:` — a `:` cannot appear in a git
+refname, so a worktree label can never be confused with, or collide in the
+name → `Ref` registry with, a real branch or tag. Beyond the name it is an
+ordinary ref: it is an owner (§10.2), it is pinnable (§10.6), it appears in the
+ref picker (§2) and the context panes (§6.2), and the resync reconciles it like
+any other tip (§3.4).
 
 ### 4.2 Virtual commits (working tree)
 
@@ -741,7 +781,10 @@ a fixed aligned column, so navigation stays line-by-line): in the default mode t
 refs are right-aligned at the window edge and the message fills the gap, truncated
 with `…` when it does not fit.
 
-**Ref decorations** — branch groups, then tags as `[name]`. The **current
+**Ref decorations** — branch groups, then tags as `[name]`, then worktree
+labels as `{wt:<dir>}` (§4.1). The bracket carries the kind, as it already does
+for branches and tags; the `wt:` prefix keeps the label self-describing without
+colour. The **current
 branch** carries no separate marker: it is drawn in the **HEAD colour**
 (`palette.head`) instead of the normal branch colour, so "you are here" reads
 from the label itself. A literal `HEAD` marker appears **only on a detached
@@ -1227,10 +1270,38 @@ descendants'. Commits therefore partition into **regions** — maximal connected
 runs of equal signature — whose boundaries fall exactly at junctions where an
 owner joins or leaves.
 
+**Owner coverage is total.** Every **real** commit in the model is reached by at
+least one owner. This is not an accident of the ref set — it is guaranteed by
+construction, because the owner set is closed under the two ways reachability can
+leave a first-parent line:
+
+- every non-first **merge parent** gets an anonymous owner (`merge:<hash>:<i>`),
+  so a path that turns off a mainline at a merge is picked up on the other side;
+- every **tip** — an in-model commit with no in-model child — that no ref covers
+  gets an anonymous owner (`tip:<hash>`).
+
+Any path from a ref to a commit decomposes into first-parent runs joined at
+merges, so with both families present induction gives coverage of everything
+reachable from a ref; the tip owners then cover whatever else the refspec drags
+in. The `tip:` family exists precisely because §3.1's commit set is not
+guaranteed to equal the ref-reachable set: `--all` walks namespaces the ref query
+does not (a `refs/original/*` filter-branch backup, for instance). §3.2's
+worktree refs give the *common* such case a real name; `tip:` is the backstop
+that makes coverage hold regardless. Anonymous owners are never pinnable (§10.6)
+and carry no label — a region owned only by them collapses to an unlabelled `◍`
+head, which §10.4 already provides for.
+
+**Working-tree virtual commits (§4.2) are excluded** from the tip family: they
+sit above HEAD with no children by construction, and §4.2 requires them always
+visible, so they are the one case that legitimately reaches the empty-signature
+branch below.
+
 A region's display mode is the **join** over the owners in its signature:
 
 - empty signature (reached by **no** owner) → **normal**; only owners can hide,
-  so an uncovered commit stays visible
+  so an uncovered commit stays visible. With total coverage the only real
+  commits that land here are the §4.2 virtual ones, which is exactly the rule's
+  purpose
 - some owner, but no non-hidden one (all hidden) → **hidden**
 - any **normal** owner in the signature → **normal**
 - otherwise (all collapsed) → **collapsed**
@@ -1536,7 +1607,8 @@ own tip's first-parent line. The defaults are:
 - the **pinned owners** (HEAD pinned by default, §10.6) → **normal**; a pinned
   owner's first-parent line is the mainline (plus the history shared below
   merge-bases), so those stay visible;
-- **every other owner** (unpinned refs, and the anonymous merge-parents) →
+- **every other owner** (unpinned refs — including the `worktree` refs of §3.2 —
+  and the anonymous merge-parent and uncovered-tip owners of §10.2) →
   **collapsed**.
 
 The trunk-only case (HEAD the sole anchor) is the default; "trunk" below reads
