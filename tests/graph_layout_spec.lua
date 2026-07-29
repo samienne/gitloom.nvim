@@ -446,7 +446,14 @@ describe("layout policy (§5.6)", function()
     it("under `straight` a lane never changes column", function()
         -- The defining property of the policy (§5.6): every lane holds its column
         -- for life. Checked on the pass-through verticals — a jog would show the
-        -- same lane id as a vertical in two different columns.
+        -- same lane as a vertical in two different columns.
+        --
+        -- Tracked by EDGE IDENTITY, not by lane `id`. A first-parent continuation
+        -- inherits the id of the chain that continues into it (§5), so one id spans
+        -- a whole chain of distinct Lanes — and since identity is chosen from the
+        -- DAG rather than from a column, the chain may legitimately continue in a
+        -- different column from the one the senior lane arrived in. That is two
+        -- Lanes meeting at a node, not a lane sliding.
         for _, ms in ipairs(STYLE_MS) do
             for seed = 1, 60 do
                 local size = 4 + (seed % 11)
@@ -458,12 +465,16 @@ describe("layout policy (§5.6)", function()
                         if line then
                             for j, col in ipairs(line) do
                                 for _, s in ipairs(col.lanes or {}) do
-                                    if s.connectivity.up and s.connectivity.down then
-                                        local prev = col_of[s.id]
+                                    -- one edge only: a multi-edge hub segment (§5)
+                                    -- stands in for every converging edge at once
+                                    if s.connectivity.up and s.connectivity.down
+                                        and #(s.edges or {}) == 1 then
+                                        local e = s.edges[1]
+                                        local prev = col_of[e]
                                         assert(prev == nil or prev == j,
                                             ("seed=%d row=%d lane %s moved column %s -> %d under `straight`")
                                             :format(seed, ri, tostring(s.id), tostring(prev), j))
-                                        col_of[s.id] = j
+                                        col_of[e] = j
                                     end
                                 end
                             end
@@ -472,6 +483,50 @@ describe("layout policy (§5.6)", function()
                 end
             end
         end
+    end)
+
+    -- THE GUARANTEE (spec §5 / §5.6): lane identity is chosen from the DAG and the
+    -- row order alone, never from a column — so every policy produces the SAME lane
+    -- ids and colours for the same input, differing only in where each lane is
+    -- drawn. Switching policy with `C` moves the graph; it never recolours it.
+    --
+    -- Keyed by EDGE (begin, parent) with position deliberately absent, and sorted,
+    -- so the comparison cannot accidentally encode column order. Any difference
+    -- here is a placement dependence that has crept back into identity — chase it,
+    -- do not relax this.
+    it("lane identity is identical under every policy", function()
+        local function identity(rows)
+            local out = {}
+            for i, row in ipairs(rows) do
+                local per = {}
+                for _, kind in ipairs({ "child_lanes", "parent_lanes" }) do
+                    for _, l in ipairs(row[kind] or {}) do
+                        per[#per + 1] = ("%s|%s->%s=%s/%s"):format(kind,
+                            tostring(l.begin and l.begin.hash), tostring(l.parent and l.parent.hash),
+                            tostring(l.id), tostring(l.color))
+                    end
+                end
+                table.sort(per)
+                out[i] = table.concat(per, ",")
+            end
+            return table.concat(out, "\n")
+        end
+        local bad = {}
+        for _, ms in ipairs(STYLE_MS) do
+            for seed = 1, 60 do
+                local items = h.dag(h.random_dag(4 + (seed % 11), seed))
+                local base = identity(build_graph(policy_opts(ms, "compact"), items))
+                for _, p in ipairs({ "survivors", "linear", "straight", "gutter" }) do
+                    local other = identity(build_graph(policy_opts(ms, p), items))
+                    if other ~= base and #bad < 3 then
+                        bad[#bad + 1] = ("seed=%d policy=%s"):format(seed, p)
+                    end
+                end
+            end
+        end
+        assert.equals(0, #bad,
+            "lane identity differs by policy — a placement dependence remains:\n"
+            .. table.concat(bad, "\n"))
     end)
 
     it("an unknown or absent policy falls back to compact", function()
