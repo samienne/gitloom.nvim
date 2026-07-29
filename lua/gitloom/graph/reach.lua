@@ -5,15 +5,16 @@
 
 local M = {}
 
---- The rendered lines of an OrderItem in display order (split / commit / merge),
---- skipping absent ones. A plain `{item.split, item.columns, item.merge}` can't be
---- `ipairs`-ed because a nil `split` truncates the list.
+--- The rendered lines of an OrderItem in display order (the virtual `above` lines,
+--- then the commit line, then the merge fan), skipping absent ones. A plain
+--- `{item.above, item.columns, item.merge}` can't be `ipairs`-ed because a nil
+--- entry truncates the list.
 ---@param item OrderItem|nil
 ---@return GraphColumn[][]
 function M.item_lines(item)
     local out = {}
     if not item then return out end
-    if item.split then out[#out + 1] = item.split end
+    for _, l in ipairs(item.above or {}) do out[#out + 1] = l end
     if item.columns then out[#out + 1] = item.columns end
     if item.merge then out[#out + 1] = item.merge end
     return out

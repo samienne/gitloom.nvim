@@ -67,7 +67,8 @@ local M = {}
 ---@field commit? Commit
 ---@field markers? Commit[]  the packed marker DisplayNodes on a "markers" row (§10.4)
 ---@field columns GraphColumn[]
----@field split? GraphColumn[]
+---@field above? GraphColumn[][]  the virtual lines above the commit line, topmost
+---   first: the §5.2 split fan, plus the `gutter` policy's handover rows (§5 Line)
 ---@field merge? GraphColumn[]
 ---@field parent_lanes? Lane[]  edges out to this commit's parents (§5)
 ---@field child_lanes? Lane[]   edges in from this commit's children (§5)
@@ -110,7 +111,7 @@ local function refresh_columns(opts, order, _start_pos)
     for i = 1, #order do
         local r = rebuilt[i]
         order[i].columns = r.columns
-        order[i].split = r.split
+        order[i].above = r.above
         order[i].merge = r.merge
         order[i].parent_lanes = r.parent_lanes
         order[i].child_lanes = r.child_lanes
@@ -129,7 +130,10 @@ M.refresh_columns = refresh_columns
 ---@return OrderItem[]
 local function pack_markers(items)
     local function is_marker(it)
-        return it.commit ~= nil and it.commit.collapsed and it.split == nil and it.merge == nil
+        -- No virtual lines at all: a marker row is one screen row, so packing it
+        -- with its neighbours cannot swallow a fan or a handover row.
+        return it.commit ~= nil and it.commit.collapsed
+            and #(it.above or {}) == 0 and it.merge == nil
     end
 
     -- Overlay group rows into one columns array; nil if any column is incompatible.

@@ -4878,12 +4878,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- partial virtual row at the window edge (§6.2). Built once per pane rebuild and
             -- shared by the footer (bottom edge) and the header (top edge).
             -- Per-item virtual-row counts (above/below) + columns height, matching what the
-            -- listview actually renders (§6.1): today a fork's split fan is one row above, a
-            -- merge fan one below, dual label mode two columns rows. Count-based so future
-            -- multi-row strategies (and both above+below on one commit) just work.
+            -- listview actually renders (§6.1): a fork's split fan and the `gutter` policy's
+            -- handover rows are the `above` LIST, a merge fan is one row below, dual label
+            -- mode two columns rows. Count-based so multi-row strategies just work.
             local function rows_of(it)
                 return {
-                    above = it.split and 1 or 0,
+                    above = #(it.above or {}),
                     height = dual_two_line(opts, it and it.commit) and 2 or 1,
                     below = it.merge and 1 or 0,
                 }
@@ -4919,7 +4919,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if not bs then return nil, "no bs" end
                 local seam = pane.footer_seam(pane_sm, bs, cover)
                 if not seam then return nil, "past top@" .. cover end
-                local line = (seam.kind == "merge") and seam.item.merge or seam.item.columns
+                local line = pane.seam_line(seam)
                 local boundary = pane.boundary_of(line)
                 if not next(boundary) then return nil, "no lanes@" .. seam.idx end
                 -- Pinned-ref tips below the cutoff that aren't on an active lane —
@@ -4975,7 +4975,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if not ts or ts <= 1 then return nil, "at top" end
                 local seam = pane.header_seam(pane_sm, ts, cover)
                 if not seam then return nil, "past end" end
-                local line = (seam.kind == "split") and seam.item.split or seam.item.columns
+                -- `pane.seam_line` decodes the seam's `virt` (an above-row seam indexes the
+                -- item's `above` LIST, `-1` = nearest the columns line; §5 Line).
+                local line = pane.seam_line(seam)
                 local boundary = pane.boundary_of(line, true)
                 if not next(boundary) then return nil, "no lanes@" .. seam.idx end
                 -- Pinned anchor tips above the cutoff, as the display nodes that
@@ -4991,7 +4993,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
                 local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
-                return res.rows, seam.idx .. (seam.kind == "split" and "s" or "c"), seam.cover, seam.idx,
+                return res.rows, seam.idx .. (seam.kind == "above" and "s" or "c"), seam.cover, seam.idx,
                     cond, boundary
             end
 
@@ -5139,9 +5141,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- The boundary the header was built from (the whole-commit seam).
                     local seam = hdr_ts and pane.header_seam(pane_sm, hdr_ts, H or 2)
                     local disp_idx = seam and seam.idx
-                    local boundary = seam
-                        and pane.boundary_of((seam.kind == "split") and seam.item.split or seam.item.columns, true)
-                        or {}
+                    local boundary = seam and pane.boundary_of(pane.seam_line(seam), true) or {}
                     out[#out + 1] = ("boundary @disp=%s kind=%s:"):format(
                         tostring(disp_idx), tostring(seam and seam.kind))
                     local bcols = {}
@@ -5213,7 +5213,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     end
                     -- The main-view display items around the seam, with their lane ids,
                     -- so the boundary can be checked against the real topology.
-                    out[#out + 1] = "main display items (disp: parent_lanes | child_lanes  split/merge):"
+                    out[#out + 1] = "main display items (disp: parent_lanes | child_lanes  above/merge):"
                     local lo = math.max(1, (disp_idx or w0disp or 2) - 2)
                     local hi = math.min(#repo.display, (disp_idx or w0disp or 2) + (H or 2) + 1)
                     for di = lo, hi do
@@ -5223,7 +5223,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                             out[#out + 1] = ("  d%d: P[%s] | C[%s] col=%s%s"):format(di,
                                 ids(it.parent_lanes), ids(it.child_lanes),
                                 tostring(it.commit and col_of(it.commit)),
-                                (it.split and " SPLIT" or "") .. (it.merge and " MERGE" or ""))
+                                ((#(it.above or {}) > 0) and (" ABOVE" .. #it.above) or "") .. (it.merge and " MERGE" or ""))
                         end
                     end
                     -- ===== FOOTER (off-screen-OLDER topology, below) =====
@@ -5231,7 +5231,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     local w0f = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
                     local _, wdisp = ctx:order_at(w_last)
                     local dbg_sm = pane.screen_lines(repo.display, function(it)
-                        return { above = it.split and 1 or 0,
+                        return { above = #(it.above or {}),
                             height = dual_two_line(opts, it and it.commit) and 2 or 1,
                             below = it.merge and 1 or 0 }
                     end)
@@ -5321,14 +5321,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                         end
                         -- disp -> buffer-line-start + split/merge flags + block height, so
                         -- the footer_seam block model can be checked against the render.
-                        out[#out + 1] = "footer seam region (disp: start srow .split .merge collapsed  hash):"
+                        out[#out + 1] = "footer seam region (disp: start srow #above .merge collapsed  hash):"
                         for di = math.max(1, fseam.idx - 2), math.min(#repo.display, wdisp) do
                             local it = repo.display[di]
                             local st = lv.controller.item_start and lv.controller.item_start(di)
                             local srow = st and vim.fn.screenpos(win, st, 1).row
                             local c = it and it.commit
-                            out[#out + 1] = ("  d%d: start=%s srow=%s split=%s merge=%s collapsed=%s hash=%s"):format(
-                                di, tostring(st), tostring(srow), tostring(it and it.split ~= nil),
+                            out[#out + 1] = ("  d%d: start=%s srow=%s above=%s merge=%s collapsed=%s hash=%s"):format(
+                                di, tostring(st), tostring(srow), tostring(it and #(it.above or {})),
                                 tostring(it and it.merge ~= nil), tostring(c and c.collapsed),
                                 tostring(c and c.hash and c.hash:sub(1, 8)))
                         end

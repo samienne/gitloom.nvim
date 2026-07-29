@@ -881,8 +881,8 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     if item.commit and item.commit.junction and opts.junction_markers ~= false then
         local graph_item = M.get_column_chars(opts, item.columns, emphasis)
         local above = {}
-        if item.split then
-            above[#above + 1] = { "", "", M.get_column_chars(opts, item.split, emphasis), "" }
+        for _, line in ipairs(item.above or {}) do
+            above[#above + 1] = { "", "", M.get_column_chars(opts, line, emphasis), "" }
         end
         local below
         if item.merge then
@@ -941,10 +941,11 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         local author_item = rh((item.commit.author or "") .. " ", palette.author)
         local graph_item = M.get_column_chars(opts, item.columns, emphasis) -- the node line
 
-        -- Stacked virtual rows above (split fan-in) / below (merge fan-out).
+        -- Stacked virtual rows above (the split fan-in, plus any `gutter` handover
+        -- rows — §5 Line, topmost first) / below (merge fan-out).
         local above = {}
-        if item.split then
-            above[#above + 1] = { "", "", M.get_column_chars(opts, item.split, emphasis), get_columns(item.split) }
+        for _, line in ipairs(item.above or {}) do
+            above[#above + 1] = { "", "", M.get_column_chars(opts, line, emphasis), get_columns(line) }
         end
         local below
         if item.merge then
@@ -1037,7 +1038,9 @@ function M.format_lane_info(item)
         end
     end
 
-    dump("split (above)", item.split)
+    for i, line in ipairs(item.above or {}) do
+        dump(("above %d/%d"):format(i, #item.above), line)
+    end
     dump("commit line", item.columns)
     dump("merge (below)", item.merge)
     return lines
