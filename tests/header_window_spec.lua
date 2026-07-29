@@ -60,7 +60,9 @@ describe("header window → top screen row (the virtual-split-above-w0 bug) (§6
     it("the fixture actually exercises virtual lines", function()
         local b = build()
         local nvirt = 0
-        for _, it in ipairs(b.display) do if it.split or it.merge then nvirt = nvirt + 1 end end
+        for _, it in ipairs(b.display) do
+            if #(it.above or {}) > 0 or it.merge then nvirt = nvirt + 1 end
+        end
         assert.is_true(nvirt > 0, "projection produced no virtual split/merge lines")
     end)
 

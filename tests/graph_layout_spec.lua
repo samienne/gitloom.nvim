@@ -67,13 +67,14 @@ local STYLES = {
 -- policy makes no jog. Only the linear-commit slide itself is policy-specific
 -- (§5.6), and it is asserted separately below.
 local POLICIES = { "compact", "survivors", "linear", "straight", "gutter" }
--- The policies that let a commit's node fall wherever its own lane already is.
--- `gutter` (§5.6) pins the current subject lane to a fixed column, so on the rows
--- where that column changes hands a linear commit's fan is not degenerate and the
--- §5.1 no-crossings COROLLARY does not apply to it. Its replacement guarantee is
--- asserted separately below. (Verified, not assumed: the corollary's check finds
--- 1154 offending commit lines over 400 DAGs under `gutter`, 0 under `straight`.)
-local LANE_COLUMN = { "compact", "survivors", "linear", "straight" }
+-- Every policy: the §5.1 no-crossings COROLLARY (a both-lines commit Line carries
+-- no horizontal, hence no crossing) holds under all five. It once failed under
+-- `gutter`: the handover's swap-in rode on the arriving commit's own Line, so a
+-- linear commit's "fan" spanned from its lane's column to the gutter and crossed
+-- whatever lay between (1154 offending commit Lines over 400 DAGs). Giving the
+-- swap-in a virtual row of its own removed that, and `gutter` now produces commit-
+-- Line horizontals identical in count to `straight`'s.
+local LANE_COLUMN = { "compact", "survivors", "linear", "straight", "gutter" }
 
 --- big_opts for a merge style, pinned to a layout policy.
 local function policy_opts(ms, policy)
@@ -234,13 +235,13 @@ describe("compaction never crosses a lane (§5)", function()
         end)
     end
 
-    -- The `gutter` replacement for the corollary (§5.6). On the rows where the
-    -- gutter changes hands its commit Lines DO carry horizontals, and therefore
-    -- crossings. What must still hold is that a reader follows exactly ONE run per
-    -- row and it always touches that row's node: every horizontal wire on the Line
-    -- belongs to a single contiguous run containing the node's column, with no
-    -- second, unrelated horizontal anywhere. That is strictly checkable and it is
-    -- the guarantee the policy offers in place of "no crossings".
+    -- `gutter`'s own guarantee, on EVERY rendered line — including the two handover
+    -- rows (§5.6), which are the only lines that carry a horizontal no fan asked
+    -- for. A reader follows exactly ONE run per row and it always touches that
+    -- row's node column (the gutter): every horizontal wire on the Line belongs to
+    -- a single contiguous run reaching the node, with no second, unrelated
+    -- horizontal anywhere. Strictly checkable, and stronger than the §5.1
+    -- corollary the policy also satisfies now that the swap-in has its own row.
     it("every horizontal belongs to one run containing the node (gutter)", function()
         local STYLE_LIST = {
             { split_on_separate_line = true,  merge_on_separate_line = true },
@@ -256,8 +257,9 @@ describe("compaction never crosses a lane (§5)", function()
                 for ri, row in ipairs(rows) do
                     local ccol
                     for j, col in ipairs(row.columns) do if col.has_commit then ccol = j end end
-                    for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-                        if line then
+                    for _, ln0 in ipairs(h.row_lines(row)) do
+                        local line = ln0.line
+                        do
                             local near, far = nil, 0
                             for j, col in ipairs(line) do
                                 local c = col.connectivity
@@ -300,7 +302,7 @@ describe("a fan line carries no compaction (§5)", function()
 
     local function inline_fan_compaction(row)
         local C = row.commit and row.commit.hash
-        local inline_fan = ((#(row.child_lanes or {}) > 1) and not row.split)
+        local inline_fan = ((#(row.child_lanes or {}) > 1) and #(row.above or {}) == 0)
             or ((#(row.parent_lanes or {}) > 1) and not row.merge)
         if not inline_fan then return 0 end
         local n = 0
@@ -387,8 +389,9 @@ describe("layout policy (§5.6)", function()
     local function shape(rows)
         local out = {}
         for _, row in ipairs(rows) do
-            for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-                if line then
+            for _, ln0 in ipairs(h.row_lines(row)) do
+                local line = ln0.line
+                do
                     for j, col in ipairs(line) do
                         for _, s in ipairs(col.lanes or {}) do
                             local c = s.connectivity
@@ -461,8 +464,9 @@ describe("layout policy (§5.6)", function()
                 local rows = build_graph(policy_opts(ms, "straight"), items)
                 local col_of = {}
                 for ri, row in ipairs(rows) do
-                    for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-                        if line then
+                    for _, ln0 in ipairs(h.row_lines(row)) do
+                        local line = ln0.line
+                        do
                             for j, col in ipairs(line) do
                                 for _, s in ipairs(col.lanes or {}) do
                                     -- one edge only: a multi-edge hub segment (§5)
@@ -555,8 +559,8 @@ describe("lane model decomposition", function()
 
         local max_lanes = 0
         for _, row in ipairs(rows) do
-            for _, lst in ipairs({ row.columns, row.split or {}, row.merge or {} }) do
-                for _, t in ipairs(lst) do
+            for _, ln in ipairs(h.row_lines(row)) do
+                for _, t in ipairs(ln.line) do
                     max_lanes = math.max(max_lanes, #(t.lanes or {}))
                 end
             end
@@ -622,5 +626,43 @@ describe("invariant checker self-test", function()
             { columns = { { connectivity = { up = true }, lanes = { { id = 7, connectivity = { up = true } } } } } },
         }
         assert.equals(0, #h.check_lane_continuity(rows))
+    end)
+
+    -- Horizontal sharing (§5.1). One cell, three columns; each `edge` is a distinct
+    -- table so the checker can tell the runs apart, and `child_lanes`/`parent_lanes`
+    -- say which fan each belongs to.
+    local function hrow(a, b)
+        local function seg(e, c) return { id = e.id, connectivity = c, edges = { e } } end
+        local function cell(...) return { lanes = { ... }, connectivity = {} } end
+        return {
+            child_lanes = { a }, parent_lanes = { b },
+            columns = {
+                cell(seg(a, { right = true, down = true }), seg(b, { right = true, down = true })),
+                cell(seg(a, { left = true, right = true }), seg(b, { left = true, right = true })),
+                cell(seg(a, { left = true, up = true }), seg(b, { left = true, up = true })),
+            },
+        }
+    end
+
+    it("horizontal sharing flags a fan-in and a fan-out sharing a run", function()
+        -- `a` is a converging child (enters at col 3, exits down at col 1); `b` is a
+        -- diverging parent travelling the other way. Same cells, opposite directions —
+        -- one glyph and one colour for two wires, which is the defect.
+        local a = { id = 1 }                                     -- in: 3 -> 1
+        local b = { id = 2 }                                     -- out: 1 -> 3
+        local row = hrow(a, b)
+        row.columns[1].lanes[2].connectivity = { right = true, up = true }
+        row.columns[3].lanes[2].connectivity = { left = true, down = true }
+        local errors = h.check_horizontals({ row })
+        assert(has(errors, "MIXED-DIRECTION"), table.concat(errors, "\n"))
+    end)
+
+    it("horizontal sharing accepts two arms of the SAME fan", function()
+        -- Both runs are converging children of this commit — a fan bus, which §5.1
+        -- explicitly permits to share cells.
+        local a, b = { id = 1 }, { id = 2 }
+        local row = hrow(a, b)
+        row.child_lanes, row.parent_lanes = { a, b }, {}
+        assert.equals(0, #h.check_horizontals({ row }))
     end)
 end)

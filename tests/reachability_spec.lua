@@ -178,9 +178,9 @@ describe("rendered dimming (per-lane)", function()
     local function grid_hls(opts, rows)
         local set = {}
         for _, row in ipairs(rows) do
-            for _, sub in ipairs({ row.split, row.columns, row.merge }) do
-                if sub then
-                    local res = get_column_chars(opts, sub)
+            for _, ln in ipairs(helpers.row_lines(row)) do
+                do
+                    local res = get_column_chars(opts, ln.line)
                     for _, h in ipairs(res.highlight or {}) do
                         set[h.hl] = (set[h.hl] or 0) + 1
                     end
@@ -259,7 +259,7 @@ describe("rendered dimming (per-lane)", function()
         local rows = build_graph(helpers.big_opts(), items) -- split on its own line
         mark_reachable(rows, 3, 1, #rows)                   -- pivot c3
         local split
-        for _, row in ipairs(rows) do if row.commit.hash == "c5" then split = row.split end end
+        for _, row in ipairs(rows) do if row.commit.hash == "c5" then split = (row.above or {})[1] end end
         assert.is_not_nil(split)
         assert.is_true(lit_in_dir(split, "down"))
     end)
@@ -285,8 +285,8 @@ describe("rendered dimming (per-lane)", function()
     -- A row's split line rendered as a "glyph(hl) glyph(hl) ..." string.
     local function render_split(opts, rows, emphasis)
         for _, row in ipairs(rows) do
-            if row.split then
-                local res = get_column_chars(opts, row.split, emphasis)
+            if (row.above or {})[1] then
+                local res = get_column_chars(opts, row.above[1], emphasis)
                 local text, hls, out, i = res.text, res.highlight or {}, {}, 1
                 local function hl_at(bp)
                     for _, h in ipairs(hls) do

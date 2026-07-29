@@ -126,8 +126,25 @@ local function line_cells(result)
     return cells
 end
 
+--- Every rendered line of one laid-out row, in vertical display order: the
+--- virtual `above` lines (topmost first — the split fan, plus the `gutter`
+--- policy's handover rows; §5 Line), then the commit line, then the merge fan.
+--- Each entry is `{ name, line }` so a violation can say which line it was on.
+---@param row table
+---@return table[]  -- { { name = string, line = GraphColumn[] } }
+function M.row_lines(row)
+    local out = {}
+    local above = row.above or {}
+    for i, l in ipairs(above) do
+        out[#out + 1] = { name = (#above > 1) and ("above %d/%d"):format(i, #above) or "above", line = l }
+    end
+    out[#out + 1] = { name = "columns", line = row.columns }
+    if row.merge then out[#out + 1] = { name = "merge", line = row.merge } end
+    return out
+end
+
 --- Render layout rows into a padded 2D grid of cells, in vertical display
---- order (split line above, commit line, merge line below).
+--- order (the virtual lines above, commit line, merge line below).
 ---@param opts table
 ---@param rows table[]  -- build_graph output
 ---@return table[][]
@@ -135,9 +152,9 @@ function M.render_grid(opts, rows)
     local gtc = graph._internal.get_column_chars
     local lines = {}
     for _, row in ipairs(rows) do
-        if row.split then lines[#lines + 1] = line_cells(gtc(opts, row.split)) end
-        lines[#lines + 1] = line_cells(gtc(opts, row.columns))
-        if row.merge then lines[#lines + 1] = line_cells(gtc(opts, row.merge)) end
+        for _, ln in ipairs(M.row_lines(row)) do
+            lines[#lines + 1] = line_cells(gtc(opts, ln.line))
+        end
     end
 
     local w = 0
@@ -232,11 +249,13 @@ local function check_one_commit_per_line(rows)
         if n ~= 1 then
             errors[#errors + 1] = ("row %d has %d commits on its line, expected 1"):format(i, n)
         end
-        for _, sub in ipairs({ row.split, row.merge }) do
-            for _, t in ipairs(sub or {}) do
-                if t.has_commit then
-                    errors[#errors + 1] = ("row %d sub-line carries a commit"):format(i)
-                    break
+        for _, ln in ipairs(M.row_lines(row)) do
+            if ln.name ~= "columns" then
+                for _, t in ipairs(ln.line or {}) do
+                    if t.has_commit then
+                        errors[#errors + 1] = ("row %d %s carries a commit"):format(i, ln.name)
+                        break
+                    end
                 end
             end
         end
@@ -263,8 +282,8 @@ local function check_lanes(rows)
     local errors = {}
     local function err(m) errors[#errors + 1] = m end
     for ri, row in ipairs(rows) do
-        for _, lst in ipairs({ row.columns, row.split or {}, row.merge or {} }) do
-            for ti, t in ipairs(lst) do
+        for _, ln in ipairs(M.row_lines(row)) do
+            for ti, t in ipairs(ln.line) do
                 local lanes = t.lanes or {}
 
                 local union = {}
@@ -318,9 +337,7 @@ end
 local function check_lane_continuity(rows)
     local lines = {}
     for _, row in ipairs(rows) do
-        if row.split then lines[#lines + 1] = row.split end
-        lines[#lines + 1] = row.columns
-        if row.merge then lines[#lines + 1] = row.merge end
+        for _, ln in ipairs(M.row_lines(row)) do lines[#lines + 1] = ln.line end
     end
 
     local errors = {}
@@ -563,12 +580,7 @@ local function check_horizontals(rows)
         local inset, outset = {}, {}
         for _, l in ipairs(row.child_lanes or {}) do inset[l] = true end
         for _, l in ipairs(row.parent_lanes or {}) do outset[l] = true end
-        local lines = {
-            { name = "split", line = row.split },
-            { name = "columns", line = row.columns },
-            { name = "merge", line = row.merge },
-        }
-        for _, ln in ipairs(lines) do
+        for _, ln in ipairs(M.row_lines(row)) do
             if ln.line then
                 local runs = horizontal_runs(ln.line)
                 for a = 1, #runs do
@@ -621,6 +633,20 @@ function M.check(opts, items, skip_color)
     for _, e in ipairs(check_lanes(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_lane_continuity(rows)) do errors[#errors + 1] = e end
     for _, e in ipairs(check_grid(grid, opts, skip_color)) do errors[#errors + 1] = e end
+    -- HORIZONTAL SHARING (§5.1): two runs may share cells only as arms of the same
+    -- fan of the commit on that Line. Asserted for every layout policy on every
+    -- merge style that gives at least one fan its own Line.
+    --
+    -- **Not** on the two fully-inline styles (`inline`, and `allow_merge_on_split`),
+    -- where a commit's fan-in and fan-out share its commit Line by construction: the
+    -- rule fires there under EVERY policy — `compact` as much as `gutter` — so it is
+    -- a pre-existing property of drawing both fans on one Line, not of any policy,
+    -- and fixing it is a separate decision (deliberately deferred). The gate is on
+    -- the merge STYLE alone; no policy, corpus or fixture is exempt.
+    local ms = opts.merge_style or {}
+    if ms.split_on_separate_line or ms.merge_on_separate_line then
+        for _, e in ipairs(check_horizontals(rows)) do errors[#errors + 1] = e end
+    end
     return errors, rows, grid
 end
 

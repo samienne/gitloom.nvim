@@ -467,7 +467,8 @@ describe("junction markers — node-less junctions (§10.4)", function()
         for _, row in ipairs(rows) do
             if row.commit and row.commit.junction then
                 saw_junction = true
-                assert.is_nil(row.split, "a node-less junction should have no separate split line")
+                assert.equals(0, #(row.above or {}),
+                    "a node-less junction should have no separate split line")
             end
         end
         assert.is_true(saw_junction)
@@ -508,7 +509,8 @@ describe("junction markers — node-less junctions (§10.4)", function()
             if row.commit and row.commit.hash == "j" then jrow = row end
         end
         assert.is_not_nil(jrow)
-        assert.is_not_nil(jrow.split, "fork+merge junction must get a separate split line, not collapse inline")
+        assert.equals(1, #(jrow.above or {}),
+            "fork+merge junction must get a separate split line, not collapse inline")
         -- and the layout is still valid end-to-end
         assert.same({}, helpers.check_grid(helpers.render_grid(opts, rows), opts))
     end)

@@ -51,9 +51,7 @@ end
 local function assert_continuous(rows)
     local lines = {}
     for _, r in ipairs(rows) do
-        if r.split then lines[#lines + 1] = r.split end
-        lines[#lines + 1] = r.columns
-        if r.merge then lines[#lines + 1] = r.merge end
+        for _, ln in ipairs(h.row_lines(r)) do lines[#lines + 1] = ln.line end
     end
     local function up_id(c) for _, s in ipairs(c.lanes or {}) do if s.connectivity.up then return s.id end end end
     local function down_id(c) for _, s in ipairs(c.lanes or {}) do if s.connectivity.down then return s.id end end end
@@ -415,7 +413,7 @@ local function header_of(items, opts, seam_pos, pinned)
             if cell.has_commit and cell.commit then node_col[cell.commit.hash] = j end
         end
     end
-    local seam_line = main[seam_pos].split or main[seam_pos].columns
+    local seam_line = (main[seam_pos].above or {})[1] or main[seam_pos].columns
     local boundary = pane.boundary_of(seam_line, true)
     local tips = {}
     for _, it in ipairs(items) do
@@ -1285,7 +1283,8 @@ describe("pane.header_seam — whole-commit cutoff in SCREEN rows (§6.2)", func
     local function items(specs)
         local out = {}
         for i, s in ipairs(specs) do
-            out[i] = { commit = { hash = "n" .. i }, split = s.split or nil, merge = s.merge or nil }
+            out[i] = { commit = { hash = "n" .. i },
+                above = s.split and { {} } or nil, merge = s.merge or nil }
         end
         return out
     end
@@ -1316,7 +1315,8 @@ describe("pane.header_seam — whole-commit cutoff in SCREEN rows (§6.2)", func
         -- its split fan (screen 4) → kind=split.
         local s = assert(pane.header_seam(sm({ {}, {}, {}, { split = {} }, {} }), 1, 3))
         assert.equals(4, s.idx)
-        assert.equals("split", s.kind) -- item 4's split (its diverging children) is the seam
+        assert.equals("above", s.kind) -- item 4's split fan (its diverging children) is the seam
+        assert.equals(-1, s.virt)      -- its only above-row, nearest the columns line
         assert.equals(4, s.seam_top)
     end)
 
@@ -1360,7 +1360,8 @@ describe("pane.footer_seam — whole-commit cutoff in SCREEN rows (§6.2)", func
     local function items(specs)
         local out = {}
         for i, s in ipairs(specs) do
-            out[i] = { commit = { hash = "n" .. i }, split = s.split or nil, merge = s.merge or nil }
+            out[i] = { commit = { hash = "n" .. i },
+                above = s.split and { {} } or nil, merge = s.merge or nil }
         end
         return out
     end
@@ -1416,6 +1417,129 @@ describe("pane.footer_seam — whole-commit cutoff in SCREEN rows (§6.2)", func
 
     it("returns nil past the first commit (footer would cover everything)", function()
         assert.is_nil(pane.footer_seam(sm({ {}, {} }), 2, 99))
+    end)
+end)
+
+describe("several above-rows on ONE commit (§5 Line, §5.6 gutter handover)", function()
+    -- `OrderItem.above` is a LIST. The merge style contributes at most the split fan;
+    -- the `gutter` policy adds an eviction row and a claim row, so one commit really
+    -- renders TWO or THREE virtual lines above its own — which is the only thing that
+    -- produces more than one today, so these fixtures are real `gutter` layouts rather
+    -- than hand-built items.
+    --
+    -- The load-bearing detail: the list and the screen model run in OPPOSITE
+    -- directions. `screen_lines` emits `virt = -k` with `-1` NEAREST the columns line
+    -- (matching nvim's `virt_lines_above` stacking), so the TOPMOST of `n` above-rows
+    -- is `virt = -n` = `above[1]`. Decoding that backwards is the silent seam-drift
+    -- class the screen-row model exists to prevent, so it is asserted head-on.
+    local DEF = { split_on_separate_line = true, merge_on_separate_line = false }
+
+    -- c3 gets an eviction row + a claim row.
+    local TWO = { { "c1", { "c2" } }, { "c2", { "c4", "c3" } }, { "c3", { "c4" } }, { "c4", {} } }
+    -- c3 gets an eviction row + a claim row + its own split fan.
+    local THREE = { { "c1", { "c2", "c3" } }, { "c2", { "c4", "c3" } }, { "c3", { "c4" } }, { "c4", {} } }
+
+    local function gutter_layout(dag)
+        local o = h.big_opts(DEF)
+        o.layout_policy = "gutter"
+        return columns.layout(o, h.dag(dag))
+    end
+
+    -- The rendered screen sequence read straight off the rows — an oracle independent
+    -- of `screen_lines`: `{ display index, the line rendered there }` per screen row.
+    local function expected_lines(rows)
+        local out = {}
+        for i, r in ipairs(rows) do
+            for _, l in ipairs(r.above or {}) do out[#out + 1] = { i, l } end
+            out[#out + 1] = { i, r.columns }
+            if r.merge then out[#out + 1] = { i, r.merge } end
+        end
+        return out
+    end
+
+    it("the fixtures really carry two and three above-rows", function()
+        assert.equals(2, #(gutter_layout(TWO)[3].above or {}))
+        assert.equals(3, #(gutter_layout(THREE)[3].above or {}))
+    end)
+
+    it("screen_lines stacks them -n..-1, the one nearest the columns line LAST", function()
+        local rows = gutter_layout(THREE)
+        local sm = pane.screen_lines(rows)
+        local exp = expected_lines(rows)
+        assert.equals(#exp, #sm.lines)
+        for sr, e in ipairs(exp) do assert.equals(e[1], sm.lines[sr].idx) end
+        local base = sm.cols[3] -- c3's columns row; its three above-rows sit just above
+        assert.same({ -3, -2, -1, 0 }, {
+            sm.lines[base - 3].virt, sm.lines[base - 2].virt,
+            sm.lines[base - 1].virt, sm.lines[base].virt,
+        })
+        assert.equals("above", sm.lines[base - 3].kind)
+    end)
+
+    it("seam_line decodes virt against the list (topmost = -n = above[1])", function()
+        local it3 = gutter_layout(THREE)[3]
+        assert.equals(it3.above[1], pane.seam_line({ item = it3, virt = -3 }))
+        assert.equals(it3.above[2], pane.seam_line({ item = it3, virt = -2 }))
+        assert.equals(it3.above[3], pane.seam_line({ item = it3, virt = -1 }))
+        assert.equals(it3.columns, pane.seam_line({ item = it3, virt = 0 }))
+    end)
+
+    it("header_seam butts the TOPMOST above-row, at every window top", function()
+        -- The header seam is a block START, so on an item with above-rows it is always
+        -- the topmost one — the eviction row, never the split fan below it.
+        for _, dag in ipairs({ TWO, THREE }) do
+            local rows = gutter_layout(dag)
+            local sm, exp = pane.screen_lines(rows), expected_lines(rows)
+            for ts = 1, #sm.lines do
+                for cover = 1, 3 do
+                    local s = pane.header_seam(sm, ts, cover)
+                    if s then
+                        local e = exp[s.seam_top]
+                        assert.equals(e[1], s.idx)
+                        assert.equals(e[2], pane.seam_line(s)) -- the line actually rendered there
+                        local n = #(s.item.above or {})
+                        if n > 0 then
+                            assert.equals(-n, s.virt)
+                            assert.equals("above", s.kind)
+                            assert.equals(s.item.above[1], pane.seam_line(s))
+                        end
+                        if #(s.item.child_lanes or {}) > 0 then
+                            assert.is_true(next(pane.boundary_of(pane.seam_line(s), true)) ~= nil,
+                                "the header seeds from a line with no up-lanes")
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    it("footer_seam butts the BOTTOM row, never inside a block, at every window bottom", function()
+        for _, dag in ipairs({ TWO, THREE }) do
+            local rows = gutter_layout(dag)
+            local sm, exp = pane.screen_lines(rows), expected_lines(rows)
+            for bs = 1, #sm.lines do
+                for cover = 1, 3 do
+                    local s = pane.footer_seam(sm, bs, cover)
+                    if s then
+                        local e = exp[s.seam_bottom]
+                        assert.equals(e[1], s.idx)
+                        assert.equals(e[2], pane.seam_line(s))
+                        -- above-rows sit at the TOP of a block, so a block boundary is
+                        -- never one of them: the footer butts a columns or merge line.
+                        assert.is_true(s.virt >= 0)
+                    end
+                end
+            end
+        end
+    end)
+
+    it("every above-row reaches the §12 emphasis walk (reach.item_lines)", function()
+        local reach = require("gitloom.graph.reach")
+        local it3 = gutter_layout(THREE)[3]
+        local lines = reach.item_lines(it3)
+        assert.equals(4, #lines) -- three above-rows + the commit line
+        for k = 1, 3 do assert.equals(it3.above[k], lines[k]) end
+        assert.equals(it3.columns, lines[4])
     end)
 end)
 
@@ -1867,7 +1991,7 @@ describe("pane.header — fuzz invariants (§6.2)", function()
             for si = 2, #items do
                 local opts2 = h.big_opts()
                 local main = columns.layout(opts2, items)
-                local seam_line = main[si].split or main[si].columns
+                local seam_line = (main[si].above or {})[1] or main[si].columns
                 local boundary = pane.boundary_of(seam_line, true)
                 if next(boundary) then
                     local res, _, cond, idx, lane_of, col_of = header_of(items, opts2, si, pinned)
