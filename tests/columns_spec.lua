@@ -501,22 +501,43 @@ describe("columns.layout gutter policy (§5.6)", function()
             for _, hash in ipairs({ "wt", "c1", "c5", "c4" }) do
                 assert.equals(1, node_col(rows, hash), hash .. " should be in the gutter")
             end
+            -- A marker sits on its OWN lane. That lane may itself be the gutter —
+            -- a junction on the trunk is on the trunk — so the claim is "not
+            -- relocated", i.e. its node column is its incoming lane's column.
             for _, hash in ipairs({ "topic", "c2", "c3" }) do
-                assert.is_true(node_col(rows, hash) > 1, hash .. " is a marker: it keeps its lane")
+                local col, inc = node_col(rows, hash), nil
+                for _, row in ipairs(rows) do
+                    if row.commit.hash == hash and row.child_lanes and row.child_lanes[1] then
+                        for j, t in ipairs(row.columns) do
+                            for _, sg in ipairs(t.lanes or {}) do
+                                if sg.connectivity.up and sg.edges and sg.edges[1] == row.child_lanes[1] then
+                                    inc = j
+                                end
+                            end
+                        end
+                    end
+                end
+                if inc then
+                    assert.equals(inc, col, hash .. " is a marker: it keeps its own lane")
+                end
             end
             assert.equals(0, #check(opts, rows), "ill-formed")
         end
     end)
 
-    it("keeps the gutter for the lane owning the next subject row", function()
-        -- The rule that makes the whole policy work (§5.6): only the lane whose
-        -- parent is the next SUBJECT-owning commit may enter the gutter. That is
-        -- what guarantees the gutter is free when the next subject row's fan-in
-        -- turns in, so its node lands there. Asserted as the observable
-        -- consequence — every subject row's node IS in the gutter — with the one
-        -- documented exception: a root having occupied it on the previous row
-        -- blocks it for one Line (§5.1 root column break), which is the invariant
-        -- working, not a hole in this one.
+    it("keeps the gutter for THIS row's own chain", function()
+        -- The rule that makes the whole policy work (§5.6): the gutter carries the
+        -- chain of the row being read. A commit's first parent continues there and
+        -- no other parent may enter — so a merge keeps its own identity under its
+        -- node instead of handing the column to the lineage it merged in. When the
+        -- next subject row belongs to a different lane, the occupant vacates on its
+        -- own virtual row (`evict_gutter`) and the fan-in turns the new one in.
+        --
+        -- Asserted as the observable consequence — every subject row's node IS in
+        -- the gutter — with two documented exceptions: a root occupying it on the
+        -- previous row blocks it for one Line (§5.1 root column break), and a row
+        -- whose own split fan already owns the above-slot cannot also carry an
+        -- eviction row, so it degrades to its own lane.
         for _, ms in ipairs({
             { split_on_separate_line = true,  merge_on_separate_line = false },
             { split_on_separate_line = false, merge_on_separate_line = true },
@@ -534,8 +555,8 @@ describe("columns.layout gutter policy (§5.6)", function()
                         local root_blocked = prev and prev.commit
                             and #(prev.commit.parents or {}) == 0
                             and prev.columns[1] and prev.columns[1].has_commit
-                        assert(root_blocked,
-                            ("seed=%d row=%d: subject node at column %d, and no root blocked the gutter")
+                        assert(root_blocked or row.split ~= nil,
+                            ("seed=%d row=%d: subject node at column %d, with neither a root block nor a split fan")
                             :format(seed, ri, cc))
                     end
                 end
@@ -583,17 +604,20 @@ describe("columns.layout gutter policy (§5.6)", function()
         assert.equals(0, #check(opts, rows))
     end)
 
-    it("never moves a pass-through lane", function()
-        -- `gutter` keeps `straight`'s no-move rule (§5.6): a lane not incident to
-        -- this row's commit is a pure vertical — it is never redrawn into another
-        -- column, so the only horizontals anywhere are commits' own fans.
+    it("moves a pass-through lane only on an eviction row, and alone", function()
+        -- `gutter` keeps `straight`'s no-move rule (§5.6) on every ORDINARY row: a
+        -- lane not incident to this row's commit is a pure vertical there, so the
+        -- only horizontals on a commit Line are that commit's own fans.
+        --
+        -- The one exception is the **eviction** row — the swap-out that frees the
+        -- gutter for the next run. Exactly one lane moves on it, which is the whole
+        -- reason it gets a row of its own: a lane leaving (left-to-right) must never
+        -- share a row with a fan-in arriving (right-to-left).
         --
         -- Stated on SURVIVORS rather than as "a Lane occupies one column for life",
         -- which is not the right property: with a separate merge Line the first
         -- parent legitimately drops out of the node on the commit Line and fans to
-        -- its column on the Line below — the hub spanning two Lines, not a jog. That
-        -- case is covered by per-Lane continuity (`check`, run over the whole matrix
-        -- above), which is the real no-jog invariant.
+        -- its column on the Line below — the hub spanning two Lines, not a jog.
         for _, ms in ipairs({
             { split_on_separate_line = true,  merge_on_separate_line = true },
             { split_on_separate_line = true,  merge_on_separate_line = false },
@@ -605,17 +629,39 @@ describe("columns.layout gutter policy (§5.6)", function()
                 local rows = columns.layout(opts, h.dag(h.random_dag(4 + (seed % 11), seed)))
                 for ri, row in ipairs(rows) do
                     local C = row.commit
-                    for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
+                    for _, pair in ipairs({ { "split", row.split }, { "columns", row.columns },
+                        { "merge", row.merge } }) do
+                        local line = pair[2]
                         if line then
-                            for j, t in ipairs(line) do
+                            -- every lane drawing a horizontal on this line, and
+                            -- whether it is a pass-through (not incident to C)
+                            local horiz, survivors = {}, 0
+                            for _, t in ipairs(line) do
                                 for _, sg in ipairs(t.lanes or {}) do
-                                    local e = #(sg.edges or {}) == 1 and sg.edges[1] or nil
-                                    local survivor = e and e.begin ~= C and e.parent ~= C
-                                    if survivor and (sg.connectivity.left or sg.connectivity.right) then
-                                        assert(false, ("seed=%d row=%d col=%d: a pass-through lane drew a horizontal")
-                                            :format(seed, ri, j))
+                                    if sg.connectivity.left or sg.connectivity.right then
+                                        local e = #(sg.edges or {}) == 1 and sg.edges[1] or nil
+                                        local key = e or sg
+                                        if horiz[key] == nil then
+                                            horiz[key] = true
+                                            if e and e.begin ~= C and e.parent ~= C then
+                                                survivors = survivors + 1
+                                            end
+                                        end
                                     end
                                 end
+                            end
+                            local n = 0
+                            for _ in pairs(horiz) do n = n + 1 end
+                            if survivors > 0 then
+                                -- This is the EVICTION row: a pass-through moving is
+                                -- allowed here and nowhere else, it must be the only
+                                -- lane moving, and it must sit above the commit.
+                                assert(pair[1] == "split",
+                                    ("seed=%d row=%d: a pass-through moved on the %s line")
+                                    :format(seed, ri, pair[1]))
+                                assert(survivors == 1 and n == 1,
+                                    ("seed=%d row=%d: eviction row moved %d lanes (%d pass-through), expected exactly 1")
+                                    :format(seed, ri, n, survivors))
                             end
                         end
                     end
