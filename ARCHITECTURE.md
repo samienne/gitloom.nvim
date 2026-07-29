@@ -482,7 +482,7 @@ Frame = {
   scope,       -- the full graph; a commit; a branch; a range (§14.2)
   modifiers,   -- filters / injected anchors intrinsic to this entry
   buf,         -- the frame's own buffer (shown via host:set_buf)
-  view_state,  -- modes / pinned / effective / cone (forked on push, §14.4)
+  view_state,  -- modes / pins / unpinned / effective / cone (forked on push, §14.4)
   controller,  -- the listview controller, for graph frames
   repo,        -- the repo data model (cross-repo frames carry their own, §14.7)
 }
@@ -913,6 +913,20 @@ the later stages instead of spelling out `occ0 or blocked` inline.
 reserving only endpoints restores fan sharing and byte-identity — a good
 confirmation the sharing rule is the right one.)
 
+**Where dedicated lanes will plug in (§10.6.2, not yet built).** A column held
+for a *reserved* pinned branch is occupancy, so `grid_taken` is the single seam:
+one more term beside `blocked`, and tip placement, the slide, survivor compaction
+and fan-out all skip the column for free — the spec's "stop, never a skip" then
+follows from the guard the stages already obey, with nothing to add per stage.
+The pin list supplies the order (`select.reserved_order`, above); the tie-break
+for a commit whose signature names several reserved owners is the earliest of
+them in that list. Enforcement is at lane **birth** plus "not compacted away" —
+never a rightward re-jog, which `compact`'s leftward-only redraw cannot express
+and `complete_check` would reject. The colour side reuses the pane **seed**
+carve-out in `columns.layout` (drop the slot from the free FIFO, bump `in_use`).
+Panes are exempt (§6.2): the footer's seam must reproduce the main view's
+boundary columns exactly, and the header never runs this sweep.
+
 **The stages.** Three **shell steps** run first (setup): `classify` (read `active`
 into incoming/survivors), `spawn_lanes` (mint one outgoing Lane per parent — the
 id/colour lifecycle), `decide_style` (the sep_split / sep_merge / inline_junction /
@@ -1192,6 +1206,45 @@ hidden in the `+N` overflow can be selected but parks at the message until
 visible. This is the selection substrate the §10 per-branch actions and the §13
 commit selection build on.
 
+**Pinned branches — the ordered list and its dialog** (specification.md §10.6 /
+§10.6.1). The anchor set is stored as **one ordered list** of `PinEntry`
+(`{ id, reserved }`), not a set: `view_state.pins` holds the user's explicitly
+ordered entries and `view_state.unpinned` the ids they removed (which suppress
+the built-in defaults). `select.lua` owns the pure core — `pin_resolve` (stored
+entries first, then the defaults HEAD / `master` / `main` / `dev` / seeded marks,
+minus the unpinned and minus refs that no longer exist), `pin_move` /
+`pin_toggle_reserved` / `pin_remove` / `pin_add`, and the two readers `pin_ids`
+(the membership set) and `reserved_order` (the reserved ids in priority order —
+the whole of what the ordering means to the layout). All are copy-in/copy-out, so
+the glue assigns the result back.
+
+Putting `reserved` **on** the entry rather than in a second list is what makes
+`reserved ⊆ pinned` and "unpin implies unreserve" structural instead of
+remembered: the flag has nowhere to survive its entry. Pinning alone still
+changes **no geometry** — the flag is set only in the dialog.
+
+`ctx:effective_pins()` resolves the live list and applies the **pin-the-pair**
+upstream rule (§6.3), which needs the ref registry: an auto-pinned upstream
+carries `auto = <local id>`, is re-derived on every resolve, and is inserted
+directly after its source — so unpinning the local drops it, exactly as before,
+while an explicit pin/unpin of the upstream still wins. `ctx:effective_pinned()`
+is that list reduced to ids and remains what `view.owners` / `collapse_owners`
+consume, so **every existing pin consumer is unchanged**.
+
+`L` opens the dialog (`GRAPH_HELPERS.pin_dialog`): a `float_zindex` float over
+the graph, with `select.pin_dialog_lines` producing the buffer lines and a
+line → entry-index row map (pure, so the layout is testable without a window).
+Its keys are buffer-local; each edit writes `view_state.pins`, reflows, and
+restores the graph cursor by hash — the same sequence `P` uses. `<CR>` and the
+"Pin new branch…" row both go through the pieces the `<leader>b` picker already
+uses (`ctx:ref_picker_format`, `ctx:jump_to_ref`, `ref_picker_items`), extracted
+so there is one ref picker, not two.
+
+Note these four helpers are **`GRAPH_HELPERS` fields, not module locals**:
+window.lua sits at LuaJIT's **200-local chunk limit** (a second ceiling beyond
+the 60-upvalue one the tables were introduced for), and adding four locals
+overflows it. New window helpers should go into the tables.
+
 **Commit selection (range)** (specification.md §13) is a separate modal layer
 over the same window. A `sel` state (active flag, `path` of DisplayNodes
 newest-first, `anchor`/`cursor` endpoints, per-junction `dparent`/`dchild`
@@ -1345,7 +1398,8 @@ The window glue:
   jumplist and the hybrid `<C-o>` returns there (§14.3).
 - **Isolation (§16.1)** is only needed for the **stamp**: the transient overlay
   can't change modes (the input owns the keys), so cancel/dismiss just clear
-  `ctx.filter`. `<C-s>`/`<C-CR>` (`do_stamp`) deep-copies `view_state.modes/pinned`
+  `ctx.filter`. `<C-s>`/`<C-CR>` (`do_stamp`) deep-copies
+  `view_state.modes` / `pins` / `unpinned`
   into the live view state and pushes a `filter` nav frame reusing the graph buffer
   (the `nav.push_frame` wipe-guard protects it); its `on_enter` re-installs the
   copy + filter; `on_show` restores `ctx.base_view` on `<C-o>`. So the base's

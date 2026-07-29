@@ -379,6 +379,7 @@ local KEYBINDS = {
     { "H", "Toggle reachability highlighting (dimming)" },
     { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
     { "P", "Pin / unpin the branch under the cursor as an anchor" },
+    { "L", "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "R", "Resync with the repository (refs + new commits + working tree)" },
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
@@ -1490,33 +1491,63 @@ local function reorder_by_hashes(ctx, hashlist)
     repo.order = new_order
 end
 
--- The effective anchor set (§10.6): HEAD + master/main/dev + seeded marks, with
--- the user's pin/unpin overrides and the pin-the-pair upstream rule on top.
-local function effective_pinned(ctx)
+-- The effective **pin list** (§10.6): an ORDERED list of `{ id, reserved }`. The
+-- user's explicitly ordered entries (`view_state.pins`) come first, then the
+-- default anchors — HEAD, master/main/dev, the seeded marks — that are not
+-- already on it; `view_state.unpinned` suppresses a default. `pin_resolve` is the
+-- pure core; the pin-the-pair upstream rule (§6.3) is applied here because it
+-- needs the ref registry, and the auto-pinned upstream is inserted **right after**
+-- its local branch so the pair reads together in the dialog (§10.6.1).
+--- (A GRAPH_HELPERS field rather than a module local — window.lua sits near
+--- LuaJIT's 200-local chunk limit, which is what these tables exist to dodge.)
+---@return PinEntry[]
+GRAPH_HELPERS.effective_pins = function(ctx)
     local repo, view_state, opts = ctx.repo, ctx.view_state, ctx.opts
-    local p = {}
-    if repo.head and repo.refs[repo.head] then p[repo.head] = true end
-    for _, name in ipairs({ "master", "main", "dev" }) do
-        if repo.refs[name] then p[name] = true end
+    local defaults = {}
+    local function def(name)
+        if repo.refs[name] then defaults[#defaults + 1] = name end
     end
-    for name in pairs(ctx.seed_pin_names) do
-        if repo.refs[name] then p[name] = true end
+    if repo.head then def(repo.head) end
+    for _, name in ipairs({ "master", "main", "dev" }) do def(name) end
+    -- Seeded pointer marks (§11.7.6) come from a set; sort so the list is stable.
+    local seeds = {}
+    for name in pairs(ctx.seed_pin_names) do seeds[#seeds + 1] = name end
+    table.sort(seeds)
+    for _, name in ipairs(seeds) do def(name) end
+
+    local pins = selectm.pin_resolve(view_state.pins, view_state.unpinned, defaults, repo.refs)
+    -- Pin-the-pair (§6.3): an entry auto-pinned as a local branch's upstream carries
+    -- `auto = <local id>`. It is re-derived on every resolve — dropped when its
+    -- source leaves the list (so unpinning the local drops it too) and re-inserted
+    -- right after its source otherwise, keeping the pair adjacent in the dialog.
+    local drop_auto = opts.pin_upstream == false
+    local on, kept = selectm.pin_ids(pins), {}
+    for _, e in ipairs(pins) do
+        if not e.auto or (not drop_auto and on[e.auto]) then kept[#kept + 1] = e end
     end
-    for id, v in pairs(view_state.pinned) do
-        if v then p[id] = true else p[id] = nil end
-    end
-    if opts.pin_upstream ~= false then
-        local add = {}
-        for id in pairs(p) do
-            local ref = repo.refs[id]
+    pins = kept
+    if not drop_auto then
+        on = selectm.pin_ids(pins)
+        local i = 1
+        while i <= #pins do
+            local e = pins[i]
+            local ref = not e.auto and repo.refs[e.id]
             local up = ref and ref.upstream and ref.upstream.short
-            if up and repo.refs[up] and view_state.pinned[up] == nil then
-                add[up] = true
+            if up and repo.refs[up] and not on[up] and not view_state.unpinned[up] then
+                on[up] = true
+                table.insert(pins, i + 1, { id = up, reserved = false, auto = e.id })
+                i = i + 1 -- skip the one just inserted
             end
+            i = i + 1
         end
-        for up in pairs(add) do p[up] = true end
     end
-    return p
+    return pins
+end
+
+-- The effective anchor **set** — `effective_pins` reduced to ids. This is what
+-- `view.owners` / `collapse_owners` consume; order matters only to §10.6.2.
+local function effective_pinned(ctx)
+    return selectm.pin_ids(ctx:effective_pins())
 end
 GRAPH_HELPERS.effective_pinned = effective_pinned
 
@@ -2359,9 +2390,79 @@ local function h_pack(ctx)
     ctx:place_cursor()
 end
 
+-- The ref-picker row formatter (§2), shared by the `<leader>b` jump picker and the
+-- pinned-branches dialog's "Pin new branch…" entry (§10.6.1) so both list refs
+-- identically. (A GRAPH_HELPERS field, not a module local — see effective_pins.)
+GRAPH_HELPERS.ref_picker_format = function(ctx, align)
+    local opts = ctx.opts
+    ---@param item { name: string, kind: string, short: string, subject: string, track?: Upstream }
+    return function(item)
+        local kind_hl = ({
+            head = "SnacksPickerGitBranchCurrent",
+            ["local"] = "SnacksPickerGitBranch",
+            remote = "SnacksPickerGitBranch",
+            tag = "SnacksPickerLabel",
+        })[item.kind]
+        local track_hl = (opts.palette and opts.palette.track) or {}
+        local ret = {}
+        ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
+        for _, seg in ipairs(git.track_segments(item.track)) do
+            ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
+        end
+        ret[#ret + 1] = { " " }
+        ret[#ret + 1] = { align(item.short, 8), "SnacksPickerGitCommit" }
+        ret[#ret + 1] = { " " }
+        ret[#ret + 1] = { item.subject, "SnacksPickerComment" }
+        return ret
+    end
+end
+
+-- Jump the graph to a ref's commit and pre-select its label on the landed row
+-- (§2). Shared by the `<leader>b` picker and the pinned-branches dialog's `<CR>`
+-- (§10.6.1). `gwin` is the graph window to refocus (a picker/dialog float steals
+-- focus, and snacks restores it to the window *behind* the float on close).
+GRAPH_HELPERS.jump_to_ref = function(ctx, gwin, name, kind, hash)
+    if not (gwin and vim.api.nvim_win_is_valid(gwin)) then return end
+    pcall(vim.api.nvim_set_current_win, gwin)
+    if not ctx:goto_hash(hash) then
+        vim.notify(("gitloom: %s is not visible (hidden?)"):format(name), vim.log.levels.INFO)
+        return
+    end
+    local line = vim.api.nvim_win_get_cursor(gwin)[1]
+    local landed = ctx:order_at(line)
+    local selection_state = ctx.selection_state
+    selection_state.commit, selection_state.index = nil, nil
+    if landed and landed.type == "markers" then
+        for i, u in ipairs(marker_units(landed)) do
+            for _, r in ipairs(u.marker.refs or {}) do
+                if r.name == name then
+                    selection_state.commit, selection_state.index = landed, i
+                    break
+                end
+            end
+            if selection_state.commit == landed and selection_state.index == i then break end
+        end
+    elseif landed and landed.commit then
+        local idx = ref_decoration_index(landed.commit, name, kind)
+        if idx then
+            selection_state.commit, selection_state.index = landed.commit, idx
+        end
+    end
+    ctx:center_view()
+    ctx:update_cone()
+    if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+    ctx:place_cursor()
+    -- Mark the landed row visited so the CursorMoved reset keeps our
+    -- pre-selection; record the remembered position (§2) too.
+    ctx.last_line = vim.api.nvim_win_get_cursor(gwin)[1]
+    local h = ctx:cursor_hash(ctx.last_line)
+    if h then saved_positions[ctx.repo_key] = h end
+    ctx:update_panes()
+end
+
 -- <leader>b: jump to a branch / ref via snacks.picker (§2).
 local function h_refpick(ctx)
-    local opts, repo = ctx.opts, ctx.repo
+    local repo = ctx.repo
     local gwin = ctx:win() -- the graph window to refocus / move
     local picker_ok, picker = pcall(require, "snacks.picker")
     if not picker_ok then
@@ -2375,32 +2476,12 @@ local function h_refpick(ctx)
     end
     -- ref_picker_items sets each item's `text` for fuzzy matching; snacks keeps the
     -- original (MRU) order when the query is empty.
-    local align = picker.util.align
     picker.pick({
         source = "gitloom_refs",
         title = "Gitloom refs",
         items = items,
         layout = { preset = "select" }, -- compact, no preview window
-        ---@param item { name: string, kind: string, short: string, subject: string, track?: Upstream }
-        format = function(item)
-            local kind_hl = ({
-                head = "SnacksPickerGitBranchCurrent",
-                ["local"] = "SnacksPickerGitBranch",
-                remote = "SnacksPickerGitBranch",
-                tag = "SnacksPickerLabel",
-            })[item.kind]
-            local track_hl = (opts.palette and opts.palette.track) or {}
-            local ret = {}
-            ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
-            for _, seg in ipairs(git.track_segments(item.track)) do
-                ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
-            end
-            ret[#ret + 1] = { " " }
-            ret[#ret + 1] = { align(item.short, 8), "SnacksPickerGitCommit" }
-            ret[#ret + 1] = { " " }
-            ret[#ret + 1] = { item.subject, "SnacksPickerComment" }
-            return ret
-        end,
+        format = ctx:ref_picker_format(picker.util.align),
         confirm = function(p, item)
             p:close()
             if not item then return end
@@ -2408,43 +2489,7 @@ local function h_refpick(ctx)
             -- Run after the picker tears down — snacks restores focus to the window
             -- behind the float, so refocus the graph first.
             vim.schedule(function()
-                if not (gwin and vim.api.nvim_win_is_valid(gwin)) then return end
-                pcall(vim.api.nvim_set_current_win, gwin)
-                if not ctx:goto_hash(item.hash) then
-                    vim.notify(("gitloom: %s is not visible (hidden?)"):format(item.name), vim.log.levels.INFO)
-                    return
-                end
-                -- Pre-select the picked ref's label on the landed row (§2).
-                local line = vim.api.nvim_win_get_cursor(gwin)[1]
-                local landed = ctx:order_at(line)
-                local selection_state = ctx.selection_state
-                selection_state.commit, selection_state.index = nil, nil
-                if landed and landed.type == "markers" then
-                    for i, u in ipairs(marker_units(landed)) do
-                        for _, r in ipairs(u.marker.refs or {}) do
-                            if r.name == item.name then
-                                selection_state.commit, selection_state.index = landed, i
-                                break
-                            end
-                        end
-                        if selection_state.commit == landed and selection_state.index == i then break end
-                    end
-                elseif landed and landed.commit then
-                    local idx = ref_decoration_index(landed.commit, item.name, item.kind)
-                    if idx then
-                        selection_state.commit, selection_state.index = landed.commit, idx
-                    end
-                end
-                ctx:center_view()
-                ctx:update_cone()
-                if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
-                ctx:place_cursor()
-                -- Mark the landed row visited so the CursorMoved reset keeps our
-                -- pre-selection; record the remembered position (§2) too.
-                ctx.last_line = vim.api.nvim_win_get_cursor(gwin)[1]
-                local h = ctx:cursor_hash(ctx.last_line)
-                if h then saved_positions[ctx.repo_key] = h end
-                ctx:update_panes()
+                ctx:jump_to_ref(gwin, item.name, item.kind, item.hash)
             end)
         end,
     })
@@ -2860,16 +2905,17 @@ local function h_filter(ctx)
         local filter = ctx.filter
         filter.current = filter.current or current_match_hash()
         local copy_modes = vim.deepcopy(ctx.view_state.modes)
-        local copy_pinned = vim.deepcopy(ctx.view_state.pinned)
+        local copy_pins = vim.deepcopy(ctx.view_state.pins)
+        local copy_unpinned = vim.deepcopy(ctx.view_state.unpinned)
         ctx.view_state.modes = copy_modes
-        ctx.view_state.pinned = copy_pinned
+        ctx.view_state.pins, ctx.view_state.unpinned = copy_pins, copy_unpinned
         close_input()
         local frame
         frame = {
             kind = "filter", buf = ctx.buf, label = "/ " .. filter.query,
             on_enter = function()
                 ctx.view_state.modes = copy_modes
-                ctx.view_state.pinned = copy_pinned
+                ctx.view_state.pins, ctx.view_state.unpinned = copy_pins, copy_unpinned
                 ctx.filter = frame.filter or filter
                 ctx:reflow()
                 filter_land(ctx)
@@ -2934,12 +2980,207 @@ local function h_pin(ctx)
         if repo.refs[oid] then targets[#targets + 1] = oid end
     end
     if #targets == 0 then return end
+    -- Pinning appends to the end of the ordered list (§10.6), unreserved; unpinning
+    -- drops the entry — which drops its reserve flag with it — and records the id
+    -- so a defaulted anchor does not come straight back.
     local want = not ctx:effective_pinned()[targets[1]]
-    for _, oid in ipairs(targets) do view_state.pinned[oid] = want end
+    local pins = ctx:effective_pins()
+    for _, oid in ipairs(targets) do
+        if want then
+            view_state.unpinned[oid] = nil
+            pins = selectm.pin_add(pins, oid)
+        else
+            view_state.unpinned[oid] = true
+            for i, e in ipairs(pins) do
+                if e.id == oid then pins = selectm.pin_remove(pins, i); break end
+            end
+        end
+    end
+    view_state.pins = pins
     ctx:reflow()
     ctx:update_footer()
     if b.follow then ctx:goto_hash(b.follow) end
     ctx:place_cursor()
+end
+
+-- L: the pinned-branches dialog (§10.6.1) — a modal float listing the resolved pin
+-- list in priority order, where it is reordered (`<C-j>`/`<C-k>`), given a dedicated
+-- lane (`<Space>`, §10.6.2), unpinned (`D`), added to ("Pin new branch…", which
+-- reuses the §2 ref picker) or jumped from (`<CR>`). Its keys are buffer-local, so
+-- they never collide with the graph's own. Every edit reflows the projection and
+-- restores the graph cursor to the commit it was on, exactly as `P` does.
+-- (A GRAPH_HELPERS field, not a module local — see effective_pins.)
+GRAPH_HELPERS.pin_dialog = function(ctx)
+    local gwin = ctx:win()
+    if not gwin then return end
+    local dbuf = vim.api.nvim_create_buf(false, true)
+    vim.bo[dbuf].buftype = "nofile"
+    vim.bo[dbuf].bufhidden = "wipe"
+    local ns = vim.api.nvim_create_namespace("gitloom_pin_dialog")
+    local dwin, rows = nil, {}
+
+    -- Paint the list. `focus` is the entry index (or "new") to leave the cursor on.
+    local function render(focus)
+        local pins = ctx:effective_pins()
+        local lines
+        lines, rows = selectm.pin_dialog_lines(pins)
+        vim.bo[dbuf].modifiable = true
+        vim.api.nvim_buf_set_lines(dbuf, 0, -1, false, lines)
+        vim.bo[dbuf].modifiable = false
+        vim.api.nvim_buf_clear_namespace(dbuf, ns, 0, -1)
+        local function hl(row, col, endcol, group)
+            pcall(vim.api.nvim_buf_set_extmark, dbuf, ns, row, col,
+                { end_col = endcol, hl_group = group })
+        end
+        hl(0, 0, #lines[1], "Title")
+        hl(#lines - 1, 0, #lines[#lines], "Comment") -- the not-yet-honoured note
+        -- Mark the per-entry diamonds so the reserved subsequence stands out. The
+        -- title row's legend and the closing note keep their own colour.
+        for i = 2, #lines - 1 do
+            local s = lines[i]:find("◆", 1, true)
+            if s then hl(i - 1, s - 1, s - 1 + #"◆", "Special") end
+        end
+        -- Fit the float to the content, centered over the graph window.
+        local w = 0
+        for _, l in ipairs(lines) do w = math.max(w, vim.fn.strdisplaywidth(l)) end
+        local gw = vim.api.nvim_win_get_width(gwin)
+        local gh = vim.api.nvim_win_get_height(gwin)
+        w = math.min(w + 2, math.max(20, gw - 4))
+        local h = math.min(#lines, math.max(3, gh - 4))
+        local cfg = {
+            relative = "win", win = gwin,
+            row = math.max(0, math.floor((gh - h) / 2)),
+            col = math.max(0, math.floor((gw - w) / 2)),
+            width = w, height = h,
+        }
+        if dwin and vim.api.nvim_win_is_valid(dwin) then
+            local full = vim.api.nvim_win_get_config(dwin)
+            for k, v in pairs(cfg) do full[k] = v end
+            pcall(vim.api.nvim_win_set_config, dwin, full)
+        else
+            cfg.style, cfg.border = "minimal", "rounded"
+            cfg.title, cfg.zindex = " pinned branches ", float_zindex(gwin)
+            dwin = vim.api.nvim_open_win(dbuf, true, cfg)
+            pcall(vim.api.nvim_set_option_value, "winhl", "Normal:NormalFloat", { win = dwin })
+            vim.wo[dwin].cursorline = true
+        end
+        -- Park on the requested entry (falling back to the first selectable row).
+        local target
+        for l, v in pairs(rows) do
+            if v == focus then target = l end
+            if not target and v == 1 then target = l end
+        end
+        if target then pcall(vim.api.nvim_win_set_cursor, dwin, { target, 0 }) end
+    end
+
+    -- The entry index (or "new") under the dialog cursor.
+    local function under_cursor()
+        if not (dwin and vim.api.nvim_win_is_valid(dwin)) then return nil end
+        return rows[vim.api.nvim_win_get_cursor(dwin)[1]]
+    end
+
+    -- Store an edited list, reflow, and keep the graph cursor on its commit.
+    local function commit(pins, focus)
+        local ok, cur = pcall(vim.api.nvim_win_get_cursor, gwin)
+        local hash = ok and ctx:cursor_hash(cur[1]) or nil
+        ctx.view_state.pins = pins
+        ctx:reflow()
+        if hash then ctx:goto_hash(hash) end
+        ctx:place_cursor()
+        ctx:update_footer()
+        ctx:update_panes()
+        render(focus)
+    end
+
+    local function close()
+        if dwin and vim.api.nvim_win_is_valid(dwin) then pcall(vim.api.nvim_win_close, dwin, true) end
+        dwin = nil
+        if vim.api.nvim_win_is_valid(gwin) then pcall(vim.api.nvim_set_current_win, gwin) end
+    end
+
+    render(1)
+
+    local function h_move(delta)
+        local i = under_cursor()
+        if type(i) ~= "number" then return end
+        local moved, at = selectm.pin_move(ctx:effective_pins(), i, delta)
+        commit(moved, at)
+    end
+
+    local function h_toggle()
+        local i = under_cursor()
+        if type(i) ~= "number" then return end
+        commit(selectm.pin_toggle_reserved(ctx:effective_pins(), i), i)
+    end
+
+    local function h_unpin()
+        local list = ctx:effective_pins()
+        local i = under_cursor()
+        if type(i) ~= "number" or not list[i] then return end
+        -- Record the removal so a defaulted anchor (HEAD / master / …) stays gone.
+        ctx.view_state.unpinned[list[i].id] = true
+        commit(selectm.pin_remove(list, i), math.min(i, math.max(1, #list - 1)))
+    end
+
+    -- "Pin new branch…": the §2 ref picker, minus the refs already on the list and
+    -- the HEAD entry (which is not a ref owner id — the current branch is).
+    local function h_add()
+        local picker_ok, picker = pcall(require, "snacks.picker")
+        if not picker_ok then
+            vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
+            return
+        end
+        local on = selectm.pin_ids(ctx:effective_pins())
+        local items = {}
+        for _, it in ipairs(ref_picker_items(ctx.repo.refs, recent_refs[ctx.repo_key])) do
+            if it.kind ~= "head" and not on[it.name] then items[#items + 1] = it end
+        end
+        if #items == 0 then
+            vim.notify("gitloom: every ref is already pinned", vim.log.levels.INFO)
+            return
+        end
+        picker.pick({
+            source = "gitloom_refs",
+            title = "Pin a branch",
+            items = items,
+            layout = { preset = "select" },
+            format = ctx:ref_picker_format(picker.util.align),
+            confirm = function(p, item)
+                p:close()
+                if not item then return end
+                vim.schedule(function()
+                    if not (dwin and vim.api.nvim_win_is_valid(dwin)) then return end
+                    pcall(vim.api.nvim_set_current_win, dwin)
+                    ctx.view_state.unpinned[item.name] = nil
+                    local added = selectm.pin_add(ctx:effective_pins(), item.name)
+                    commit(added, #added)
+                end)
+            end,
+        })
+    end
+
+    -- <CR>: on an entry, jump the graph to that branch (§2 semantics); on the last
+    -- row, open the picker.
+    local function h_enter()
+        local i = under_cursor()
+        if i == "new" then h_add(); return end
+        if type(i) ~= "number" then return end
+        local entry = ctx:effective_pins()[i]
+        local ref = entry and ctx.repo.refs[entry.id]
+        if not (ref and ref.commit) then return end
+        recent_refs[ctx.repo_key] = bump_recent(recent_refs[ctx.repo_key], entry.id)
+        close()
+        ctx:jump_to_ref(gwin, entry.id, ref.kind, ref.commit.hash)
+    end
+
+    local map = { buffer = dbuf, nowait = true }
+    vim.keymap.set("n", "<C-j>", function() h_move(1) end, map)
+    vim.keymap.set("n", "<C-k>", function() h_move(-1) end, map)
+    vim.keymap.set("n", "<Space>", h_toggle, map)
+    vim.keymap.set("n", "D", h_unpin, map)
+    vim.keymap.set("n", "<CR>", h_enter, map)
+    vim.keymap.set("n", "q", close, map)
+    vim.keymap.set("n", "<Esc>", close, map)
 end
 
 -- i: toggle the per-lane id debug column.
@@ -3012,6 +3253,7 @@ local GRAPH_KEYS = {
     ["n"] = function(ctx) if ctx.filter then filter_goto(ctx, 1) end end,
     ["N"] = function(ctx) if ctx.filter then filter_goto(ctx, -1) end end,
     ["P"] = h_pin,
+    ["L"] = function(ctx) ctx:pin_dialog() end,
     ["i"] = h_laneids,
     ["F"] = h_panes,
     ["<leader>wD"] = h_dump,
@@ -3468,7 +3710,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field sel GraphSel
     ---@field display_index table<string,integer>
     ---@field node_loc table<string,{item:table,col:integer}>
-    ---@field view_state { cone?:table, modes:table, effective:table, pinned:table }
+    ---@field view_state { cone?:table, modes:table, effective:table, pins:PinEntry[], unpinned:table<string,boolean> }
     ---@field sig_cache { norder:integer, nowners:integer, cm?:boolean, sig?:table }
     ---@field worktree_commits table
     ---@field worktree_head? string
@@ -3476,7 +3718,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field selection_visible boolean
     ---@field filter? { query: string, keep: table<string,boolean>, current?: string }  in-graph filter-search (§16); nil = none
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
-    ---@field base_view { modes: table, pinned: table }  base view-state tables restored on filter exit (§16.1)
+    ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     --- == debounce state (Phase B4) ==
     ---@field cone_gen integer       cone-update debounce generation
     ---@field applying boolean       suppresses the WinScrolled emitted by the deferred refresh
@@ -3570,10 +3812,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- `modes` is explicit per-owner overrides; `effective` is the resolved mode
     -- per owner id after the first-parent default (§10.7), kept for the footer
     -- and the `<CR>` cycle. Both filled by reflow.
-    -- `pinned` is the explicit per-ref pin overrides (ref id → boolean), on top
-    -- of the HEAD-pinned-by-default rule (§10.6). The effective anchor set is
-    -- computed by `ctx:effective_pinned()`; it generalises the single trunk of §10.7.
-    local view_state = { cone = nil, modes = {}, effective = {}, pinned = {} }
+    -- `pins` is the user's explicitly ordered pin list (§10.6) — `{ id, reserved }`
+    -- entries, priority order — and `unpinned` the ids they removed, which suppress
+    -- the HEAD / master / main / dev defaults. `ctx:effective_pins()` resolves the
+    -- two into the live list and `ctx:effective_pinned()` reduces it to the anchor
+    -- set, which generalises the single trunk of §10.7.
+    local view_state = { cone = nil, modes = {}, effective = {}, pins = {}, unpinned = {} }
 
     -- The effective anchor set (§10.6). Pinned by default: the current branch
     -- (HEAD) and the common trunks `master`/`main`/`dev` when present. The user's
@@ -3695,7 +3939,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- The **base** view-state tables (§16.1): a stamped filter installs a
         -- private copy into view_state and restores these on exit, so the base's
         -- collapse/pin are provably untouched (no per-change bookkeeping).
-        base_view = { modes = view_state.modes, pinned = view_state.pinned },
+        base_view = { modes = view_state.modes, pins = view_state.pins, unpinned = view_state.unpinned },
         win = gwin,
     }
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
@@ -5218,7 +5462,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         if ctx.filter then
             ctx.filter = nil
             ctx.view_state.modes = ctx.base_view.modes
-            ctx.view_state.pinned = ctx.base_view.pinned
+            ctx.view_state.pins, ctx.view_state.unpinned = ctx.base_view.pins, ctx.base_view.unpinned
             ctx:reflow()
         end
         local target = saved_positions[repo_key]
@@ -5733,7 +5977,9 @@ end
 -- linker (integrate_commit), and the pin resolution (effective_pinned). These
 -- mutate only their `ctx.repo`, touching no window. Mirrors graph._internal.
 M._internal = {
+    effective_pins = GRAPH_HELPERS.effective_pins,
     effective_pinned = effective_pinned,
+    pin_dialog = GRAPH_HELPERS.pin_dialog, -- §10.6.1; windowed smoke test seam
     reconcile_refs = reconcile_refs,
     prune_to_reachable = prune_to_reachable,
     reorder_repo = reorder_repo,

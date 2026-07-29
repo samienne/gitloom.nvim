@@ -150,6 +150,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `H` | Toggle reachability highlighting (dimming) off / on |
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
+| `L` | **Pinned branches** — a dialog listing the pinned branches in priority order: `<C-j>`/`<C-k>` reorder, `<Space>` flags a branch for a dedicated graph lane, `D` unpins, `<CR>` jumps to a branch, the last row adds one via the ref picker, `q` closes |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
@@ -196,6 +197,28 @@ collapses. The footer notes the anchor count when more than one is pinned
 (§10.6). Pinning a local branch also pins its **tracked upstream** (so both lanes
 stay in full and a divergence is drawn rather than the remote collapsing);
 disable with `pin_upstream = false`.
+
+Press `L` for the **pinned-branches dialog** — the anchors in priority order,
+where they are managed together:
+
+```
+Pinned branches                    ◆ = dedicated lane
+
+  1  ◆  master              <C-j>/<C-k>  move
+  2  ◆  topic1              <Space>      toggle lane
+  3     origin/release      D            unpin
+  4     dev                 <CR>         jump to branch
+     + Pin new branch…      q            close
+```
+
+`<C-j>`/`<C-k>` reorder, `D` unpins, the last row adds a branch through the
+ref picker, and `<CR>` jumps the graph to a branch. `<Space>` flags a branch for
+a **dedicated lane** — a graph column held for it, marked `◆`. Pinning by itself
+never claims a column (up to four branches are pinned by default, so it must not); only
+this flag does, and the list order decides which reserved branch gets which
+column, left to right. **The dedicated-lane flag is currently recorded but not yet
+honoured by the layout** — the dialog says so on its last line — so today it sets
+up the ordering the layout work will read (§10.6.1, §10.6.2).
 
 **Upstream tracking.** A local branch that tracks a remote shows a terse
 divergence indicator after its name: `⇡N` ahead, `⇣N` behind, `⇡N⇣M` diverged,
