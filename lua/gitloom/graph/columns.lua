@@ -38,10 +38,10 @@
 --- IS `layout_seam`, reused verbatim), and `gutter` (lanes never move AND the lane
 --- owning the current subject row is held in a fixed column). The first four are
 --- chains of the stages already here and add no stage code; `gutter` adds three
---- stages (`evict_gutter`, `claim_gutter`, `place_gutter`) and generalises two
---- (`fan_in`/`fan_out`) by the trunk column `state.kt` — nil, and therefore inert,
---- under every other policy. It is also the only one that varies the *seam* chain
---- (it is its own seam; see `POLICY` below).
+--- stages (`evict_gutter`, `claim_gutter`, `place_gutter`) and touches the shared
+--- ones only through `state.gutter` — nil, and therefore inert, under every other
+--- policy. It is also the only one that varies the *seam* chain (it is its own
+--- seam; see `POLICY` below).
 ---
 --- A row renders as `[above…] columns [merge]`: `above` is a LIST of virtual lines
 --- (the split fan, plus `gutter`'s handover rows), topmost first (§5 Line).
@@ -592,11 +592,9 @@ function M.layout(opts, items, seed)
         -- merge's node, and `top_lane` colours a node from the cell's `down` segment,
         -- so the merge rendered as the topic. The handover the lineage needs happens
         -- on its own row instead (`evict_gutter`).
-        if outgoing[1] then
-            local kt = (cc == GUTTER) and GUTTER or cc
-            g.used[kt] = true
-            state.kt = kt
-        end
+        -- The node's own column carries that continuation, so reserve it: no other
+        -- lane may lay a horizontal through it on this row.
+        if outgoing[1] then g.used[cc] = true end
         -- No node and nothing continuing here: hold the gutter empty rather than
         -- letting a generic fan-out grab it, so it is free when the next subject
         -- lane turns in.
@@ -664,15 +662,12 @@ function M.layout(opts, items, seed)
         for _, inc in ipairs(commit_incoming) do
             g.draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
         end
-        -- The first parent leaves the node column and turns down in its own lane
-        -- column `kt`. `state.kt` is set only by `place_gutter`; everywhere else the
-        -- node IS its lane, so `kt == cc` and this is the classic one-cell down stub.
-        -- With a separate merge Line the fan happens below, so the commit Line
-        -- carries only the stub into the ascent — at the node column either way.
-        if outgoing[1] then
-            local dk = (state.kt and not state.sep_merge) and state.kt or cc
-            g.draw(outgoing[1].lane, math.min(dk, cc), math.max(dk, cc), nil, dk)
-        end
+        -- The first parent turns down out of the node. The node always sits on its
+        -- own lane's column — under `gutter` too, since `claim_gutter` brings that
+        -- lane into the gutter a row earlier — so this is a one-cell down stub. With
+        -- a separate merge Line the fan happens below and the commit Line carries
+        -- only the stub into the ascent, at the same column either way.
+        if outgoing[1] then g.draw(outgoing[1].lane, cc, cc, nil, cc) end
     end
 
     -- COMPACT (stage): each survivor slides into the run of free columns to its
@@ -725,10 +720,6 @@ function M.layout(opts, items, seed)
         local g = state.g
         local survivors, outgoing = state.survivors, state.outgoing
         local cc, commit_incoming, sep_merge = state.cc, state.commit_incoming, state.sep_merge
-        -- The first parent's column. `state.kt` is the `gutter` policy's trunk
-        -- column (§5.6), where the node is NOT on its own lane; nil everywhere else,
-        -- so `kt == cc` and every expression below is the classic one.
-        local kt = state.kt or cc
         local freed = {}
         if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #commit_incoming do
@@ -738,7 +729,7 @@ function M.layout(opts, items, seed)
                 if not (state.gutter and c == GUTTER) then freed[#freed + 1] = c end
             end
         end
-        if outgoing[1] then outgoing[1].out = kt end
+        if outgoing[1] then outgoing[1].out = cc end
         local fi = 1
         for i = 2, #outgoing do
             -- `place_gutter` may have pinned this parent to the gutter already; every
@@ -769,14 +760,7 @@ function M.layout(opts, items, seed)
                 local ascent = {}
                 for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
                 madd(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
-                if kt == cc then
-                    madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
-                else
-                    -- `gutter`: the first parent leaves the node column too, so it
-                    -- fans out to `kt` like the extra parents rather than dropping
-                    -- straight down out of the hub.
-                    mdraw(outgoing[1].lane, math.min(kt, cc), math.max(kt, cc), nil, kt)
-                end
+                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
             end
             for i = 2, #outgoing do
                 local o = outgoing[i]
@@ -789,7 +773,7 @@ function M.layout(opts, items, seed)
         -- one row so nothing stacks under it).
         active = {}
         for _, s in ipairs(survivors) do active[s.out] = s.lane end
-        if outgoing[1] then active[kt] = outgoing[1].lane end
+        if outgoing[1] then active[cc] = outgoing[1].lane end
         for i = 2, #outgoing do active[outgoing[i].out] = outgoing[i].lane end
         blocked = {}
         if #outgoing == 0 then blocked[state.cc] = true end

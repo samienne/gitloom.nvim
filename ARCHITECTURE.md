@@ -1083,15 +1083,16 @@ rule — the trap that produced an unsanctioned lane handoff during development)
 the gutter itself is held against generic fan-out allocation whenever nothing has
 claimed it.
 
-Because the node may be off its own lane on a handover row, two shared stages need
-to know where the first parent actually goes: `place_gutter` publishes it as
-**`state.kt`**, and `fan_in` / `fan_out` read `state.kt or cc`; a parent pinned to
-the gutter is published by pre-setting its `out`, which the fan-out loop skips.
-`state.kt`, `state.gutter` and a pre-set `out` are all `nil` under every other
-policy, so those expressions reduce to the ones that were there before — which is
-why adding this policy is provably inert for the other four (verified cell-for-cell
-against both the pre-gutter and the shipped baseline, 12,340 cases each, 0
-differing).
+The node always sits on its **own lane's** column, `gutter` included — the handover
+rows put that lane in the gutter a row before the node lands there — so `fan_in`
+and `fan_out` need no notion of "the first parent's column is elsewhere". There was
+one (`state.kt`, published by `place_gutter` and read as `state.kt or cc`), from the
+version where a merge's node could sit off its lane; it was provably equal to `cc`
+and has been removed. The only thing `gutter` still writes into a shared stage is
+`state.gutter`, which stops a fan-out reclaiming the gutter as a freed column; it is
+`nil` under every other policy, so adding this policy is provably inert for the
+other four (verified cell-for-cell against the shipped baseline: 5 policies × 5
+merge styles × 154 fixtures, 0 differing in glyphs or colour).
 
 **The handover is two virtual rows, one move each** (spec §5.6). When a subject row
 belongs to a different lane than the one in the gutter, the column changes hands —
