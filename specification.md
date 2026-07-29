@@ -66,7 +66,9 @@ unreachable ones, re-sorts, and rebuilds the working-tree virtual commits (§4.2
 preserving cursor/scroll/selection. `S` cycles the **row sort mode** (§3.1) —
 gitloom's own topological order (reproducing git's `--topo-order`), or git's date
 / author-date order — reordering in place and keeping the cursor on its commit.
-`V` enters **commit selection** (§13) — a modal range
+`L` opens the **pinned-branches dialog** (§10.6.1) — the pinned branches in
+priority order, where they are reordered, given a dedicated lane, unpinned, or
+added to. `V` enters **commit selection** (§13) — a modal range
 selection along one branch, fed to the diff provider and the commit view's range
 mode. `<leader>gl` opens a **commit search** (§15) — a fuzzy picker over commit
 subjects and authors that jumps the cursor to the chosen commit. `/` enters the
@@ -446,6 +448,18 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   the sweep's own column bookkeeping — tip placement and fan-out both skip a
   blocked column — never by a compaction move, so it survives a policy that moves
   nothing.
+- **Reserved columns are occupied.** A column held for a **reserved** pinned
+  branch (§10.6.2) counts as occupied for every placement decision, on every
+  Line — exactly the root-column-break mechanism above, with a longer lifetime.
+  Only that branch's own lane may be born into it; tip placement, fan-out and
+  every compaction move skip it. Occupancy is bookkeeping rather than a move, so
+  this holds under every policy. Its one extra requirement over the root break:
+  a compacting lane that meets a reserved column **stops at it and never lays a
+  horizontal across it** (the conditional guard below already says exactly that,
+  and a reserved column is simply one more thing it stops at). A horizontal
+  crossing a *held* column is not a horizontal crossing a *vertical*, so nothing
+  in the crossings check would catch it — which is why it is stated rather than
+  left implicit.
 - **Colour comes from a carried Lane.** A Column's colour is the `color` slot of
   one Lane on one of its Segments (§5.5). Colour is a property of the lane
   *lifecycle* (born / continued / ended), which no policy varies.
@@ -472,7 +486,9 @@ every policy (vacuously where none is made).
   row start*, **stopping at the first occupied column** rather than reaching past
   it into a farther gap (which would lay the lane's horizontal across the
   occupant). A gap behind an occupied lane is reclaimed on a later row, once that
-  lane itself moves (a ripple).
+  lane itself moves (a ripple). "Occupied" is occupancy in the universal sense
+  above — a live lane, a root-blocked column, or a column **reserved** for a
+  pinned branch (§10.6.2) — so the guard covers all three without restatement.
 - **A fan Line carries no compaction.** *Where compaction runs*, it is suppressed
   entirely on a Line whose fan is drawn **inline** (the split or merge shares the
   commit Line rather than getting its own Line): a pass-through lane crosses the
@@ -497,7 +513,9 @@ historical — it is about *reusing* a freed column, not about the compaction mo
 - **Compact column reuse.** A fanned-out parent lane (a merge's extra parent)
   takes the **leftmost column that has been free since before its Line** — an
   interior gap an earlier branch vacated — rather than always opening a new
-  rightmost column. So a staircase of sequential feature-branch merges stays a
+  rightmost column. A column **reserved** for a pinned branch (§10.6.2) is never
+  free, so a fan-out steps over it; only that branch's own lane is born there.
+  So a staircase of sequential feature-branch merges stays a
   bounded width instead of growing one column wider per merge. A column a
   *terminating* child frees is reusable by an outgoing parent only when that does
   not place two turns in one cell: when the fan-out is on a **separate merge Line**
@@ -600,6 +618,15 @@ would break its colour continuity).
 A first-parent continuation keeps the trunk's slot (one colour per first-parent
 chain, §5); only a branch head or a merge's extra parent allocates.
 
+**Reserved slots.** A slot may be **held out of the free list entirely** for as
+long as something owns it: it is dropped from the FIFO, counted in use, and
+neither recycled nor retired. Two things reserve a slot — a context pane's
+**seeded** boundary lane, so a lane born inside the pane never reuses a colour
+live at the seam (§6.2), and a pinned branch with a **dedicated column**
+(§10.6.2), so that branch reads as the same colour every time it appears.
+Reserving is the same mechanism in both cases; a dedicated lane is the
+longer-lived instance of it.
+
 ### 5.6 Layout policy
 
 Lane placement is a **named policy**, selected by `layout_policy` (§8) and cycled
@@ -672,6 +699,17 @@ per §6.2 (the header is a rebuild of a focused sub-DAG, not a continuation of t
 sweep), but it is visible when comparing policies and is called out here so it
 does not read as an inconsistency. Bringing the header onto the policy axis would
 mean expressing the seam-up grid as a stage chain — not planned.
+
+**Reserved columns cut across the axis.** A **dedicated column** held for a
+pinned branch (§10.6.2) is not a policy: it is occupancy (§5.1), so every policy
+respects it and none of the four is exempt. What varies with the policy is only
+how much work it does. Under `straight` no lane ever moves sideways, so a
+reservation is a **birth-placement constraint alone** — the reserved column is
+simply never chosen for anyone else's new lane. Under the three policies that
+move lanes it is additionally a **barrier the moves stop at** (§5.1's guard).
+The reservation itself is enforced at birth and by "not compacted away", never
+by jogging an already-placed lane rightward into its column — compaction's
+redraw is leftward-only, and a rightward jog has no redraw to produce.
 
 **Reserved: `interval`.** The name is reserved for a future "straight branches"
 placement that assigns columns from forbidden intervals over precomputed lane
@@ -806,6 +844,16 @@ grid invariant (§5.1) lifted to the window edge. It is also stronger than anyth
 §5.1 asks of a body row — **every seeded lane must keep its seeded column**, or the
 seam jogs — so the seam row is laid out by the **no-move** placement regardless of
 the layout policy (§5.6) the body rows use.
+
+**Panes do not honour dedicated columns.** A column **reserved** for a pinned
+branch (§10.6.2) is a main-view placement rule; neither pane applies it. The
+footer is a seeded sweep whose seam must reproduce the main view's boundary
+columns *exactly*, so holding an extra column there would jog the seam — the
+very thing the invariant above forbids. The header never runs the column sweep
+at all (it is the direct seam-up grid below), so a reservation would have
+nothing to constrain. The exemption is deliberate: the boundary invariants in
+this section are unaffected by reservation, and a pane whose columns differ from
+the main view's for this reason is not a seam violation.
 
 **The minimal connecting subgraph.** A pane is a **focused rebuild**, not a
 reduction of the whole off-screen graph. The header shows **only how the pinned
@@ -1326,6 +1374,32 @@ release branch, a few personal branches. **HEAD (the current branch) is pinned
 by default, along with the common trunks `master` / `main` / `dev` when they
 exist**; the user may pin or unpin any ref.
 
+**The pinned branches are an ordered list, not a set.** Each entry is a ref
+owner id plus one flag, **reserved** (§10.6.2) — so the state is *one* list:
+
+```
+PinEntry = { id: string, reserved: boolean }
+pins     = PinEntry[]        -- priority order, highest first
+```
+
+Two consequences are structural rather than remembered rules: `reserved` ⊆
+`pinned` by construction (the flag has nowhere else to live), and **unpinning
+implies unreserving** (the flag leaves with its entry). The order is the
+**anchor priority**: first entry wins wherever one anchor has to be named.
+
+Order is **meaningful only among reserved entries** (§10.6.2 — they take
+dedicated columns left to right in list order, skipping unreserved ones).
+An unreserved entry's position is **latent**: it changes nothing today and
+becomes meaningful the moment that entry is reserved. Moving an unreserved
+entry is therefore a no-op on the rendered graph, which the dialog makes
+visible rather than hiding (§10.6.1).
+
+The list is **resolved**, not stored whole: the defaults above are appended, in
+that order (HEAD, `master`, `main`, `dev`), to whatever the user has explicitly
+ordered, and an explicitly **unpinned** ref suppresses its default. An entry
+naming a ref that no longer exists is dropped. So the list is deterministic for
+a repository the user has never touched, and stable once they have.
+
 **Pin the pair.** Pinning a local branch that **tracks an upstream** (§6.3) also
 pins that upstream remote-tracking ref as an anchor (config `pin_upstream`,
 default on). A logical branch is the local *and* where the remote thinks it is,
@@ -1336,7 +1410,7 @@ short name), so it pins the *correct* remote ref even when branch names collide
 across remotes (§6.3). Unpinning the local branch drops the auto-pinned upstream
 too (an explicit pin/unpin on the upstream ref itself still wins).
 
-Anchors drive two things:
+Anchors drive two things — and, deliberately, nothing more:
 
 - **The focus default (§10.7).** Pinned owners default **normal**; every other
   owner defaults **collapsed**. So naming the anchors *is* choosing what stays
@@ -1347,8 +1421,106 @@ Anchors drive two things:
   is drawn only until it merges into an anchor, and otherwise terminated
   minimally. The boundary lane-continuity invariant and pane sizing are
   specified in §6.
+- **Nothing else.** In particular pin does **not** touch lane geometry: a pinned
+  branch is laid out by exactly the same rules as any other. A **dedicated
+  column** is a separate, explicitly-set flag (§10.6.2), never a consequence of
+  pinning. This is deliberate and load-bearing — a typical repository pins up to
+  four branches by default (HEAD plus the trunks, and their upstreams), so
+  "pin ⇒ held column" would silently hold several columns open for a user who
+  asked for none.
 
 Pin is part of the view state; changing it reflows the projection (§10.5).
+
+#### 10.6.1 The pinned-branches dialog (`L`)
+
+`L` opens a small modal float over the graph listing the resolved pin list
+(§10.6) in priority order — the one place the order and the reserve flags are
+edited:
+
+```
+Pinned branches                    ◆ = dedicated lane
+
+  1  ◆  master              <C-j>/<C-k>  move
+  2  ◆  topic1              <Space>      toggle lane
+  3     origin/release      D            unpin
+  4     dev                 <CR>         jump to branch
+     + Pin new branch…      q            close
+```
+
+- Each row is one entry: its **priority number**, the **`◆` marker** when the
+  entry is reserved (§10.6.2) and blank when it is not, and the ref name. The
+  marker column is what makes "order matters only among reserved entries"
+  visible — the numbering runs over the whole list, the `◆` picks out the
+  subsequence that actually claims columns.
+- `<C-j>` / `<C-k>` move the entry under the cursor **down / up**, clamped at
+  the ends; the cursor follows it so a move is repeatable.
+- `<Space>` toggles the entry's reserve flag.
+- `D` unpins the entry — it leaves the list, taking its reserve flag with it.
+- The last row, **`+ Pin new branch…`**, opens the existing ref picker (§2,
+  `<leader>b`); the chosen ref is appended to the list, pinned and **not**
+  reserved. Refs already on the list are omitted from that picker.
+- `<CR>` on an entry closes the dialog and **jumps the graph to that branch**,
+  exactly as picking it in the ref picker does (§2) — centered, with the ref's
+  label pre-selected.
+- `q` / `<Esc>` closes.
+
+Every edit is applied immediately: the view state changes, the projection
+reflows (§10.5), and the graph cursor is restored to the commit it was on. The
+dialog's keys are buffer-local, so they do not collide with the graph's own
+bindings. `P` (§10.6) remains the in-graph shortcut for pin/unpin of the branch
+under the cursor; it appends to the end of the list, unreserved.
+
+**Honesty about unimplemented effect.** The reserve flag is recorded and
+displayed before the layout honours it (§10.6.2 is staged). While that is true,
+the dialog says so on its own last line — a control whose effect is not yet
+built must be visibly labelled as such rather than appear to work.
+
+#### 10.6.2 Dedicated lanes (reserved columns)
+
+A pin entry may be **reserved**: the branch is given a **dedicated column** in
+the graph, held for it whether or not a lane of that branch is drawn on a given
+row. Reserved branches take columns **left to right in pin-list order**,
+skipping unreserved entries. Reserving is always explicit (§10.6.1); the default
+for every entry, including the defaulted anchors, is **pinned but not
+reserved**.
+
+- **A reserved column is occupied for placement purposes.** It is exactly the
+  existing **root column break** (§5.1) mechanism generalised: the sweep's own
+  column bookkeeping marks the column taken, so tip placement, fan-out and any
+  compaction move all skip it. Nothing new is asked of §5.1 — its "stopping at
+  the first occupied column" stays literally true, with a reserved column being
+  one of the things that counts as occupied.
+- **Stop, never a skip.** A lane compacting leftward that meets a reserved
+  column **halts there**. It must never lay a horizontal *across* the reserved
+  column to reach a farther gap: that would be a wire crossing a held column,
+  and — unlike a horizontal crossing a *vertical* — it is invisible to the
+  crossing checker (§5.1 tests a horizontal against a vertical bar), so it would
+  pass every existing test while looking wrong.
+- **Birth, not re-jog.** The reservation is enforced where a lane is **born**
+  (and by "not compacted away" thereafter), never by moving an already-placed
+  lane rightward into its column. Compaction redraws leftward only; a rightward
+  jog has no redraw and fails the layout's completeness check.
+- **A reserved branch keeps a stable colour slot.** Its palette slot (§5.5) is
+  reserved for it: dropped from the free list, counted in use, and never
+  recycled or retired while the reservation stands. This generalises the
+  existing context-pane **seed** carve-out (§6.2), which already removes a live
+  seam lane's colour from the free list for exactly the same reason.
+- **Attribution tie-break.** A commit's signature is a *set* of owners (§10.2),
+  so a commit may belong to several reserved branches at once. The column is
+  chosen deterministically: the **highest-priority reserved owner in the
+  signature** — the earliest such entry in the pin list. This is the one place
+  pin-list order changes what is drawn, and it is why the list is ordered.
+- **The context panes are exempt.** Neither the footer nor the header honours
+  reservations. The footer is a *seeded* sweep whose seam row must reproduce the
+  main view's boundary columns exactly (§6.2), and the header is a direct
+  seam-up grid that never runs the column sweep at all. Holding a column in
+  either would break the seam or mean nothing. This is deliberate, not an
+  oversight: the §6.2 seam invariants are unchanged by reservation.
+
+Under the `straight` layout policy (§5.6) nothing compacts, so reservation
+reduces to a birth-placement constraint alone; under the other three it is both
+a birth constraint and a barrier the compaction moves stop at. No policy is
+exempt — the reserved column is occupancy, and occupancy is universal (§5.1).
 
 ### 10.7 First-parent default
 
