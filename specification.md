@@ -810,10 +810,10 @@ not distinguishable from a fan; and a cell holding two different lanes' bends
 renders a single colour for two wires, which is exactly the §5.2 lane handoff.
 Instead the handover decomposes onto two **different** rows, each an ordinary fan:
 
-- the last commit of a run has no parent leading to the next subject commit, so its
-  continuation leaves the gutter as **that commit's own fan-out** turn, and the
-  gutter falls empty;
-- the next subject commit's incoming lane turns in as **that commit's own fan-in**.
+- the occupant leaves on a **virtual eviction row** of its own, on which exactly
+  one lane moves;
+- the next subject commit's incoming lane turns in as **that commit's own fan-in**,
+  a row later.
 
 §5.1 already permits a commit's own fan to cross lanes, every cell keeps at most one
 turning lane, colour stays continuous, and it costs **no extra rows and no new
@@ -830,10 +830,15 @@ comparison tool rather than a repaint.
 
 Three consequences worth stating:
 
-- A **newly born lane can claim the gutter for free.** At a merge, the parent
-  starting the merged-in lineage is the next subject commit, so it is placed
-  straight into the gutter as part of the merge's own fan-out — no move, no wire
-  that was not already being drawn.
+- **The gutter belongs to the row being read, and nothing may take it early.**
+  A commit's first parent continues in the gutter; no other parent may enter it.
+  This was once the other way round — at a merge, the parent starting the
+  merged-in lineage was placed straight into the gutter as part of the merge's own
+  fan-out, which looked free (a lane is born there, no wire moves) and was
+  documented as a bonus. It was a bug: the node's colour is read from its cell's
+  downward segment, so the merge rendered in the **lineage's** colour, and a merge
+  on the trunk read as the topic branch it merged. A handover costs a row; it does
+  not get to borrow one from the commit above.
 - The gutter may be **briefly empty**, between a run ending and the next lane
   turning in. It renders blank; nothing else may take it.
 - The **root column break** (§5.1) applies unchanged. A root sitting in the gutter
