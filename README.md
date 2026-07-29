@@ -138,7 +138,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `q` | Hide the graph window (`<leader>wg` returns to it, `<C-w>q` destroys it) |
 | `<C-o>` / `<C-i>` | Navigate back / forward through the view history (graph ⇄ commit view ⇄ drilled-in submodule) |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
-| `C` | Cycle the lane layout policy (compact → survivors → linear → straight) — which lanes may move sideways to close a gap |
+| `C` | Cycle the lane layout policy (compact → survivors → linear → straight → gutter) — which lanes may move sideways to close a gap, and (gutter) whether the node sits in a fixed column beside the message |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
