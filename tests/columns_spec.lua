@@ -30,21 +30,32 @@ local function check(opts, rows)
                     err(("r%d c%d: union != connectivity at %s"):format(ri, ti, k))
                 end
             end
-            -- per-column limits: <=1 vertical, <=1 turn (<=2 with merge_on_split)
-            local verticals, turns = 0, 0
+            -- Per-column limits: <=1 vertical, <=1 turning LANE (<=2 with
+            -- merge_on_split). Counted by distinct lane **id**, not by segment: the
+            -- cap exists to bound how many separate wires bend in one cell, because
+            -- the cell renders ONE colour and two different lanes bending there make
+            -- that colour a lie (the §5.2 handoff). Two segments of the SAME lane —
+            -- the `gutter` policy's trunk arriving from above and leaving below, both
+            -- detouring through the gutter (§5.6) — are one wire passing through, and
+            -- the cell's colour is truthful, so they count once. Under every other
+            -- policy a lane is drawn once per cell per line, so this is exactly the
+            -- previous count.
+            local verticals, turning = 0, {}
             for _, s in ipairs(segs) do
                 local c = s.connectivity
                 if c.up and c.down then verticals = verticals + 1 end
-                if (c.left or c.right) and (c.up or c.down) then turns = turns + 1 end
+                if (c.left or c.right) and (c.up or c.down) then turning[s.id] = true end
                 if nsides(c) > 2 then err(("r%d c%d: segment >2 sides"):format(ri, ti)) end
                 if nsides(c) < 2 and not (t.has_commit or #segs > 1) then
                     err(("r%d c%d: 1-sided non-endpoint"):format(ri, ti))
                 end
                 if c.down and not s.parent then err(("r%d c%d: down without parent"):format(ri, ti)) end
             end
+            local turns = 0
+            for _ in pairs(turning) do turns = turns + 1 end
             if verticals > 1 then err(("r%d c%d: %d vertical segments"):format(ri, ti, verticals)) end
             local turn_cap = opts.merge_style.allow_merge_on_split and 2 or 1
-            if turns > turn_cap then err(("r%d c%d: %d turns (cap %d)"):format(ri, ti, turns, turn_cap)) end
+            if turns > turn_cap then err(("r%d c%d: %d turning lanes (cap %d)"):format(ri, ti, turns, turn_cap)) end
         end
         end
     end
@@ -75,7 +86,18 @@ local function check(opts, rows)
     -- not reuse the root's column with a vertical wire or a node (a horizontal
     -- crossing is fine). Otherwise an independent history stacks under the root
     -- and reads as one continuous lane.
+    --
+    -- Skipped under `gutter` (§5.1 root column break, §5.6): there EVERY node sits
+    -- in the reserved gutter, so "the root's column" is a column that carries no
+    -- continuity meaning and is occupied by a node on every row by construction —
+    -- the check would assert the opposite of the policy. What the break actually
+    -- guards (a vertical stub continued by an unrelated wire) cannot arise there,
+    -- because a gutter node's incoming lane ends in a TURN out of its lane column;
+    -- that is asserted directly by "a root's lane column is safely reopened next
+    -- row [gutter]" below, via the colour-continuity checker that would catch a
+    -- false continuation.
     local flat = {} -- { line = GraphColumn[], root_col = int|nil }
+    local skip_root_break = opts.layout_policy == "gutter"
     for _, row in ipairs(rows) do
         if row.split then flat[#flat + 1] = { line = row.split } end
         local ccol
@@ -84,7 +106,7 @@ local function check(opts, rows)
         flat[#flat + 1] = { line = row.columns, root_col = is_root and ccol or nil }
         if row.merge then flat[#flat + 1] = { line = row.merge } end
     end
-    for fi = 1, #flat - 1 do
+    for fi = 1, (skip_root_break and 0 or #flat - 1) do
         local rc = flat[fi].root_col
         local below = rc and flat[fi + 1].line[rc]
         if below and (below.has_commit or below.connectivity.up or below.connectivity.down) then
@@ -124,10 +146,16 @@ local STYLES = {
 -- Layout policies (spec §5.6). Phase 1's per-cell well-formedness, continuity and
 -- colouring are all UNIVERSAL invariants (§5.1), so the whole style sweep runs
 -- under every policy.
-local POLICIES = { "compact", "survivors", "linear", "straight" }
+local POLICIES = { "compact", "survivors", "linear", "straight", "gutter" }
 -- The policies that run the linear-commit slide — the one §5.6 policy-specific
 -- behaviour, so assertions about a *commit* moving belong to these two only.
 local SLIDING = { "compact", "linear" }
+-- The policies that place a commit's node IN A LANE COLUMN. `gutter` (§5.6) puts
+-- it in a reserved column instead, so any assertion phrased in terms of *which
+-- column a node lands in* is about these four; the gutter's own placement is
+-- asserted separately. This is a difference in what the assertion can even mean,
+-- not a relaxation of it.
+local LANE_COLUMN = { "compact", "survivors", "linear", "straight" }
 
 local function policy_opts(ms, policy)
     local o = h.big_opts(ms)
@@ -227,7 +255,7 @@ describe("columns.layout root column break", function()
     -- UNIVERSAL (§5.1): the break lives in the sweep's own `blocked` bookkeeping —
     -- read by tip placement and fan-out, never produced by a compaction move — so
     -- it must survive a policy that moves nothing. Asserted across the matrix.
-    for _, policy in ipairs(POLICIES) do
+    for _, policy in ipairs(LANE_COLUMN) do
         it("does not stack a branch head under a root [" .. policy .. "]", function()
             -- Two independent chains: a1->a2(root), then b1(head)->b2(root). Without
             -- the break, b1 reuses a2's column and the four nodes read as one lane.
@@ -249,6 +277,29 @@ describe("columns.layout root column break", function()
             assert.equals(a, c)    -- a's column free again by c
         end)
     end
+
+    -- The `gutter` counterpart (§5.1 root column break, §5.6). Both assertions
+    -- above ask which COLUMN a node lands in, and under `gutter` every
+    -- subject-owning node lands in the same one by definition — so they cannot be
+    -- run here without asserting the opposite of the policy. What the break
+    -- actually guards is a lane ending in a vertical STUB that an unrelated lane
+    -- then continues; under `gutter` an incoming lane ends in a TURN out of its
+    -- column, so a lane born there next row reads as separate. That is what is
+    -- asserted, on the same fixture, by the checker that would catch a false
+    -- continuation: two `│` cells of different colours stacked is a colour break.
+    it("a root's lane column is safely reopened next row [gutter]", function()
+        local opts = policy_opts(nil, "gutter")
+        local rows = columns.layout(opts, h.dag({
+            { "a1", { "a2" } }, { "a2", {} },
+            { "b1", { "b2" } }, { "b2", {} },
+        }))
+        -- every node in the gutter; the two histories share lane columns freely
+        for _, hash in ipairs({ "a1", "a2", "b1", "b2" }) do
+            assert.equals(1, commit_col(rows, hash))
+        end
+        -- ...and nothing reads as one continuous lane across the boundary
+        assert.equals(0, #check(opts, rows))
+    end)
 end)
 
 describe("columns.layout compact column reuse (spec §5.1)", function()
@@ -283,13 +334,20 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
     -- So the bounded widths must be identical under every policy; running the
     -- matrix here is what keeps a future `interval` placement policy (§5.6) from
     -- reading as a §5.1 violation.
+    -- `gutter` reserves a node column no lane may use (§5.6), so every width below
+    -- is one larger under it. The ASSERTION is unchanged — a short and a long
+    -- staircase must render the SAME bounded width — only the constant shifts by
+    -- the reserved column. Pinning the constant per policy keeps the real claim
+    -- (bounded, not growing per merge) exact rather than loosening it to "<= N".
+    local function gut(policy, n) return policy == "gutter" and n + 1 or n end
+
     for _, policy in ipairs(POLICIES) do
         it("keeps a staircase of merges bounded, not growing per merge [" .. policy .. "]", function()
             local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = false }, policy)
             -- Width must not scale with the number of merges: a short and a long
             -- staircase render the same bounded width (3: trunk + the alternating gap).
-            assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(3)))))
-            assert.equals(3, max_width(columns.layout(opts, h.dag(staircase(12)))))
+            assert.equals(gut(policy, 3), max_width(columns.layout(opts, h.dag(staircase(3)))))
+            assert.equals(gut(policy, 3), max_width(columns.layout(opts, h.dag(staircase(12)))))
         end)
 
         it("stays well-formed and connected across the staircase [" .. policy .. "]", function()
@@ -305,8 +363,8 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
             -- instead of leaving an empty-column gap. The gap made the width oscillate
             -- (2 vs 3) and bounced a right-aligned mirror graph. Width must stay 2.
             local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = true }, policy)
-            assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(3)))))
-            assert.equals(2, max_width(columns.layout(opts, h.dag(staircase(12)))))
+            assert.equals(gut(policy, 2), max_width(columns.layout(opts, h.dag(staircase(3)))))
+            assert.equals(gut(policy, 2), max_width(columns.layout(opts, h.dag(staircase(12)))))
             local errs = check(opts, columns.layout(opts, h.dag(staircase(8))))
             assert.equals(0, #errs, table.concat(errs, "\n"))
         end)
@@ -349,6 +407,127 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
             assert.equals(0, #check(opts, laid), "ill-formed")
         end)
     end
+end)
+
+describe("columns.layout gutter policy (§5.6)", function()
+    -- The gutter rule is "the node that owns its row's SUBJECT", so the interesting
+    -- cases are the node kinds that do NOT own one. A collapsed head and a kept
+    -- junction are markers (§10.4) — ref labels, no subject, and several may share a
+    -- packed line — so they keep their lane column; a working-tree virtual commit
+    -- (§4.2) carries a synthesized subject, so it is a gutter node. Getting this
+    -- wrong is invisible on plain fixtures (every fuzz commit owns a subject), which
+    -- is why it is pinned here.
+    local function build()
+        local items = h.dag({
+            { "wt", { "c1" } }, { "c1", { "c2" } }, { "topic", { "c3" } },
+            { "c2", { "c3", "c5" } }, { "c5", { "c4" } }, { "c3", { "c4" } }, { "c4", {} },
+        })
+        local by = {}
+        for _, it in ipairs(items) do by[it.commit.hash] = it.commit end
+        by.wt.virtual = "staged"                                  -- has a subject
+        by.topic.collapsed = true                                 -- marker
+        by.topic.count = 7
+        by.topic.refs = { { name = "topic", kind = "local" } }
+        by.c2.junction = true                                     -- node-less junction
+        by.c2.refs = {}
+        by.c3.junction = true                                     -- LABELLED junction
+        by.c3.refs = { { name = "release", kind = "local" } }
+        return items
+    end
+
+    local function node_col(rows, hash)
+        for _, row in ipairs(rows) do
+            if row.commit and row.commit.hash == hash then
+                for j, t in ipairs(row.columns) do if t.has_commit then return j end end
+            end
+        end
+    end
+
+    it("puts subject-owning nodes in the gutter and markers on their lanes", function()
+        for _, ms in ipairs({
+            { split_on_separate_line = true, merge_on_separate_line = false },
+            { split_on_separate_line = false, merge_on_separate_line = false },
+        }) do
+            local opts = policy_opts(ms, "gutter")
+            opts.junction_markers = true
+            local rows = columns.layout(opts, build())
+            for _, hash in ipairs({ "wt", "c1", "c5", "c4" }) do
+                assert.equals(1, node_col(rows, hash), hash .. " should be in the gutter")
+            end
+            for _, hash in ipairs({ "topic", "c2", "c3" }) do
+                assert.is_true(node_col(rows, hash) > 1, hash .. " is a marker: it keeps its lane")
+            end
+            assert.equals(0, #check(opts, rows), "ill-formed")
+        end
+    end)
+
+    it("never lets a lane pass through the gutter between commits", function()
+        -- No lane LIVES in the gutter: it is never carried from one commit's block
+        -- to the next, so the column stays free for nodes on every row (blank on a
+        -- marker row, keeping the node column aligned down the whole graph).
+        --
+        -- A commit's OWN hub wire does run in the gutter *within* its block — with a
+        -- separate split line the children converge there and drop one row into the
+        -- node, and with a separate merge line the parents ascend out of it. That is
+        -- the node's own fan reaching it, not a lane occupying the column, so the
+        -- check is exactly at the block boundary: a gutter cell going `down` on the
+        -- last line of one commit met by `up` on the first line of the next would be
+        -- a lane living there.
+        for _, ms in ipairs({
+            { split_on_separate_line = true,  merge_on_separate_line = false },
+            { split_on_separate_line = false, merge_on_separate_line = true },
+            { split_on_separate_line = true,  merge_on_separate_line = true },
+            { split_on_separate_line = false, merge_on_separate_line = false },
+        }) do
+            local opts = policy_opts(ms, "gutter")
+            for seed = 1, 80 do
+                local rows = columns.layout(opts, h.dag(h.random_dag(3 + (seed % 12), seed)))
+                local last -- the previous ROW's final line
+                for ri, row in ipairs(rows) do
+                    local lines = {}
+                    if row.split then lines[#lines + 1] = row.split end
+                    lines[#lines + 1] = row.columns
+                    if row.merge then lines[#lines + 1] = row.merge end
+                    local first = lines[1][1]
+                    if last and last.connectivity.down and first and first.connectivity.up then
+                        assert(false, ("seed=%d row=%d: a lane passes through the gutter"):format(seed, ri))
+                    end
+                    last = lines[#lines][1]
+                end
+            end
+        end
+    end)
+
+    it("never moves a lane sideways", function()
+        -- `gutter` shares `straight`'s no-move rule (§5.6): a lane holds its column
+        -- for life, so the only horizontals are commits' own fans.
+        for _, ms in ipairs({
+            { split_on_separate_line = true, merge_on_separate_line = true },
+            { split_on_separate_line = false, merge_on_separate_line = false },
+        }) do
+            local opts = policy_opts(ms, "gutter")
+            for seed = 1, 80 do
+                local rows = columns.layout(opts, h.dag(h.random_dag(4 + (seed % 11), seed)))
+                local col_of = {}
+                for ri, row in ipairs(rows) do
+                    for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
+                        if line then
+                            for j, t in ipairs(line) do
+                                for _, s in ipairs(t.lanes or {}) do
+                                    if s.connectivity.up and s.connectivity.down then
+                                        assert(col_of[s.id] == nil or col_of[s.id] == j,
+                                            ("seed=%d row=%d: lane %s moved %s -> %d")
+                                            :format(seed, ri, tostring(s.id), tostring(col_of[s.id]), j))
+                                        col_of[s.id] = j
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
 end)
 
 describe("columns.layout free-list colouring", function()

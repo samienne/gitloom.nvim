@@ -142,10 +142,13 @@ end
 
 -- The footer threads ONE shared `opts` into both `columns.layout` (the main view)
 -- and `pane.footer` (the seeded pane), so it picks the layout policy (§5.6) up for
--- free. The seam contract is policy-INDEPENDENT — a pane's seam row always runs the
--- no-move chain, whatever the body does — so the whole replay must hold, at every
--- cutoff, under every policy.
-for _, policy in ipairs({ "compact", "survivors", "linear", "straight" }) do
+-- free. The seam CONTRACT is policy-independent — every seeded lane keeps its
+-- seeded column — even though the chain that satisfies it is not always the same
+-- one: four policies share `layout_seam`, while `gutter` is its own seam (that
+-- chain moves no lane either, and it is the only one that also keeps the seam row's
+-- node in the gutter, so the pane's first row agrees with its body). So the whole
+-- replay must hold, at every cutoff, under every policy.
+for _, policy in ipairs({ "compact", "survivors", "linear", "straight", "gutter" }) do
 describe("large real-world footer replay [" .. policy .. "] (§6.2)", function()
     it("every seam line — columns AND virtual split/merge — lays out with no strand/jog", function()
         local b = build(policy)

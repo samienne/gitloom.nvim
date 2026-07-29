@@ -103,7 +103,7 @@ end
 -- seam-up grid), but the MAIN view it takes its cutoffs and lane ids from does —
 -- so the layout policy (§5.6) still changes its input. The anchor-severing
 -- invariant must hold whichever policy laid the main graph out.
-for _, policy in ipairs({ "compact", "survivors", "linear", "straight" }) do
+for _, policy in ipairs({ "compact", "survivors", "linear", "straight", "gutter" }) do
 describe("large real-world header replay [" .. policy .. "] (§6.2)", function()
     it("keeps HEAD and dev on their graph lane id at every cutoff (no fresh-id severing)", function()
         local ctx = build(policy)

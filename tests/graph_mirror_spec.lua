@@ -193,3 +193,88 @@ for _, style in ipairs(STYLES) do
         end)
     end
 end
+
+--------------------------------------------------------------------------------
+-- (4) The `gutter` layout policy under mirror (spec §5.6)
+--------------------------------------------------------------------------------
+-- Mirroring is orthogonal to *movement*, so the four compaction policies need no
+-- separate mirror sweep — they emit the same shapes in different columns. `gutter`
+-- is different in kind: it changes where NODES go, which produces cell shapes the
+-- other policies never emit (a node cell whose only wire is a horizontal; a lane
+-- cell where one lane both arrives and leaves, rendered `┤`). Those are exactly
+-- the shapes a flip could get wrong, and mirrored is the orientation the policy
+-- exists for (§5.4 puts the gutter nearest the message), so it gets the full
+-- treatment: invariants on the mirrored render, mirror == flip(normal), and colour
+-- preservation, across every merge style.
+
+local function gutter_opts(ms, mirror)
+    local o = h.big_opts(ms)
+    o.layout_policy = "gutter"
+    o.mirror = mirror
+    return o
+end
+
+for _, style in ipairs(STYLES) do
+    describe("gutter policy under mirror [" .. style.name .. "]", function()
+        for _, fx in ipairs(FIXTURES) do
+            it("lays out " .. fx.name .. " mirrored", function()
+                assert_ok(gutter_opts(style.ms, true), h.dag(fx.rows),
+                    "gutter/" .. style.name .. "/" .. fx.name, style.experimental)
+            end)
+        end
+
+        it("is well-formed mirrored across random DAGs", function()
+            local failures = {}
+            for seed = 1, 120 do
+                local n = 3 + (seed % 12)
+                local items = h.dag(h.random_dag(n, seed))
+                local errors, _, grid = h.check(gutter_opts(style.ms, true), items, style.experimental)
+                if #errors > 0 then
+                    failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s"):format(
+                        seed, n, h.grid_to_string(grid), table.concat(errors, "\n"))
+                    if #failures >= 3 then break end
+                end
+            end
+            assert(#failures == 0, "\n=== gutter fuzz failures ===\n" .. table.concat(failures, "\n\n"))
+        end)
+
+        it("is well-formed unmirrored across random DAGs", function()
+            local failures = {}
+            for seed = 1, 120 do
+                local n = 3 + (seed % 12)
+                local items = h.dag(h.random_dag(n, seed))
+                local errors, _, grid = h.check(gutter_opts(style.ms, false), items, style.experimental)
+                if #errors > 0 then
+                    failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s"):format(
+                        seed, n, h.grid_to_string(grid), table.concat(errors, "\n"))
+                    if #failures >= 3 then break end
+                end
+            end
+            assert(#failures == 0, "\n=== gutter fuzz failures ===\n" .. table.concat(failures, "\n\n"))
+        end)
+
+        it("mirrors as the true flip of the normal render", function()
+            for _, fx in ipairs(FIXTURES) do
+                local items = h.dag(fx.rows)
+                local rows = graph._internal.build_graph(gutter_opts(style.ms, false), items)
+                local normal = h.render_grid(gutter_opts(style.ms, false), rows)
+                local mirrored = h.render_grid(gutter_opts(style.ms, true), rows)
+                assert.equals(core(flip(normal)), core(glyph_lines(mirrored)),
+                    "gutter/" .. style.name .. "/" .. fx.name)
+            end
+        end)
+
+        if not style.experimental then
+            it("preserves colour under the flip", function()
+                for seed = 1, 40 do
+                    local items = h.dag(h.random_dag(3 + (seed % 10), seed))
+                    local rows = graph._internal.build_graph(gutter_opts(style.ms, false), items)
+                    assert.same(
+                        color_multiset(h.render_grid(gutter_opts(style.ms, false), rows)),
+                        color_multiset(h.render_grid(gutter_opts(style.ms, true), rows)),
+                        "gutter/" .. style.name .. "/seed=" .. seed)
+                end
+            end)
+        end
+    end)
+end
