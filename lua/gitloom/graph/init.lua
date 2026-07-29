@@ -256,6 +256,8 @@ M._internal = {
     -- gitloom.git (model / parse / format / refs / range / order / date)
     classify_ref = git.classify_ref,
     group_refs = git.group_refs,
+    parse_worktrees = git.parse_worktrees,
+    worktree_refs = git.worktree_refs,
     track_segments = git.track_segments,
     track_label = git.track_label,
     bump_recent = git.bump_recent,

@@ -767,3 +767,142 @@ describe("view.project — output is layout-valid", function()
         end
     end)
 end)
+
+describe("view.owners — owner coverage of the loaded commit set (§10.7)", function()
+    -- REGRESSION (fix/reactive-unpacked). §3.1 loads commits with `git log --all`
+    -- while §3.2 reads refs from `refs/heads`, `refs/remotes` and `refs/tags`
+    -- only. In a repository with linked worktrees (`--all` walks every worktree's
+    -- HEAD) or a `refs/original/*` backup namespace, the model therefore holds
+    -- real commits that **no owner reaches**. `mode_of` then applies the
+    -- "uncovered ⇒ normal" fallback (§10.2) and the whole branch renders as a run
+    -- of full commit rows — no `◍` head, nothing for `pack_markers` to pack — in
+    -- a view whose stated result is "current branch in full, every other branch a
+    -- `◍` head" (§10.7).
+    --
+    -- The fixture is the topology only: a trunk with a pinned ref, plus a branch
+    -- that forks off it and carries **no ref at all**.
+    local function fixture()
+        local items, by_hash = dag({
+            { "h",  { "t2" } }, -- master tip (the pinned anchor)
+            { "x1", { "x2" } }, -- an UNREFERENCED branch tip
+            { "x2", { "x3" } },
+            { "x3", { "t2" } }, -- ... forking off the trunk
+            { "t2", { "t3" } },
+            { "t3", {} },
+        })
+        local ref_owners = { { id = "master", tip = by_hash.h } }
+        return items, by_hash, ref_owners
+    end
+
+    it("every real commit in the model is reached by some owner", function()
+        local items, _, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, { master = true }, {}, true)
+        local sig = view.signatures(items, os)
+        for _, it in ipairs(items) do
+            assert.is_true(next(sig[it.commit.hash]) ~= nil,
+                "commit " .. it.commit.hash .. " has an empty signature — no owner covers it")
+        end
+    end)
+
+    it("an unreferenced branch collapses to one ◍ head, not a run of commits", function()
+        local items, _, ref_owners = fixture()
+        local os = view.owners(items, ref_owners, { master = true }, {}, true)
+        local proj = view.project(items, os)
+
+        -- the pinned anchor's first-parent mainline stays in full
+        assert.equals("normal", proj.mode.h)
+        assert.equals("normal", proj.mode.t2)
+        assert.equals("normal", proj.mode.t3)
+
+        -- the ref-less branch is "every other branch": collapsed to one head
+        assert.equals("collapsed", proj.mode.x1)
+        assert.equals("collapsed", proj.mode.x2)
+        assert.equals("collapsed", proj.mode.x3)
+
+        local heads, normals = 0, 0
+        for _, n in ipairs(proj.nodes) do
+            if n.collapsed then heads = heads + 1 else normals = normals + 1 end
+        end
+        assert.equals(1, heads)   -- one ◍ standing for x1..x3
+        assert.equals(3, normals) -- only the trunk h, t2, t3
+    end)
+end)
+
+describe("view.owners — the tip-owner backstop (§10.2)", function()
+    local view = require("gitloom.graph.view")
+    local helpers = require("tests.graph_helpers")
+
+    -- h (ref "master", the anchor) -> t2 -> t3 ; x1 is a ref-less tip forking
+    -- off t2 — the shape a commit reachable only from `--all` makes.
+    local function fixture()
+        local items = helpers.dag({
+            { "h", { "t2" } },
+            { "x1", { "x2" } },
+            { "x2", { "t2" } },
+            { "t2", { "t3" } },
+            { "t3", {} },
+        })
+        local by = {}
+        for _, it in ipairs(items) do by[it.commit.hash] = it.commit end
+        return items, by
+    end
+
+    -- owner list → id → owner, so an absent owner is a plain nil assertion.
+    local function by_id(os)
+        local m = {}
+        for _, o in ipairs(os) do m[o.id] = o end
+        return m
+    end
+
+    it("mints a tip: owner for an uncovered tip, collapsed and fp-only", function()
+        local items, by = fixture()
+        local os = view.owners(items, { { id = "master", tip = by.h } }, { master = true }, {}, true)
+        local o = by_id(os)["tip:x1"]
+        assert.is_not_nil(o)
+        assert.equals("collapsed", o.mode)
+        assert.is_true(o.fp_only)
+        assert.equals(by.x1, o.tip)
+    end)
+
+    it("mints none for a tip a ref already owns", function()
+        local items, by = fixture()
+        local os = view.owners(items, { { id = "master", tip = by.h } }, { master = true }, {}, true)
+        assert.is_nil(by_id(os)["tip:h"])
+    end)
+
+    it("mints none for an interior commit", function()
+        local items, by = fixture()
+        local os = view.owners(items, { { id = "master", tip = by.h } }, { master = true }, {}, true)
+        local ids = by_id(os)
+        assert.is_nil(ids["tip:x2"])
+        assert.is_nil(ids["tip:t3"]) -- a root has children, so it is not a tip
+    end)
+
+    it("an explicit mode overrides a tip owner like any other", function()
+        local items, by = fixture()
+        local os = view.owners(items, { { id = "master", tip = by.h } }, { master = true },
+            { ["tip:x1"] = "normal" }, true)
+        for _, o in ipairs(os) do
+            if o.id == "tip:x1" then assert.equals("normal", o.mode) end
+        end
+    end)
+
+    it("EXCLUDES a working-tree virtual commit (§4.2 must stay visible)", function()
+        local items = helpers.dag({ { "wt", { "h" } }, { "h", { "t2" } }, { "t2", {} } })
+        local by = {}
+        for _, it in ipairs(items) do by[it.commit.hash] = it.commit end
+        by.wt.virtual = "staged" -- the §4.2 marker; childless by construction
+        local os = view.owners(items, { { id = "master", tip = by.h } }, { master = true }, {}, true)
+        assert.is_nil(by_id(os)["tip:wt"])
+        -- ... and it therefore still projects as a normal, always-visible row.
+        local proj = view.project(items, os)
+        assert.equals("normal", proj.mode.wt)
+        assert.is_false(proj.node_of_hash.wt.collapsed)
+    end)
+
+    it("adds no anonymous owners at all with focus off", function()
+        local items, by = fixture()
+        local os = view.owners(items, { { id = "master", tip = by.h } }, { master = true }, {}, false)
+        assert.equals(1, #os) -- the ref owner only
+    end)
+end)

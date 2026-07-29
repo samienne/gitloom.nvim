@@ -65,7 +65,11 @@ Commit attribution — deciding which commits "belong to" a branch being
 collapsed or hidden when commits are shared across the DAG — is resolved by the
 **reachability-signature** model (specification.md §10.2): per-commit signature
 → regions of equal signature → a display-mode join over each region's owners.
-Owners are refs, plus anonymous non-first merge-parents, plus a *first-parent-
+Owners are refs — including the `worktree` refs read from `git worktree list`
+(§3.2), which is what stops a linked worktree's checked-out commits from being
+the one thing in the model no owner reaches — plus anonymous non-first
+merge-parents, plus anonymous **uncovered tips** (`tip:<hash>`, the backstop that
+makes coverage total whatever the `--all` refspec drags in), plus a *first-parent-
 only* trunk owner (HEAD) whose coverage stops at every merge — which is what lets
 the **first-parent focus** default (§10.7) show HEAD's mainline in full while
 collapsing every branch merged into or diverging from it. The trunk is the
@@ -342,9 +346,10 @@ lua/gitloom/
   git/            The git DATA LIBRARY (gitloom.git)
     init.lua        Public aggregator (re-exports the submodules)
     model.lua       Commit/Ref/Upstream types + sparse placeholder constructors
-    parse.lua       git log/show/diff/status parsers (incl. the stream de-chunker)
+    parse.lua       git log/show/diff/status/worktree-list parsers (incl. the stream de-chunker)
     format.lua      Commit-detail / diff / diffstat / range / worktree formatters
-    refs.lua        classify/group refs, ref-picker model, resync ref-diff (§2/§3.4)
+    refs.lua        classify/group refs, worktree-HEAD refs (§3.2), ref-picker
+                    model, resync ref-diff (§2/§3.4)
     range.lua       DiffRange builders (§11.5/§13.5)
     order.lua       order_commits — gitloom's owned topo-sort (§3.1)
     date.lua        Timestamp parse + date formatters (§4/§6)
@@ -543,7 +548,16 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   `Ref.upstream` (`{ short, ahead, behind, gone }`, §6.3) — only when git reports a
   tracked upstream, so divergence comes from real tracking config, never a shared
   short name. `fetch_ref_entries` (the resync read) carries the same upstream so
-  `R` refreshes the indicator.
+  `R` refreshes the indicator. Both then chain `read_worktree_refs` (below), so
+  the ref set the open path builds and the one the resync reconciles are the same.
+- `read_worktree_refs(taken)` — `git worktree list --porcelain`, parsed by the
+  pure `parse.parse_worktrees` (blank-line-separated stanzas: `worktree <path>`,
+  `HEAD <sha>`, `branch <refname>` / `detached` / `bare`) and filtered by the pure
+  `refs.worktree_refs` into `worktree` refs named `wt:<basename>` (§3.2/§4.1). The
+  I/O layer supplies only `taken` — the hashes the real refs already point at —
+  so the whole skip rule (main worktree, bare, already-referenced) stays testable.
+  A non-zero exit resolves to `{}`: an old git or a plain checkout degrades to the
+  previous behaviour rather than failing the open.
 - `fetch_head(repo)` — `git symbolic-ref --short --quiet HEAD` for the current
   branch.
 - `fetch_commits(opts)` — `git log --topo-order --parents` (a valid topo base for

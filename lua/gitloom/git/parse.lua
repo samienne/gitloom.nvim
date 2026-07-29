@@ -234,4 +234,52 @@ function M.parse_status(lines)
     return st
 end
 
+--- Parse `git worktree list --porcelain` (spec §3.2). The porcelain form is
+--- stanzas separated by a blank line, each opening with `worktree <path>` and
+--- then carrying label-only or `label value` attributes:
+---
+---     worktree /repo            worktree /repo/wt/feature      worktree /repo/bare
+---     HEAD <sha>                HEAD <sha>                     bare
+---     branch refs/heads/master  detached
+---
+--- The **first** stanza is the main worktree; the rest are linked worktrees. A
+--- bare stanza has no HEAD. `branch` and `detached` are mutually exclusive, so
+--- `detached` is derived (a HEAD with no branch) rather than trusted on its own —
+--- older git wrote the attribute inconsistently and the derivation is total.
+--- `name` is the path's basename (the §4.1 label stem), taken from either
+--- separator so a Windows path parses the same as a POSIX one. Pure; exposed for
+--- testing.
+---@param lines string[]
+---@return { path: string, name: string, head: string?, branch: string?, detached: boolean, bare: boolean, main: boolean }[]
+function M.parse_worktrees(lines)
+    local out, cur = {}, nil
+    local function flush()
+        if cur then
+            cur.detached = cur.head ~= nil and cur.branch == nil
+            cur.main = #out == 0
+            out[#out + 1] = cur
+        end
+        cur = nil
+    end
+    for _, line in ipairs(lines or {}) do
+        local path = line:match("^worktree (.+)$")
+        if path then
+            flush()
+            cur = { path = path, name = path:match("([^/\\]+)$") or path, bare = false }
+        elseif cur then
+            local head = line:match("^HEAD (%x+)$")
+            local branch = line:match("^branch (.+)$")
+            if head then
+                cur.head = head
+            elseif branch then
+                cur.branch = branch
+            elseif line == "bare" then
+                cur.bare = true
+            end
+        end
+    end
+    flush()
+    return out
+end
+
 return M

@@ -46,6 +46,12 @@ even though it ships as part of the same suite. See
   (staged, unstaged, untracked) on top of HEAD; open any to inspect its
   diff in the commit view or the external viewer. Updates live as you edit or
   stage (and on `R`); strictly read-only — gitloom never stages or commits
+- **Linked worktrees** — a worktree checked out on a **detached HEAD** would
+  otherwise have no branch naming its commits, so they would show as a run of
+  fully expanded rows in an otherwise focused graph (and vanish on the next `R`).
+  gitloom reads `git worktree list` and labels such a HEAD `{wt:<dir>}`, so it
+  collapses, pins and navigates like any other branch. A worktree that is on a
+  branch — or parked on a tip something else already names — gets no extra label
 - **Search & filter** — `<leader>gl` fuzzy-finds a commit by subject/author in a
   picker (preview shows the commit + a graph snippet); `/` is a live in-graph
   **filter** that folds the graph to matching commits in place (the rest
@@ -154,7 +160,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
-| `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
+| `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, linked-worktree HEADs (`wt:<dir>`) and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `<leader>gl` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
 | `/` | Filter the graph — a live, isolated overlay that folds it to commits whose subject/author match (the rest collapse); `<C-j>`/`<C-k>` (or `<Up>`/`<Down>`) step matches, `<CR>` jumps to one (opening its branch), `<C-s>` stamps it as a persistent view, `<Esc>` cancels |
 | `F` | Toggle the off-screen context panes (summary bands above and below the graph) |
@@ -375,6 +381,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         head = "Special",        -- the current branch's label (a detached HEAD's marker)
         message = nil,
         tags = "Comment",
+        worktree = "Comment",    -- a linked worktree's HEAD label, {wt:<dir>}
         selected = "Visual",     -- the h/l-selected ref decoration
         action = "Special",      -- the commit-view diff action label (§11.5)
         dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)

@@ -140,7 +140,8 @@ end
 -- ── Ref decorations (specification.md §6) ───────────────────────────────────
 
 --- The plain text of each selectable ref decoration on a commit, in selection
---- order (branch groups then tags). The single source of truth so the rendered
+--- order (branch groups, tags, then linked-worktree labels §3.2). The single
+--- source of truth so the rendered
 --- text and the cursor-target search use byte-identical strings.
 ---@param commit { refs: Ref[] }?   only the ref list is read
 ---@return string[]
@@ -157,12 +158,17 @@ function M.decoration_texts(commit)
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = "[" .. tag .. "]"
     end
+    -- A worktree label already carries its `wt:` stem (§4.1); the braces are the
+    -- kind bracket, matching ( ) for branches and [ ] for tags.
+    for _, wt in ipairs(g.worktrees) do
+        out[#out + 1] = "{" .. wt .. "}"
+    end
     return out
 end
 
 --- The labels to draw for a commit in a topology PANE (header/footer), as
 --- `{ text, kind }` segments so each can be coloured by kind ("head"|"branch"|"remote"|
---- "tag") the same way the main view colours them (§6). The **current branch** carries
+--- "tag"|"worktree") the same way the main view colours them (§6). The **current branch** carries
 --- no separate marker: it is emitted as its own branch group but with kind "head", so it
 --- renders in the HEAD colour ("you are here"). `head_branch` (= repo.head) identifies it.
 --- A literal `HEAD` marker is emitted only on a **detached HEAD** — a head marker present
@@ -191,6 +197,9 @@ function M.pane_labels(commit, head_branch)
     end
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag", hl = hl_by_name[tag] }
+    end
+    for _, wt in ipairs(g.worktrees) do
+        out[#out + 1] = { text = "{" .. wt .. "}", kind = "worktree" }
     end
     return out
 end
@@ -779,6 +788,17 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
                 items[#items + 1] = rh("[" .. t .. "]", hl_by_name[t] or palette.tags)
+            end
+        end
+        -- Linked-worktree labels (§3.2) come last: they are the least branch-like
+        -- entry, and putting them after the tags keeps the branch a row is really
+        -- "on" nearest the graph when the width budget starts hiding labels (§6).
+        for _, w in ipairs(g.worktrees) do
+            di = di + 1
+            if di == selected then
+                items[#items + 1] = highlight_text(texts[di], palette.selected)
+            else
+                items[#items + 1] = rh("{" .. w .. "}", palette.worktree or palette.tags)
             end
         end
         return items
