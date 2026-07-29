@@ -24,8 +24,9 @@ end
 
 --- The owner ids (repo.refs keys, i.e. view-builder owner ids) a selected ref
 --- decoration stands for. A branch group covers its local ref and each remote
---- (`origin/<name>`), so they cycle together as one branch; a tag is itself.
---- Mirrors decoration_texts' order (branch groups then tags). nil if no match.
+--- (`origin/<name>`), so they cycle together as one branch; a tag and a
+--- linked-worktree label (§3.2) are each themselves.
+--- Mirrors decoration_texts' order (branch groups, tags, worktrees). nil if no match.
 ---@param commit { refs: Ref[] }
 ---@param index integer  -- 1-based decoration index (selection_state.index)
 ---@return string[]|nil
@@ -39,8 +40,15 @@ function M.selected_owner_ids(commit, index)
         for _, r in ipairs(b.remotes) do ids[#ids + 1] = r .. "/" .. b.name end
         return #ids > 0 and ids or nil
     end
-    local tag = g.tags[index - #g.branches]
-    return tag and { tag } or nil
+    if index <= #g.branches + #g.tags then
+        local tag = g.tags[index - #g.branches]
+        return tag and { tag } or nil
+    end
+    -- A linked-worktree label (§3.2) is an owner like any other ref; its owner id
+    -- is its name (`wt:<dir>`), so selecting it collapses/expands that worktree's
+    -- branch exactly as selecting a branch label does.
+    local wt = g.worktrees[index - #g.branches - #g.tags]
+    return wt and { wt } or nil
 end
 
 --- Move the ref selection. `nil` is the message (the default; the message is to

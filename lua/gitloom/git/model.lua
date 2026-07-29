@@ -12,7 +12,7 @@ local M = {}
 
 ---@class Ref
 ---@field name string
----@field kind "local"|"remote"|"tag"|"head"
+---@field kind "local"|"remote"|"tag"|"head"|"worktree"
 ---@field commit Commit   the commit this ref points at (a direct reference)
 ---@field upstream? Upstream   tracking info, only on a local branch that tracks one (§6.3)
 ---@field hl? string      optional highlight override (a synthetic pointer mark, §11.7.6)

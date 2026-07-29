@@ -1366,6 +1366,7 @@ end
 ---@field head? string
 ---@field message? string
 ---@field tags? string
+---@field worktree? string  a linked worktree's HEAD label, `{wt:<dir>}` (§3.2/§4.1)
 ---@field selected? string  the h/l-selected ref decoration (§2)
 ---@field search? string  the filter-search matched substring (§16.7)
 ---@field action? string  the commit-view diff action label (§11.5)
@@ -2402,6 +2403,7 @@ GRAPH_HELPERS.ref_picker_format = function(ctx, align)
             ["local"] = "SnacksPickerGitBranch",
             remote = "SnacksPickerGitBranch",
             tag = "SnacksPickerLabel",
+            worktree = "SnacksPickerLabel", -- a linked worktree's HEAD (§3.2)
         })[item.kind]
         local track_hl = (opts.palette and opts.palette.track) or {}
         local ret = {}
@@ -3539,6 +3541,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             head = "Special",
             message = nil,
             tags = "Comment",
+            -- Linked-worktree labels (§3.2/§4.1), drawn as `{wt:<dir>}`. Muted
+            -- like a remote: a worktree HEAD is real, checked-out work, but it is
+            -- not a branch anyone else can see.
+            worktree = "Comment",
             selected = "Visual", -- the h/l-selected ref decoration (§2)
             search = "Search",   -- the filter-search matched substring (§16.7)
             action = "Special",  -- the commit-view diff action label (§11.5)
@@ -4545,7 +4551,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             local lines, marks = {}, {}
             local pal = opts.palette or {}
             -- Ref-label highlight by kind, matching the main view's ref colours.
-            local label_hl = { head = pal.head, branch = pal.branch, remote = pal.remote, tag = pal.tags }
+            local label_hl = { head = pal.head, branch = pal.branch, remote = pal.remote, tag = pal.tags,
+                worktree = pal.worktree or pal.tags }
             -- Reachability emphasis (§6.2): when on, a row whose node is outside the
             -- pivot's cone renders its labels/count dimmed (the graph glyphs dim per
             -- cell inside get_column_chars). `incone` is the propagated in-cone node

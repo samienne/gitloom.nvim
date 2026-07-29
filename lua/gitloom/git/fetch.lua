@@ -23,6 +23,8 @@ local parse_status = parse.parse_status
 local get_or_create_commit = model.get_or_create_commit
 local add_ref = model.add_ref
 local classify_ref = refs.classify_ref
+local parse_worktrees = parse.parse_worktrees
+local worktree_refs = refs.worktree_refs
 local EMPTY_TREE = range.EMPTY_TREE
 
 local M = {}
@@ -116,12 +118,39 @@ local function parse_ref_line(line)
     return { kind = kind, name = name, hash = target, upstream = upstream }
 end
 
+--- Read the linked worktrees' HEADs as refs (spec §3.2). `taken` is the set of
+--- commit hashes the refs already read point at — the skip-if-already-referenced
+--- rule lives in the pure `refs.worktree_refs`; this only supplies the I/O.
+--- Resolves to a list of `{ name = "wt:<dir>", kind = "worktree", hash }`, empty
+--- when the repository has no linked worktrees (or `git worktree` fails — an old
+--- git or a plain checkout must degrade to today's behaviour, not error).
+---@param taken table<string, boolean>
+---@return Future
+local function read_worktree_refs(taken)
+    local future, promise = make_future()
+    local lines = {}
+    js({ "git", "worktree", "list", "--porcelain" }, {
+        stdout_buffered = true,
+        on_stdout = function(_, out)
+            for _, line in ipairs(out or {}) do lines[#lines + 1] = trim_ws(line) end
+        end,
+        on_exit = function(_, code)
+            if code ~= 0 then return promise.resolve({}) end
+            promise.resolve(worktree_refs(parse_worktrees(lines), taken))
+        end,
+    })
+    return future
+end
+
 --- Read all refs via `git for-each-ref` and resolve each to its commit. Local
 --- branches that track an upstream carry their divergence (§6.3); annotated tags
---- are dereferenced to the commit.
+--- are dereferenced to the commit. The linked worktrees' HEADs are then read and
+--- added as `worktree` refs (§3.2) — chained after, since the skip rule needs to
+--- know which commits the real refs already name.
 ---@param repo Repo
 function M.fetch_refs(repo)
     local future, promise = make_future()
+    local taken = {}
 
     js(
         { "git", "for-each-ref", "--format=" .. REF_FMT,
@@ -132,12 +161,18 @@ function M.fetch_refs(repo)
                 for _, line in ipairs(lines) do
                     if line ~= "" then
                         local r = parse_ref_line(line)
-                        if r then add_ref(repo, r.name, r.kind, r.hash, r.upstream) end
+                        if r then
+                            add_ref(repo, r.name, r.kind, r.hash, r.upstream)
+                            taken[r.hash] = true
+                        end
                     end
                 end
             end,
             on_exit = function()
-                promise.resolve()
+                read_worktree_refs(taken).next(function(wts)
+                    for _, w in ipairs(wts) do add_ref(repo, w.name, w.kind, w.hash) end
+                    promise.resolve()
+                end)
             end,
         })
 
@@ -195,10 +230,17 @@ end
 --- tracking captured like fetch_refs so `R` refreshes the §6.3 indicator), `head`
 --- the current branch name (nil when detached), and `detached` the checked-out
 --- commit hash when detached (so the resync can still mark HEAD; nil on a branch).
+---
+--- The linked worktrees' HEADs are included as `worktree` entries (§3.2), so the
+--- resync reconciles them exactly like branch tips. This is load-bearing rather
+--- than cosmetic: the orphan prune keeps only what a ref reaches, so omitting
+--- them here would make the first `R` silently delete every commit a linked
+--- worktree has checked out (§3.4).
 ---@return Future
 function M.fetch_ref_entries()
     local future, promise = make_future()
     local entries = {}
+    local taken = {}
 
     js(
         { "git", "for-each-ref", "--format=" .. REF_FMT,
@@ -212,6 +254,7 @@ function M.fetch_ref_entries()
                         if r then
                             entries[#entries + 1] =
                                 { name = r.name, kind = r.kind, hash = r.hash, upstream = r.upstream }
+                            taken[r.hash] = true
                         end
                     end
                 end
@@ -221,6 +264,12 @@ function M.fetch_ref_entries()
                 -- in the same pass. When detached (no branch), chain `rev-parse HEAD`
                 -- so the checked-out commit can still be marked (§3.2).
                 local head = nil
+                local function finish(res)
+                    read_worktree_refs(taken).next(function(wts)
+                        for _, w in ipairs(wts) do entries[#entries + 1] = w end
+                        promise.resolve(res)
+                    end)
+                end
                 js({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }, {
                     stdout_buffered = true,
                     on_stdout = function(_, l)
@@ -228,7 +277,7 @@ function M.fetch_ref_entries()
                     end,
                     on_exit = function()
                         if head then
-                            promise.resolve({ entries = entries, head = head })
+                            finish({ entries = entries, head = head })
                             return
                         end
                         local detached = nil
@@ -238,7 +287,7 @@ function M.fetch_ref_entries()
                                 if l[1] and l[1] ~= "" then detached = l[1] end
                             end,
                             on_exit = function()
-                                promise.resolve({ entries = entries, head = nil, detached = detached })
+                                finish({ entries = entries, head = nil, detached = detached })
                             end,
                         })
                     end,

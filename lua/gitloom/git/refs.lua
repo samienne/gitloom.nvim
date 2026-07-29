@@ -28,6 +28,35 @@ function M.classify_ref(refname)
     return nil
 end
 
+--- Turn parsed worktree stanzas (`parse_worktrees`) into ref entries for the
+--- **linked worktrees whose HEAD nothing else names** (spec §3.2). Three skips:
+---
+---  * the **main** worktree — its HEAD is already the `head` ref (§4.1);
+---  * a **bare** worktree, or any stanza with no HEAD — nothing to point at;
+---  * a HEAD commit **any existing ref already points at** (`taken`). This is the
+---    general form of "don't add it if there's a matching branch": it covers a
+---    worktree checked out on a branch (the branch ref labels that commit) and a
+---    detached HEAD parked on a branch tip or tag alike. Emitted entries join
+---    `taken` as we go, so two worktrees on the same commit yield one label.
+---
+--- The name is `wt:<basename>`. A `:` is invalid in a git refname, so this can
+--- never collide with a real branch or tag in the name → Ref registry. Pure.
+---@param entries { path: string, name: string, head: string?, bare: boolean, main: boolean }[]?
+---@param taken table<string, boolean>?  -- commit hashes an existing ref points at
+---@return { name: string, kind: string, hash: string }[]
+function M.worktree_refs(entries, taken)
+    local seen = {}
+    for h in pairs(taken or {}) do seen[h] = true end
+    local out = {}
+    for _, e in ipairs(entries or {}) do
+        if not e.main and not e.bare and e.head and not seen[e.head] then
+            seen[e.head] = true
+            out[#out + 1] = { name = "wt:" .. e.name, kind = "worktree", hash = e.head }
+        end
+    end
+    return out
+end
+
 --- The divergence indicator's pieces for a tracked branch (§6.3), as
 --- `{ text, kind }` segments whose concatenated `text` is `track_label` and whose
 --- `kind` ("ahead"|"behind"|"gone") selects the colour. Empty for no upstream or
@@ -59,18 +88,22 @@ end
 --- refs (local + remote) that share a short name collapse into one entry: the
 --- name once, plus the remotes that also point here. A remote ref's name keeps
 --- its `remote/` prefix (classify_ref), so the short name is the part after the
---- first path component. Tags and the HEAD marker stay separate. A local branch
+--- first path component. Tags, worktree labels (§3.2) and the HEAD marker stay
+--- separate. A local branch
 --- that tracks an upstream carries its `track` (the §6.3 divergence) on the group.
+---
+--- The three lists are the decoration order (§6): branches, tags, worktrees.
 ---@class RefGroup
 ---@field name string
 ---@field has_local boolean
 ---@field remotes string[]
 ---@field track? Upstream   the local branch's upstream divergence, if it tracks one
 ---@param refs Ref[]?
----@return { head: boolean, branches: RefGroup[], tags: string[] }
+---@return { head: boolean, branches: RefGroup[], tags: string[], worktrees: string[] }
 function M.group_refs(refs)
     local head = false
     local tags = {}
+    local worktrees = {}
     local by_name = {} -- short name -> RefGroup
     local order = {}   -- short names, first-seen (stable, matches git's order)
 
@@ -87,6 +120,8 @@ function M.group_refs(refs)
             head = true
         elseif ref.kind == "tag" then
             tags[#tags + 1] = ref.name
+        elseif ref.kind == "worktree" then
+            worktrees[#worktrees + 1] = ref.name
         elseif ref.kind == "local" then
             local g = group(ref.name)
             g.has_local = true
@@ -106,7 +141,7 @@ function M.group_refs(refs)
     for _, short in ipairs(order) do
         branches[#branches + 1] = by_name[short]
     end
-    return { head = head, branches = branches, tags = tags }
+    return { head = head, branches = branches, tags = tags, worktrees = worktrees }
 end
 
 --- Push a ref name to the front of a session most-recently-used list, dropping
@@ -124,8 +159,9 @@ function M.bump_recent(list, name)
 end
 
 -- Sort key for the ref picker's stable (non-recent) grouping: HEAD first, then
--- local branches, remotes, and tags.
-local REF_KIND_RANK = { head = 1, ["local"] = 2, remote = 3, tag = 4 }
+-- local branches, remotes, tags, and the linked-worktree labels (§3.2) last —
+-- they are the least branch-like thing in the list.
+local REF_KIND_RANK = { head = 1, ["local"] = 2, remote = 3, tag = 4, worktree = 5 }
 
 --- Build the ordered ref-picker item list (§2). Each ref (the name → Ref
 --- registry, "HEAD" included) becomes an entry carrying what the picker shows
@@ -176,17 +212,24 @@ end
 --- order) of the decoration that represents the ref named `name` of kind `kind`,
 --- or nil if it has none. A local/remote ref maps to its branch group (keyed by
 --- the short name — the part after the first path component for a remote); a tag
---- maps to its tag entry; HEAD has no own decoration (nil). Used to pre-select a
+--- maps to its tag entry, a worktree label to its entry after the tags; HEAD has
+--- no own decoration (nil). Used to pre-select a
 --- picked ref on its landed row (§2). Pure; the inverse of `selected_owner_ids`.
 ---@param commit { refs: Ref[] }?
 ---@param name string
----@param kind string   -- "local" | "remote" | "tag" | "head"
+---@param kind string   -- "local" | "remote" | "tag" | "head" | "worktree"
 ---@return integer|nil
 function M.ref_decoration_index(commit, name, kind)
     local g = M.group_refs(commit and commit.refs or {})
     if kind == "tag" then
         for i, t in ipairs(g.tags) do
             if t == name then return #g.branches + i end
+        end
+        return nil
+    end
+    if kind == "worktree" then
+        for i, w in ipairs(g.worktrees) do
+            if w == name then return #g.branches + #g.tags + i end
         end
         return nil
     end
