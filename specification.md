@@ -40,7 +40,8 @@ exists primarily to exercise and validate the graph algorithm.
   `q` **hides** it (its navigation stack and view state are retained; `<C-w>q`
   destroys it, and `<C-o>` / `<C-i>` walk its navigation history — §14.1, §14.3);
   `m` cycles the merge/split rendering style (§5.2) so the styles can be compared
-  at a glance; `M` toggles
+  at a glance; `C` cycles the **layout policy** (§5.6) so the lane-placement
+  algorithms can be compared the same way; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
   placements can be compared at a glance. `<Space>` is the quick **collapse ⇄
   expand toggle** for the branch under the cursor (§10.4): it collapses an
@@ -409,6 +410,16 @@ head, or a merge's second-and-later parent.
 
 ### 5.1 Invariants
 
+Lane placement is a **switchable policy** (§5.6), so the guarantees here are of
+three kinds and the distinction is load-bearing. A **universal** invariant holds
+under every policy. A **conditional** one constrains a sideways move a policy may
+or may not make — it is vacuously true under a policy that makes none. And one
+rule below is a **placement** rule on an axis of its own, unrelated to compaction.
+The single genuine claim that compaction *happens* is policy-specific and lives in
+§5.6, not here.
+
+**Universal.** These hold under every layout policy.
+
 - **One commit per Line.** Exactly one Commit's node is placed on a commit line;
   the virtual split/merge lines carry none. *Exception:* a **packed marker line**
   (§10.4) carries several markers' nodes — messageless collapsed heads merged
@@ -431,13 +442,58 @@ head, or a merge's second-and-later parent.
   or commit node on the immediately following Line, so an independent history
   beneath a root is offset into another column instead of stacking under it (which
   would read as one continuous lane). A horizontal wire may still cross that
-  column on the next Line (a crossing, not a continuation).
+  column on the next Line (a crossing, not a continuation). This is enforced by
+  the sweep's own column bookkeeping — tip placement and fan-out both skip a
+  blocked column — never by a compaction move, so it survives a policy that moves
+  nothing.
 - **Colour comes from a carried Lane.** A Column's colour is the `color` slot of
-  one Lane on one of its Segments (§5.5).
+  one Lane on one of its Segments (§5.5). Colour is a property of the lane
+  *lifecycle* (born / continued / ended), which no policy varies.
 - **Connectivity consistency.** The glyph's wired sides equal the union of the
   Column's Segments' connectivity (every wired side has a Segment providing it).
 - Merges (commit with >1 parent) fan out `parent_lanes`; splits (>1 child) fan in
   `child_lanes`.
+- **No crossings on a both-lines commit Line.** With both fans on their own Lines
+  (the both-lines style, §5.2) the commit Line carries no fan, and no jog may
+  cross a lane (below) — so such a Line has **no crossings at all**. This is
+  *provable* from the two guards rather than merely observed, which is why it
+  holds under every policy; under a policy that makes no jog at all (`straight`,
+  §5.6) it is strictly **stronger** — the Line then carries no horizontal wire
+  whatsoever.
+
+**Conditional — the compaction guards.** Stated as constraints on any jog a policy
+chooses to make, not as claims that one is made, so they hold unchanged under
+every policy (vacuously where none is made).
+
+- **A compaction jog never crosses a lane.** Once two lanes have separated they
+  share a horizontal Line only at a commit's own fan (the split/merge funnel).
+  *Where a policy makes a jog* — the linear-commit slide (§5.6), or a survivor
+  shifting into a gap — it moves left only through a run of columns *free since
+  row start*, **stopping at the first occupied column** rather than reaching past
+  it into a farther gap (which would lay the lane's horizontal across the
+  occupant). A gap behind an occupied lane is reclaimed on a later row, once that
+  lane itself moves (a ripple).
+- **A fan Line carries no compaction.** *Where compaction runs*, it is suppressed
+  entirely on a Line whose fan is drawn **inline** (the split or merge shares the
+  commit Line rather than getting its own Line): a pass-through lane crosses the
+  fan **vertically**, never compacting horizontally along it, and the
+  linear-commit slide does not run. Only the fan's own lanes — the converging
+  children, the diverging parents — draw the horizontal; a lane joins it only if
+  it belongs to that fan. Where compaction runs at all, it still applies on
+  non-fan Lines and on a Line whose fan sits on its own split/merge Line.
+
+Both guards are specified — and tested — by **counting violations** ("no jog does
+X"), never by asserting an existence ("a jog happens"). That is what lets them
+stay sound, and stay *unchanged*, across every policy; it is a deliberate property,
+not an accident of phrasing, and it should be preserved when policies are added.
+
+**Fan-out placement.** A separate axis from compaction: it governs where a *newly
+diverging* lane is put, not whether an existing one moves, so it applies under
+every policy — including one that never compacts. There is exactly one placement
+rule today; replacing it is a future policy of its own (§5.6). Its name is
+historical — it is about *reusing* a freed column, not about the compaction moves
+— so do not read it as part of the compaction axis.
+
 - **Compact column reuse.** A fanned-out parent lane (a merge's extra parent)
   takes the **leftmost column that has been free since before its Line** — an
   interior gap an earlier branch vacated — rather than always opening a new
@@ -452,30 +508,6 @@ head, or a merge's second-and-later parent.
   alternate columns by one. Reusing the column on a separate merge Line is what
   keeps that style from leaving an empty-column gap that bounces a right-aligned
   (mirrored, §5.4) graph.
-- **Commit compaction.** A *linear* commit (reached by a single child-lane) slides
-  left, its incoming lane turning into the new column. So a branch born one column
-  out — an inline merge-on-split that had to fan past a freed cell — compacts next
-  to the trunk after a single jog rather than running stranded beside an empty
-  column. The slide reserves its column before survivor compaction, so a survivor
-  keeps any nearer gap; the lone jog is a turn, not a straight run, so
-  id-continuity holds.
-- **Compaction never crosses a lane.** Once two lanes have separated they share a
-  horizontal Line only at a commit's own fan (the split/merge funnel). A
-  compaction jog — the linear-commit slide above, or a survivor shifting into a gap
-  — therefore moves left only through a run of columns *free since row start*,
-  **stopping at the first occupied column** rather than reaching past it into a
-  farther gap (which would lay the lane's horizontal across the occupant). A gap
-  behind an occupied lane is reclaimed on a later row, once that lane itself moves
-  (a ripple). Consequently, with both fans on their own Lines (the both-lines
-  style), a commit Line has **no crossings at all**.
-- **A fan Line carries no compaction.** When the fan is drawn *inline* (the split
-  or merge shares the commit Line rather than getting its own Line), compaction is
-  suppressed on that Line entirely: a pass-through lane crosses the fan
-  **vertically**, never compacting horizontally along it, and the linear-commit
-  slide does not run. Only the fan's own lanes — the converging children, the
-  diverging parents — draw the horizontal; a lane joins it only if it belongs to
-  that fan. Compaction still applies on non-fan Lines and on a Line whose fan sits
-  on its own split/merge Line.
 
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view
@@ -567,6 +599,85 @@ would break its colour continuity).
 
 A first-parent continuation keeps the trunk's slot (one colour per first-parent
 chain, §5); only a branch head or a merge's extra parent allocates.
+
+### 5.6 Layout policy
+
+Lane placement is a **named policy**, selected by `layout_policy` (§8) and cycled
+live with `C` — so the placement algorithms can be compared in the real
+application, on a real repository, at a glance (the same "compare at a glance"
+motive as `m` for the merge style, §5.2). Every §5.1 universal invariant holds
+under every policy and both §5.1 guards constrain every policy; what a policy
+chooses is **which lanes may move sideways to close a gap**.
+
+Two independent moves exist:
+
+- the **linear-commit slide** — a *linear* commit (reached by a single child-lane)
+  slides left through the run of columns free since row start, its incoming lane
+  turning into the new column. So a branch born one column out — an inline
+  merge-on-split that had to fan past a freed cell — compacts next to the trunk
+  after a single jog rather than running stranded beside an empty column. The
+  slide reserves its column before survivor compaction, so a survivor keeps any
+  nearer gap; the lone jog is a turn, not a straight run, so id-continuity holds.
+  *This is the one §5.1 claim that is genuinely policy-specific: it asserts that a
+  jog happens.*
+- **survivor compaction** — a pass-through lane shifts left into the run of free
+  columns to its left, redrawn as a turn.
+
+| Policy | Linear slide | Survivor compaction |
+|--------|--------------|---------------------|
+| `compact` (**default**) | yes | yes |
+| `survivors` | no | yes |
+| `linear` | yes | no |
+| `straight` | no | no |
+
+Under `straight` every lane holds its column for its whole life: nothing but a
+commit's own fan draws a horizontal, so on the both-lines style a commit Line
+carries no horizontal wire at all — strictly stronger than the no-crossings
+guarantee §5.1 states for every policy.
+
+The policy is a **flat enum**, not a pair of booleans. The table above happens to
+be a 2×2 today, but the axis is "how are lanes placed", and a future policy
+(below) is not a point in that square.
+
+`linear` names *what* slides — a linear commit — rather than the move; it is
+deliberately not called `slide`.
+
+**Why `compact` is the default, and what it costs.** The default is today's
+behaviour, kept so the change is inert until a policy is chosen. Its cost is
+measured and should stay visible, because "compaction saves width" is the obvious
+intuition and it is **not** what the numbers say: the linear-commit slide never
+bought width on any fixture (max |Δ mean width| **0.03 columns**), while on the
+default inline style over gitloom's own projected history, dropping it took
+within-sweep lane stability from **43.2% to 93.2%**, crossings **−14%** and ink
+**−23%**. The visible artifact it produces is the **trunk stepping sideways at
+every collapsed feature head**. So a non-sliding policy is a legitimate candidate
+for the default, not a degradation; the reason to keep it selectable rather than
+delete the slide is that the comparison should be made in the application, on real
+histories, rather than settled by fixtures.
+
+**The pane seam is not on this axis.** A context pane's boundary row (§6.2) must
+satisfy a stronger requirement — **every seeded lane keeps its seeded column** — so
+the pane meets the main view without a jog. That requirement is violated by exactly
+the two moves above, so the seam row is laid out by the **no-move** placement
+whatever policy the body rows use. Policy × seam is two-dimensional in principle;
+today it is rank-1 (one seam behaviour, shared by all four policies), and the seam
+requirement is what would keep it so even if the body policies multiplied.
+
+**The footer follows the policy; the header does not.** The footer is a seeded
+lane sweep, so its body rows obey the active policy like the main view. The
+**header** is built by the *direct seam-up grid* (§6.2) — a different layout
+routine that never runs the stage chain — so its rows are unaffected by the
+policy, and a `straight` graph keeps a `compact`-style header. This is correct
+per §6.2 (the header is a rebuild of a focused sub-DAG, not a continuation of the
+sweep), but it is visible when comparing policies and is called out here so it
+does not read as an inconsistency. Bringing the header onto the policy axis would
+mean expressing the seam-up grid as a stage chain — not planned.
+
+**Reserved: `interval`.** The name is reserved for a future "straight branches"
+placement that assigns columns from forbidden intervals over precomputed lane
+lifespans (an `O(N)` pre-pass), replacing the §5.1 **fan-out placement** rule
+rather than the compaction moves — which is why the enum is flat and why that rule
+is filed on its own axis. It is not specified here.
 
 ## 6. Row content
 
@@ -691,7 +802,10 @@ contracted.
 boundary **must** connect to something in the pane — no lane dangles at the edge.
 A region that *touches* the boundary is therefore never folded away; its crossing
 lane is preserved and terminated explicitly. This is the "wires must connect"
-grid invariant (§5.1) lifted to the window edge.
+grid invariant (§5.1) lifted to the window edge. It is also stronger than anything
+§5.1 asks of a body row — **every seeded lane must keep its seeded column**, or the
+seam jogs — so the seam row is laid out by the **no-move** placement regardless of
+the layout policy (§5.6) the body rows use.
 
 **The minimal connecting subgraph.** A pane is a **focused rebuild**, not a
 reduction of the whole off-screen graph. The header shows **only how the pinned
@@ -888,10 +1002,11 @@ status in the window footer.
 `GraphOptions` (see [README.md](README.md) for the full default table):
 
 ```
-GraphOptions = { win, palette, merge_style, icons, branches, sort_mode, mirror,
-                 highlight, date_format, date_mode, message_min, label_mode, diff,
-                 working_tree, scrolloff, search }
+GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
+                 sort_mode, mirror, highlight, date_format, date_mode,
+                 message_min, label_mode, diff, working_tree, scrolloff, search }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
+LayoutPolicy = "compact" | "survivors" | "linear" | "straight"
 Diff         = { open: fun(range: DiffRange), label: string }
 DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
 Endpoint     = Commit | "index" | "worktree"
@@ -931,6 +1046,12 @@ Endpoint     = Commit | "index" | "worktree"
 - `sort_mode` — the initial **row sort mode** (§3.1): `"topo"` (default,
   gitloom's own order reproducing git's `--topo-order`), `"date"`, or `"author"`.
   Cycle live with `S`.
+- `layout_policy` — the lane **layout policy** (§5.6): `"compact"` (**default**,
+  linear slide + survivor compaction), `"survivors"`, `"linear"`, or `"straight"`
+  (no lane ever moves sideways). Cycle live with `C`. Like the merge style (`m`)
+  and mirroring (`M`), the live value lives on the graph's options, which are
+  rebuilt each time the graph is opened — so it **resets to the configured value
+  on reopen**.
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
   conventional left-to-right layout. Purely a rendering transform; ordering and

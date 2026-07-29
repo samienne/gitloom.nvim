@@ -11,7 +11,7 @@ local view = require("gitloom.graph.view")
 local fix = require("tests.large_topo")
 
 -- Build the projected display + lane maps ONCE (the projection is cutoff-independent).
-local function build()
+local function build(policy)
     local items = h.dag(fix.dag)
     local byhash = {}
     for _, it in ipairs(items) do byhash[it.commit.hash] = it.commit end
@@ -39,6 +39,7 @@ local function build()
     local proj = view.project(items, view.owners(items, ofr(), pinned, {}, true), nil)
     local display = proj.items
     local opts = h.big_opts()
+    opts.layout_policy = policy
     local main = columns.layout(opts, display)
     local didx, lane_main, node_col = {}, {}, {}
     for i, it in ipairs(display) do
@@ -98,9 +99,14 @@ local function header_anchor_ids(ctx, si)
     return ids
 end
 
-describe("large real-world header replay (§6.2)", function()
+-- The header does NOT lay itself out with `columns.layout` (it is the direct
+-- seam-up grid), but the MAIN view it takes its cutoffs and lane ids from does —
+-- so the layout policy (§5.6) still changes its input. The anchor-severing
+-- invariant must hold whichever policy laid the main graph out.
+for _, policy in ipairs({ "compact", "survivors", "linear", "straight" }) do
+describe("large real-world header replay [" .. policy .. "] (§6.2)", function()
     it("keeps HEAD and dev on their graph lane id at every cutoff (no fresh-id severing)", function()
-        local ctx = build()
+        local ctx = build(policy)
         local head_lane = ctx.lane_of(ctx.dnode_of(fix.head))
         local dev_lane = ctx.lane_of(ctx.dnode_of(fix.dev))
         assert.is_not_nil(head_lane, "HEAD must have a main-view lane")
@@ -120,3 +126,4 @@ describe("large real-world header replay (§6.2)", function()
             "anchors severed onto a fresh id at:\n  " .. table.concat(bad, "\n  ", 1, math.min(#bad, 12)))
     end)
 end)
+end

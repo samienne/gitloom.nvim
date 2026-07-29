@@ -786,7 +786,8 @@ the current row. For each commit `C`:
    edges, terminating here); the rest are **survivors** (pass-throughs).
 2. **Commit column `cc`** = the leftmost incoming column, or the leftmost free
    column for a tip. A **linear** commit (a single incoming child-lane) then
-   **compacts** `cc` left through the run of columns free since row start, its
+   **compacts** `cc` left — under the `compact` / `linear` layout policies (§5.6);
+   the others skip this slide — through the run of columns free since row start, its
    incoming lane turning in — so a branch born one column out (an inline
    merge-on-split that had to fan past a freed cell) ends up next to the trunk
    after a single jog rather than stranded beside an empty column (`cc` is reserved
@@ -813,7 +814,9 @@ the current row. For each commit `C`:
    calmed graph drifts back to the curated palette.
    Without generation (no truecolor), exhaustion instead **shares** a curated
    slot, reference-counted so it returns only when its last holder ends.
-4. **Compaction**: each survivor shifts left through the run of *row-start* gaps
+4. **Compaction** (under the `compact` / `survivors` layout policies, §5.6; the
+   others hold every survivor in its column): each survivor shifts left through
+   the run of *row-start* gaps
    to its left (drawn as a horizontal turn), **stopping at the first occupied
    column** so the jog never crosses another lane — once two lanes have separated
    they re-share a horizontal only at a commit's own fan. It never moves into a
@@ -824,8 +827,9 @@ the current row. For each commit `C`:
    — an *inline* split (≥2 incoming, no separate split line) or merge (≥2 outgoing,
    no separate merge line) — suppresses all compaction on that line** (both the
    survivor shift and step 2's linear slide): a pass-through lane crosses the fan
-   vertically, and only the fan's own lanes draw the horizontal. An extra
-   (non-first) parent likewise takes the
+   vertically, and only the fan's own lanes draw the horizontal. On a separate
+   axis — **fan-out placement**, which runs under every policy — an extra
+   (non-first) parent takes the
    leftmost column free since before this row — an interior gap, not a fresh
    rightmost one — so a staircase of sequential merges stays a bounded width. A
    column a *terminating child* frees is reusable by a parent only when that does
@@ -865,7 +869,7 @@ reordering / swapping / adding stages is the seam.
 **The model.** Each stage **writes segments into a live column grid and reads
 occupancy back from it** — the grid *is* the working state, not an abstract plan
 rendered at the end. `columns.layout` sweeps the order top-to-bottom carrying the
-imperative shell (`active` col → Lane flowing down, `blocked`, `first_row`, the
+imperative shell (`active` col → Lane flowing down, `blocked`, the
 id/colour minters). For each commit it builds a per-item `state`:
 
 ```
@@ -898,6 +902,12 @@ horizontal bus is shared by its lanes; nothing else may overlap a horizontal*:
   reserved — every lane of a fan emanates from the same commit's hub, so they
   overlap freely and only each lane's turn-down **endpoint** is claimed (as a
   vertical). `grid_taken(c)` = neither slot free.
+
+Every stage tests occupancy through `grid_taken`. `place_commit` and `slide` run
+before anything writes `used` (`seed_bars` creates it empty; only `fan_in` /
+`compact` / `carry` / `fan_out` write it, all later in every chain), so for them
+its `used` term is provably false — which is why they can share the predicate with
+the later stages instead of spelling out `occ0 or blocked` inline.
 
 (A first grid attempt reserved whole fan spans and pushed inline merges wider;
 reserving only endpoints restores fan sharing and byte-identity — a good
@@ -967,6 +977,75 @@ that makes the footer a footer lives outside `columns.layout`: building the
 sub-DAG (`pane.continue` / `condense` — projection) and the dashed / dimmed drawing
 (`render_pane` / `paint_pane` — render).
 
+**Layout policies (spec §5.6).** The selectable layout policy needs **no new stage
+code**: all four policies are chains of the stages already here, differing only in
+whether `slide` runs and whether the compaction slot holds `compact` or `carry`.
+`layout_seam` *is* the no-slide/no-compact chain already, byte-identical to what
+`straight` needs.
+
+| Policy | Body chain (after the shell steps) |
+|--------|------------------------------------|
+| `compact` | `seed_bars` `place_commit` `slide` `fan_in` `compact` `fan_out` `finalize` |
+| `survivors` | `seed_bars` `place_commit` `fan_in` `compact` `fan_out` `finalize` |
+| `linear` | `seed_bars` `place_commit` `slide` `fan_in` `carry` `fan_out` `finalize` |
+| `straight` | `seed_bars` `place_commit` `fan_in` `carry` `fan_out` `finalize` |
+
+A policy is therefore a **record carrying both chains**, not a single strategy —
+`{ body, seam }` — because the seam row's requirement (every seeded lane keeps its
+seeded column) is orthogonal to the body's placement and must hold under every
+policy. `seam` is `layout_seam` for all four today; the record exists so a policy
+that needed a different seam could say so, and so the sweep's
+`(seed and i == 1) and policy.seam or policy.body` selection stays one expression.
+`straight`'s **body** is that same `layout_seam` function object — reused, not
+duplicated — so "`straight` is the no-move chain" is true by construction rather
+than by two copies staying in sync. A reserved third field, `prepass`, is where a
+future `interval` policy (§5.6) hangs its `O(N)` lane-lifespan annotation: a
+`prepass(opts, items)` called once before the sweep, free to annotate `items` in
+place so no hint-plumbing threads through `state`. No current policy declares one,
+and the sweep simply skips it — exactly the annotation-pass shape the lookahead
+sketch below needs.
+
+`opts.layout_policy` selects the record; an unknown or absent value falls back to
+`compact`, since it is read from user config and must never error.
+
+**The live toggle (`C`).** `window.lua` cycles `ctx.opts.layout_policy` through
+`LAYOUT_POLICIES` and reflows. Two deliberate departures from the neighbouring
+cycles: the index is **derived from `ctx.opts` at each keypress** rather than held
+in a module-level counter (`merge_style_index` and friends are shared by every
+open graph — wrong for a feature whose purpose is holding two windows at two
+policies), and the handler also writes `ctx.pane_opts.layout_policy`, because the
+panes hold a **shallow copy of `opts` frozen at window creation** and would
+otherwise keep the open-time policy while the main view changed. The toggle uses
+`reflow()` (not `refresh()`) since a different placement can change which markers
+pack, and re-anchors with `goto_hash` so the two renderings are comparable row for
+row. The **footer** therefore follows the policy; the **header** does not, since
+`pane.header` is the direct seam-up grid and never calls `columns.layout` (spec
+§5.6, §6.2).
+
+**`complete_check` is policy-free.** Every obligation it verifies — the node placed
+once and on the main line, each incoming lane drawn and terminated, each survivor
+drawn and carried, each outgoing lane drawn and carried, the outgoing count — is
+owed by *any* strategy, whatever it does with columns. It asserts nothing about
+where a lane sits. That is what makes adding a policy safe: the oracle keeps its
+teeth without being parameterised, and a policy that drops a stage still gets
+caught.
+
+**Two contracts a stage in the compaction slot must honour.**
+
+- **`s.out` is the interface between the compaction slot and `fan_out`.** Both
+  `compact` and `carry` set `s.out` (the survivor's column *after* this row) on
+  every survivor entry, and `fan_out` reads it to advance `active`. It is not
+  defaulted anywhere. A replacement stage that leaves `s.out` nil for a survivor
+  silently drops that lane from the next row's `active` — the failure is a lane
+  vanishing a row later, not an error at the point of the bug. Set it for every
+  survivor, always.
+- **`fan_out` does double duty.** It both *draws* the diverging parents (and the
+  merge line below) and performs the **advance** — rebuilding `active` and
+  `blocked` for the next row. A future *placement* policy that replaces the
+  fan-out rule (the §5.1 fan-out placement axis; `interval`) must keep the advance,
+  which most likely means splitting `fan_out` into `fan_out` (draw) + `advance`
+  (shell bookkeeping) first, so the placement half is the replaceable part.
+
 **Completeness oracle.** `complete_check(state)` runs after the strategy and
 verifies the emitted lines: the node appears exactly once and on the main line;
 every incoming lane is drawn and has **terminated** (absent from the next
@@ -1000,11 +1079,13 @@ the characterization matrix plus `make test` / `make lint`:
    function plus the oracle.
 
 The panes and `pack_markers` consume `columns.layout`'s output (including the
-`seed` / `first_row` seam semantics, kept in the shell), so they are unaffected as
-long as its output is preserved.
+`seed` seam semantics, kept in the shell), so they are unaffected as long as its
+output is preserved.
 
 **Future strategies (not yet built).** With the pipeline in place, alternative
-layouts become new strategies (a different chain of stages), not new algorithms:
+layouts become new strategies (a different chain of stages), not new algorithms —
+and, once the policy enum exists, new **entries in it** (§5.6) rather than new
+seams:
 
 - *Spread* — a placement stage that keeps empty columns between occupied lanes
   with a restoring "pressure" toward the boundary. Local; no lookahead.

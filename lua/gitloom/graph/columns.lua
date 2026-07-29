@@ -23,7 +23,7 @@
 --- **Staged layout.** `M.layout` lays out each item with shell setup steps
 --- (classify / spawn_lanes / decide_style) then a **layout strategy** — a plain
 --- function that chains the grid stages in order, each called once. `layout_compact`
---- (main view + pane body) is seed_bars -> place_commit -> slide -> fan_in ->
+--- (the default) is seed_bars -> place_commit -> slide -> fan_in ->
 --- compact -> fan_out -> finalize; each writes segments into a live column grid on
 --- `state.g` and reads occupancy back between stages. A structural oracle
 --- (`complete_check`) then verifies the emitted lines. A different strategy is a
@@ -31,6 +31,12 @@
 --- swaps `compact` for `carry`, so the seam matches the seeded columns without a
 --- jog. There is no generic runner — the sequence is the algorithm. See
 --- ARCHITECTURE.md ("Layout as a staged pipeline").
+---
+--- **Layout policy** (spec §5.6). Which chain lays out an ordinary row is
+--- selectable via `opts.layout_policy`: `compact` (default), `survivors` (no
+--- linear slide), `linear` (no survivor compaction), `straight` (neither — which
+--- IS `layout_seam`, reused verbatim). All four are chains of the stages already
+--- here; no policy adds stage code, and none of them varies the *seam* chain.
 local M = {}
 
 ---@param t table
@@ -292,6 +298,12 @@ function M.layout(opts, items, seed)
     -- fan's own bus is NOT reserved — every lane of a fan shares the same commit's
     -- hub, so they overlap freely and only each turn-down endpoint is claimed (as a
     -- vertical). `grid_taken` = neither slot free.
+    --
+    -- Every stage tests occupancy through this one predicate. `place_commit` and
+    -- `slide` run before any stage writes `g.used` (seed_bars creates it empty;
+    -- only fan_in / compact / carry / fan_out write it, all of them later in every
+    -- chain), so for them the `used` term is provably false and the predicate is
+    -- exactly the `occ0 or blocked` test they used to spell out inline.
     local function grid_taken(g, c) return g.occ0[c] or g.used[c] or blocked[c] end
 
     -- SEED_BARS (stage): open the main line; every survivor enters from above as a
@@ -317,7 +329,7 @@ function M.layout(opts, items, seed)
             cc0 = incoming[1].col
         else
             cc0 = 1
-            while g.occ0[cc0] or blocked[cc0] do cc0 = cc0 + 1 end
+            while grid_taken(g, cc0) do cc0 = cc0 + 1 end
         end
         local commit_incoming = incoming
         if state.sep_split then
@@ -337,7 +349,7 @@ function M.layout(opts, items, seed)
         if #state.commit_incoming ~= 1 or state.fan_line then return end
         local g, cc = state.g, state.cc
         for c = cc - 1, 1, -1 do
-            if g.occ0[c] or blocked[c] then break end
+            if grid_taken(g, c) then break end
             cc = c
         end
         state.cc = cc
@@ -378,6 +390,12 @@ function M.layout(opts, items, seed)
     -- left, stopping at the first taken column (never crossing a lane), redrawn as a
     -- turn; its jog span is reserved in `used`. Suppressed on a fan line, where a
     -- pass-through crosses the fan vertically instead.
+    --
+    -- CONTRACT of the compaction slot: whatever stage occupies it (compact, carry,
+    -- or a future one) MUST set `s.out` — the survivor's column after this row — for
+    -- EVERY survivor, because `fan_out` reads it to advance `active`. Leave one nil
+    -- and that lane silently vanishes from the next row (complete_check catches it,
+    -- but only on the row after the mistake).
     local function compact(state)
         local g = state.g
         for _, s in ipairs(state.survivors) do
@@ -510,6 +528,23 @@ function M.layout(opts, items, seed)
         fan_out(state)
         finalize(state)
     end
+    local function layout_survivors(state)
+        seed_bars(state)
+        place_commit(state)
+        fan_in(state)
+        compact(state)
+        fan_out(state)
+        finalize(state)
+    end
+    local function layout_linear(state)
+        seed_bars(state)
+        place_commit(state)
+        slide(state)
+        fan_in(state)
+        carry(state)
+        fan_out(state)
+        finalize(state)
+    end
     local function layout_seam(state)
         seed_bars(state)
         place_commit(state)
@@ -518,6 +553,27 @@ function M.layout(opts, items, seed)
         fan_out(state)
         finalize(state)
     end
+
+    -- A layout POLICY (spec §5.6) pairs the chain for an ordinary row with the one
+    -- for a seeded pane's seam row. The seam must keep every seeded lane in its
+    -- column, which is exactly what the no-move chain does — so `seam` is
+    -- `layout_seam` for all four policies today; the field exists so a policy that
+    -- needed a different seam could say so, and so the sweep's selection stays one
+    -- expression. `straight` IS the no-move chain, so it reuses `layout_seam`
+    -- verbatim rather than duplicating it: the equivalence holds by construction.
+    ---@class LayoutPolicy
+    ---@field body fun(state: table)  -- an ordinary row
+    ---@field seam fun(state: table)  -- a seeded pane's boundary (seam) row
+    ---@field prepass? fun(opts: table, items: table[])  -- reserved (§5.6 `interval`):
+    ---   a once-per-sweep pass that may annotate `items` in place with forward hints
+    ---   (lane lifespans etc.). No current policy declares one.
+    ---@type table<string, LayoutPolicy>
+    local POLICY = {
+        compact   = { body = layout_compact,   seam = layout_seam },
+        survivors = { body = layout_survivors, seam = layout_seam },
+        linear    = { body = layout_linear,    seam = layout_seam },
+        straight  = { body = layout_seam,      seam = layout_seam },
+    }
 
     local function active_contains(lane)
         for _, l in pairs(active) do
@@ -601,10 +657,14 @@ function M.layout(opts, items, seed)
     end
 
     -- A seeded sweep is a context pane: its first row is the seam, laid out so it
-    -- meets the main view without a jog (`layout_seam`). Every other row — and the
-    -- whole main view — uses `layout_compact`.
+    -- meets the main view without a jog (`policy.seam`). Every other row — and the
+    -- whole main view — uses the policy's body chain. An unknown or absent
+    -- `layout_policy` falls back to `compact`: this comes from user config, so it
+    -- must never error.
+    local policy = POLICY[opts.layout_policy] or POLICY.compact
+    if policy.prepass then policy.prepass(opts, items) end
     for i, item in ipairs(items) do
-        run_item(item, (seed and i == 1) and layout_seam or layout_compact)
+        run_item(item, (seed and i == 1) and policy.seam or policy.body)
     end
 
     return rows

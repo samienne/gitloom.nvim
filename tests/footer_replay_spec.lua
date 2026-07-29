@@ -22,7 +22,7 @@ local h = require("tests.graph_helpers")
 -- Build the projected display + main layout ONCE (cutoff-independent), like the
 -- header replay. Returns the display, the main layout, a hash→order index, the
 -- pinned set, the refs, and opts.
-local function build()
+local function build(policy)
     local items = h.dag(fix.dag)
     local byhash = {}
     for _, it in ipairs(items) do byhash[it.commit.hash] = it.commit end
@@ -50,6 +50,7 @@ local function build()
     local proj = view.project(items, view.owners(items, ofr(), pinned, {}, true), nil)
     local display = proj.items
     local opts = h.big_opts()
+    opts.layout_policy = policy
     local main = columns.layout(opts, display)
     -- hash → order index (for continue's order_of and the `extra` pinned tips).
     local idx = {}
@@ -139,9 +140,15 @@ local function check_seam(b, seam_line, ctx, bad)
     if cp then bad[#bad + 1] = cp end
 end
 
-describe("large real-world footer replay (§6.2)", function()
+-- The footer threads ONE shared `opts` into both `columns.layout` (the main view)
+-- and `pane.footer` (the seeded pane), so it picks the layout policy (§5.6) up for
+-- free. The seam contract is policy-INDEPENDENT — a pane's seam row always runs the
+-- no-move chain, whatever the body does — so the whole replay must hold, at every
+-- cutoff, under every policy.
+for _, policy in ipairs({ "compact", "survivors", "linear", "straight" }) do
+describe("large real-world footer replay [" .. policy .. "] (§6.2)", function()
     it("every seam line — columns AND virtual split/merge — lays out with no strand/jog", function()
-        local b = build()
+        local b = build(policy)
         local bad = {}
         for si = 1, #b.display - 1 do
             local row = b.main[si]
@@ -155,3 +162,4 @@ describe("large real-world footer replay (§6.2)", function()
             "footer replay problems:\n  " .. table.concat(bad, "\n  ", 1, math.min(#bad, 15)))
     end)
 end)
+end
