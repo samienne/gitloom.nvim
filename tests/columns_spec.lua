@@ -17,8 +17,8 @@ local function check(opts, rows)
     local function err(m) errs[#errs + 1] = m end
 
     for ri, row in ipairs(rows) do
-        for _, line in ipairs({ row.split or {}, row.columns, row.merge or {} }) do
-        for ti, t in ipairs(line) do
+        for _, ln in ipairs(h.row_lines(row)) do
+        for ti, t in ipairs(ln.line) do
             local segs = t.lanes or {}
             -- union of segments == cell connectivity
             local u = {}
@@ -53,9 +53,7 @@ local function check(opts, rows)
     -- cell's up-lane id must equal the down-lane id directly above it.
     local lines = {}
     for _, row in ipairs(rows) do
-        if row.split then lines[#lines + 1] = row.split end
-        lines[#lines + 1] = row.columns
-        if row.merge then lines[#lines + 1] = row.merge end
+        for _, ln in ipairs(h.row_lines(row)) do lines[#lines + 1] = ln.line end
     end
     local function up_id(x) for _, s in ipairs(x.lanes or {}) do if s.connectivity.up then return s.id end end end
     local function down_id(x) for _, s in ipairs(x.lanes or {}) do if s.connectivity.down then return s.id end end end
@@ -77,7 +75,7 @@ local function check(opts, rows)
     -- and reads as one continuous lane.
     local flat = {} -- { line = GraphColumn[], root_col = int|nil }
     for _, row in ipairs(rows) do
-        if row.split then flat[#flat + 1] = { line = row.split } end
+        for _, l in ipairs(row.above or {}) do flat[#flat + 1] = { line = l } end
         local ccol
         for j, t in ipairs(row.columns) do if t.has_commit then ccol = j end end
         local is_root = row.commit and #(row.commit.parents or {}) == 0
@@ -100,8 +98,8 @@ local function render(opts, rows)
     local gtc = graph._internal.get_column_chars
     local out = {}
     for _, row in ipairs(rows) do
-        for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-            if line then out[#out + 1] = (gtc(opts, line, false).text or ""):gsub("%s+$", "") end
+        for _, ln in ipairs(h.row_lines(row)) do
+            out[#out + 1] = (gtc(opts, ln.line, false).text or ""):gsub("%s+$", "")
         end
     end
     return table.concat(out, "\n")
@@ -285,9 +283,9 @@ describe("columns.layout track-id reuse", function()
     local function distinct_ids(rows)
         local ids = {}
         for _, row in ipairs(rows) do
-            for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-                if line then
-                    for _, t in ipairs(line) do if t.id then ids[t.id] = true end end
+            for _, ln in ipairs(h.row_lines(row)) do
+                do
+                    for _, t in ipairs(ln.line) do if t.id then ids[t.id] = true end end
                 end
             end
         end
@@ -367,8 +365,8 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
     local function max_width(rows)
         local w = 0
         for _, row in ipairs(rows) do
-            for _, line in ipairs({ row.split or {}, row.columns, row.merge or {} }) do
-                if #line > w then w = #line end
+            for _, ln in ipairs(h.row_lines(row)) do
+                if #ln.line > w then w = #ln.line end
             end
         end
         return w
@@ -531,13 +529,15 @@ describe("columns.layout gutter policy (§5.6)", function()
         -- no other parent may enter — so a merge keeps its own identity under its
         -- node instead of handing the column to the lineage it merged in. When the
         -- next subject row belongs to a different lane, the occupant vacates on its
-        -- own virtual row (`evict_gutter`) and the fan-in turns the new one in.
+        -- own virtual row (`evict_gutter`) and the arriving lane turns in on its own
+        -- virtual row (`claim_gutter`) — never on the commit Line.
         --
         -- Asserted as the observable consequence — every subject row's node IS in
-        -- the gutter — with two documented exceptions: a root occupying it on the
-        -- previous row blocks it for one Line (§5.1 root column break), and a row
-        -- whose own split fan already owns the above-slot cannot also carry an
-        -- eviction row, so it degrades to its own lane.
+        -- the gutter — with exactly ONE documented exception: a root occupying it on
+        -- the previous row blocks it for one Line (§5.1 root column break). There
+        -- used to be a second (a row whose own split fan owned the single above-slot
+        -- could not also carry an eviction row); `above` is a LIST now, so the
+        -- handover rows and the split fan coexist and the exception is gone.
         for _, ms in ipairs({
             { split_on_separate_line = true,  merge_on_separate_line = false },
             { split_on_separate_line = false, merge_on_separate_line = true },
@@ -555,8 +555,8 @@ describe("columns.layout gutter policy (§5.6)", function()
                         local root_blocked = prev and prev.commit
                             and #(prev.commit.parents or {}) == 0
                             and prev.columns[1] and prev.columns[1].has_commit
-                        assert(root_blocked or row.split ~= nil,
-                            ("seed=%d row=%d: subject node at column %d, with neither a root block nor a split fan")
+                        assert(root_blocked,
+                            ("seed=%d row=%d: subject node at column %d, with no root block above it")
                             :format(seed, ri, cc))
                     end
                 end
@@ -612,7 +612,10 @@ describe("columns.layout gutter policy (§5.6)", function()
         -- The one exception is the **eviction** row — the swap-out that frees the
         -- gutter for the next run. Exactly one lane moves on it, which is the whole
         -- reason it gets a row of its own: a lane leaving (left-to-right) must never
-        -- share a row with a fan-in arriving (right-to-left).
+        -- share a row with the arriving lane (right-to-left) or with a fan. (The
+        -- **claim** row moves exactly one lane too, but that lane is incident to the
+        -- commit — it is the chain the commit continues — so it is not a survivor
+        -- and this check does not see it.)
         --
         -- Stated on SURVIVORS rather than as "a Lane occupies one column for life",
         -- which is not the right property: with a separate merge Line the first
@@ -629,9 +632,8 @@ describe("columns.layout gutter policy (§5.6)", function()
                 local rows = columns.layout(opts, h.dag(h.random_dag(4 + (seed % 11), seed)))
                 for ri, row in ipairs(rows) do
                     local C = row.commit
-                    for _, pair in ipairs({ { "split", row.split }, { "columns", row.columns },
-                        { "merge", row.merge } }) do
-                        local line = pair[2]
+                    for _, pair in ipairs(h.row_lines(row)) do
+                        local line = pair.line
                         if line then
                             -- every lane drawing a horizontal on this line, and
                             -- whether it is a pass-through (not incident to C)
@@ -656,9 +658,9 @@ describe("columns.layout gutter policy (§5.6)", function()
                                 -- This is the EVICTION row: a pass-through moving is
                                 -- allowed here and nowhere else, it must be the only
                                 -- lane moving, and it must sit above the commit.
-                                assert(pair[1] == "split",
+                                assert(pair.name:match("^above"),
                                     ("seed=%d row=%d: a pass-through moved on the %s line")
-                                    :format(seed, ri, pair[1]))
+                                    :format(seed, ri, pair.name))
                                 assert(survivors == 1 and n == 1,
                                     ("seed=%d row=%d: eviction row moved %d lanes (%d pass-through), expected exactly 1")
                                     :format(seed, ri, n, survivors))
@@ -675,9 +677,7 @@ describe("columns.layout free-list colouring", function()
     local function all_lines(rows)
         local lines = {}
         for _, row in ipairs(rows) do
-            if row.split then lines[#lines + 1] = row.split end
-            lines[#lines + 1] = row.columns
-            if row.merge then lines[#lines + 1] = row.merge end
+            for _, ln in ipairs(h.row_lines(row)) do lines[#lines + 1] = ln.line end
         end
         return lines
     end
@@ -853,9 +853,9 @@ describe("columns.layout colour generation (spec §5.5)", function()
             { "a", {} }, { "b", {} }, { "c", {} },
         }))
         for _, row in ipairs(rows) do
-            for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-                if line then
-                    for _, t in ipairs(line) do
+            for _, ln in ipairs(h.row_lines(row)) do
+                do
+                    for _, t in ipairs(ln.line) do
                         if t.color then assert.is_true(t.color <= 3, "generated below capacity") end
                     end
                 end
@@ -972,8 +972,8 @@ describe("columns.layout boundary seed (§6.2)", function()
         -- colour slot 1 belongs only to the seed lane (id 99); the merge-born
         -- lanes must have taken other slots even though 1 is normally first out.
         for _, row in ipairs(rows) do
-            for _, line in ipairs({ row.split or {}, row.columns, row.merge or {} }) do
-                for _, t in ipairs(line) do
+            for _, ln in ipairs(h.row_lines(row)) do
+                for _, t in ipairs(ln.line) do
                     for _, s in ipairs(t.lanes or {}) do
                         if s.color == 1 then assert.equals(99, s.id) end
                     end

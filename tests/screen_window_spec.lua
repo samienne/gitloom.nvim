@@ -22,7 +22,8 @@ local pane = require("gitloom.graph.pane")
 local function items_of(spec)
     local out = {}
     for i, s in ipairs(spec) do
-        out[i] = { commit = { hash = ("h%02d"):format(i) }, split = s.split or nil, merge = s.merge or nil }
+        out[i] = { commit = { hash = ("h%02d"):format(i) },
+            above = s.split and { {} } or nil, merge = s.merge or nil }
     end
     return out
 end

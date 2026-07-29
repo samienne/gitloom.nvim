@@ -101,9 +101,9 @@ describe("pane.screen_lines — the screen-row model (§6.2)", function()
     it("the default rows_of interleaves split/columns/merge with signed virt offsets", function()
         local items = {
             { commit = { hash = "a" } },
-            { commit = { hash = "b" }, split = {} },
+            { commit = { hash = "b" }, above = { {} } },
             { commit = { hash = "c" }, merge = {} },
-            { commit = { hash = "d" }, split = {}, merge = {} }, -- both on one commit
+            { commit = { hash = "d" }, above = { {} }, merge = {} }, -- both on one commit
         }
         local sm = pane.screen_lines(items)
         -- a:cols(1) | b:above(2),cols(3) | c:cols(4),below(5) | d:above(6),cols(7),below(8)
@@ -153,7 +153,9 @@ describe("footer window → bottom screen row (the virtual-lines-above-w0 bug) (
     it("the fixture actually exercises virtual lines", function()
         local b = build()
         local nsplit = 0
-        for _, it in ipairs(b.display) do if it.split or it.merge then nsplit = nsplit + 1 end end
+        for _, it in ipairs(b.display) do
+            if #(it.above or {}) > 0 or it.merge then nsplit = nsplit + 1 end
+        end
         assert.is_true(nsplit > 0, "projection produced no virtual split/merge lines")
     end)
 
@@ -222,7 +224,7 @@ describe("footer window → bottom screen row (the virtual-lines-above-w0 bug) (
                             -- The seam commit's block must lie entirely within the visible,
                             -- NON-overlay region: its top screen row ≥ ts (on screen) and its
                             -- bottom = overlay_top - 1 (butts the overlay, above it).
-                            local seam_top = sm.cols[f.seam.idx] - (f.seam.item.split and 1 or 0)
+                            local seam_top = sm.cols[f.seam.idx] - #(f.seam.item.above or {})
                             local overlay_top = bs - f.fheight + 1
                             if seam_top < ts then
                                 bad[#bad + 1] = ("w0=%d ts=%d wh=%d: seam %d top=%d scrolled above ts")

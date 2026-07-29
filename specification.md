@@ -427,9 +427,14 @@ the model outward:
   `child_lanes` in from its children), and its rendered **Lines**. This is the
   commit ↔ visual bridge.
 - **Line** — one rendered row: a sequence of **Columns**. An OrderItem has a
-  *commit line* and, per the merge style (§5.2), an optional *split line* (above)
-  and/or *merge line* (below). Exactly one Commit's node sits on the commit line;
-  the split/merge lines carry only wires.
+  *commit line*, **any number of virtual lines above** it, and, per the merge
+  style (§5.2), an optional *merge line* (below). The above-lines are a **list**,
+  not one optional slot: the merge style contributes at most one (the *split
+  line*, §5.2), and the `gutter` policy (§5.6) contributes its handover rows, so
+  a commit may render two or three lines above its own. Exactly one Commit's node
+  sits on the commit line; every virtual line carries only wires. A virtual line
+  takes a **screen** row but no real buffer line (§6.2), so adding one never
+  changes what `line('w0')`/`line('w$')` address.
 - **Column** — one cell of a Line: the **Segments** through it, plus the Commit
   node when one sits here. (`GraphColumn` in the code.)
 - **Gutter column** — a Column that holds the **Lane owning the current subject
@@ -555,14 +560,24 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   horizontal at all and therefore has **no crossings**. This is *provable* from the
   guards rather than merely observed. Under `straight` it is strictly stronger
   still — no Line carries a jog, so no commit Line ever carries a horizontal that
-  is not a fan. The corollary does **not** hold under `gutter` (§5.6), which
-  constrains *which column* a Lane occupies: on the rows where the gutter changes
-  hands, a linear commit's fan is not degenerate — it spans from the Lane's column
-  to the gutter — and a linear commit gets no separate split/merge Line to put it
-  on. Those rows are a small minority (§5.6 measures them), but they exist, so the
-  corollary is a consequence of node placement and node placement is a policy
-  choice. What replaces it under `gutter` — every horizontal on a Line belongs to
-  one contiguous run containing the node's column — is stated in §5.6.
+  is not a fan. It holds under `gutter` (§5.6) too, and for the same reason:
+  constraining *which column* a Lane occupies does mean a lane has to travel on
+  the rows where the gutter changes hands, but that handover is given **virtual
+  rows of its own** and never rides a commit Line — so a commit Line still carries
+  only that commit's own fans. Measured over the §5.6 fixtures, `gutter` and
+  `straight` produce **identical** counts of commit Lines carrying a horizontal;
+  the residue in both is the node-less junction whose single fan renders inline
+  (§10.4), which is a fan. This was false while the handover's swap-in rode on the
+  arriving commit's own Line: a linear commit's "fan" then spanned from its Lane's
+  column to the gutter and crossed whatever lay between. The separate claim row is
+  what removed it.
+- **A repositioning move gets a Line of its own.** A policy may move a lane for
+  reasons that are not a commit's fan — today only the `gutter` handover (§5.6).
+  Such a move is drawn on a **virtual Line** carrying that move and nothing else:
+  exactly one lane turns on it, so it has one horizontal run, in one direction,
+  and it cannot be confused with a fan or with another move. It may not share a
+  commit Line, whose horizontals are reserved for that commit's own fans by the
+  rule above.
 
 **Conditional — the compaction guards.** Stated as constraints on any jog a policy
 chooses to make, not as claims that one is made, so they hold unchanged under
@@ -803,23 +818,42 @@ never displaces it: a marker between two commits of one lane disturbs nothing. I
 own node sits on its own lane like any other node. A working-tree virtual commit
 (§4.2) carries a synthesized subject, so it is an ordinary subject row.
 
-**The handover is two ordinary fans, not a swap.** This is the design's load-bearing
-choice. Two lanes exchanging columns over ONE row must both bend in the gutter cell,
-which renders `├─┤` — the same glyph a two-arm fan bus draws, so a transposition is
-not distinguishable from a fan; and a cell holding two different lanes' bends
-renders a single colour for two wires, which is exactly the §5.2 lane handoff.
-Instead the handover decomposes onto two **different** rows, each an ordinary fan:
+**The handover is two virtual rows, one move each — never a swap, and never
+shared with a fan.** This is the design's load-bearing choice. Two lanes
+exchanging columns over ONE row must both bend in the gutter cell, which renders
+`├─┤` — the same glyph a two-arm fan bus draws, so a transposition is not
+distinguishable from a fan; and a cell holding two different lanes' bends renders
+a single colour for two wires, which is exactly the §5.2 lane handoff. Nor may
+either move ride on the commit Line: a wire travelling *into* the gutter and the
+arms of that commit's own fan travelling *out* of it occupy the same cells in
+opposite directions, and a reader following a run cannot tell which wire it is
+on. So the handover decomposes onto **two separate virtual rows above the
+commit**, in this order:
 
-- the occupant leaves on a **virtual eviction row** of its own, on which exactly
-  one lane moves;
-- the next subject commit's incoming lane turns in as **that commit's own fan-in**,
-  a row later.
+1. a **virtual eviction row** — the occupant leaves the gutter for the nearest
+   free column to its right;
+2. a **virtual claim row** — the arriving lane turns in from its own column to
+   the gutter, directly above the commit that will sit on it.
 
-§5.1 already permits a commit's own fan to cross lanes, every cell keeps at most one
-turning lane, colour stays continuous, and it costs **no extra rows and no new
-glyph**. The claim rule is what makes it work: only a lane whose parent is the next
-subject-owning commit may enter the gutter, so the gutter is guaranteed free when
-the fan-in arrives.
+Each row moves **exactly one lane**, so it carries exactly one horizontal run, in
+one direction, and nothing else on it turns at all. The commit Line below them
+then carries only that commit's own fan (usually nothing, since the trunk is
+already in place). The lane that claims is the one whose **chain the commit
+continues** (§5 lane identity), so the gutter cell's wire above the node and its
+wire below it are one Lane, one id, one colour.
+
+Either row is emitted only when it has work: a gutter already free needs no
+eviction, and a lane already in the gutter needs no claim — which, given the
+lineage grouping (§3.1), is the overwhelmingly common case. Only a subject row
+may claim the gutter, so it is guaranteed free when the claim row runs.
+
+**The general rule this is an instance of.** Two horizontal runs may share cells
+on a Line only when both are arms of the **same fan of the commit on that Line** —
+both converging children, or both diverging parents. A run belonging to one fan
+sharing with a run of the other, or with any lane that is not incident to that
+commit, is a defect regardless of policy. Repositioning moves — the gutter
+handover above, and anything like it a future policy adds — therefore get rows of
+their own rather than borrowing a commit's.
 
 **Colour and identity are the same under this policy as under every other.** Lane
 identity is chosen from the DAG and the row order alone (§5), so constraining columns
@@ -837,8 +871,8 @@ Three consequences worth stating:
   fan-out, which looked free (a lane is born there, no wire moves) and was
   documented as a bonus. It was a bug: the node's colour is read from its cell's
   downward segment, so the merge rendered in the **lineage's** colour, and a merge
-  on the trunk read as the topic branch it merged. A handover costs a row; it does
-  not get to borrow one from the commit above.
+  on the trunk read as the topic branch it merged. A handover costs its own rows;
+  it does not get to borrow one from the commit above or the commit below.
 - The gutter may be **briefly empty**, between a run ending and the next lane
   turning in. It renders blank; nothing else may take it.
 - The **root column break** (§5.1) applies unchanged. A root sitting in the gutter
@@ -847,13 +881,13 @@ Three consequences worth stating:
   That is the only case where a subject row's node is not in the gutter, and it is
   the invariant working, not an exception to it.
 
-**What replaces the no-crossings corollary.** Every horizontal wire on a Line
-belongs to **one contiguous run containing that row's node** — a reader follows
-exactly one run per row and it always touches the node. There is no second,
-unrelated horizontal anywhere on the Line. That is weaker than "no crossings" and
-it is the honest trade: this policy converts *distance* into *crossings*, and
-concentrates them on the rare handover rows instead of spreading them over every
-row.
+**Where the crossings and the extra rows are.** The §5.1 no-crossings corollary
+holds on commit Lines (above) — the cost moved onto the handover rows rather than
+vanishing. Each handover row carries **exactly one** horizontal wire, in one
+direction, with nothing else turning on it, and that wire crosses whatever lanes
+lie between the gutter and the lane's own column. So this policy converts
+*distance* into *crossings* and *rows*, and concentrates both on the rare handover
+rows instead of spreading them over every row.
 
 **The costs, measured** over gitloom's own projected history (`tests/large_topo`)
 and a 1028-commit real repository, against `compact` (the default):
@@ -861,24 +895,28 @@ and a 1028-commit real repository, against `compact` (the default):
 | | large_topo focused | large_topo expanded | real repo focused | real repo expanded |
 |---|---|---|---|---|
 | subject rows with the node **adjacent** | 98.9% → **100%** | 40.4% → **99.8%** | 88.6% → **100%** | 8.2% → **99.0%** |
-| mean node-to-message distance | 0.51 → **0.00** ch | 15.73 → **0.03** ch | 0.23 → **0.00** ch | 21.37 → **0.06** ch |
-| rows carrying a horizontal | 14.6% → **10.4%** | 7.6% → **9.8%** | 68.1% → **56.1%** | 26.5% → **25.1%** |
-| crossings | 160 → **199** | 160 → **664** | 1179 → **1136** | 1323 → **2318** |
-| ink (glyph cells) | 2068 → **2081** | 8751 → **9299** | 8319 → **8410** | 22578 → **23773** |
-| rendered rows | unchanged | unchanged | unchanged | unchanged |
-| max graph width | unchanged | unchanged | +2 | +2 |
+| mean node-to-message distance | 0.51 → **0.00** ch | 15.73 → **0.03** ch | 0.23 → **0.00** ch | 21.37 → **0.05** ch |
+| rows carrying a horizontal | 14.6% → **10.4%** | 7.6% → **12.3%** | 68.1% → **56.0%** | 26.5% → **34.6%** |
+| crossings | 160 → **202** | 160 → **888** | 1179 → **1109** | 1323 → **3438** |
+| ink (glyph cells) | 2068 → **2102** | 8751 → **10319** | 8319 → **8396** | 22578 → **29802** |
+| rendered rows | 335 → **336** | 661 → **715** | 392 → **393** | 1135 → **1400** |
+| max graph width | 54 → **54** | 54 → **54** | 60 → **64** | 60 → **62** |
 
 **Handover frequency** — the number that governs the design. Counted as subject
-rows whose owning lane differs from the previous subject row's: **1.2 per 100
-rendered rows** (large_topo focused), 11.3 (expanded), **0.3** (real repo focused),
-24.2 (expanded). In the shipping default view the gutter effectively never changes
-hands; fully expanded it changes roughly every fourth subject row, which is where
-the crossing count comes from.
+rows whose owning lane differs from the previous subject row's: **0.6 per 100
+rendered rows** (large_topo focused), 8.0 (expanded), **0.3** (real repo focused),
+17.6 (expanded). It is a property of the DAG and the row order, not of the layout,
+so no placement change moves it. In the shipping default view the gutter
+effectively never changes hands; fully expanded it changes roughly every fifth
+subject row, which is where the extra rows and crossings come from — each handover
+costs up to two virtual rows.
 
-So: adjacency goes from 8–99% to 99–100%, ink costs **+0.6% to +5%**, and the graph
-is *no taller and no wider* (bar one column on a wide history). The one real cost is
-crossings, up 25% in a focused view and up to 75% fully expanded. Two caveats
-remain:
+So: adjacency goes from 8–99% to 99–100% and the graph is no wider on a narrow
+history (up to +4 columns on a wide one). The costs are rows and ink — **+0.3%**
+rows / **+1.6%** ink in a focused view, up to **+23%** rows / **+32%** ink fully
+expanded — and crossings, which are up 26% (large_topo focused) and 4.5× fully
+expanded on that fixture, but **down** 6% on the real repository focused. Two
+caveats remain:
 
 - The **`dual` label mode (§6.1) partially defeats it**: row 1 carries the node and
   the labels, row 2 carries the message, so the message row has no adjacent node.
@@ -944,11 +982,14 @@ by jogging an already-placed lane rightward into its column — compaction's
 redraw is leftward-only, and a rightward jog has no redraw to produce.
 
 **The pre-pass.** A policy may declare a once-per-sweep `prepass` computing hints
-the top-to-bottom sweep cannot see, since it would have to look forward. `gutter`
-uses one: for each row, the commit owning the **next** subject row, which is what
-lets a fan-out hand the gutter straight to the lane that will need it. It is a pure
-function of `(opts, items)` whose result is threaded onto each row, so nothing is
-written back onto the caller's items.
+the top-to-bottom sweep cannot see, since it would have to look forward. It is a
+pure function of `(opts, items)` whose result is threaded onto each row, so
+nothing is written back onto the caller's items. **No policy uses it today.**
+`gutter` did — the commit owning the *next* subject row, so a fan-out could hand
+the gutter straight to the lane that would need it — but that is exactly the
+"claim the gutter early" move the identity rule forbids, and once the handover
+moved onto rows of its own the sweep had everything it needs at the row itself.
+The hook is kept for the reserved `interval` placement (below).
 
 **Reserved: `interval`.** The name is reserved for a future "straight branches"
 placement that assigns columns from forbidden intervals over precomputed lane
@@ -1044,9 +1085,10 @@ selectable order (branch groups then tags; the current branch coloured as HEAD,
   one commit — `<CR>`/`D` act on that commit from either row, and reachability
   (§12) dims both together. The cursor parks on the **labels** on the first row
   (landing on a labelled commit pre-selects the first label, so `h`/`l` refine it)
-  and on the **message** on the second row. The two rows stack with the §5.2
-  split/merge virtual lines as: split line (fan-in), label row, message row, merge
-  line (fan-out).
+  and on the **message** on the second row. The two rows stack with the virtual
+  lines (§5 *Line*) as: every above-line in order (the §5.2 split fan-in, and any
+  handover rows the layout policy added), label row, message row, merge line
+  (fan-out).
 
 In every mode an out-of-cone row dims its refs with the rest of the row (§12),
 and a selected ref is drawn with `palette.selected`. The **context panes** (§6.2)

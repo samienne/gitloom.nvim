@@ -37,11 +37,14 @@
 --- linear slide), `linear` (no survivor compaction), `straight` (neither — which
 --- IS `layout_seam`, reused verbatim), and `gutter` (lanes never move AND the lane
 --- owning the current subject row is held in a fixed column). The first four are
---- chains of the stages already here and add no stage code; `gutter` adds exactly
---- one stage (`place_gutter`), declares the `prepass`, and generalises two
---- (`fan_in`/`fan_out`) by the trunk column `state.kt` — nil, and therefore inert,
---- under every other policy. It is also the only one that varies the *seam* chain
---- (it is its own seam; see `POLICY` below).
+--- chains of the stages already here and add no stage code; `gutter` adds three
+--- stages (`evict_gutter`, `claim_gutter`, `place_gutter`) and touches the shared
+--- ones only through `state.gutter` — nil, and therefore inert, under every other
+--- policy. It is also the only one that varies the *seam* chain (it is its own
+--- seam; see `POLICY` below).
+---
+--- A row renders as `[above…] columns [merge]`: `above` is a LIST of virtual lines
+--- (the split fan, plus `gutter`'s handover rows), topmost first (§5 Line).
 local M = {}
 
 --- The `gutter` policy's fixed node column (spec §5.6). Model column 1 is the
@@ -65,23 +68,6 @@ local function owns_subject(C, opts)
     if C.collapsed then return false end
     if C.junction and opts.junction_markers ~= false then return false end
     return true
-end
-
---- `gutter`'s prepass (spec §5.6): for each item, the Commit that owns the NEXT
---- subject row. The sweep hands the gutter to whichever outgoing lane leads to it,
---- which is what keeps a run of commits on one lane in the gutter with no wire
---- moving at all. O(N), one backward pass; the sweep itself cannot compute it
---- because it needs to look forward.
----@param opts table
----@param items table[]
----@return table<integer, table>  -- item index -> the next subject-owning Commit
-local function gutter_prepass(opts, items)
-    local nx, seen = {}, nil
-    for i = #items, 1, -1 do
-        nx[i] = seen
-        if owns_subject(items[i].commit, opts) then seen = items[i].commit end
-    end
-    return nx
 end
 
 ---@param t table
@@ -438,15 +424,16 @@ function M.layout(opts, items, seed)
     -- The gutter carries the previous run's chain. When this subject row belongs to
     -- a different lane, that occupant has to leave before this row can use the
     -- column — and it must leave on a **separate row**, because a lane moving out
-    -- (left-to-right) and this commit's fan-in moving in (right-to-left) on one row
+    -- (left-to-right) and the arriving lane moving in (right-to-left) on one row
     -- would share a horizontal run in opposite directions, which is unreadable
     -- (§5.1 horizontal sharing). So the occupant vacates on a virtual row above this
-    -- commit, and the swap-in rides on the commit's own fan-in a row later.
+    -- commit, and `claim_gutter` turns the arriving lane in on the NEXT virtual row.
     --
     -- Exactly one lane moves here, so the row carries one horizontal in one
     -- direction. It runs FIRST in the chain, before `seed_bars` reads the survivor
     -- columns, and patches the survivor's recorded column so every later stage sees
-    -- the new position.
+    -- the new position. `state.above` is a LIST, so this row coexists with the claim
+    -- row and with the commit's own split fan (§5 Line).
     local function evict_gutter(state)
         if not state.subject or blocked[GUTTER] then return end
         -- our own incoming lane already holds it: nothing to do
@@ -458,10 +445,6 @@ function M.layout(opts, items, seed)
             if s.col == GUTTER then occ = s end
         end
         if not occ then return end -- already free
-        -- The above-slot is taken by this commit's own split fan; leaving the
-        -- occupant put degrades to `place_gutter`'s off-gutter fallback rather than
-        -- stacking two virtual rows, which `OrderItem` cannot carry today.
-        if state.sep_split then return end
 
         local taken = {}
         for _, s in ipairs(state.survivors) do taken[s.col] = true end
@@ -485,6 +468,62 @@ function M.layout(opts, items, seed)
         occ.col = f
     end
 
+    -- CLAIM_GUTTER (stage, `gutter` only): the swap-IN, on a row of its own.
+    --
+    -- The mirror of `evict_gutter`, and for the same reason. A lane turning INTO the
+    -- gutter travels right-to-left; this commit's own fan-out travels left-to-right
+    -- out of the same cell, and its fan-in converges on it. Sharing the commit Line
+    -- with either lays two runs across the same cells in opposite directions — one
+    -- glyph, one colour, two wires — which is exactly what makes a handover row
+    -- unreadable (§5.6). So the claim gets its own virtual row, on which exactly one
+    -- lane moves and nothing else turns; the commit Line below then carries only the
+    -- commit's own fan.
+    --
+    -- WHICH lane turns in: the one whose chain this commit continues (`trunk_in`,
+    -- chosen from the DAG in `spawn_lanes` — never from a column, §5). Its outgoing
+    -- first parent inherits that id and colour and leaves the node straight down, so
+    -- the gutter cell's wire above the node and its wire below it are one Lane and
+    -- the run reads as one colour.
+    --
+    -- Declines when there is nothing to move: a tip (no incoming), one of this
+    -- commit's OWN children already in the gutter (then the commit's fan converges
+    -- there, which is a fan and legitimately shares its Line), a survivor still
+    -- holding it (eviction declined, so `place_gutter` falls back off-gutter), or a
+    -- root-blocked gutter (§5.1). Runs after `evict_gutter` and before `seed_bars`,
+    -- patching the incoming entry's column so every later stage sees the new one.
+    local function claim_gutter(state)
+        if not state.subject or blocked[GUTTER] then return end
+        local incoming = state.incoming
+        if #incoming == 0 then return end
+        for _, inc in ipairs(incoming) do
+            if inc.col == GUTTER then return end
+        end
+        for _, s in ipairs(state.survivors) do
+            if s.col == GUTTER then return end
+        end
+        local claimer
+        for _, inc in ipairs(incoming) do
+            if inc.lane == state.trunk_in then claimer = inc end
+        end
+        claimer = claimer or incoming[1]
+
+        local cells, draw = new_line()
+        for _, s in ipairs(state.survivors) do draw(s.lane, s.col, s.col, s.col, s.col) end
+        for _, inc in ipairs(incoming) do
+            if inc == claimer then
+                -- in at its own column from above, out at the gutter
+                draw(inc.lane, GUTTER, inc.col, inc.col, GUTTER)
+            else
+                draw(inc.lane, inc.col, inc.col, inc.col, inc.col)
+            end
+        end
+        state.above[#state.above + 1] = assemble(cells, nil, nil)
+        claimer.col = GUTTER
+        -- `incoming` is kept sorted by column (every later stage reads incoming[1] as
+        -- the leftmost); the claimer is now in column 1, so it simply moves to front.
+        table.sort(incoming, function(a, b) return a.col < b.col end)
+    end
+
     -- PLACE_GUTTER (stage): `place_commit` for the `gutter` policy (§5.6). The
     -- gutter column holds a **LANE**, not a bare node: the lane owning the current
     -- subject row lives there, so its commits' nodes sit on it and a run of commits
@@ -492,22 +531,23 @@ function M.layout(opts, items, seed)
     -- all. The gutter changes hands only when the next subject row is on a
     -- different lane.
     --
-    -- That handover is deliberately NOT a same-row swap. Two lanes exchanging
-    -- columns over one row must both turn in the gutter cell, which renders `├─┤` —
-    -- indistinguishable from a fan bus, and a cell with two different lanes bending
-    -- in it renders one colour for two wires (the §5.2 handoff). Instead it
-    -- decomposes into two ordinary fans on two DIFFERENT rows:
+    -- That handover is deliberately NOT a same-row swap, and it does not ride on a
+    -- commit Line at all. Two lanes exchanging columns over one row must both turn
+    -- in the gutter cell, which renders `├─┤` — indistinguishable from a fan bus,
+    -- and a cell with two different lanes bending in it renders one colour for two
+    -- wires (the §5.2 handoff). Putting either move on the commit Line is the same
+    -- defect one step out: the move's run and the commit's own fan cross the same
+    -- cells in opposite directions. So the handover decomposes into two virtual rows
+    -- above the commit, each moving EXACTLY ONE lane (§5.6):
     --
-    --   * the outgoing lane of the last commit of a run does not claim the gutter
-    --     (its parent is not the next subject commit), so it leaves as that
-    --     commit's own **fan-out** turn and the gutter falls empty;
-    --   * the next subject commit's incoming lane turns in as that commit's own
-    --     **fan-in**.
+    --   * `evict_gutter` — the occupant leaves the gutter for the nearest free
+    --     column to its right;
+    --   * `claim_gutter` — the arriving lane (this commit's own chain) turns in.
     --
-    -- Both are a commit's own fan, which §5.1 already permits to cross lanes; each
-    -- cell holds at most one turning lane; and it costs zero extra rows and no new
-    -- glyph. The claim rule is what guarantees the gutter is free when the fan-in
-    -- arrives: only a lane whose parent is the next subject commit may enter it.
+    -- Each row then carries one horizontal in one direction and nothing else turns
+    -- on it, so no two wires ever share a run; the commit Line carries only this
+    -- commit's own fan. Only a subject row may claim the gutter, which is what
+    -- guarantees it is free when the claim row runs.
     --
     -- Reserving every incoming column in `occ0` is load-bearing, not tidiness: it is
     -- how §5.1's fan-out placement rule ("a column a terminating child frees is
@@ -552,11 +592,9 @@ function M.layout(opts, items, seed)
         -- merge's node, and `top_lane` colours a node from the cell's `down` segment,
         -- so the merge rendered as the topic. The handover the lineage needs happens
         -- on its own row instead (`evict_gutter`).
-        if outgoing[1] then
-            local kt = (cc == GUTTER) and GUTTER or cc
-            g.used[kt] = true
-            state.kt = kt
-        end
+        -- The node's own column carries that continuation, so reserve it: no other
+        -- lane may lay a horizontal through it on this row.
+        if outgoing[1] then g.used[cc] = true end
         -- No node and nothing continuing here: hold the gutter empty rather than
         -- letting a generic fan-out grab it, so it is free when the next subject
         -- lane turns in.
@@ -624,15 +662,12 @@ function M.layout(opts, items, seed)
         for _, inc in ipairs(commit_incoming) do
             g.draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
         end
-        -- The first parent leaves the node column and turns down in its own lane
-        -- column `kt`. `state.kt` is set only by `place_gutter`; everywhere else the
-        -- node IS its lane, so `kt == cc` and this is the classic one-cell down stub.
-        -- With a separate merge Line the fan happens below, so the commit Line
-        -- carries only the stub into the ascent — at the node column either way.
-        if outgoing[1] then
-            local dk = (state.kt and not state.sep_merge) and state.kt or cc
-            g.draw(outgoing[1].lane, math.min(dk, cc), math.max(dk, cc), nil, dk)
-        end
+        -- The first parent turns down out of the node. The node always sits on its
+        -- own lane's column — under `gutter` too, since `claim_gutter` brings that
+        -- lane into the gutter a row earlier — so this is a one-cell down stub. With
+        -- a separate merge Line the fan happens below and the commit Line carries
+        -- only the stub into the ascent, at the same column either way.
+        if outgoing[1] then g.draw(outgoing[1].lane, cc, cc, nil, cc) end
     end
 
     -- COMPACT (stage): each survivor slides into the run of free columns to its
@@ -685,10 +720,6 @@ function M.layout(opts, items, seed)
         local g = state.g
         local survivors, outgoing = state.survivors, state.outgoing
         local cc, commit_incoming, sep_merge = state.cc, state.commit_incoming, state.sep_merge
-        -- The first parent's column. `state.kt` is the `gutter` policy's trunk
-        -- column (§5.6), where the node is NOT on its own lane; nil everywhere else,
-        -- so `kt == cc` and every expression below is the classic one.
-        local kt = state.kt or cc
         local freed = {}
         if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #commit_incoming do
@@ -698,7 +729,7 @@ function M.layout(opts, items, seed)
                 if not (state.gutter and c == GUTTER) then freed[#freed + 1] = c end
             end
         end
-        if outgoing[1] then outgoing[1].out = kt end
+        if outgoing[1] then outgoing[1].out = cc end
         local fi = 1
         for i = 2, #outgoing do
             -- `place_gutter` may have pinned this parent to the gutter already; every
@@ -729,14 +760,7 @@ function M.layout(opts, items, seed)
                 local ascent = {}
                 for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
                 madd(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
-                if kt == cc then
-                    madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
-                else
-                    -- `gutter`: the first parent leaves the node column too, so it
-                    -- fans out to `kt` like the extra parents rather than dropping
-                    -- straight down out of the hub.
-                    mdraw(outgoing[1].lane, math.min(kt, cc), math.max(kt, cc), nil, kt)
-                end
+                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
             end
             for i = 2, #outgoing do
                 local o = outgoing[i]
@@ -749,14 +773,19 @@ function M.layout(opts, items, seed)
         -- one row so nothing stacks under it).
         active = {}
         for _, s in ipairs(survivors) do active[s.out] = s.lane end
-        if outgoing[1] then active[kt] = outgoing[1].lane end
+        if outgoing[1] then active[cc] = outgoing[1].lane end
         for i = 2, #outgoing do active[outgoing[i].out] = outgoing[i].lane end
         blocked = {}
         if #outgoing == 0 then blocked[state.cc] = true end
     end
 
     -- FINALIZE (stage): assemble the main line from the grid, build the OrderItem
-    -- (split/columns/merge + parent/child lanes), and discharge the ledger.
+    -- (above/columns/merge + parent/child lanes), and discharge the ledger.
+    --
+    -- `above` is a LIST of virtual lines, topmost first — the order the stages
+    -- appended them, which is the order they render (§5 Line). The merge style
+    -- contributes at most one (the split fan); `gutter` adds its eviction and claim
+    -- rows above it.
     local function finalize(state)
         local C = state.commit
         local main = assemble(state.g.cells, state.cc, C)
@@ -765,7 +794,7 @@ function M.layout(opts, items, seed)
             commit = C,
             parent_lanes = {},
             child_lanes = {},
-            split = state.above[1],
+            above = state.above,
             columns = main,
             merge = state.below[1],
         }
@@ -829,8 +858,10 @@ function M.layout(opts, items, seed)
     -- "lanes never move" true, so the seam requirement (§5.6) is met by the body
     -- chain itself and this is also the policy's seam.
     -- A context pane's SEAM row must keep every seeded lane in its seeded column
-    -- (§5.6), so it cannot evict: the pane's top edge has to reproduce the main
-    -- view's exactly. Everything else about the gutter applies.
+    -- (§5.6), so it can neither evict nor claim: the pane's top edge has to
+    -- reproduce the main view's exactly. Everything else about the gutter applies —
+    -- including `fan_in`'s "the node column is elsewhere" arm, which is reachable
+    -- only from here now that the body chain claims the gutter first.
     local function layout_gutter_seam(state)
         seed_bars(state)
         place_gutter(state)
@@ -841,6 +872,7 @@ function M.layout(opts, items, seed)
     end
     local function layout_gutter(state)
         evict_gutter(state)
+        claim_gutter(state)
         seed_bars(state)
         place_gutter(state)
         fan_in(state)
@@ -866,9 +898,11 @@ function M.layout(opts, items, seed)
     ---@field prepass? fun(opts: table, items: table[]): any  -- a once-per-sweep pass
     ---   computing forward hints the sweep cannot (it runs top-to-bottom). Its return
     ---   value is threaded onto each row's `state.pre`, indexed by `state.index`, so
-    ---   nothing is written onto the caller's `items`. `gutter` uses it for the next
-    ---   subject-owning commit; a future `interval` placement (§5.6) would use it for
-    ---   lane lifespans.
+    ---   nothing is written onto the caller's `items`. NO policy uses it today —
+    ---   `gutter` did (the next subject-owning commit, so a fan-out could hand the
+    ---   gutter over early), but that is the very move §5.6's identity rule forbids,
+    ---   and its handover rows need only what the current row already knows. Kept for
+    ---   the reserved `interval` placement (§5.6), which needs lane lifespans.
     ---@type table<string, LayoutPolicy>
     local POLICY = {
         compact   = { body = layout_compact,   seam = layout_seam },

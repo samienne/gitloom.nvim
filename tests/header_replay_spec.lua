@@ -73,7 +73,7 @@ end
 
 -- Build the header at cutoff `si` and return the rendered lane id of each named anchor.
 local function header_anchor_ids(ctx, si)
-    local line = ctx.main[si].split or ctx.main[si].columns
+    local line = (ctx.main[si].above or {})[1] or ctx.main[si].columns
     local boundary = pane.boundary_of(line, true)
     if not next(boundary) then return {} end
     local tips = {}
@@ -121,9 +121,9 @@ local LOOSE_ORACLE = { gutter = true }
 local function main_ids(ctx)
     local ids = {}
     for _, row in ipairs(ctx.main) do
-        for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
-            if line then
-                for _, cell in ipairs(line) do
+        for _, ln in ipairs(h.row_lines(row)) do
+            do
+                for _, cell in ipairs(ln.line) do
                     for _, sg in ipairs(cell.lanes or {}) do ids[sg.id] = true end
                 end
             end

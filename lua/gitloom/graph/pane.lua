@@ -378,15 +378,22 @@ end
 --- The overlay covers **whole commit blocks** — it never splits a commit across the seam.
 --- Walking down from just below `ts`, the seam is the first **block start** (the first
 --- screen row of some item's block) that leaves ≥ `cover` rows above it, so no partial
---- commit shows below the overlay. The seam item's top rendered line is its `split` fan
---- (if any, `kind = "split"`), else its `columns` line — the edge the header butts.
+--- commit shows below the overlay. The seam item's top rendered line is the **topmost of
+--- its `above` list** (if it has any — `kind = "above"`), else its `columns` line: the edge
+--- the header butts.
+---
+--- **`kind = "above"`, not `"split"`:** the above-lines are a LIST (§5 Line) — the split
+--- fan, and under the `gutter` policy (§5.6) the handover rows — so the caller resolves the
+--- line by the returned `virt` (`-k`, with `-1` the row NEAREST the columns line, matching
+--- `screen_lines`' stacking), i.e. `item.above[#item.above + virt + 1]`. `footer_seam`'s
+--- `kind = "merge"` stays as it is: below is still a single fan line.
 ---
 --- Pure — no `screenpos`. The live glue supplies `ts` from the cursor anchor + the window
 --- top via the same `screen_lines` model (which counts virtual lines).
 ---@param sm { lines: table[], cols: integer[] }  -- from `M.screen_lines`
 ---@param ts integer               -- the top visible SCREEN row
 ---@param cover integer            -- the overlay's requested screen-row budget
----@return table?  -- { item, kind = "split"|"columns", idx, cover, seam_top } or nil past the end
+---@return table?  -- { item, kind = "above"|"columns", virt, idx, cover, seam_top } or nil past the end
 function M.header_seam(sm, ts, cover)
     local n = #sm.lines
     if not ts or ts > n then return nil end
@@ -396,11 +403,11 @@ function M.header_seam(sm, ts, cover)
         -- (so `r` is the first rendered line of a fresh commit block).
         if sm.lines[r].idx ~= sm.lines[r - 1].idx and (r - ts) >= cover then
             local ln = sm.lines[r]
-            -- The seam item's top rendered row seeds the header: an **above** virtual row is
-            -- its split fan (`virt < 0`), otherwise its columns line.
+            -- The seam item's top rendered row seeds the header: an **above** virtual row
+            -- (`virt < 0`, indexed into `item.above` by `virt`), otherwise its columns line.
             return {
                 item = ln.item,
-                kind = (ln.virt and ln.virt < 0) and "split" or "columns",
+                kind = (ln.virt and ln.virt < 0) and "above" or "columns",
                 virt = ln.virt or 0,
                 idx = ln.idx,
                 cover = r - ts,   -- whole commit blocks covered (≥ the requested budget)
@@ -482,6 +489,30 @@ function M.footer_seam(sm, bs, cover)
     return nil
 end
 
+--- The rendered line a seam names — the single place the `virt` sign convention is
+--- decoded, so no caller re-derives it. `M.header_seam` / `M.footer_seam` return the
+--- screen row the pane butts against; this turns it into the `GraphColumn[]` whose edge
+--- `M.boundary_of` reads.
+---
+--- **The direction convention** (from `M.screen_lines`): `virt = -k` is the k-th row
+--- **above** the columns line with **`-1` NEAREST the columns line**, so the topmost of
+--- `n` above-rows is `virt = -n` and the list index is `n + virt + 1`. Indexing the list
+--- forwards from `-virt` is off by exactly the drift this convention was introduced to
+--- prevent (§6.2). `virt = +k` is the k-th row below; there is only ever one (`merge`).
+---@param seam table?  -- from `M.header_seam` / `M.footer_seam`
+---@return table[]?    -- GraphColumn[] (nil when the seam names no rendered line)
+function M.seam_line(seam)
+    if not seam or not seam.item then return nil end
+    local it, virt = seam.item, seam.virt or 0
+    if virt < 0 then
+        local above = it.above or {}
+        return above[#above + virt + 1]
+    elseif virt > 0 then
+        return it.merge
+    end
+    return it.columns
+end
+
 --- Flatten display OrderItems into the actual sequence of **rendered screen lines**
 --- (spec §6.2). A commit renders as a block of `[above…] columns [below…]` screen rows;
 --- the `above`/`below` fan rows are **virtual** (decoration-provider `virt_lines`) — they
@@ -493,8 +524,8 @@ end
 --- **Count-based, not boolean.** Each item may render **any number** of virtual rows above
 --- and below its columns block (a fork's split fan, a merge fan, dual-mode continuation,
 --- or future layout strategies — and both above AND below on one commit). `rows_of(item)`
---- returns `{ above = <n>, height = <columns rows, ≥1>, below = <n> }`; the default reads
---- the single `.split`/`.merge` fans (the current graph). This generalises the old
+--- returns `{ above = <n>, height = <columns rows, ≥1>, below = <n> }`; the default counts
+--- the item's `.above` list and its single `.merge` fan. This generalises the old
 --- `virt_lines_above` boolean so more/other virtual rows just work.
 ---
 --- Returns `{ lines, cols }`:
@@ -510,7 +541,7 @@ end
 ---@return { lines: table[], cols: integer[] }
 function M.screen_lines(items, rows_of)
     rows_of = rows_of or function(it)
-        return { above = it.split and 1 or 0, height = 1, below = it.merge and 1 or 0 }
+        return { above = #(it.above or {}), height = 1, below = it.merge and 1 or 0 }
     end
     local lines, cols = {}, {}
     for di, it in ipairs(items) do
@@ -599,7 +630,8 @@ end
 function M.boundary_above(rows, i)
     local row = rows[i]
     if not row then return {} end
-    local line = row.split or row.columns -- the first rendered line of the row
+    -- the first rendered line of the row: its topmost virtual line if it has any
+    local line = (row.above and row.above[1]) or row.columns
     local out = {}
     for col, cell in ipairs(line) do
         for _, s in ipairs(cell.lanes or {}) do

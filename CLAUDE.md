@@ -290,7 +290,16 @@ Coverage:
   and stays continuous (the seam row runs no compaction), and the seed colour is
   reserved so a pane-born lane never reuses it
 - `tests/pane_spec.lua` — the context-pane layout core (`gitloom.pane`, spec
-  §6.2): `boundary_below`/`boundary_above` (the lanes crossing a row's edge, by
+  §6.2), **plus the multiple-above-rows contract** (§5 Line): a REAL `gutter` layout
+  with two (and three) virtual lines above one commit, driven through
+  `screen_lines` and BOTH seam functions at every window top/bottom × cover, with
+  an oracle for "which line is rendered at screen row N" built independently of
+  `screen_lines`. It pins the direction convention head-on — `virt = -1` is the row
+  NEAREST the columns line, so the topmost of `n` is `virt = -n` = `above[1]` — and
+  that `header_seam` always butts the TOPMOST above-row (a block start), while
+  `footer_seam` never lands inside a block; `pane.seam_line` is the one decoder and
+  inverting it fails three of these tests. Also covers:
+  `boundary_below`/`boundary_above` (the lanes crossing a row's edge, by
   column), `split_boundary` (continue vs terminate via `node_of`), `mark_pane_cone`
   (the reachability-emphasis propagation: down `.parents` = ancestors, up
   `.children` = descendants, a confluence in-cone from the join, empty seeds → empty
@@ -432,17 +441,25 @@ Coverage:
   along it (fuzzed over the inline / split-line / merge-line styles). The whole
   STYLES × FIXTURES sweep and **both** compaction guards run across all five
   layout policies (§5.6) — the guards are violation counts, so they hold unchanged
-  (vacuously under `straight` and `gutter`, which move nothing). The both-lines **no-crossings corollary** is pinned
-  to the policies that let a node fall wherever its lane already is: under `gutter`
-  a handover row's fan is not degenerate and does cross (verified — 1154 offending
-  commit lines over 400 DAGs, 0 under `straight`), so it is replaced by the
-  one-run test (every horizontal on a Line belongs to one contiguous run containing
-  that row's node). Plus a `layout policy (§5.6)` block: the
+  (vacuously under `straight` and `gutter`, which move nothing). The both-lines **no-crossings corollary** now runs
+  under **all five** policies — including `gutter`, once its handover swap-IN moved
+  onto a virtual row of its own (it used to ride the arriving commit's Line: 1154
+  offending commit Lines over 400 DAGs). `gutter` additionally satisfies the
+  stronger one-run test on EVERY rendered line, handover rows included (every
+  horizontal belongs to one contiguous run reaching that row's node). Plus a
+  `layout policy (§5.6)` block: the
   linear-commit slide changes the layout on only a small minority of DAGs while
   survivor compaction dominates (asserted as a wide-margin relation, not a count),
   under `straight` no lane ever changes column, and an unknown/absent policy falls
   back to `compact`. The `inline+mergesplit` characterization snapshot is pinned
-  to `compact` explicitly (a golden snapshot is a picture of one policy).
+  to `compact` explicitly (a golden snapshot is a picture of one policy). The
+  `invariant checker self-test` block also proves **`check_horizontals`** has teeth:
+  a fan-in and a fan-out sharing a run is flagged MIXED-DIRECTION, two arms of the
+  same fan are not. That checker is wired into `M.check` (§5.1 horizontal sharing)
+  for every merge style that gives at least one fan its own Line; it is NOT run on
+  the two fully-inline styles, where a commit's fan-in and fan-out share its Line by
+  construction and the rule fires under every policy alike (a deferred, pre-existing
+  property of those styles, not of any policy).
 - `tests/graph_mirror_spec.lua` — the `mirror` render transform (spec §5.4):
   the same invariant suite must pass on mirrored output, the mirrored grid must
   equal the horizontal flip of the normal grid (reverse + glyph swap), and the
@@ -546,8 +563,11 @@ runtime). Its pure helpers are testable — `snacks.win` loads lazily (only
 - **GraphColumn** — one cell of a rendered line: its connectivity plus the
   **Segment**s (per-edge wires) it draws. (Was `Track`; renamed.)
 - **OrderItem** — a rendered row (`commit`, `merge`, or `split` type) holding
-  its commit line `columns` plus optional `split`/`merge` virtual lines and the
-  `parent_lanes`/`child_lanes` for reachability.
+  its commit line `columns` plus an `above` **list** of virtual lines (the §5.2
+  split fan, and under the `gutter` policy its two handover rows — so one commit can
+  render three lines above its own), an optional `merge` virtual line below, and the
+  `parent_lanes`/`child_lanes` for reachability. `pane.seam_line` is the single
+  decoder of a seam's `virt` against that list (`-1` = nearest the columns line).
 - **GraphOptions / MergeStyle** — configuration; see specification.md §8.
 - **listview** — the generic virtualized list widget the graph renders into.
 

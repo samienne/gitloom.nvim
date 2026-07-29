@@ -65,13 +65,11 @@ local function build(policy)
     return { display = display, main = main, refs = refs, pinned = pinned, opts = opts, idx = idx }
 end
 
--- Flatten a footer row's rendered lines top-to-bottom (split, columns, merge).
+-- Flatten a footer row's rendered lines top-to-bottom (above..., columns, merge).
 local function lines_of(rows)
     local out = {}
     for _, r in ipairs(rows) do
-        if r.split then out[#out + 1] = r.split end
-        out[#out + 1] = r.columns
-        if r.merge then out[#out + 1] = r.merge end
+        for _, ln in ipairs(h.row_lines(r)) do out[#out + 1] = ln.line end
     end
     return out
 end
@@ -159,7 +157,9 @@ describe("large real-world footer replay [" .. policy .. "] (§6.2)", function()
             -- Each rendered line of the block is a candidate seam the live picker can land on.
             check_seam(b, row.columns, ("si=%d columns"):format(si), bad)
             if row.merge then check_seam(b, row.merge, ("si=%d merge"):format(si), bad) end
-            if row.split then check_seam(b, row.split, ("si=%d split"):format(si), bad) end
+            for k, l in ipairs(row.above or {}) do
+                check_seam(b, l, ("si=%d above%d"):format(si, k), bad)
+            end
         end
         assert.equals(0, #bad,
             "footer replay problems:\n  " .. table.concat(bad, "\n  ", 1, math.min(#bad, 15)))
