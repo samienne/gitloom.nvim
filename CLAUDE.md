@@ -586,9 +586,7 @@ Details not covered by the spec or architecture:
   the next subject commit's fan-in turns in), never by a same-row swap: two lanes
   transposing must both bend in the gutter cell, which renders `├─┤` — the same
   glyph a fan bus draws — with one colour for two wires. So there is no swap glyph
-  and no virtual swap row. One consequence to know: a first parent inherits its
-  **leftmost incoming** lane's id/colour (§5), so constraining columns changes which
-  child's colour continues at a split. An unknown/absent value falls back to `compact`. §5.1's invariants
+  and no virtual swap row. An unknown/absent value falls back to `compact`. §5.1's invariants
   are classified accordingly: **universal** (hold under every policy),
   **conditional guards** (constrain any jog a policy makes — written as violation
   counts, so they go vacuous rather than false), **policy-specific** (only the
@@ -600,6 +598,23 @@ Details not covered by the spec or architecture:
   frozen at window creation) is kept in step by the handler. The **footer** pane
   follows the policy; the **header** does not (it is the direct seam-up grid,
   never `columns.layout`).
+- **Lane identity is independent of placement** (spec §5, `spawn_lanes`): a
+  commit's first parent continues the identity of the incoming lane that
+  represents the same line of history — prefer a lane whose child has this commit
+  as its FIRST parent, else any incoming lane (a merge's second-parent edge is
+  still that branch continuing; minting fresh there would recolour every
+  merged-in branch tip), and among the candidates take the most **senior**, the
+  smallest id. Only a genuine tip is born. The ended lanes' colours are returned in
+  **id order**, because `free_color` appends to a FIFO and the return order decides
+  which colour a later lane gets. Nothing here reads a column, which buys the
+  cross-policy guarantee: **all five policies produce identical lane ids and
+  colours**, differing only in position, so `C` moves the graph and never recolours
+  it (asserted in `graph_layout_spec`). This replaced "reuse the **leftmost**
+  incoming lane" — a positional proxy for "the trunk" that failed wherever a topic
+  lane landed left of it, drawing the merge and the whole spine below as the topic.
+  It was found under `gutter` (which constrains columns, so it hit reliably) but was
+  never gutter-specific: `compact` mis-picked on ~2.8% of commits. The fix changes
+  **colour only — geometry is untouched** (0 glyph changes across every corpus).
 - **Branch modes — the view builder** (`view.lua`, spec §10): a pure
   pre-Phase-1 stage projecting the immutable commit DAG + a view state (per-ref
   `normal`/`collapsed`/`hidden`) into an **OrderItem graph** of DisplayNodes that

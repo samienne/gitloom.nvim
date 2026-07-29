@@ -813,10 +813,19 @@ the current row. For each commit `C`:
    skip it — so an independent history does not stack directly under a root (the
    "root column break" invariant). The block lasts one row, so consecutive stacked
    roots simply alternate columns.
-3. **Outgoing** = one Lane per parent. The first parent **reuses the trunk
-   child's id and colour** (so a straight chain keeps one colour); a fresh id and
-   a free-list colour slot are taken only where a lane is born — a branch head (a
-   tip's first parent) and every extra parent of a merge. Colours come from a
+3. **Outgoing** = one Lane per parent. The first parent **continues the identity
+   of the chain that runs into this commit** (spec §5): prefer an incoming lane
+   whose child has this commit as its FIRST parent, else any incoming lane (a
+   merge's second-parent edge is still that branch continuing), and among the
+   candidates take the most SENIOR — the smallest id. Ids are minted in row order
+   and carried along a chain, so the smallest is the chain that started highest.
+   The choice reads the DAG and the row order only, **never a column**, which is
+   what makes lane identity identical under every layout policy. A fresh id and a
+   free-list colour slot are taken only where a lane is born — a branch head (a
+   tip's first parent) and every extra parent of a merge. The ended lanes' colours
+   are returned in **id order** too: `free_color` appends to a FIFO, so the return
+   order decides which colour a later lane receives, and taking it from columns
+   would let placement reach colour through the back door. Colours come from a
    recycling **free list** seeded with `palette.tracks`: a born lane takes a slot
    from the front, an ended lane returns its slot to the back (FIFO). New lanes
    allocate *before* the line's ended lanes return their slots, so concurrent

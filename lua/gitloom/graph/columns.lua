@@ -294,26 +294,68 @@ function M.layout(opts, items, seed)
         state.incoming_lanes, state.survivor_lanes = iset, sset
     end
 
-    -- SPAWN_LANES (shell step): mint one outgoing Lane per parent — the first
-    -- parent reuses the trunk child's id + colour (a straight chain keeps one
-    -- colour), every other lane is born with a fresh id + free-list slot — then
-    -- return the ended incoming children's colours. Pure lane lifecycle, driven
-    -- by the DAG, never by placement; must run before any later colour alloc so
+    -- SPAWN_LANES (shell step): mint one outgoing Lane per parent, then return the
+    -- ended incoming children's colours. Pure lane lifecycle, driven by the DAG and
+    -- the row order, NEVER by placement; must run before any later colour alloc so
     -- a slot freed here cannot be reused by a lane born on the same line.
+    --
+    -- IDENTITY (spec §5). The first parent continues the identity of the incoming
+    -- lane that represents the same line of history. Two tiers, both read off the
+    -- DAG and the row order — never off a column:
+    --
+    --  1. Prefer a lane whose child has THIS COMMIT as its FIRST parent: that
+    --     child's mainline runs into here, so it is a continuation outright.
+    --  2. Otherwise take any incoming lane. A merge's second-parent edge is still a
+    --     continuation — it is the merged-in BRANCH, and this commit is that
+    --     branch's tip carrying on downward. (Minting a fresh lane here instead
+    --     would recolour every merged-in branch tip; the `m -> {a, b}` diamond is
+    --     the smallest case that proves it.)
+    --
+    -- Within whichever tier applies, the most SENIOR wins — the smallest id. Ids are
+    -- minted in row order and carried along a whole first-parent chain, so the
+    -- smallest is the chain that started highest and a topic forking off a trunk is
+    -- always junior to it. Only a genuine tip, with nothing arriving at all, is born.
+    --
+    -- This used to be "the leftmost incoming lane" — a positional proxy for "the
+    -- trunk", true only while the trunk happened to sit leftmost. Where a topic lane
+    -- landed left of the trunk, the merge and the whole spine below it were drawn as
+    -- the topic. Choosing semantically is also what makes identity **invariant
+    -- across layout policies** (§5.6): no column may reach an id or a colour.
     local function spawn_lanes(state)
         local C = state.commit
         local incoming = state.incoming
-        local trunk_id = incoming[1] and incoming[1].lane.id
-        local trunk_color = incoming[1] and incoming[1].lane.color
+        local trunk, senior
+        for _, e in ipairs(incoming) do
+            local child = e.lane.begin
+            if child and child.parents and child.parents[1] == C then
+                if not trunk or e.lane.id < trunk.id then trunk = e.lane end
+            end
+            if not senior or e.lane.id < senior.id then senior = e.lane end
+        end
+        trunk = trunk or senior
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
-            local id = (i == 1 and trunk_id) or new_id()
-            local color = (i == 1 and trunk_color) or alloc_color()
+            local id, color
+            if i == 1 and trunk then
+                id, color = trunk.id, trunk.color
+            else
+                id, color = new_id(), alloc_color()
+            end
             outgoing[#outgoing + 1] = { lane = { id = id, color = color, begin = C, parent = p, highlighted = false } }
         end
-        for i = 2, #incoming do free_color(incoming[i].lane.color) end
-        if #incoming > 0 and #outgoing == 0 then free_color(incoming[1].lane.color) end
+        -- Return the colour of every incoming lane that did not continue (all of
+        -- them when nothing leaves). Ordered by lane id — row order — because
+        -- `free_color` appends to a FIFO, so the ORDER of these returns decides which
+        -- colour a later lane receives; taking it from columns would let placement
+        -- reach colour through the back door and two policies would diverge (§5.5).
+        local ended = {}
+        for _, e in ipairs(incoming) do
+            if e.lane ~= trunk or #outgoing == 0 then ended[#ended + 1] = e.lane end
+        end
+        table.sort(ended, function(a, b) return a.id < b.id end)
+        for _, lane in ipairs(ended) do free_color(lane.color) end
         state.outgoing = outgoing
+        state.trunk_in = trunk
     end
 
     -- DECIDE_STYLE (shell step): the merge-style flags for this item. A node-less
@@ -530,6 +572,11 @@ function M.layout(opts, items, seed)
             end
             local descent = {}
             for _, inc in ipairs(incoming) do descent[#descent + 1] = inc.lane end
+            -- The shared descent is a BUNDLE of every converging edge, and its label
+            -- is pinned by per-Lane continuity (§5.1): the commit Line below draws
+            -- this same wire as `commit_incoming`'s up-stub, so the two must carry
+            -- one id. It is not an identity choice — identity changes at the node,
+            -- below this wire — so it stays the arriving trunk's, as it always was.
             add_seg(cc0, { down = true }, descent, trunk.lane.id, trunk.lane.color)
             for i = 2, #incoming do
                 local inc = incoming[i]
