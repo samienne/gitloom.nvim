@@ -479,9 +479,130 @@ local function check_grid(grid, opts, skip_color, allow_floating_heads)
     return errors
 end
 
+----------------------------------------------------------------------
+-- Horizontal sharing (spec §5.1)
+----------------------------------------------------------------------
+
+-- A horizontal run belongs to ONE Lane — one edge child -> parent — and has a
+-- DIRECTION: the way that wire travels along the Line, following the graph's own
+-- top-to-bottom flow.
+--
+--   entry column = where the lane has `up` (it arrived from the Line above); if it
+--                  has no `up` it is emanating from the commit/hub on this Line, so
+--                  the entry is the far end of its run.
+--   exit column  = where the lane has `down` (it continues below); if it has no
+--                  `down` it terminates at the commit/hub, so the exit is the far end.
+--   direction    = sign(exit - entry).
+--
+-- Direction is defined on the LANE's travel rather than, say, which side of the
+-- node the wire is on, because what a reader follows is the edge — child down to
+-- parent. Two wires crossing the same cells in opposite directions are exactly
+-- what makes a run unreadable: the eye cannot tell which wire it is on, and the
+-- cell renders one glyph and one colour for both.
+--
+-- THE RULE (§5.1): two horizontal runs may share a cell only when both belong to
+-- the SAME fan of the commit on that Line — both converging children, or both
+-- diverging parents. A run of one fan sharing with a run of the other, or with a
+-- lane that is not incident to this commit at all, is an error. Reported with the
+-- directions so a mixed-direction share (the visible defect) is distinguishable
+-- from a same-direction one.
+---@param line table   -- GraphColumn[]
+---@return table       -- edge -> { lo, hi, from, to, dir, id }
+local function horizontal_runs(line)
+    local runs, order = {}, {}
+    for j, cell in ipairs(line or {}) do
+        for _, sg in ipairs(cell.lanes or {}) do
+            local c = sg.connectivity
+            for _, e in ipairs(sg.edges or {}) do
+                local r = runs[e]
+                if not r then
+                    r = { lo = j, hi = j, id = sg.id }
+                    runs[e] = r
+                    order[#order + 1] = e
+                end
+                if j < r.lo then r.lo = j end
+                if j > r.hi then r.hi = j end
+                if c.up then r.up = j end
+                if c.down then r.down = j end
+                if c.left or c.right then r.h = true end
+            end
+        end
+    end
+    local out = {}
+    for _, e in ipairs(order) do
+        local r = runs[e]
+        if r.h then
+            local from, to
+            if r.up and r.down then
+                from, to = r.up, r.down
+            elseif r.up then
+                from = r.up
+                to = (r.up == r.lo) and r.hi or r.lo
+            elseif r.down then
+                to = r.down
+                from = (r.down == r.lo) and r.hi or r.lo
+            else
+                from, to = r.lo, r.hi -- defensive: a run with neither endpoint
+            end
+            r.from, r.to = from, to
+            r.dir = (to > from) and 1 or ((to < from) and -1 or 0)
+            out[#out + 1] = { edge = e, r = r }
+        end
+    end
+    return out
+end
+M.horizontal_runs = horizontal_runs
+
+--- Check §5.1 horizontal sharing over a laid-out row list.
+--- `rows` are OrderItems ({ columns, split?, merge?, child_lanes, parent_lanes }).
+---@param rows table[]
+---@return string[] errors
+local function check_horizontals(rows)
+    local errors = {}
+    for ri, row in ipairs(rows) do
+        local inset, outset = {}, {}
+        for _, l in ipairs(row.child_lanes or {}) do inset[l] = true end
+        for _, l in ipairs(row.parent_lanes or {}) do outset[l] = true end
+        local lines = {
+            { name = "split", line = row.split },
+            { name = "columns", line = row.columns },
+            { name = "merge", line = row.merge },
+        }
+        for _, ln in ipairs(lines) do
+            if ln.line then
+                local runs = horizontal_runs(ln.line)
+                for a = 1, #runs do
+                    for b = a + 1, #runs do
+                        local A, B = runs[a], runs[b]
+                        local overlap = math.max(A.r.lo, B.r.lo) <= math.min(A.r.hi, B.r.hi)
+                        if overlap then
+                            local same_fan = (inset[A.edge] and inset[B.edge])
+                                or (outset[A.edge] and outset[B.edge])
+                            if not same_fan then
+                                local mixed = A.r.dir ~= B.r.dir
+                                local function side(e)
+                                    return inset[e] and "in" or (outset[e] and "out" or "OUTSIDE")
+                                end
+                                errors[#errors + 1] = ("row %d %s: %s horizontal share — lane %s [%d->%d, %s] and lane %s [%d->%d, %s] overlap cols %d..%d")
+                                    :format(ri, ln.name,
+                                        mixed and "MIXED-DIRECTION" or "cross-fan",
+                                        tostring(A.r.id), A.r.from, A.r.to, side(A.edge),
+                                        tostring(B.r.id), B.r.from, B.r.to, side(B.edge),
+                                        math.max(A.r.lo, B.r.lo), math.min(A.r.hi, B.r.hi))
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return errors
+end
+
 -- Exposed so a self-test can prove the checker catches broken grids.
 M.check_grid = check_grid
 M.check_lane_continuity = check_lane_continuity
+M.check_horizontals = check_horizontals
 
 --- Build the layout for `items` and run every invariant.
 --- Returns a flat list of error strings (empty = all good).

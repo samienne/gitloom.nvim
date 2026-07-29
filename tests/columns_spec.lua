@@ -184,6 +184,103 @@ describe("columns.layout dumps", function()
     end)
 end)
 
+describe("columns.layout lane identity (spec §5)", function()
+    -- Identity is chosen from the DAG and the row order — never from a column. The
+    -- regression: `spawn_lanes` used to inherit the LEFTMOST incoming lane, a
+    -- positional proxy for "the trunk" that holds only while the trunk happens to
+    -- sit leftmost. Where a topic lane landed left of the trunk, the merge and the
+    -- whole spine below it were drawn as the topic.
+    --
+    --   m1 -> m2
+    --   m2 -> m3, t1      (merge: FIRST parent m3 = master spine)
+    --   t1 -> t2
+    --   t2 -> m3          (the topic forked from m3)
+    --   m3 -> m4
+    --
+    -- Both m2 and t2 have m3 as their first parent, so the tiebreak decides: the
+    -- SENIOR chain (smallest id — master's, born at the tip) must continue.
+    local MERGED = {
+        { "m1", { "m2" } },
+        { "m2", { "m3", "t1" } },
+        { "t1", { "t2" } },
+        { "t2", { "m3" } },
+        { "m3", { "m4" } },
+        { "m4", {} },
+    }
+
+    --- id/colour of each commit's first-parent lane.
+    local function spine(rows)
+        local out = {}
+        for _, row in ipairs(rows) do
+            local pl = row.parent_lanes and row.parent_lanes[1]
+            if pl then out[row.commit.hash] = pl end
+        end
+        return out
+    end
+
+    local function ordered(spec)
+        local items = h.dag(spec)
+        local commits = {}
+        for _, it in ipairs(items) do commits[#commits + 1] = it.commit end
+        local ord = {}
+        for _, c in ipairs(require("gitloom.git.order").order_commits(commits)) do
+            ord[#ord + 1] = { type = "commit", commit = c }
+        end
+        return ord
+    end
+
+    for _, policy in ipairs(POLICIES) do
+        it("the trunk survives a merge whose lineage is expanded [" .. policy .. "]", function()
+            local opts = policy_opts(nil, policy)
+            local sp = spine(columns.layout(opts, ordered(MERGED)))
+            assert.is_not_nil(sp.m1)
+            assert.equals(sp.m1.id, sp.m2.id, "m1->m2 and m2->m3 must be one lane")
+            assert.equals(sp.m2.id, sp.m3.id, "the spine must survive the merge at m3")
+            assert.equals(sp.m1.color, sp.m3.color, "and keep one colour")
+            assert.is_true(sp.t1.id ~= sp.m3.id, "the topic must not become the spine")
+        end)
+    end
+
+    it("a merged-in branch tip carries its own lane on", function()
+        -- `base` is reached only as a SECOND parent, from two different merges. Each
+        -- of those edges IS the merged-in branch, and `base` is its tip continuing
+        -- downward — so the continuation keeps one of them (the senior) rather than
+        -- being born afresh. Minting here would recolour every merged-in branch tip.
+        for _, policy in ipairs(POLICIES) do
+            local opts = policy_opts(nil, policy)
+            local rows = columns.layout(opts, ordered({
+                { "a", { "a2", "base" } },
+                { "a2", { "tail" } },
+                { "b", { "b2", "base" } },
+                { "b2", { "tail" } },
+                { "base", { "tail" } },
+                { "tail", {} },
+            }))
+            local sp = spine(rows)
+            local incoming = {}
+            for _, row in ipairs(rows) do
+                if row.commit.hash == "base" then
+                    for _, l in ipairs(row.child_lanes or {}) do incoming[l.id] = true end
+                end
+            end
+            assert.is_true(next(incoming) ~= nil, "base must have incoming lanes")
+            assert.is_true(incoming[sp.base.id] == true,
+                policy .. ": base must continue one of its incoming lanes")
+        end
+    end)
+
+    it("the tiebreak is SENIORITY, not arrival order", function()
+        -- Both `m2` and `t2` have `m3` as their first parent; the senior chain (the
+        -- smaller id — master's, born at the tip) must win under every policy, which
+        -- is what makes identity independent of where the lanes were placed.
+        for _, policy in ipairs(POLICIES) do
+            local sp = spine(columns.layout(policy_opts(nil, policy), ordered(MERGED)))
+            assert.is_true(sp.m3.id < sp.t1.id,
+                policy .. ": the senior lane must be the one that continues")
+        end
+    end)
+end)
+
 describe("columns.layout track-id reuse", function()
     local function distinct_ids(rows)
         local ids = {}
