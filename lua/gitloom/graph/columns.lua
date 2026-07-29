@@ -433,6 +433,58 @@ function M.layout(opts, items, seed)
         state.cc0, state.cc, state.commit_incoming = cc0, cc0, commit_incoming
     end
 
+    -- EVICT_GUTTER (stage, `gutter` only): the swap-OUT, on a row of its own.
+    --
+    -- The gutter carries the previous run's chain. When this subject row belongs to
+    -- a different lane, that occupant has to leave before this row can use the
+    -- column — and it must leave on a **separate row**, because a lane moving out
+    -- (left-to-right) and this commit's fan-in moving in (right-to-left) on one row
+    -- would share a horizontal run in opposite directions, which is unreadable
+    -- (§5.1 horizontal sharing). So the occupant vacates on a virtual row above this
+    -- commit, and the swap-in rides on the commit's own fan-in a row later.
+    --
+    -- Exactly one lane moves here, so the row carries one horizontal in one
+    -- direction. It runs FIRST in the chain, before `seed_bars` reads the survivor
+    -- columns, and patches the survivor's recorded column so every later stage sees
+    -- the new position.
+    local function evict_gutter(state)
+        if not state.subject or blocked[GUTTER] then return end
+        -- our own incoming lane already holds it: nothing to do
+        for _, inc in ipairs(state.incoming) do
+            if inc.col == GUTTER then return end
+        end
+        local occ
+        for _, s in ipairs(state.survivors) do
+            if s.col == GUTTER then occ = s end
+        end
+        if not occ then return end -- already free
+        -- The above-slot is taken by this commit's own split fan; leaving the
+        -- occupant put degrades to `place_gutter`'s off-gutter fallback rather than
+        -- stacking two virtual rows, which `OrderItem` cannot carry today.
+        if state.sep_split then return end
+
+        local taken = {}
+        for _, s in ipairs(state.survivors) do taken[s.col] = true end
+        for _, inc in ipairs(state.incoming) do taken[inc.col] = true end
+        local f = GUTTER + 1
+        while taken[f] or blocked[f] do f = f + 1 end
+
+        local cells, draw = new_line()
+        for _, s in ipairs(state.survivors) do
+            if s == occ then
+                draw(s.lane, GUTTER, f, GUTTER, f) -- in at the gutter, out at f
+            else
+                draw(s.lane, s.col, s.col, s.col, s.col)
+            end
+        end
+        -- the incoming lanes cross this row on their way down to the commit
+        for _, inc in ipairs(state.incoming) do
+            draw(inc.lane, inc.col, inc.col, inc.col, inc.col)
+        end
+        state.above[#state.above + 1] = assemble(cells, nil, nil)
+        occ.col = f
+    end
+
     -- PLACE_GUTTER (stage): `place_commit` for the `gutter` policy (§5.6). The
     -- gutter column holds a **LANE**, not a bare node: the lane owning the current
     -- subject row lives there, so its commits' nodes sit on it and a run of commits
@@ -492,40 +544,23 @@ function M.layout(opts, items, seed)
             cc = incoming[1] and incoming[1].col or free_lane_col()
         end
 
-        -- CLAIM. At most one outgoing lane may enter the gutter: the one whose
-        -- parent owns the next subject row. Everything else keeps out, so the gutter
-        -- is always either the current subject lane or empty.
-        local ns = state.next_subject
-        local claim
-        if ns and not held and not blocked[GUTTER] then
-            for i, o in ipairs(outgoing) do
-                if o.lane.parent == ns then claim = i break end
-            end
-        end
-
+        -- CONTINUATION. The gutter belongs to THIS row's own chain: when the node is
+        -- in the gutter its first parent continues there, full stop. No other parent
+        -- may enter it — that is the whole point. Letting the parent that starts the
+        -- merged-in lineage claim the gutter on the MERGE's own row looked free (the
+        -- lane is born there, no wire moves) but it put the topic's lane under the
+        -- merge's node, and `top_lane` colours a node from the cell's `down` segment,
+        -- so the merge rendered as the topic. The handover the lineage needs happens
+        -- on its own row instead (`evict_gutter`).
         if outgoing[1] then
-            local kt
-            if claim == 1 then
-                kt = GUTTER
-            elseif cc == GUTTER then
-                -- The node is in the gutter but its continuation does not own the
-                -- next subject row: it leaves as this commit's own fan-out, freeing
-                -- the gutter for the lane that does.
-                kt = free_lane_col()
-            else
-                kt = cc -- a marker keeps its own lane column
-            end
+            local kt = (cc == GUTTER) and GUTTER or cc
             g.used[kt] = true
             state.kt = kt
         end
-        if claim and claim > 1 then
-            outgoing[claim].out = GUTTER
-            g.used[GUTTER] = true
-        end
-        -- Nothing is entering the gutter and no node is on it: hold it empty rather
-        -- than letting a generic fan-out grab it, so it is free when the next
-        -- subject lane turns in.
-        if not claim and cc ~= GUTTER then g.occ0[GUTTER] = true end
+        -- No node and nothing continuing here: hold the gutter empty rather than
+        -- letting a generic fan-out grab it, so it is free when the next subject
+        -- lane turns in.
+        if cc ~= GUTTER then g.occ0[GUTTER] = true end
 
         local commit_incoming = incoming
         if state.sep_split then
@@ -793,7 +828,19 @@ function M.layout(opts, items, seed)
     -- subject row is held in the gutter. `carry` (not `compact`) is what makes
     -- "lanes never move" true, so the seam requirement (§5.6) is met by the body
     -- chain itself and this is also the policy's seam.
+    -- A context pane's SEAM row must keep every seeded lane in its seeded column
+    -- (§5.6), so it cannot evict: the pane's top edge has to reproduce the main
+    -- view's exactly. Everything else about the gutter applies.
+    local function layout_gutter_seam(state)
+        seed_bars(state)
+        place_gutter(state)
+        fan_in(state)
+        carry(state)
+        fan_out(state)
+        finalize(state)
+    end
     local function layout_gutter(state)
+        evict_gutter(state)
         seed_bars(state)
         place_gutter(state)
         fan_in(state)
@@ -828,7 +875,7 @@ function M.layout(opts, items, seed)
         survivors = { body = layout_survivors, seam = layout_seam },
         linear    = { body = layout_linear,    seam = layout_seam },
         straight  = { body = layout_seam,      seam = layout_seam },
-        gutter    = { body = layout_gutter,    seam = layout_gutter, prepass = gutter_prepass },
+        gutter    = { body = layout_gutter,    seam = layout_gutter_seam },
     }
 
     local function active_contains(lane)
