@@ -11,6 +11,10 @@ local owners_from_refs = internal.owners_from_refs
 local next_mode = internal.next_mode
 local selected_owner_ids = internal.selected_owner_ids
 local collapse_owners = internal.collapse_owners
+local parse_worktrees = internal.parse_worktrees
+local worktree_refs = internal.worktree_refs
+local decoration_texts = internal.decoration_texts
+local ref_decoration_index = internal.ref_decoration_index
 
 describe("classify_ref", function()
     it("classifies a local branch", function()
@@ -366,5 +370,208 @@ describe("branch-mode toggle helpers", function()
         -- off both anchors: feat alone keeps it visible, so it is collapsible.
         assert.same({ "feat" }, collapse_owners({ feat = true }, { trunk = true, dev = true },
             { feat = "normal" }))
+    end)
+end)
+
+describe("parse_worktrees (§3.2)", function()
+    -- `git worktree list --porcelain`: blank-line-separated stanzas, each opening
+    -- with `worktree <path>`.
+    local PORCELAIN = {
+        "worktree /repo",
+        "HEAD 1111111111111111111111111111111111111111",
+        "branch refs/heads/master",
+        "",
+        "worktree /repo/wt/feature",
+        "HEAD 2222222222222222222222222222222222222222",
+        "branch refs/heads/feature",
+        "",
+        "worktree /repo/wt/scratch",
+        "HEAD 3333333333333333333333333333333333333333",
+        "detached",
+        "",
+        "worktree /repo/wt/bare",
+        "bare",
+        "",
+    }
+
+    it("splits the stanzas, marking the first as the main worktree", function()
+        local w = parse_worktrees(PORCELAIN)
+        assert.equals(4, #w)
+        assert.is_true(w[1].main)
+        assert.is_false(w[2].main)
+        assert.same({ "/repo", "/repo/wt/feature", "/repo/wt/scratch", "/repo/wt/bare" },
+            { w[1].path, w[2].path, w[3].path, w[4].path })
+    end)
+
+    it("takes the name from the path basename", function()
+        local w = parse_worktrees(PORCELAIN)
+        assert.same({ "repo", "feature", "scratch", "bare" },
+            { w[1].name, w[2].name, w[3].name, w[4].name })
+    end)
+
+    it("parses a Windows path the same way", function()
+        local w = parse_worktrees({ "worktree C:/src/reactive-wt/stackA-clean",
+            "HEAD 4444444444444444444444444444444444444444", "detached" })
+        assert.equals("stackA-clean", w[1].name)
+    end)
+
+    it("backslashes are a separator too", function()
+        local w = parse_worktrees({ [[worktree C:\src\wt\thing]], "detached" })
+        assert.equals("thing", w[1].name)
+    end)
+
+    it("derives detached from a HEAD with no branch", function()
+        local w = parse_worktrees(PORCELAIN)
+        assert.is_false(w[2].detached) -- on a branch
+        assert.is_true(w[3].detached)  -- detached
+        assert.is_false(w[4].detached) -- bare: no HEAD at all
+    end)
+
+    it("flags a bare worktree and gives it no HEAD", function()
+        local w = parse_worktrees(PORCELAIN)
+        assert.is_true(w[4].bare)
+        assert.is_nil(w[4].head)
+        assert.is_false(w[1].bare)
+    end)
+
+    it("reads the branch refname and the HEAD hash", function()
+        local w = parse_worktrees(PORCELAIN)
+        assert.equals("refs/heads/master", w[1].branch)
+        assert.equals(("1"):rep(40), w[1].head)
+        assert.is_nil(w[3].branch)
+    end)
+
+    it("is empty for no input", function()
+        assert.same({}, parse_worktrees(nil))
+        assert.same({}, parse_worktrees({}))
+    end)
+end)
+
+describe("worktree_refs — linked worktree HEADs as refs (§3.2)", function()
+    local A, B, C = ("a"):rep(40), ("b"):rep(40), ("c"):rep(40)
+    local function wt(path, head, main, bare)
+        return { path = path, name = path:match("([^/\\]+)$"), head = head,
+            main = main or false, bare = bare or false }
+    end
+
+    it("labels a linked worktree HEAD wt:<basename>", function()
+        local out = worktree_refs({ wt("/repo", A, true), wt("/repo/wt/scratch", B) }, { [A] = true })
+        assert.equals(1, #out)
+        assert.same({ name = "wt:scratch", kind = "worktree", hash = B }, out[1])
+    end)
+
+    it("skips the main worktree — its HEAD is already the head ref", function()
+        -- Main is skipped even when nothing else points at its commit.
+        assert.same({}, worktree_refs({ wt("/repo", A, true) }, {}))
+    end)
+
+    it("skips a worktree whose HEAD any existing ref already points at", function()
+        -- The general form of "do not add it if there is a matching branch":
+        -- a worktree checked out on a branch, or a detached HEAD parked on a tip.
+        assert.same({}, worktree_refs({ wt("/repo", A, true), wt("/repo/wt/feat", B) },
+            { [A] = true, [B] = true }))
+    end)
+
+    it("skips a bare worktree and a stanza with no HEAD", function()
+        local out = worktree_refs({
+            wt("/repo", A, true),
+            wt("/repo/wt/bare", nil, false, true),
+            wt("/repo/wt/headless", nil),
+        }, { [A] = true })
+        assert.same({}, out)
+    end)
+
+    it("emits one label when two worktrees sit on the same commit", function()
+        local out = worktree_refs({
+            wt("/repo", A, true), wt("/repo/wt/one", B), wt("/repo/wt/two", B),
+        }, { [A] = true })
+        assert.equals(1, #out)
+        assert.equals("wt:one", out[1].name) -- first wins, in porcelain order
+    end)
+
+    it("does not mutate the caller's taken set", function()
+        local taken = { [A] = true }
+        worktree_refs({ wt("/repo", A, true), wt("/repo/wt/x", B) }, taken)
+        assert.is_nil(taken[B])
+    end)
+
+    it("is empty for a repository with no linked worktrees", function()
+        assert.same({}, worktree_refs(nil, nil))
+        assert.same({}, worktree_refs({}, {}))
+    end)
+
+    it("a worktree named like a branch still gets its own registry key", function()
+        -- The label is `wt:master`, not `master`, so it can never overwrite the
+        -- real branch in the name → Ref registry (a `:` is invalid in a refname,
+        -- so no real ref can produce this key either).
+        local out = worktree_refs({ wt("/repo", A, true), wt("/repo/wt/master", C) }, { [A] = true })
+        assert.equals("wt:master", out[1].name)
+    end)
+end)
+
+describe("worktree ref display + selection (§3.2/§6)", function()
+    local function commit(refs) return { refs = refs } end
+    local WT = { kind = "worktree", name = "wt:stackA-clean" }
+
+    it("group_refs keeps worktree labels in their own bucket", function()
+        local g = group_refs({ { kind = "local", name = "main" }, { kind = "tag", name = "v1" }, WT })
+        assert.equals(1, #g.branches)
+        assert.same({ "v1" }, g.tags)
+        assert.same({ "wt:stackA-clean" }, g.worktrees)
+    end)
+
+    it("group_refs.worktrees is empty (not nil) with none present", function()
+        assert.same({}, group_refs({ { kind = "local", name = "main" } }).worktrees)
+    end)
+
+    it("decoration_texts renders it as {wt:<dir>}, after the tags", function()
+        assert.same({ "(main)", "[v1]", "{wt:stackA-clean}" },
+            decoration_texts(commit({ { kind = "local", name = "main" },
+                { kind = "tag", name = "v1" }, WT })))
+    end)
+
+    it("a lone worktree label is the only decoration", function()
+        assert.same({ "{wt:stackA-clean}" }, decoration_texts(commit({ WT })))
+    end)
+
+    it("ref_decoration_index finds it after the branches and tags", function()
+        local c = commit({ { kind = "local", name = "main" }, { kind = "tag", name = "v1" }, WT })
+        assert.equals(3, ref_decoration_index(c, "wt:stackA-clean", "worktree"))
+        assert.equals(1, ref_decoration_index(c, "main", "local"))
+        assert.equals(2, ref_decoration_index(c, "v1", "tag"))
+        assert.is_nil(ref_decoration_index(c, "wt:absent", "worktree"))
+    end)
+
+    it("selected_owner_ids maps the decoration back to the worktree owner", function()
+        local c = commit({ { kind = "local", name = "main" }, { kind = "tag", name = "v1" }, WT })
+        assert.same({ "main" }, selected_owner_ids(c, 1))
+        assert.same({ "v1" }, selected_owner_ids(c, 2))
+        assert.same({ "wt:stackA-clean" }, selected_owner_ids(c, 3))
+        assert.is_nil(selected_owner_ids(c, 4))
+    end)
+
+    it("owners_from_refs makes a worktree ref an owner like any other", function()
+        local tip = { hash = "h1", parents = {}, children = {}, refs = {} }
+        local os = owners_from_refs(
+            { ["wt:scratch"] = { kind = "worktree", name = "wt:scratch", commit = tip } }, {})
+        assert.equals(1, #os)
+        assert.equals("wt:scratch", os[1].id)
+        assert.equals(tip, os[1].tip)
+    end)
+end)
+
+describe("pane_labels — worktree labels (§3.2/§6.2)", function()
+    local pane_labels = internal.pane_labels
+    local function ref(kind, name) return { kind = kind, name = name } end
+    it("emits the {wt:<dir>} label with its own kind, after the tags", function()
+        local segs = pane_labels({ refs = {
+            ref("local", "main"),
+            ref("tag", "v1"),
+            ref("worktree", "wt:scratch"),
+        } }, "other")
+        local t, k = {}, {}
+        for _, s in ipairs(segs) do t[#t + 1] = s.text; k[#k + 1] = s.kind end
+        assert.same({ "(main)", "[v1]", "{wt:scratch}" }, t)
+        assert.same({ "branch", "tag", "worktree" }, k)
     end)
 end)

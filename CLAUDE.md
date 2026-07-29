@@ -135,9 +135,18 @@ Coverage:
   `track_segments` / `track_label` (the upstream divergence indicator's coloured
   segments + byte-identical plain label: ahead/behind/diverged/gone/in-sync),
   `decoration_texts` + `ref_picker_items` upstream threading (§6.3),
-  `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), and the
+  `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), the
   branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
-  (§10/§10.4)
+  (§10/§10.4), and the **linked-worktree refs** (§3.2/§4.1): `parse_worktrees`
+  (the `git worktree list --porcelain` stanza parser — main-vs-linked, bare,
+  detached *derived* from a HEAD with no branch, basename from either path
+  separator), `worktree_refs` (the `wt:<dir>` labels + all three skips: the main
+  worktree, bare/headless, and **any commit an existing ref already points at** —
+  which subsumes "checked out on a branch"; two worktrees on one commit yield one
+  label; the caller's `taken` set is not mutated), and the new kind flowing
+  through `group_refs` (its own `worktrees` bucket) / `decoration_texts` +
+  `pane_labels` (`{wt:<dir>}`, after the tags) / `ref_decoration_index` /
+  `selected_owner_ids` / `owners_from_refs`
 - `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
   `bump_recent` (the session MRU list — newest first, deduped, input not mutated),
   `ref_picker_items` (name → Ref registry → ordered picker entries: session-
@@ -161,8 +170,16 @@ Coverage:
   collapsed heads onto one line with the packed grid passing the wires-connect
   checker; no-op when there are no markers), **node-less junction markers**
   (§10.4: a kept junction renders no node glyph — node count drops — vs. a node
-  when `junction_markers` is off), and a fuzz sweep feeding projections through
-  the real layout's wires-connect checks
+  when `junction_markers` is off), a fuzz sweep feeding projections through
+  the real layout's wires-connect checks, and **total owner coverage** (§10.2):
+  the `tip:<hash>` backstop (minted for an in-set commit with no in-set child that
+  no ref owns — collapsed + fp_only, overridable by an explicit mode, none for a
+  ref-owned tip or an interior commit, none at all with focus off) and its **§4.2
+  exclusion** (a working-tree virtual commit is childless by construction and must
+  stay visible, so it gets no `tip:` owner and still projects normal). Plus the
+  regression the backstop fixes: a ref-less branch (a linked worktree's detached
+  HEAD, a `refs/original/*` commit) must have a non-empty signature and collapse
+  to one `◍`, not render as a run of expanded commits
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), `window_right` (the selection-windowed
@@ -418,7 +435,9 @@ Coverage:
   connector-color scan that flips direction under mirror).
 
 `graph._internal` (`require("gitloom.graph")._internal`) exposes, **for tests
-only** (not the public API): `classify_ref`, `group_refs`, `bump_recent` /
+only** (not the public API): `classify_ref`, `group_refs`, `parse_worktrees` /
+`worktree_refs` (the linked-worktree HEAD refs — porcelain parse + the
+`wt:<dir>` labelling and skip rules; §3.2), `bump_recent` /
 `ref_picker_items` (the `<leader>b` ref-picker MRU + ordered entries; §2),
 `ref_decoration_index` (picked ref → decoration index for pre-selection; §2),
 `display_item` (the per-row renderer — exposed for the §6 ref-window integration
@@ -576,6 +595,32 @@ Details not covered by the spec or architecture:
   mode overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
+- **Total owner coverage** (spec §3.2/§10.2): §3.1 streams `git log --all`, which
+  in a repo with **linked worktrees** walks *every worktree's HEAD* — while §3.2's
+  ref query reads only `refs/heads`/`refs/remotes`/`refs/tags`. The commit set was
+  therefore a strict superset of the ref-reachable set, and those extra commits
+  got an **empty signature** → `mode_of`'s "uncovered ⇒ normal" → a run of fully
+  expanded rows in a focused view with no `◍` and nothing to pack. Worse, `R`'s
+  `prune_to_reachable` deleted exactly those commits, so the open path and the
+  resync disagreed. Two changes close it, and both are needed:
+  1. **`worktree` refs** — `fetch_refs`/`fetch_ref_entries` chain
+     `read_worktree_refs` (`git worktree list --porcelain` → the pure
+     `parse.parse_worktrees` → the pure `refs.worktree_refs`), giving each linked
+     worktree HEAD *nothing else names* a ref `wt:<basename>`. Skips: the main
+     worktree (already the `head` ref), bare/headless, and **any commit an existing
+     ref already points at** — the general form of "not if a branch matches", which
+     also catches a detached HEAD parked on a tip. `:` is invalid in a refname, so
+     `wt:` can never collide in `repo.refs`. A non-zero exit degrades to `{}`.
+     Being in `repo.refs` is what makes them owners, pinnable, picker/pane
+     entries, and — crucially — resync-reconciled instead of pruned.
+  2. **`tip:<hash>` owners** — `view.owners` mints an anonymous fp-only, collapsed
+     owner for every in-set commit with **no in-set child** that no ref owns, so
+     coverage is total *by construction* whatever else `--all` drags in
+     (`refs/original/*` is deliberately not filtered). **§4.2 virtual commits are
+     excluded** (`c.virtual`): they are childless by construction and must stay
+     visible — they are the case the empty-signature rule exists for.
+  Anonymous owners are dropped from pinning structurally, not by a name test:
+  `h_pin` filters on `repo.refs[oid]`, which `merge:`/`tip:` ids never satisfy.
 - **Pin axis** (spec §10.6, toggled by `P`, managed by `L`): pin is the **anchor**
   set the focus default folds toward — it *generalises the trunk* (one anchor → a
   set). It is stored as **one ordered list**, `view_state.pins` (`PinEntry` =
