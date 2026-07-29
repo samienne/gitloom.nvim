@@ -67,12 +67,12 @@ local STYLES = {
 -- policy makes no jog. Only the linear-commit slide itself is policy-specific
 -- (§5.6), and it is asserted separately below.
 local POLICIES = { "compact", "survivors", "linear", "straight", "gutter" }
--- The policies that place a commit's node IN A LANE COLUMN. `gutter` (§5.6) puts
--- it in a reserved column beside the message and reaches its lane by a horizontal
--- on the commit Line, so the §5.1 "no crossings on a both-lines commit Line"
--- COROLLARY does not apply to it (its premise — the Line carries no fan — is
--- false: the node connector is a fan of one). Its replacement guarantee is
--- asserted separately below.
+-- The policies that let a commit's node fall wherever its own lane already is.
+-- `gutter` (§5.6) pins the current subject lane to a fixed column, so on the rows
+-- where that column changes hands a linear commit's fan is not degenerate and the
+-- §5.1 no-crossings COROLLARY does not apply to it. Its replacement guarantee is
+-- asserted separately below. (Verified, not assumed: the corollary's check finds
+-- 1154 offending commit lines over 400 DAGs under `gutter`, 0 under `straight`.)
 local LANE_COLUMN = { "compact", "survivors", "linear", "straight" }
 
 --- big_opts for a merge style, pinned to a layout policy.
@@ -234,14 +234,14 @@ describe("compaction never crosses a lane (§5)", function()
         end)
     end
 
-    -- The `gutter` replacement for the corollary (§5.6). Its commit Lines DO carry
-    -- horizontals — the node sits in the gutter, so reaching its lane is a fan of
-    -- one — and therefore crossings. What must still hold is that a reader follows
-    -- exactly ONE run per row and it always starts at the node: every horizontal
-    -- wire on the Line belongs to a single contiguous run anchored at the gutter,
-    -- with no second, unrelated horizontal anywhere. That is strictly checkable and
-    -- it is the guarantee the policy offers in place of "no crossings".
-    it("every horizontal belongs to one run anchored at the gutter (gutter)", function()
+    -- The `gutter` replacement for the corollary (§5.6). On the rows where the
+    -- gutter changes hands its commit Lines DO carry horizontals, and therefore
+    -- crossings. What must still hold is that a reader follows exactly ONE run per
+    -- row and it always touches that row's node: every horizontal wire on the Line
+    -- belongs to a single contiguous run containing the node's column, with no
+    -- second, unrelated horizontal anywhere. That is strictly checkable and it is
+    -- the guarantee the policy offers in place of "no crossings".
+    it("every horizontal belongs to one run containing the node (gutter)", function()
         local STYLE_LIST = {
             { split_on_separate_line = true,  merge_on_separate_line = true },
             { split_on_separate_line = true,  merge_on_separate_line = false },
@@ -254,20 +254,29 @@ describe("compaction never crosses a lane (§5)", function()
             for seed = 1, 150 do
                 local rows = build_graph(opts, h.dag(h.random_dag(3 + (seed % 12), seed)))
                 for ri, row in ipairs(rows) do
+                    local ccol
+                    for j, col in ipairs(row.columns) do if col.has_commit then ccol = j end end
                     for _, line in ipairs({ row.split or false, row.columns, row.merge or false }) do
                         if line then
-                            local far, has = 0, {}
+                            local near, far = nil, 0
                             for j, col in ipairs(line) do
                                 local c = col.connectivity
                                 if c.left or c.right then
-                                    has[j] = true
+                                    near = near or j
                                     if j > far then far = j end
                                 end
                             end
-                            for j = 1, far do
-                                if not has[j] then
-                                    bad[#bad + 1] = ("style=%d seed=%d row=%d: horizontal run breaks at col %d")
-                                        :format(si, seed, ri, j)
+                            if near then
+                                for j = near, far do
+                                    local c = line[j] and line[j].connectivity
+                                    if not (c and (c.left or c.right)) then
+                                        bad[#bad + 1] = ("style=%d seed=%d row=%d: horizontal run breaks at col %d")
+                                            :format(si, seed, ri, j)
+                                    end
+                                end
+                                if ccol and not (ccol >= near - 1 and ccol <= far + 1) then
+                                    bad[#bad + 1] = ("style=%d seed=%d row=%d: run [%d,%d] does not reach the node at %d")
+                                        :format(si, seed, ri, near, far, ccol)
                                 end
                             end
                         end
