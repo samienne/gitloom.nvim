@@ -861,9 +861,12 @@ the current row. For each commit `C`:
    `parent_lanes`/`child_lanes` to the `OrderItem` for reachability.
 
 Per-column well-formedness (validated by the tests): at most one vertical
-(`up+down`) Segment and at most one *turning* Segment; the exception is
-`allow_merge_on_split`, which permits the two-turn cell where an extra parent
-reuses a freed merge column. Empty columns are allowed.
+(`up+down`) Segment and at most one *turning* **lane** — counted by lane id, since
+the cap bounds how many separate wires bend in a cell that can render only one
+colour. Two turning Segments of the *same* lane are one wire passing through (the
+`gutter` policy's trunk, arriving from above and leaving below via the gutter). The
+exception is `allow_merge_on_split`, which permits the two-turn cell where an extra
+parent reuses a freed merge column — two *different* lanes, hence the handoff. Empty columns are allowed.
 
 `build_graph(opts, items)` lays out a whole ordered list from scratch (the test
 entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
@@ -1005,11 +1008,12 @@ that makes the footer a footer lives outside `columns.layout`: building the
 sub-DAG (`pane.continue` / `condense` — projection) and the dashed / dimmed drawing
 (`render_pane` / `paint_pane` — render).
 
-**Layout policies (spec §5.6).** The selectable layout policy needs **no new stage
-code**: all four policies are chains of the stages already here, differing only in
-whether `slide` runs and whether the compaction slot holds `compact` or `carry`.
+**Layout policies (spec §5.6).** The four *compaction* policies need **no new stage
+code**: they are chains of the stages already here, differing only in whether
+`slide` runs and whether the compaction slot holds `compact` or `carry`.
 `layout_seam` *is* the no-slide/no-compact chain already, byte-identical to what
-`straight` needs.
+`straight` needs. `gutter` is the one policy that changes **placement** rather than
+movement, so it brings one new stage.
 
 | Policy | Body chain (after the shell steps) |
 |--------|------------------------------------|
@@ -1017,16 +1021,35 @@ whether `slide` runs and whether the compaction slot holds `compact` or `carry`.
 | `survivors` | `seed_bars` `place_commit` `fan_in` `compact` `fan_out` `finalize` |
 | `linear` | `seed_bars` `place_commit` `slide` `fan_in` `carry` `fan_out` `finalize` |
 | `straight` | `seed_bars` `place_commit` `fan_in` `carry` `fan_out` `finalize` |
+| `gutter` | `seed_bars` **`place_gutter`** `fan_in` `carry` `fan_out` `finalize` |
 
 A policy is therefore a **record carrying both chains**, not a single strategy —
 `{ body, seam }` — because the seam row's requirement (every seeded lane keeps its
 seeded column) is orthogonal to the body's placement and must hold under every
-policy. `seam` is `layout_seam` for all four today; the record exists so a policy
-that needed a different seam could say so, and so the sweep's
+policy. `seam` is `layout_seam` for the four compaction policies; the record is
+what lets `gutter` say otherwise, and it must: `layout_seam` would place the seam
+row's node back on its lane, so a pane's first row would disagree with its body
+about where nodes live. `gutter`'s body already keeps every seeded lane in its
+column (it moves nothing), so it is its own seam. The sweep's
 `(seed and i == 1) and policy.seam or policy.body` selection stays one expression.
 `straight`'s **body** is that same `layout_seam` function object — reused, not
 duplicated — so "`straight` is the no-move chain" is true by construction rather
-than by two copies staying in sync. A reserved third field, `prepass`, is where a
+than by two copies staying in sync.
+
+**How `gutter` reaches into the shared stages.** `place_gutter` is `place_commit`
+for a reserved node column: it puts a **subject-owning** node (`state.subject`,
+derived in `decide_style` from the same `collapsed` / `junction` test
+`inline_junction` makes) in model column 1 and leaves a marker or junction node on
+its lane, reserves the gutter on every row so no lane is born into it, and reserves
+each incoming column so a lane born on this row cannot take one a terminating child
+just freed (the §5.1 fan-out placement rule — the trap that produced the
+unsanctioned lane handoff in the prototype). Because the node is then **not** on its
+own lane, two shared stages need to know where the first parent actually goes:
+`place_gutter` publishes it as **`state.kt`**, the trunk column, and `fan_in` /
+`fan_out` read `state.kt or cc`. `state.kt` is `nil` under every other policy, so
+those expressions reduce to the ones that were there before — which is why adding
+this policy is provably inert for the other four (verified cell-for-cell, 12,340
+cases, 0 differing). A reserved third field, `prepass`, is where a
 future `interval` policy (§5.6) hangs its `O(N)` lane-lifespan annotation: a
 `prepass(opts, items)` called once before the sweep, free to annotate `items` in
 place so no hint-plumbing threads through `state`. No current policy declares one,

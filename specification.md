@@ -432,6 +432,19 @@ the model outward:
   the split/merge lines carry only wires.
 - **Column** — one cell of a Line: the **Segments** through it, plus the Commit
   node when one sits here. (`GraphColumn` in the code.)
+- **Gutter column** — a Column reserved for **nodes only**: no Lane may live in
+  it, i.e. no wire is ever carried through it from one commit to the next. It
+  exists only under the `gutter` layout policy (§5.6), where it is model column 1 —
+  so under the default mirror (§5.4) it renders as the **rightmost** cell,
+  immediately beside the commit message. A node placed there is not sitting on any
+  of its own Lanes, so it reaches them by a horizontal on its own Line; every other
+  policy places a node **in a lane column** and needs no gutter. Rows whose node
+  stays in a lane column (§5.6) leave the gutter blank rather than reusing it, so
+  the node column stays aligned down the whole graph. *A commit's own fan hub does
+  occupy the gutter within its own block*: with a separate split Line the children
+  converge there and descend one row into the node, and with a separate merge Line
+  the parents ascend out of it (§5.2). That is the node's own fan reaching it, not
+  a Lane occupying the column — the distinction is exactly the block boundary.
 - **Segment** — a single wire within a Column: its `connectivity`
   {up, down, left, right} and the **Lane(s)** it carries. Each drawn edge gets
   its own Segment — one per Column normally, two where wires cross. The one
@@ -487,7 +500,15 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   column on the next Line (a crossing, not a continuation). This is enforced by
   the sweep's own column bookkeeping — tip placement and fan-out both skip a
   blocked column — never by a compaction move, so it survives a policy that moves
-  nothing.
+  nothing. What it guards against is a **vertical stub** being continued by an
+  unrelated wire. Under `gutter` (§5.6) a node in the gutter ends its incoming
+  lane with a **turn out of** its lane column rather than a stub, so the following
+  Line may open a new lane there and nothing reads as continuous — the guard is
+  satisfied without a block. Its nodes do stack in the gutter, which under that
+  policy carries no continuity meaning at all: consecutive commits **of one lane**
+  stack there too, and the lane columns beside them are where continuity is read.
+  A row whose node keeps a lane column (a marker or junction, §5.6) blocks exactly
+  as every other policy does.
 - **Reserved columns are occupied.** A column held for a **reserved** pinned
   branch (§10.6.2) counts as occupied for every placement decision, on every
   Line — exactly the root-column-break mechanism above, with a longer lifetime.
@@ -507,13 +528,22 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   Column's Segments' connectivity (every wired side has a Segment providing it).
 - Merges (commit with >1 parent) fan out `parent_lanes`; splits (>1 child) fan in
   `child_lanes`.
-- **No crossings on a both-lines commit Line.** With both fans on their own Lines
-  (the both-lines style, §5.2) the commit Line carries no fan, and no jog may
-  cross a lane (below) — so such a Line has **no crossings at all**. This is
-  *provable* from the two guards rather than merely observed, which is why it
-  holds under every policy; under a policy that makes no jog at all (`straight`,
-  §5.6) it is strictly **stronger** — the Line then carries no horizontal wire
-  whatsoever.
+- **A commit Line's horizontals are its own fans.** The only horizontal wires on a
+  commit Line are the wires of that commit's own fan — its converging children,
+  its diverging parents, and (where the node is not on one of its Lanes) the
+  connector reaching it. Everything else is a compaction jog, and no jog may cross
+  a lane (the guard below). *Corollary, for every policy that places the node in a
+  **lane column*** — `compact`, `survivors`, `linear`, `straight`: on the
+  both-lines style (§5.2) both fans are elsewhere, so such a commit Line carries
+  no horizontal at all and therefore has **no crossings**. This is *provable* from
+  the guards rather than merely observed. Under `straight` it is strictly stronger
+  still — no Line carries a jog, so no commit Line ever carries a horizontal that
+  is not a fan. The corollary does **not** hold under `gutter` (§5.6): the node
+  sits in the gutter column, so reaching its lane is a fan of one and appears on
+  every commit Line, including a both-lines one. What replaces it there — every
+  horizontal on such a Line belongs to one run anchored at the gutter — is stated
+  in §5.6. The invariant above is what is universal; the corollary is a
+  consequence of node placement, and node placement is a policy choice.
 
 **Conditional — the compaction guards.** Stated as constraints on any jog a policy
 chooses to make, not as claims that one is made, so they hold unchanged under
@@ -566,6 +596,19 @@ historical — it is about *reusing* a freed column, not about the compaction mo
   alternate columns by one. Reusing the column on a separate merge Line is what
   keeps that style from leaving an empty-column gap that bounces a right-aligned
   (mirrored, §5.4) graph.
+
+  **How it is enforced, and why that matters to a new policy.** The default is
+  *not* reuse: a terminating child's column is marked **occupied for its own Line**
+  when the commit is placed, so every later placement on that Line steps over it,
+  and only the two sanctioned cases above lift it deliberately. The one exemption
+  is a commit's **first parent** re-taking its own trunk child's column — it
+  inherits that lane's `id` and `colour` (§5), so the cell holds one lane, not two.
+  A policy that places commits itself and forgets to reserve those columns
+  reintroduces the §5.2 lane handoff *unsanctioned*: an ending child's turn and an
+  unrelated lane's turn land in one cell, whose single rendered colour then breaks
+  mid-column. This is stated because it has actually happened during development,
+  and because the reservation looks like bookkeeping rather than the invariant it
+  is.
 
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view
@@ -673,8 +716,9 @@ Lane placement is a **named policy**, selected by `layout_policy` (§8) and cycl
 live with `C` — so the placement algorithms can be compared in the real
 application, on a real repository, at a glance (the same "compare at a glance"
 motive as `m` for the merge style, §5.2). Every §5.1 universal invariant holds
-under every policy and both §5.1 guards constrain every policy; what a policy
-chooses is **which lanes may move sideways to close a gap**.
+under every policy and both §5.1 guards constrain every policy. A policy chooses
+**which lanes may move sideways to close a gap**, and — one policy only —
+**where a commit's node is put**.
 
 Two independent moves exist:
 
@@ -690,21 +734,70 @@ Two independent moves exist:
 - **survivor compaction** — a pass-through lane shifts left into the run of free
   columns to its left, redrawn as a turn.
 
-| Policy | Linear slide | Survivor compaction |
-|--------|--------------|---------------------|
-| `compact` (**default**) | yes | yes |
-| `survivors` | no | yes |
-| `linear` | yes | no |
-| `straight` | no | no |
+| Policy | Linear slide | Survivor compaction | Node column |
+|--------|--------------|---------------------|-------------|
+| `compact` (**default**) | yes | yes | its own lane |
+| `survivors` | no | yes | its own lane |
+| `linear` | yes | no | its own lane |
+| `straight` | no | no | its own lane |
+| `gutter` | no | no | a reserved **gutter** |
 
 Under `straight` every lane holds its column for its whole life: nothing but a
 commit's own fan draws a horizontal, so on the both-lines style a commit Line
 carries no horizontal wire at all — strictly stronger than the no-crossings
-guarantee §5.1 states for every policy.
+corollary §5.1 states for the lane-column policies.
 
-The policy is a **flat enum**, not a pair of booleans. The table above happens to
-be a 2×2 today, but the axis is "how are lanes placed", and a future policy
-(below) is not a point in that square.
+The policy is a **flat enum**, not a pair of booleans. The first four happen to
+be a 2×2, but the axis is "how are lanes placed": `gutter` shares `straight`'s
+row of that square and is still a different policy, and a future policy (below)
+is not a point in it at all.
+
+#### `gutter` — a fixed node column
+
+Every commit's node sits in **one column for the whole graph**, immediately beside
+the message (§5 *gutter column*; model column 1, so the rightmost cell under the
+default mirror). Lanes live in the columns beyond it and **never move** — the
+`straight` no-move rule — and a commit reaches its own lane by a horizontal on its
+own Line, exactly as a merge already fans out to its extra parents.
+
+**The gutter holds the node that owns its row's subject.** A **marker** row — a
+collapsed head, or a kept junction drawn as a marker (§10.4) — carries ref labels
+but no subject, and there may be several markers on one packed Line (§10.4), so a
+marker keeps its lane column and is placed exactly as the other policies place it.
+The gutter is still reserved on those rows (left blank), so the node column stays
+aligned. A working-tree virtual commit (§4.2) carries a synthesized subject, so it
+is a gutter node.
+
+**What replaces the no-crossings corollary.** Every horizontal wire on a Line whose
+node is in the gutter belongs to **one run anchored at the gutter** — the fan-in,
+the fan-out and the node connector all emanate from the same cell — so a reader
+follows exactly one run per row and it always starts at the node. There is no
+second, unrelated horizontal anywhere on the Line. That is weaker than "no
+crossings" and it is the honest trade: this policy converts *distance* into
+*crossings*.
+
+**The costs, measured.** Over gitloom's own projected history (`tests/large_topo`):
+
+- In the **shipping default view** (first-parent focus, §10.7) **98.9%** of
+  subject rows already have their node adjacent to the message, because collapsing
+  everything off-trunk leaves the trunk in column 1. The gutter takes that to 100%
+  and pays crossings **17 → 27** and ink **+82%**. In that view it is close to a
+  no-op that costs drawing.
+- **Fully expanded** it earns its keep on adjacency — **40.4% → 100%**, mean
+  node-to-message distance 2.14 → 0 characters — and pays crossings **17 → 674**
+  and ink **2.3×**.
+- **Marker rows get worse**, not better: mean node-to-label distance **5.59 → 7.52
+  characters**, because the blank gutter pushes every marker out one column.
+- It costs **one extra column on every row, always** — a single-lane repository
+  renders `├─○` where it renders `○` today.
+- The **`dual` label mode (§6.1) partially defeats it**: row 1 carries the node and
+  the labels, row 2 carries the message, so the message row has no adjacent node.
+- The **header pane does not follow it** (see below) — and where that is a cosmetic
+  difference for the other policies, here the two halves of the screen disagree
+  about *where nodes live*, which is far more visible.
+
+It is offered as a policy rather than a default for exactly these reasons: the
+comparison is worth making in the application, on a real history.
 
 `linear` names *what* slides — a linear commit — rather than the move; it is
 deliberately not called `slide`.
@@ -726,9 +819,12 @@ histories, rather than settled by fixtures.
 satisfy a stronger requirement — **every seeded lane keeps its seeded column** — so
 the pane meets the main view without a jog. That requirement is violated by exactly
 the two moves above, so the seam row is laid out by the **no-move** placement
-whatever policy the body rows use. Policy × seam is two-dimensional in principle;
-today it is rank-1 (one seam behaviour, shared by all four policies), and the seam
-requirement is what would keep it so even if the body policies multiplied.
+whatever policy the body rows use. Policy × seam is two-dimensional in principle,
+and `gutter` is the case that shows why: it must use its **own** chain for the seam
+too, because the shared no-move chain would put the seam row's node back in a lane
+column and the pane's first row would then disagree with its body about where nodes
+live. Its body chain already satisfies the seam requirement — it moves no lane — so
+it is its own seam. For the other four the seam behaviour is shared.
 
 **The footer follows the policy; the header does not.** The footer is a seeded
 lane sweep, so its body rows obey the active policy like the main view. The
@@ -738,7 +834,12 @@ policy, and a `straight` graph keeps a `compact`-style header. This is correct
 per §6.2 (the header is a rebuild of a focused sub-DAG, not a continuation of the
 sweep), but it is visible when comparing policies and is called out here so it
 does not read as an inconsistency. Bringing the header onto the policy axis would
-mean expressing the seam-up grid as a stage chain — not planned.
+mean expressing the seam-up grid as a stage chain — not planned. **Under `gutter`
+this caveat is much louder** than for the other policies: the header's nodes sit
+in lane columns while the main view's sit in the gutter, so the seam is not a
+subtle difference in compaction but a visible disagreement about the layout model.
+It is a known limitation of offering `gutter` as a policy, not a defect in either
+routine.
 
 **Reserved columns cut across the axis.** A **dedicated column** held for a
 pinned branch (§10.6.2) is not a policy: it is occupancy (§5.1), so every policy
@@ -1097,7 +1198,7 @@ GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
                  message_min, label_mode, diff, working_tree, scrolloff, search }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
-LayoutPolicy = "compact" | "survivors" | "linear" | "straight"
+LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
 DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
 Endpoint     = Commit | "index" | "worktree"
@@ -1138,8 +1239,10 @@ Endpoint     = Commit | "index" | "worktree"
   gitloom's own order reproducing git's `--topo-order`), `"date"`, or `"author"`.
   Cycle live with `S`.
 - `layout_policy` — the lane **layout policy** (§5.6): `"compact"` (**default**,
-  linear slide + survivor compaction), `"survivors"`, `"linear"`, or `"straight"`
-  (no lane ever moves sideways). Cycle live with `C`. Like the merge style (`m`)
+  linear slide + survivor compaction), `"survivors"`, `"linear"`, `"straight"`
+  (no lane ever moves sideways), or `"gutter"` (`straight`, plus every
+  subject-owning node moved into a reserved column beside the message). Cycle live
+  with `C`. Like the merge style (`m`)
   and mirroring (`M`), the live value lives on the graph's options, which are
   rebuilt each time the graph is opened — so it **resets to the configured value
   on reopen**.

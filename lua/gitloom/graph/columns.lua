@@ -11,8 +11,12 @@
 ---   * A **Column** holds one or more **Segments**. A Segment is one wire of one
 ---     Lane in that cell, with its own connectivity {up,down,left,right}.
 ---   * Per-column well-formedness (validated): at most one vertical (up+down)
----     segment; at most one segment turning horizontal -> up/down (two — one up,
----     one down — only when `allow_merge_on_split`). Empty columns are allowed.
+---     segment; at most one turning LANE — horizontal -> up/down — where the count
+---     is by lane **id**, since the cap bounds how many separate wires bend in a
+---     cell that renders one colour (two — one up, one down — only when
+---     `allow_merge_on_split`, the sanctioned handoff). Two turns of the SAME lane
+---     are one wire passing through: that is the `gutter` policy's trunk, arriving
+---     from above and leaving below via the gutter. Empty columns are allowed.
 ---
 --- Output shape matches the legacy build_graph so Phase 2 (get_column_chars) and
 --- the invariant tests consume it unchanged: rows of { columns, parent_lanes,
@@ -35,9 +39,19 @@
 --- **Layout policy** (spec §5.6). Which chain lays out an ordinary row is
 --- selectable via `opts.layout_policy`: `compact` (default), `survivors` (no
 --- linear slide), `linear` (no survivor compaction), `straight` (neither — which
---- IS `layout_seam`, reused verbatim). All four are chains of the stages already
---- here; no policy adds stage code, and none of them varies the *seam* chain.
+--- IS `layout_seam`, reused verbatim), and `gutter` (the node column is a reserved
+--- gutter; lanes never move). The first four are chains of the stages already
+--- here and add no stage code; `gutter` adds exactly one stage (`place_gutter`)
+--- and generalises two (`fan_in`/`fan_out`) by the trunk column `state.kt`, which
+--- is nil — and therefore inert — under every other policy. It is also the only one
+--- that varies the *seam* chain (it is its own seam; see `POLICY` below).
 local M = {}
+
+--- The `gutter` policy's node column (spec §5.6). Model column 1 is a node-only
+--- gutter no Lane may occupy; lanes live in columns >= GUTTER + 1. Under
+--- `opts.mirror` (the default, §5.4) column 1 renders as the RIGHTMOST cell, i.e.
+--- immediately adjacent to the commit message.
+local GUTTER = 1
 
 ---@param t table
 local function conn(t)
@@ -277,11 +291,19 @@ function M.layout(opts, items, seed)
     -- sep_split/sep_merge put a fan on its own line; fan_line = the commit line
     -- itself carries a fan (which suppresses compaction). Pure function of
     -- #incoming/#outgoing/opts/C.junction.
+    --
+    -- `subject` — does this node own its row's SUBJECT? False for a collapsed head
+    -- and for a kept junction drawn as a marker (§10.4): the renderer blanks
+    -- date/author/message for both, so their row's flex column holds ref labels,
+    -- not a subject. It is the same junction test `inline_junction` makes, which is
+    -- why it is derived here rather than recomputed downstream. Only the `gutter`
+    -- policy (§5.6) reads it; it is inert for every other chain.
     local function decide_style(state)
         local C = state.commit
         local ni, no = #state.incoming, #state.outgoing
         local inline_junction = C.junction and (opts.junction_markers ~= false)
             and not (ni > 1 and no > 1)
+        state.subject = not (C.collapsed or (C.junction and opts.junction_markers ~= false))
         local sep_split = opts.merge_style.split_on_separate_line and ni > 1 and not inline_junction
         local sep_merge = opts.merge_style.merge_on_separate_line and no > 1 and not inline_junction
         local fan_line = (ni > 1 and not sep_split) or (no > 1 and not sep_merge)
@@ -341,6 +363,62 @@ function M.layout(opts, items, seed)
         state.cc0, state.cc, state.commit_incoming = cc0, cc0, commit_incoming
     end
 
+    -- PLACE_GUTTER (stage): `place_commit` for the `gutter` policy (§5.6). The node
+    -- of a **subject-owning** row goes in the reserved gutter; a messageless marker
+    -- or junction (§10.4) keeps a lane column and is placed exactly as
+    -- `place_commit` places it. `kt` is the column the FIRST PARENT lane continues
+    -- in — the trunk child's own column, so no lane ever moves — and it is the one
+    -- piece of state the shared `fan_in`/`fan_out` need in order to draw a node that
+    -- is not sitting on its own lane.
+    --
+    -- Reserving every incoming column in `occ0` is load-bearing, not tidiness: it is
+    -- how §5.1's fan-out placement rule ("a column a terminating child frees is
+    -- reusable only when that stacks no two turns in one cell") is enforced. Without
+    -- it a lane born on this row could take the column an incoming child just
+    -- vacated, putting the child's turn and an unrelated lane's turn in one cell —
+    -- the §5.2 `allow_merge_on_split` colour handoff, un-sanctioned. `place_commit`
+    -- reserves the same columns for the same reason; the trunk reusing its own
+    -- child's column (`kt`) is exempt because it keeps that lane's id and colour.
+    local function place_gutter(state)
+        local g, incoming = state.g, state.incoming
+        -- No lane may live in the gutter, on any row — including a marker row, where
+        -- it renders blank so the node column stays aligned down the whole graph.
+        g.occ0[GUTTER] = true
+        for _, inc in ipairs(incoming) do g.occ0[inc.col] = true end
+
+        local function free_lane_col()
+            local c = GUTTER + 1
+            while grid_taken(g, c) do c = c + 1 end
+            return c
+        end
+
+        local cc
+        if state.subject then
+            cc = GUTTER
+        else
+            cc = incoming[1] and incoming[1].col or free_lane_col()
+        end
+        -- The first parent inherits the trunk child's column (or, for a tip, opens
+        -- one); a messageless node is its own trunk column, exactly as before.
+        if state.outgoing[1] then
+            local kt
+            if state.subject then
+                kt = incoming[1] and incoming[1].col or free_lane_col()
+            else
+                kt = cc
+            end
+            g.used[kt] = true
+            state.kt = kt
+        end
+
+        local commit_incoming = incoming
+        if state.sep_split then
+            commit_incoming = { { col = cc, lane = incoming[1].lane } }
+        end
+        state.cc0, state.cc, state.commit_incoming = cc, cc, commit_incoming
+        state.gutter_node = cc == GUTTER
+    end
+
     -- SLIDE (stage): compact a *linear* commit leftward through the run of free
     -- columns, stopping at the first occupied column (never crossing a lane). A
     -- no-op on a fan line (the commit shares its line with its fan). The `layout_seam`
@@ -368,7 +446,15 @@ function M.layout(opts, items, seed)
         if state.sep_split then
             local trunk = incoming[1]
             local cells, draw, add_seg = new_line()
-            add_seg(cc0, { up = true }, { trunk.lane }, trunk.lane.id, trunk.lane.color)
+            if trunk.col == cc0 then
+                -- The node sits on the trunk's own column (every policy but
+                -- `gutter`): the trunk enters the hub as a bare up-stub.
+                add_seg(cc0, { up = true }, { trunk.lane }, trunk.lane.id, trunk.lane.color)
+            else
+                -- The node column is elsewhere (the `gutter` policy, §5.6), so the
+                -- trunk reaches the hub as a fan arm like every other child.
+                draw(trunk.lane, math.min(trunk.col, cc0), math.max(trunk.col, cc0), trunk.col, nil)
+            end
             local descent = {}
             for _, inc in ipairs(incoming) do descent[#descent + 1] = inc.lane end
             add_seg(cc0, { down = true }, descent, trunk.lane.id, trunk.lane.color)
@@ -383,7 +469,15 @@ function M.layout(opts, items, seed)
         for _, inc in ipairs(commit_incoming) do
             g.draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
         end
-        if outgoing[1] then g.draw(outgoing[1].lane, cc, cc, nil, cc) end
+        -- The first parent leaves the node column and turns down in its own lane
+        -- column `kt`. `state.kt` is set only by `place_gutter`; everywhere else the
+        -- node IS its lane, so `kt == cc` and this is the classic one-cell down stub.
+        -- With a separate merge Line the fan happens below, so the commit Line
+        -- carries only the stub into the ascent — at the node column either way.
+        if outgoing[1] then
+            local dk = (state.kt and not state.sep_merge) and state.kt or cc
+            g.draw(outgoing[1].lane, math.min(dk, cc), math.max(dk, cc), nil, dk)
+        end
     end
 
     -- COMPACT (stage): each survivor slides into the run of free columns to its
@@ -436,11 +530,15 @@ function M.layout(opts, items, seed)
         local g = state.g
         local survivors, outgoing = state.survivors, state.outgoing
         local cc, commit_incoming, sep_merge = state.cc, state.commit_incoming, state.sep_merge
+        -- The first parent's column. `state.kt` is the `gutter` policy's trunk
+        -- column (§5.6), where the node is NOT on its own lane; nil everywhere else,
+        -- so `kt == cc` and every expression below is the classic one.
+        local kt = state.kt or cc
         local freed = {}
         if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #commit_incoming do freed[#freed + 1] = commit_incoming[i].col end
         end
-        if outgoing[1] then outgoing[1].out = cc end
+        if outgoing[1] then outgoing[1].out = kt end
         local fi = 1
         for i = 2, #outgoing do
             local k
@@ -467,7 +565,14 @@ function M.layout(opts, items, seed)
                 local ascent = {}
                 for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
                 madd(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
-                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
+                if kt == cc then
+                    madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
+                else
+                    -- `gutter`: the first parent leaves the node column too, so it
+                    -- fans out to `kt` like the extra parents rather than dropping
+                    -- straight down out of the hub.
+                    mdraw(outgoing[1].lane, math.min(kt, cc), math.max(kt, cc), nil, kt)
+                end
             end
             for i = 2, #outgoing do
                 local o = outgoing[i]
@@ -480,10 +585,15 @@ function M.layout(opts, items, seed)
         -- one row so nothing stacks under it).
         active = {}
         for _, s in ipairs(survivors) do active[s.out] = s.lane end
-        if outgoing[1] then active[cc] = outgoing[1].lane end
+        if outgoing[1] then active[kt] = outgoing[1].lane end
         for i = 2, #outgoing do active[outgoing[i].out] = outgoing[i].lane end
         blocked = {}
-        if #outgoing == 0 then blocked[state.cc] = true end
+        -- Root column break (§5.1): a root leaves a bare vertical stub in its lane
+        -- column, so nothing may stack under it next row. A `gutter` node sits in the
+        -- gutter and its incoming lane ends in a TURN out of the column — there is no
+        -- stub to stack under, and the gutter itself is reserved on every row — so
+        -- the block would name a column that cannot be reused anyway.
+        if #outgoing == 0 and not state.gutter_node then blocked[state.cc] = true end
     end
 
     -- FINALIZE (stage): assemble the main line from the grid, build the OrderItem
@@ -553,14 +663,31 @@ function M.layout(opts, items, seed)
         fan_out(state)
         finalize(state)
     end
+    -- `layout_gutter` is `layout_seam`'s chain with `place_gutter` in place of
+    -- `place_commit`: no slide, no survivor compaction — a gutter graph moves no
+    -- lane at all — and the node placed in the reserved gutter instead of on its
+    -- lane. `carry` (not `compact`) is what makes "lanes never move" true, so the
+    -- seam requirement (§5.6) is met by the body chain itself.
+    local function layout_gutter(state)
+        seed_bars(state)
+        place_gutter(state)
+        fan_in(state)
+        carry(state)
+        fan_out(state)
+        finalize(state)
+    end
 
     -- A layout POLICY (spec §5.6) pairs the chain for an ordinary row with the one
     -- for a seeded pane's seam row. The seam must keep every seeded lane in its
     -- column, which is exactly what the no-move chain does — so `seam` is
-    -- `layout_seam` for all four policies today; the field exists so a policy that
-    -- needed a different seam could say so, and so the sweep's selection stays one
+    -- `layout_seam` for four of the five policies; the field exists so a policy that
+    -- needs a different seam can say so, and so the sweep's selection stays one
     -- expression. `straight` IS the no-move chain, so it reuses `layout_seam`
     -- verbatim rather than duplicating it: the equivalence holds by construction.
+    -- `gutter` is the one policy that must NOT take `layout_seam` as its seam: that
+    -- chain would put the seam row's node back on its lane, so the pane's first row
+    -- would disagree with the body about where nodes live. Its body chain already
+    -- satisfies the seam requirement (it moves no lane), so it is its own seam.
     ---@class LayoutPolicy
     ---@field body fun(state: table)  -- an ordinary row
     ---@field seam fun(state: table)  -- a seeded pane's boundary (seam) row
@@ -573,6 +700,7 @@ function M.layout(opts, items, seed)
         survivors = { body = layout_survivors, seam = layout_seam },
         linear    = { body = layout_linear,    seam = layout_seam },
         straight  = { body = layout_seam,      seam = layout_seam },
+        gutter    = { body = layout_gutter,    seam = layout_gutter },
     }
 
     local function active_contains(lane)

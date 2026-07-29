@@ -144,7 +144,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `q` | Hide the graph window (`<leader>wg` returns to it, `<C-w>q` destroys it) |
 | `<C-o>` / `<C-i>` | Navigate back / forward through the view history (graph ⇄ commit view ⇄ drilled-in submodule) |
 | `m` | Cycle the merge/split rendering style (split line → merge line → both → inline → inline w/ merge-on-split) |
-| `C` | Cycle the lane layout policy (compact → survivors → linear → straight) — which lanes may move sideways to close a gap |
+| `C` | Cycle the lane layout policy (compact → survivors → linear → straight → gutter) — which lanes may move sideways to close a gap, and (gutter) whether the node sits in a fixed column beside the message |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
@@ -406,7 +406,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     layout_policy = "compact", -- lane placement (§5.6); cycle with C:
-                             -- "compact" / "survivors" / "linear" / "straight"
+                             -- "compact" / "survivors" / "linear" /
+                             -- "straight" / "gutter"
     mirror = true,           -- render mirrored (lane 1 on the right); toggle with M
     highlight = true,        -- reachability dimming (§12) on; toggle with H
     collapse_merged = true,  -- first-parent focus (§10.7) on; toggle with c
@@ -446,7 +447,11 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   survivor compaction, today's behaviour), `"survivors"` (compaction only),
   `"linear"` (slide only), or `"straight"` (neither — every lane holds its column
   for life, so the trunk never steps sideways, at the cost of leaving occasional
-  empty columns). Cycle live with `C` to compare them on a real repository; the
+  empty columns). `"gutter"` additionally moves the **node** out of the lanes into
+  a fixed column beside the message, so it is always obvious which row a message
+  belongs to — at the cost of a horizontal connector on every commit row (and so
+  more crossings), one extra column always, and markers sitting a column further
+  from their labels. Cycle live with `C` to compare them on a real repository; the
   live value is per-window and resets to this option on reopen. See
   [specification.md](specification.md) §5.6.
 - **`branches`** — the ref arguments passed to `git log` (default `--all`).

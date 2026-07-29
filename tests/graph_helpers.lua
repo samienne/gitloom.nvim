@@ -189,7 +189,11 @@ local STUBS = {
     [" "] = {},
 }
 
-local NODES = { ["○"] = true, ["◉"] = true, ["◎"] = true, ["◍"] = true }
+-- Every commit marker glyph (spec §5.3). `◌` (a working-tree virtual commit,
+-- §4.2) was missing: no earlier test fed a virtual commit through the checker, so
+-- it read as an unknown glyph. Listing it lets any policy's layout be validated on
+-- a graph that includes the working-tree nodes.
+local NODES = { ["○"] = true, ["◉"] = true, ["◎"] = true, ["◍"] = true, ["◌"] = true }
 
 ----------------------------------------------------------------------
 -- Invariants
