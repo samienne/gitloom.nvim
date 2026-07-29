@@ -27,7 +27,7 @@ local function new_ctx(repo, fields)
     local ctx = {
         repo = repo,
         opts = {},
-        view_state = { pinned = {}, modes = {}, effective = {} },
+        view_state = { pins = {}, unpinned = {}, modes = {}, effective = {} },
         seed_pin_names = {},
         worktree_commits = {},
     }
@@ -36,7 +36,7 @@ local function new_ctx(repo, fields)
     return ctx
 end
 
-describe("window._internal.effective_pinned (§10.6)", function()
+describe("window._internal.effective_pins / effective_pinned (§10.6)", function()
     -- HEAD on `main`; master/dev present; feature tracks origin/feature.
     local function repo_with_branches()
         local repo = new_repo()
@@ -49,6 +49,19 @@ describe("window._internal.effective_pinned (§10.6)", function()
         return repo
     end
 
+    -- A view_state in the ordered-list shape (§10.6), with the other fields the
+    -- helpers expect present.
+    local function vs(pins, unpinned)
+        return { pins = pins or {}, unpinned = unpinned or {}, modes = {}, effective = {} }
+    end
+
+    -- The ids of a pin list, in order.
+    local function ids(list)
+        local out = {}
+        for _, e in ipairs(list) do out[#out + 1] = e.id end
+        return out
+    end
+
     it("pins HEAD + the conventional trunks by default", function()
         local p = internal.effective_pinned(new_ctx(repo_with_branches()))
         assert.is_true(p.main)   -- HEAD
@@ -57,21 +70,53 @@ describe("window._internal.effective_pinned (§10.6)", function()
         assert.is_nil(p.feature) -- not a default anchor
     end)
 
+    it("defaults resolve in a deterministic order — HEAD first, then the trunks", function()
+        local list = internal.effective_pins(new_ctx(repo_with_branches()))
+        assert.same({ "main", "master", "dev" }, ids(list))
+    end)
+
+    it("no anchor is reserved by default (pinning alone claims no column, §10.6.2)", function()
+        for _, e in ipairs(internal.effective_pins(new_ctx(repo_with_branches()))) do
+            assert.is_false(e.reserved)
+        end
+    end)
+
+    it("the user's ordered entries come first and keep their reserve flags", function()
+        local ctx = new_ctx(repo_with_branches(),
+            { view_state = vs({ { id = "dev", reserved = true }, { id = "feature", reserved = false } }) })
+        local list = internal.effective_pins(ctx)
+        assert.same({ "dev", "feature", "origin/feature", "main", "master" }, ids(list))
+        assert.is_true(list[1].reserved)
+    end)
+
     it("honours an explicit pin and pins the tracked upstream too (pin-the-pair)", function()
-        local ctx = new_ctx(repo_with_branches(), { view_state = { pinned = { feature = true } } })
+        local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
         assert.is_true(p.feature)
         assert.is_true(p["origin/feature"]) -- carried by the upstream pairing
+        -- and it sits directly after its local branch, so the pair reads together.
+        assert.same({ "feature", "origin/feature" }, { ids(internal.effective_pins(ctx))[1],
+            ids(internal.effective_pins(ctx))[2] })
+    end)
+
+    it("dropping the local branch drops its auto-pinned upstream with it", function()
+        local ctx = new_ctx(repo_with_branches(),
+            { view_state = vs({ { id = "feature" }, { id = "origin/feature", auto = "feature" } }) })
+        assert.is_true(internal.effective_pinned(ctx)["origin/feature"])
+        -- Unpin the local: the auto entry is re-derived away, not left orphaned.
+        ctx.view_state.pins = { { id = "origin/feature", auto = "feature" } }
+        ctx.view_state.unpinned = { feature = true }
+        assert.is_nil(internal.effective_pinned(ctx)["origin/feature"])
     end)
 
     it("honours an explicit unpin of a default anchor", function()
-        local ctx = new_ctx(repo_with_branches(), { view_state = { pinned = { main = false } } })
+        local ctx = new_ctx(repo_with_branches(), { view_state = vs({}, { main = true }) })
         assert.is_nil(internal.effective_pinned(ctx).main)
     end)
 
     it("does not pair the upstream when pin_upstream is off", function()
         local ctx = new_ctx(repo_with_branches(),
-            { opts = { pin_upstream = false }, view_state = { pinned = { feature = true } } })
+            { opts = { pin_upstream = false }, view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
         assert.is_true(p.feature)
         assert.is_nil(p["origin/feature"])

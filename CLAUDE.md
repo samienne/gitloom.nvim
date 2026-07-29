@@ -378,6 +378,21 @@ Coverage:
   `keep` set (§16.3: a match stays a normal commit while the runs between matches
   collapse; junctions preserved; a kept match is never a node-less junction; nil
   keep = the plain collapse)
+- `tests/pin_spec.lua` — the ordered pin list (§10.6) + the dialog (§10.6.1):
+  `pin_resolve` (stored entries first then the defaults, unpinned suppressed,
+  stale refs dropped, defaults never reserved), `pin_move` (clamped at both ends,
+  reports the new index, carries the flag), `pin_toggle_reserved`, `pin_remove`
+  (**unpin implies unreserve** — re-adding comes back unreserved), `pin_add`
+  (idempotent), `pin_ids`, `reserved_order` (reserved-only, in list order; an
+  **unreserved entry's position is latent** — moving it changes nothing, reserving
+  it makes that position bite), and `pin_dialog_lines` (numbering, `◆` on reserved
+  rows only, the key help, the add row, the row map, the aligned help column, the
+  "not honoured yet" note). Plus a **windowed smoke** block driving the real
+  dialog in a real float over a stub ctx (open/`<Space>`/`<C-j>`/`D`/`q`) — the
+  keymaps, re-render and focus handoff, which the pure tests cannot reach.
+  `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`
+  (default order, nothing reserved by default, pin-the-pair adjacency, and the
+  auto-upstream dropping with its local).
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -428,8 +443,13 @@ virtual-commit pure helpers; §3.3/§4.2/§11.8),
 `owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
 helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
 marker-packing pass; §10.4), `collapse_owners` (the region's collapsible
-owners under the cursor; §10.4), and `smartcase_match` / `filter_keep` (the
-filter-search matcher + keep-set; §16.2). `columns.layout` is reached via
+owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
+`pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
+`reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), and `smartcase_match` /
+`filter_keep` (the filter-search matcher + keep-set; §16.2).
+`window._internal` additionally exposes `effective_pins` / `effective_pinned` and
+`pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam).
+`columns.layout` is reached via
 `require("gitloom.graph.columns")`; the view builder `view.project` (which takes
 the §16.3 `keep` set) / `view.signatures` / `view.owners` via
 `require("gitloom.graph.view")` (§10).
@@ -556,16 +576,38 @@ Details not covered by the spec or architecture:
   mode overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
-- **Pin axis** (spec §10.6, toggled by `P`): pin is the **anchor** set the focus
-  default folds toward — it *generalises the trunk* (one anchor → a set). HEAD is
-  pinned by default; `view_state.pinned` holds explicit per-ref pin/unpin
-  overrides and `effective_pinned()` resolves the live set ({HEAD} ∪ overrides),
-  passed to `view.owners`/`collapse_owners` in place of the old single `trunk_id`.
+- **Pin axis** (spec §10.6, toggled by `P`, managed by `L`): pin is the **anchor**
+  set the focus default folds toward — it *generalises the trunk* (one anchor → a
+  set). It is stored as **one ordered list**, `view_state.pins` (`PinEntry` =
+  `{ id, reserved }`, priority order) plus `view_state.unpinned` (ids explicitly
+  removed, which suppress the HEAD / `master` / `main` / `dev` / seeded-mark
+  defaults). `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`)
+  and applies the pin-the-pair upstream rule — an auto entry carries
+  `auto = <local id>` and is re-derived each resolve, so unpinning the local drops
+  it; `ctx:effective_pinned()` is that list reduced to ids and is still what
+  `view.owners`/`collapse_owners` consume, so no pin consumer changed.
   Pinning changes only the default *mode* (anchors normal, rest collapsed), not
   `fp_only` or the owner tips, so it does **not** invalidate the signature cache
   (like a mode toggle). `P` uses `branch_under_cursor`, pins only real refs (drops
-  anonymous merge owners), reflows, and repositions the cursor. Anchors are the
-  foundation for the planned context panes (spec §6.2).
+  anonymous merge owners), appends to the list, reflows, and repositions the
+  cursor. Anchors are the foundation for the context panes (spec §6.2).
+- **Dedicated lanes + the pinned-branches dialog** (spec §10.6.1/§10.6.2, `L`):
+  "holds a reserved graph column" is a **flag on the pin entry**, not a second
+  list — so `reserved ⊆ pinned` and *unpin implies unreserve* are structural, and
+  **pinning alone claims no column** (up to four are pinned by default). Order
+  is meaningful only among reserved entries (`select.reserved_order`); an
+  unreserved entry's position is latent. `L` opens a `float_zindex` float rendered
+  by the pure `select.pin_dialog_lines` (lines + a line → entry-index row map);
+  its buffer-local keys `<C-j>`/`<C-k>`/`<Space>`/`D`/`<CR>`/`q` each write
+  `view_state.pins`, reflow, and restore the graph cursor by hash like `P`.
+  `<CR>` and "Pin new branch…" reuse the `<leader>b` picker pieces extracted as
+  `ctx:ref_picker_format` / `ctx:jump_to_ref`. **The layout does not honour the
+  reserve flag yet** — the follow-up plugs it into `columns.lua`'s `grid_taken`
+  (see ARCHITECTURE) — and the dialog's last line says so, since a control whose
+  effect is unbuilt must not look like it works.
+  **NB:** these helpers are `GRAPH_HELPERS` fields rather than module locals
+  because window.lua is at LuaJIT's **200-local chunk limit** (a second ceiling
+  beyond the 60-upvalue one); new window helpers must go into the tables.
 - **Marker packing** (`opts.pack_markers`, default on; spec §10.4, toggled by
   `p`): a **marker** is a messageless node (today a collapsed head — `◍` + ref
   labels + count, no subject). `pack_markers` is a post-Phase-1 pass run in
