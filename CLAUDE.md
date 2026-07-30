@@ -446,7 +446,15 @@ Coverage:
   onto a virtual row of its own (it used to ride the arriving commit's Line: 1154
   offending commit Lines over 400 DAGs). `gutter` additionally satisfies the
   stronger one-run test on EVERY rendered line, handover rows included (every
-  horizontal belongs to one contiguous run reaching that row's node). Plus a
+  horizontal belongs to one contiguous run reaching that row's node), plus the
+  **node spine** (`h.check_spine`, §5/§5.6): at a node cell the wire arriving from
+  above and the wire leaving below carry ONE lane id, over the four stable styles ×
+  200 fuzz DAGs, and on a named fixture — a fork three lines came out of, with a
+  topic's last commit directly above it — asserting the split hub above the node is
+  the trunk's lane and colour, not the ending topic's (the reported gutter split
+  colour bug). Asserted for `gutter` only: the four lane-column policies put the
+  node on the leftmost incoming lane and carry a small residue (see
+  `place_commit`). Plus a
   `layout policy (§5.6)` block: the
   linear-commit slide changes the layout on only a small minority of DAGs while
   survivor compaction dominates (asserted as a wide-margin relation, not a count),
@@ -593,20 +601,30 @@ Details not covered by the spec or architecture:
   at all). The first four are **chains of the existing stages** in `columns.lua` —
   no new stage code — dispatched through a `POLICY` record `{ body, seam, prepass }`.
   `straight` reuses `layout_seam` verbatim, so "straight is the no-move chain" holds
-  by construction. `gutter` adds ONE stage (`place_gutter`), declares the `prepass`
-  (the next subject-owning commit per row — the sweep runs top-to-bottom and cannot
-  see it), and generalises `fan_in`/`fan_out` by `state.kt` (the first parent's
-  column, since on a handover row the node is not on its own lane); `state.kt`,
-  `state.gutter` and a pre-set `outgoing[i].out` are all nil under every other
-  policy, which is why the addition is provably inert for them (verified
-  cell-for-cell, 12,340 cases, against both the pre-gutter and the shipped
-  baseline). It is also the one policy whose `seam` is NOT `layout_seam` — that
-  chain does not apply the column constraint. **The gutter changes hands by two
-  ordinary fans on two different rows** (the run's last commit's fan-out leaves it,
-  the next subject commit's fan-in turns in), never by a same-row swap: two lanes
-  transposing must both bend in the gutter cell, which renders `├─┤` — the same
-  glyph a fan bus draws — with one colour for two wires. So there is no swap glyph
-  and no virtual swap row. An unknown/absent value falls back to `compact`. §5.1's invariants
+  by construction. `gutter` adds THREE stages (`evict_gutter`, `claim_gutter`,
+  `place_gutter`) and touches the shared ones only through `state.gutter` — nil, and
+  therefore inert, under every other policy (verified cell-for-cell: 0 differing
+  cells over 4,080 style × policy × corpus blocks for the four lane-column
+  policies). No policy uses the declared `prepass` hook; it is kept for the reserved
+  `interval` placement. It is also the one policy whose `seam` is NOT `layout_seam`
+  — that chain does not apply the column constraint. **The gutter changes hands on
+  two virtual rows of its own, one lane each** (`evict_gutter` moves the occupant
+  out, `claim_gutter` turns the arriving lane in), never by a same-row swap and
+  never on a commit Line: two lanes transposing must both bend in the gutter cell,
+  which renders `├─┤` — the same glyph a fan bus draws — with one colour for two
+  wires. So there is no swap glyph. **The occupant to evict is whoever is in the
+  column** — a survivor *or* one of the commit's own converging children; reading it
+  as "a survivor only" (equivalently, reading the claim's skip test as "any incoming
+  lane already in the gutter" instead of "the claimer") is what drew a fork's split
+  hub in the *ending* branch's colour while the spine below it was the trunk's, since
+  §3.1's ordering routinely parks an ending lineage in the gutter right above a fork
+  (85 of 986 nodes on a 1040-commit repo expanded; `compact` showed 0–1, hence it
+  read as gutter-specific). `tests/graph_helpers.check_spine` is the invariant —
+  at a node cell, the wire above and the wire below carry one lane id. `gutter`
+  holds it exactly; the four lane-column policies place the node on the LEFTMOST
+  incoming lane (a positional stand-in for its own lane) and carry a 1–2 rows/repo
+  residue, unfixed because the node column is what compaction ripples off (see
+  `place_commit`). An unknown/absent value falls back to `compact`. §5.1's invariants
   are classified accordingly: **universal** (hold under every policy),
   **conditional guards** (constrain any jog a policy makes — written as violation
   counts, so they go vacuous rather than false), **policy-specific** (only the
