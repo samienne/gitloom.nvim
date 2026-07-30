@@ -611,10 +611,54 @@ local function check_horizontals(rows)
     return errors
 end
 
+----------------------------------------------------------------------
+-- The spine through a node (spec §5, §5.6)
+----------------------------------------------------------------------
+
+-- A commit's node sits in ITS OWN lane's column — the column of the incoming Lane
+-- its first parent continues (§5: "places each node in its own Lane's column"; §5.6
+-- for the gutter: "the wire above the node and the wire below it are one Lane, one
+-- id, one colour"). Observably: at the node's cell, the Segment arriving from above
+-- and the Segment leaving below carry the SAME lane id.
+--
+-- Put the node on some *other* converging child's column and the cell's wire from
+-- above belongs to a lane that ENDS here while its wire below belongs to the
+-- continuing one, so a straight vertical changes colour mid-column — and the split
+-- hub above it is drawn in the ending branch's colour instead of the spine's. That
+-- is precisely what a reader mis-reads as "the fork is on the topic branch".
+--
+-- Not part of `M.check`: the four lane-column policies place a node on the LEFTMOST
+-- incoming lane, a positional stand-in for its own lane that is right on a real
+-- history but not always (see `place_commit`), so they carry a small residue —
+-- ~5% of random DAGs, 1–2 rows per real repository. `gutter` fixes the node column
+-- outright and holds this exactly, which is why it is asserted there.
+---@param rows table[]
+---@return string[] errors
+local function check_spine(rows)
+    local errors = {}
+    for ri, row in ipairs(rows) do
+        for j, cell in ipairs(row.columns or {}) do
+            if cell.has_commit then
+                local u, d
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.connectivity.up and not u then u = s end
+                    if s.connectivity.down and not d then d = s end
+                end
+                if u and d and u.id ~= d.id then
+                    errors[#errors + 1] = ("row %d col %d (%s): node spine changes lane %s -> %s")
+                        :format(ri, j, tostring(row.commit and row.commit.hash), tostring(u.id), tostring(d.id))
+                end
+            end
+        end
+    end
+    return errors
+end
+
 -- Exposed so a self-test can prove the checker catches broken grids.
 M.check_grid = check_grid
 M.check_lane_continuity = check_lane_continuity
 M.check_horizontals = check_horizontals
+M.check_spine = check_spine
 
 --- Build the layout for `items` and run every invariant.
 --- Returns a flat list of error strings (empty = all good).

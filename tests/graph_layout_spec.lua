@@ -195,6 +195,15 @@ describe("compaction never crosses a lane (§5)", function()
     -- column into a farther gap, jogging the lane across the occupant.
     local build_graph = require("gitloom.graph")._internal.build_graph
 
+    -- The four stable merge styles (allow_merge_on_split excluded — its sanctioned
+    -- two-turn cell is a colour handoff by design, §5.2).
+    local STYLE_LIST = {
+        { split_on_separate_line = true,  merge_on_separate_line = true },
+        { split_on_separate_line = true,  merge_on_separate_line = false },
+        { split_on_separate_line = false, merge_on_separate_line = true },
+        { split_on_separate_line = false, merge_on_separate_line = false },
+    }
+
     -- Count cells where a vertical lane (up+down) is crossed by a *different*
     -- lane's horizontal segment (left/right) — a crossing.
     local function commit_line_crossings(row)
@@ -243,12 +252,6 @@ describe("compaction never crosses a lane (§5)", function()
     -- horizontal anywhere. Strictly checkable, and stronger than the §5.1
     -- corollary the policy also satisfies now that the swap-in has its own row.
     it("every horizontal belongs to one run containing the node (gutter)", function()
-        local STYLE_LIST = {
-            { split_on_separate_line = true,  merge_on_separate_line = true },
-            { split_on_separate_line = true,  merge_on_separate_line = false },
-            { split_on_separate_line = false, merge_on_separate_line = true },
-            { split_on_separate_line = false, merge_on_separate_line = false },
-        }
         local bad = {}
         for si, ms in ipairs(STYLE_LIST) do
             local opts = policy_opts(ms, "gutter")
@@ -288,6 +291,86 @@ describe("compaction never crosses a lane (§5)", function()
             end
         end
         assert.equals(0, #bad, "\n" .. table.concat(bad, "\n"))
+    end)
+
+    -- THE SPINE THROUGH A NODE (§5, §5.6). A commit's node sits on its OWN lane's
+    -- column — the incoming lane its first parent continues — so the wire above the
+    -- node and the wire below it are one Lane, one id, one colour (§5.6, verbatim).
+    -- Under `gutter` this is exact: the gutter fixes the node column, and the
+    -- handover rows are what bring the right lane into it.
+    --
+    -- The regression: the handover declined whenever ANY converging child already
+    -- sat in the gutter, reading §5.6's "a lane already in the gutter needs no
+    -- claim" as *any* lane rather than the CLAIMING one. Because the row order emits
+    -- a merged-in lineage right after its merge (§3.1), the gutter at a fork is
+    -- routinely held by the lineage that is ending there, not by the trunk the fork
+    -- continues on — so the split hub and the wire down into the node rendered in
+    -- the topic branch's colour while the spine below the node rendered in the
+    -- trunk's. 85 of 986 nodes on a 1040-commit repository fully expanded, 21 of 605
+    -- on `tests/large_topo`; `compact` showed 0–1 on the same corpora, which is why
+    -- it read as a gutter-only defect.
+    it("keeps one lane through a node's spine (gutter)", function()
+        local bad = {}
+        for _, ms in ipairs(STYLE_LIST) do
+            local opts = policy_opts(ms, "gutter")
+            for seed = 1, 200 do
+                local rows = build_graph(opts, h.dag(h.random_dag(4 + (seed % 14), seed)))
+                for _, e in ipairs(h.check_spine(rows)) do
+                    if #bad < 6 then bad[#bad + 1] = ("seed=%d %s"):format(seed, e) end
+                end
+            end
+        end
+        assert.equals(0, #bad, "\nnode spine changes lane mid-column:\n" .. table.concat(bad, "\n"))
+    end)
+
+    -- The reported case, as a fixture rather than a fuzz hit, so the failure names
+    -- the shape: a fork `f` that three lines of history came out of — the trunk
+    -- (`main`) plus two topic branches — where the row order puts a TOPIC's last
+    -- commit directly above the fork. That is not contrived: the ordering emits a
+    -- merged-in lineage contiguously right after its merge (§3.1), so at a fork with
+    -- more than two children the trunk's own commit is emitted early and a junior
+    -- lineage ends up adjacent — it is the shape of 21 of `tests/large_topo`'s 605
+    -- expanded nodes. The junior lane then holds the gutter when the fork arrives, and
+    -- the fork must still render on the trunk: the split hub above the node, the node,
+    -- and the wire below it are one lane, one colour (§5.6).
+    it("draws a fork hub in the TRUNK's colour, not the merged-in topic's (gutter)", function()
+        local items = h.dag({
+            { "tip",   { "main", "topic" } }, -- merges the trunk and a topic
+            { "main",  { "f" } },             -- the trunk: SENIOR lane, emitted early
+            { "topic", { "t1", "t2" } },      -- the topic itself merges two lines
+            { "t1",    { "f" } },
+            { "t2",    { "f" } },             -- junior, and directly above the fork
+            { "f",     { "r" } },
+            { "r",     {} },
+        })
+        local opts = policy_opts({ split_on_separate_line = true, merge_on_separate_line = false }, "gutter")
+        local rows = build_graph(opts, items)
+        assert.equals(0, #h.check_spine(rows), "the fork's spine changes lane at the node")
+
+        -- Locate f's row: the trunk lane it continues on must own the split hub above
+        -- it, its node cell, and the wire below — and the topics must be ARMS.
+        local frow
+        for _, row in ipairs(rows) do
+            if row.commit.hash == "f" then frow = row end
+        end
+        assert.truthy(frow)
+        assert.equals(3, #frow.child_lanes) -- main's, t1's and t2's edges converge here
+        local trunk = frow.parent_lanes[1].id
+        -- the trunk's own edge into f is the SENIOR incoming lane (§5 identity)
+        local senior = math.huge
+        for _, l in ipairs(frow.child_lanes) do senior = math.min(senior, l.id) end
+        assert.equals(senior, trunk, "f must continue the senior (trunk) lane")
+
+        local fan = frow.above[#frow.above] -- fan_in appends the split Line last
+        local ncol
+        for j, cell in ipairs(frow.columns) do if cell.has_commit then ncol = j end end
+        local hub_down
+        for _, s in ipairs(fan[ncol].lanes or {}) do
+            if s.connectivity.down then hub_down = s end
+        end
+        assert.truthy(hub_down, "the split hub must descend into the node's column")
+        assert.equals(trunk, hub_down.id, "the split hub must be the trunk's lane, not the topic's")
+        assert.equals(frow.parent_lanes[1].color, hub_down.color)
     end)
 end)
 
