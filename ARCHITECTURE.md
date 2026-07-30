@@ -861,7 +861,14 @@ the current row. For each commit `C`:
    column a *terminating child* frees is reusable by a parent only when that does
    not stack two turns in a cell: on a **separate merge line** (the child ended on
    the commit line above) or under `allow_merge_on_split` (the sanctioned inline
-   two-turn cell); inline otherwise, the freed column waits for the next row.
+   two-turn cell); inline otherwise, the freed column waits for the next row. Even
+   then the reuse is a *preference among free columns*: it deliberately lifts the
+   `occ0` reservation on an incoming column — that is its whole purpose — but the
+   `used` ledger, a non-shareable claim made **on this row**, still binds, and the
+   node's own column is always in it (the first parent continues there). The
+   candidates are therefore filtered through the ledger rather than derived
+   positionally as "every converging child but the leftmost"; see the note under
+   `gutter` below for why the positional form was wrong.
 5. **Emit Segments** for the split line (children converge, when
    `split_on_separate_line`), the commit line (the marker + first-parent handoff
    + inline fans), and the merge line (parents fan out, when
@@ -984,9 +991,9 @@ fan_line flags). Then the **layout strategy** chains the grid stages:
 - `compact` — slide each survivor left into free columns, redrawn as a turn,
   reserving its jog in `used` (suppressed on a fan line, where a pass-through crosses
   the fan vertically).
-- `fan_out` — the diverging parents' columns (endpoint-only reservation,
-  freed-column reuse), drawn inline or on the merge line below; then advance
-  `active` / `blocked`.
+- `fan_out` — the diverging parents' columns (endpoint-only reservation, plus
+  freed-column reuse filtered through the row's `used` ledger), drawn inline or on
+  the merge line below; then advance `active` / `blocked`.
 - `finalize` — assemble the main line, build the `OrderItem` (`above` list /
   `columns` / `merge` + parent/child lanes).
 
@@ -1094,6 +1101,27 @@ here cannot take one a terminating child just freed (the §5.1 fan-out placement
 rule — the trap that produced an unsanctioned lane handoff during development), and
 the gutter itself is held against generic fan-out allocation whenever nothing has
 claimed it.
+
+That reservation binds the **freed-column reuse** too, and this is where putting the
+node on `trunk_entry` first bit. `fan_out` used to derive its reuse candidates
+positionally — `commit_incoming[2..n]`, "every converging child but the leftmost" —
+which stands in for "every incoming column this row has not claimed" only while the
+node sits on the leftmost arriving lane, i.e. only under `place_commit`. On a
+**non-subject row** (a `◍` head or a junction marker, the rows the handover
+deliberately skips, so the commit's own lane is wherever it happens to be) the node
+lands on `trunk_entry`, which can be any incoming entry; its column then appeared
+among the candidates, an extra parent was assigned it on top of the first parent, and
+`active` kept only one of the two — `columns.layout` errored out of `complete_check`
+with "did not carry an outgoing edge forward" (`gutter` ×
+`merge_on_separate_line` / `allow_merge_on_split`, the two styles that populate the
+freed list at all). The repair is to test the row's `used` ledger instead of the
+ordinal, which is inert for the four lane-column policies by construction rather than
+by measurement: not one of their 4,382 freed reuses across the fuzz + real-repository
+sweep is in `used`, while all 82 under `gutter` are exactly the node column. Note
+that the reachable-only-on-a-projection part is why the whole policy × merge-style
+matrix stayed green: a raw test DAG has no collapsed heads and no junctions, so it
+has no non-subject rows at all (see the projected sweeps in `columns_spec` /
+`graph_layout_spec`).
 
 The node always sits on its **own lane's** column, `gutter` included — the handover
 rows put that lane in the gutter a row before the node lands there — so `fan_in`

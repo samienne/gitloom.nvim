@@ -784,6 +784,31 @@ function M.layout(opts, items, seed)
     -- separate merge line below). Only the endpoint is claimed (the parents share
     -- the diverging bus). Inline parents draw here; a separate merge line draws them
     -- below. Then advance active/blocked for the next row.
+    --
+    -- A FREED column is a *preference* among free columns, not a licence to ignore
+    -- this row's own claims. It deliberately overrides the `occ0` reservation on an
+    -- incoming column — relaxing that reservation is the whole point (§5.1 fan-out
+    -- placement) — but `g.used`, a NON-SHAREABLE claim made on this row, still
+    -- binds, and the node's own column is always in it: it carries the first
+    -- parent's continuation, which every placement stage reserves.
+    --
+    -- Deriving the candidates POSITIONALLY (`commit_incoming[2..n]`) only *looked*
+    -- like it respected that. It is a stand-in for "every incoming column this row
+    -- has not claimed", correct exactly while the node sits on `commit_incoming[1]`
+    -- — which is what `place_commit` does. `place_gutter` puts the node on the
+    -- commit's OWN lane instead (§5, `state.trunk_entry`), and that can be ANY
+    -- incoming entry, so the node's own column could be handed to an extra parent
+    -- too: both parents then landed in one column, `active` kept only the later of
+    -- the two, and `complete_check` errored that the first parent was never carried
+    -- forward (`gutter` × `merge_on_separate_line` / `allow_merge_on_split`, on a
+    -- non-subject row — a marker or junction, the rows no handover runs on).
+    --
+    -- Consulting the ledger instead of the position is what makes the reuse safe for
+    -- whatever a placement stage does next, which is the general form of the bug. It
+    -- is provably inert for the four lane-column policies rather than merely
+    -- equivalent on a corpus: not one of their 4,382 freed reuses across the fuzz +
+    -- real-repository sweep is in `used`, whereas all 82 under `gutter` are exactly
+    -- the node column.
     local function fan_out(state)
         local g = state.g
         local survivors, outgoing = state.survivors, state.outgoing
@@ -792,9 +817,13 @@ function M.layout(opts, items, seed)
         if opts.merge_style.allow_merge_on_split or sep_merge then
             for i = 2, #commit_incoming do
                 local c = commit_incoming[i].col
-                -- `gutter` (§5.6): the gutter is entered only by the lane owning the
-                -- next subject row, never by a fan-out reclaiming a freed column.
-                if not (state.gutter and c == GUTTER) then freed[#freed + 1] = c end
+                -- `gutter` (§5.6) additionally holds the gutter itself for the lane
+                -- owning the next subject row, never a fan-out reclaiming a freed
+                -- column. That hold is an `occ0` reservation — the one `freed`
+                -- overrides by design — so it is stated apart from the `used` ledger.
+                if not g.used[c] and not (state.gutter and c == GUTTER) then
+                    freed[#freed + 1] = c
+                end
             end
         end
         if outgoing[1] then outgoing[1].out = cc end

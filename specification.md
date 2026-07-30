@@ -644,6 +644,17 @@ historical — it is about *reusing* a freed column, not about the compaction mo
   and because the reservation looks like bookkeeping rather than the invariant it
   is.
 
+  The **mirror image** has also happened, and binds just as hard: a reuse is a
+  *preference among columns that are free*, never a licence to take one **this
+  Line has already claimed**. The node's own column is always claimed — the first
+  parent continues there (§5) — so it is never a reuse candidate, however the
+  policy chose it. Deciding that by POSITION ("every converging child but the
+  leftmost") is only correct while the node sits on the leftmost arriving lane;
+  a policy that puts it on the commit's own lane instead (§5, which is what §5.6's
+  `gutter` does) then offers the node's own column to an extra parent, and the two
+  parents collide in one column with one silently dropped. Test the claim, not the
+  ordinal.
+
 Edge attribution (`begin`/`end` per Lane, and a Segment's edge set) is the model
 contract that makes the §12 reachability emphasis exact and the planned §10 view
 work and lane navigation possible. The handoff split (an incoming child-lane and

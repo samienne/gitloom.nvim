@@ -259,7 +259,12 @@ Coverage:
   keeps a non-trunk cone lane connected through the hub
 - `tests/columns_spec.lua` — Phase 1 (`columns.layout`) directly: per-cell
   well-formedness (≤1 vertical, the turn cap), vertical continuity, and a
-  fuzz sweep across all five styles **× all five layout policies** (§5.6); plus the
+  fuzz sweep across all five styles **× all five layout policies** (§5.6) over
+  **both** a raw DAG **and the §10.7 focused projection** (`h.focused` — the corpus
+  that actually has `◍` heads and junction markers, hence **non-subject rows**;
+  without it every such branch in `columns.lua` is unreachable, which is how
+  `gutter` × `merge_on_separate_line` shipped a hard layout error with the matrix
+  green); plus the
   policy reclassification — the linear-slide test ("compacts an expanded inline
   branch next to the trunk") is pinned to the **sliding** policies only, while root
   column break and compact column reuse run the whole matrix (a universal invariant
@@ -459,7 +464,15 @@ Coverage:
   linear-commit slide changes the layout on only a small minority of DAGs while
   survivor compaction dominates (asserted as a wide-margin relation, not a count),
   under `straight` no lane ever changes column, and an unknown/absent policy falls
-  back to `compact`. The `inline+mergesplit` characterization snapshot is pinned
+  back to `compact`. The whole STYLES × POLICIES matrix also runs its invariant
+  sweep over the **§10.7 focused projection** (`h.focused`), and a
+  `a freed fan-out column is never the node's own (§5.1/§5.6)` block pins the
+  freed-column regression: a named fixture (a junction reached by a foreign
+  second-parent edge *above* its own lane, so the node lands off the leftmost
+  incoming column) laid out under `gutter` × merge-line / mergesplit, plus a
+  matrix-wide projected sweep asserting **no two outgoing lanes ever turn down in
+  one column**. Both are unreachable on a raw DAG — a projected view is what
+  produces a row that owns no subject. The `inline+mergesplit` characterization snapshot is pinned
   to `compact` explicitly (a golden snapshot is a picture of one policy). The
   `invariant checker self-test` block also proves **`check_horizontals`** has teeth:
   a fan-in and a fan-out sharing a run is flagged MIXED-DIRECTION, two arms of the
@@ -537,6 +550,13 @@ maintenance treadmill. Two layers, both in `graph_helpers.lua`:
   no unknown glyphs, no dangling left/right or up/down stubs, crossings pass
   the horizontal wire through a vertical bar, and lane color stays continuous
   (including across crossings).
+
+Both layers run over **two corpora**: raw `dag()` items, and the same DAGs through
+`h.focused` — the §10.7 first-parent projection an opened graph actually lays out.
+The second is not redundant. `owns_subject` (§5.6) is false only for a collapsed
+head or a junction marker, and a raw DAG has neither, so *every* non-subject-row
+path in `columns.lua` is unreachable on raw fuzz however long it runs. Any new
+layout invariant should be asserted on both.
 
 Color/id-continuity is the **id-continuity** invariant: a lane's id must not
 silently change along a straight `│` run (a "lane handoff"). Tests use
