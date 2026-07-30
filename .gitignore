@@ -2,3 +2,6 @@
 *.lua.luarc.json
 .luals-log/
 .claude/
+
+# Untracked measurement / sample scratch (spike probes, corpus fixtures)
+/spike/

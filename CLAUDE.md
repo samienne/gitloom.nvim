@@ -453,13 +453,26 @@ Coverage:
   stronger one-run test on EVERY rendered line, handover rows included (every
   horizontal belongs to one contiguous run reaching that row's node), plus the
   **node spine** (`h.check_spine`, §5/§5.6): at a node cell the wire arriving from
-  above and the wire leaving below carry ONE lane id, over the four stable styles ×
-  200 fuzz DAGs, and on a named fixture — a fork three lines came out of, with a
+  above and the wire leaving below carry ONE lane id — over the four stable styles ×
+  200 fuzz DAGs **× both corpora** (raw and `h.focused`, since the §5.6 parent swap
+  fires only on the expanded one and clause 2 must be seen declining on the projected
+  one), asserting 0 unlicensed breaks, a NON-ZERO licensed count on the raw corpus
+  (so the sweep is not vacuous) and exactly 0 on the focused one (byte-identity in
+  invariant form) — and on a named fixture — a fork three lines came out of, with a
   topic's last commit directly above it — asserting the split hub above the node is
   the trunk's lane and colour, not the ending topic's (the reported gutter split
   colour bug). Asserted for `gutter` only: the four lane-column policies put the
   node on the leftmost incoming lane and carry a small residue (see
-  `place_commit`). Plus a
+  `place_commit`). Plus a **`the gutter parent swap (§5.6)`** block covering each gate
+  clause on BOTH corpora from the same DAG — it fires expanded (the second parent
+  continues in the gutter, the row it was handed pays no handover, the break is
+  licensed), the node is coloured from its `own_lane_up` wire (with the un-flagged
+  render asserted to be the topic's colour, so the fix cannot become a no-op), and it
+  declines for each clause: clause 2 on the FOCUSED projection of that same DAG (the
+  collapsed-head case — the whole reason clause 2 exists), clause 1 when the first
+  parent already comes first, clause 3 when that parent has a second in-set child,
+  and never at all under the other four policies × every merge style × both corpora
+  (no `own_lane_up` anywhere). Plus a
   `layout policy (§5.6)` block: the
   linear-commit slide changes the layout on only a small minority of DAGs while
   survivor compaction dominates (asserted as a wide-margin relation, not a count),
@@ -476,7 +489,13 @@ Coverage:
   to `compact` explicitly (a golden snapshot is a picture of one policy). The
   `invariant checker self-test` block also proves **`check_horizontals`** has teeth:
   a fan-in and a fan-out sharing a run is flagged MIXED-DIRECTION, two arms of the
-  same fan are not. That checker is wired into `M.check` (§5.1 horizontal sharing)
+  same fan are not. It proves **`check_spine`** has teeth too, on hand-built rows that
+  isolate each licence clause: the licensed swap passes, while a break outside the
+  gutter column, a break whose wire below is not a parent lane, a next subject row
+  whose node is not in the gutter, a next subject row entered by a DIFFERENT lane
+  (`SAVED NOTHING` — the case clause 3 prevents) and a break with no following subject
+  row at all are each flagged with their own reason. So a checker that quietly became
+  "gutter is exempt" fails there. That checker is wired into `M.check` (§5.1 horizontal sharing)
   for every merge style that gives at least one fan its own Line; it is NOT run on
   the two fully-inline styles, where a commit's fan-in and fan-out share its Line by
   construction and the rule fires under every policy alike (a deferred, pre-existing
@@ -622,12 +641,18 @@ Details not covered by the spec or architecture:
   no new stage code — dispatched through a `POLICY` record `{ body, seam, prepass }`.
   `straight` reuses `layout_seam` verbatim, so "straight is the no-move chain" holds
   by construction. `gutter` adds THREE stages (`evict_gutter`, `claim_gutter`,
-  `place_gutter`) and touches the shared ones only through `state.gutter` — nil, and
-  therefore inert, under every other policy (verified cell-for-cell: 0 differing
-  cells over 4,080 style × policy × corpus blocks for the four lane-column
-  policies). No policy uses the declared `prepass` hook; it is kept for the reserved
-  `interval` placement. It is also the one policy whose `seam` is NOT `layout_seam`
-  — that chain does not apply the column constraint. **The gutter changes hands on
+  `place_gutter`) plus a `prepass` (`gutter_prepass`) and one pure decision inside
+  `place_gutter` (`gutter_swap`), and touches the shared ones only through three
+  `state` fields — `state.gutter`, `state.cont` (the index of the outgoing entry that
+  continues at the node column; every reader spells `state.cont or 1`, so `1` is the
+  un-swapped path by construction) and `state.own_lane_up`. All three are nil, and
+  therefore inert, under every other policy — verified cell-for-cell against the
+  baseline over glyphs, highlight groups AND every Segment's
+  `id.colour.connectivity`: **0 differing over 191,364 signature Lines** (4 policies ×
+  4 merge styles × 3 corpora × 2 projections). `gutter` is the policy the `prepass`
+  hook exists for (it is also kept for the reserved `interval` placement); it is
+  also the one policy whose `seam` is NOT `layout_seam` — that chain does not apply
+  the column constraint. **The gutter changes hands on
   two virtual rows of its own, one lane each** (`evict_gutter` moves the occupant
   out, `claim_gutter` turns the arriving lane in), never by a same-row swap and
   never on a commit Line: two lanes transposing must both bend in the gutter cell,
@@ -639,12 +664,40 @@ Details not covered by the spec or architecture:
   hub in the *ending* branch's colour while the spine below it was the trunk's, since
   §3.1's ordering routinely parks an ending lineage in the gutter right above a fork
   (85 of 986 nodes on a 1040-commit repo expanded; `compact` showed 0–1, hence it
-  read as gutter-specific). `tests/graph_helpers.check_spine` is the invariant —
-  at a node cell, the wire above and the wire below carry one lane id. `gutter`
+  read as gutter-specific).
+  **The one handover that is avoided rather than paid for** is `gutter_swap` (§5.6):
+  at a merge, hand the gutter to a **non-first** parent so the branch owning the next
+  subject row is already in it. Gated on THREE clauses, all required — (1) that
+  parent's next commit is earlier in row order than the first parent's, (2) it OWNS
+  the next subject row, (3) this merge is its only in-set child so it can KEEP the
+  gutter. Clause 2 is the gate: with clause 1 alone it fires at 100% of merges in the
+  shipping FOCUSED view and buys nothing (a `◍` head sits after the merge by §3.1
+  lineage grouping, and a head owns no subject row), measured at crossings 116 → 209,
+  rows +29.5%, node-in-gutter 1.000 → 0.943. Clause 3 makes the saving *provable*:
+  without it a senior sibling lane wins §5 identity at that parent, ours is evicted
+  anyway, and the break buys nothing — it declines exactly the unearned fires
+  (15 of 100 on a 1040-commit repo expanded, 0 of 11 on `large_topo`). Cost on that
+  repo expanded: crossings 598 → 512, rendered Lines 1593 → 1423, ink −12.3%,
+  handover Lines 445 → 275, width and node-in-gutter unchanged, lane stability
+  0.912 → 0.922, and 85 spine breaks each removing one handover. Focused is
+  BYTE-IDENTICAL (0 differing over 20,601 signature Lines).
+  `tests/graph_helpers.check_spine` is the invariant —
+  at a node cell, the wire above and the wire below carry one lane id — and it now
+  **prices** the swap instead of exempting it: a break is licensed only if it is in
+  the gutter column, is between the row's first and a non-first parent lane, AND the
+  next subject row's node is in the gutter entered by the swapped lane (i.e. the
+  handover was observably saved). All read off the rendered rows, so a swap that saved
+  nothing still fails; it returns the licensed count so a test can prove the gate
+  fires. `gutter`
   holds it exactly; the four lane-column policies place the node on the LEFTMOST
   incoming lane (a positional stand-in for its own lane) and carry a 1–2 rows/repo
   residue, unfixed because the node column is what compaction ripples off (see
-  `place_commit`). An unknown/absent value falls back to `compact`. §5.1's invariants
+  `place_commit`). **A swapped node's colour comes from its `up` wire**, not the
+  usual `down`: `render.top_lane` takes an `own_lane_up` flag (set by `finalize` from
+  the layout, nil everywhere else) and inverts its vertical preference for that cell
+  alone, so a trunk merge keeps the trunk's colour and the topic lane merely *begins*
+  below it instead of the merge reading as the branch it merged.
+  An unknown/absent value falls back to `compact`. §5.1's invariants
   are classified accordingly: **universal** (hold under every policy),
   **conditional guards** (constrain any jog a policy makes — written as violation
   counts, so they go vacuous rather than false), **policy-specific** (only the
