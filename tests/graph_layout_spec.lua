@@ -140,18 +140,32 @@ local function assert_ok(opts, items, label, skip_color)
 end
 
 -- Run the invariants over a batch of random DAGs; fail with details on the
--- first few offenders.
-local function fuzz(opts, skip_color)
+-- first few offenders. `project` feeds each DAG through the §10.7 focused
+-- projection first (`h.focused`), which is what a graph actually renders.
+local function fuzz(opts, skip_color, project)
     local failures = {}
-    for seed = 1, 60 do
-        local n = 3 + (seed % 10) -- sizes 3..12
+    -- Projection CONTRACTS a DAG (a collapsed run becomes one `◍`), so it needs more
+    -- raw material than the plain sweep to produce the interesting rows — junctions
+    -- and heads. Sizes 3..14 over 80 seeds is enough that several land on the shape
+    -- the freed-column regression below needs (seeds 20, 42, 46 among them).
+    local seeds = project and 80 or 60
+    for seed = 1, seeds do
+        local n = project and (3 + (seed % 12)) or (3 + (seed % 10)) -- 3..14 / 3..12
         local items = h.dag(h.random_dag(n, seed))
-        local errors, _, grid = h.check(opts, items, skip_color)
+        if project then items = h.focused(items) end
+        local ok, errors, _, grid = pcall(h.check, opts, items, skip_color)
+        if not ok then
+            -- `columns.layout`'s own oracle errors out, so an offender never reaches
+            -- the invariants. Report it as the failure it is instead of blowing up
+            -- the whole sweep on the first one.
+            failures[#failures + 1] = ("seed=%d n=%d: LAYOUT ERROR %s"):format(seed, n, tostring(errors))
+            errors = {}
+        end
         if #errors > 0 then
             failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s"):format(
                 seed, n, h.grid_to_string(grid), table.concat(errors, "\n"))
-            if #failures >= 3 then break end -- cap the noise
         end
+        if #failures >= 3 then break end -- cap the noise
     end
     if #failures > 0 then
         assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
@@ -182,6 +196,18 @@ for _, style in ipairs(STYLES) do
                     fuzz(opts, false)
                 end)
             end
+
+            -- The SAME sweep over the §10.7 FOCUSED PROJECTION — what an opened graph
+            -- actually lays out (spec §10.7: the anchor's mainline in full, every other
+            -- branch a `◍` head). A raw `dag()` is all ordinary commits, so every
+            -- non-subject-row path in `columns.lua` (`owns_subject` false — a collapsed
+            -- head or a junction marker) is unreachable no matter how hard the raw DAGs
+            -- are fuzzed. That gap is what let `gutter` × `merge_on_separate_line` /
+            -- `allow_merge_on_split` ship a hard `columns.layout` error while the whole
+            -- policy × style matrix stayed green (see the regression below).
+            it("produces well-formed graphs over the focused projection (§10.7)", function()
+                fuzz(opts, style.experimental, true)
+            end)
         end)
     end
 end
@@ -371,6 +397,156 @@ describe("compaction never crosses a lane (§5)", function()
         assert.truthy(hub_down, "the split hub must descend into the node's column")
         assert.equals(trunk, hub_down.id, "the split hub must be the trunk's lane, not the topic's")
         assert.equals(frow.parent_lanes[1].color, hub_down.color)
+    end)
+end)
+
+describe("a freed fan-out column is never the node's own (§5.1/§5.6)", function()
+    -- REGRESSION (fix/gutter-freed-own-column). `fan_out` may reuse a column a
+    -- terminating child just vacated for an extra merge parent (§5.1 fan-out
+    -- placement, reachable under `allow_merge_on_split` or a separate merge Line).
+    -- It derived the candidates POSITIONALLY — `commit_incoming[2..n]`, "every
+    -- incoming lane but the leftmost" — which stands in for "every incoming column
+    -- this row has not claimed" only while the node sits on the LEFTMOST incoming
+    -- lane. `place_commit` does exactly that; `place_gutter` puts the node on the
+    -- commit's OWN lane (§5, `trunk_entry`), which can be any incoming entry. The
+    -- node's column then appeared in the freed list, an extra parent was assigned
+    -- it, and the first parent — assigned the same column a moment earlier — was
+    -- overwritten in `active`: `columns.layout` errored outright with
+    -- "did not carry an outgoing edge forward".
+    --
+    -- Three things had to coincide, which is why nothing caught it: the `gutter`
+    -- policy (`C`), a merge style that populates `freed` at all (`m`), and a
+    -- NON-SUBJECT row (a `◍` head or a junction marker — the rows the handover
+    -- deliberately skips, so the node's lane is wherever it happens to be). The
+    -- third is only reachable on a PROJECTED view, and the layout matrix fed it raw
+    -- DAGs, all of whose rows own a subject.
+    local build_graph = require("gitloom.graph")._internal.build_graph
+
+    -- The shape, as a named fixture: a junction `f` that is both a fork and a merge,
+    -- reached by TWO lanes — a merge's second-parent edge (from `x`, whose mainline
+    -- goes elsewhere) and `f`'s own line of history (`y`, whose FIRST parent is `f`).
+    -- Row order puts `x` above `y`, so `f`'s own lane is the RIGHTMOST of the two and
+    -- the node lands off the leftmost incoming column. Not contrived: §3.1 emits a
+    -- merged-in lineage right after its merge, so a junction reached by a foreign
+    -- second-parent edge above its own is ordinary.
+    local FIXTURE = {
+        { "x", { "p", "f" } }, -- a merge; `f` is its SECOND parent
+        { "y", { "f" } },      -- `f`'s own line of history
+        { "p", { "g" } },
+        { "f", { "g", "r" } }, -- merges (x, y) AND forks (g, r) => a kept junction
+        { "g", { "r" } },
+        { "r", {} },
+    }
+
+    -- Every (line, column) where TWO DISTINCT outgoing lanes of this row turn down.
+    -- Two parents given one column is the defect, whatever the style draws around
+    -- it. Counted per rendered line and by lane identity, because one parent
+    -- legitimately turns down at the same column on two lines (the commit Line's
+    -- stub into the merge fan, then the fan itself), and a fan's shared ascent is a
+    -- BUNDLE of every parent's edge in one segment.
+    local function parent_column_clashes(row)
+        local out, seen = {}, {}
+        for _, l in ipairs(row.parent_lanes or {}) do seen[l] = true end
+        for _, ln in ipairs(h.row_lines(row)) do
+            for j, col in ipairs(ln.line or {}) do
+                local lanes = {}
+                for _, s in ipairs(col.lanes or {}) do
+                    if s.connectivity.down then
+                        for _, e in ipairs(s.edges or {}) do
+                            if seen[e] then lanes[e] = true end
+                        end
+                    end
+                end
+                local n = 0
+                for _ in pairs(lanes) do n = n + 1 end
+                if n > 1 then
+                    out[#out + 1] = ("%s col %d: %d outgoing lanes turn down"):format(ln.name, j, n)
+                end
+            end
+        end
+        return out
+    end
+
+    local CASES = {
+        { name = "merge-line", ms = { split_on_separate_line = false, merge_on_separate_line = true } },
+        { name = "inline+mergesplit", exp = true,
+          ms = { split_on_separate_line = false, merge_on_separate_line = false, allow_merge_on_split = true } },
+    }
+
+    for _, case in ipairs(CASES) do
+        it("lays out a junction whose own lane is not the leftmost [gutter / " .. case.name .. "]", function()
+            local opts = policy_opts(case.ms, "gutter")
+            local items = h.focused(h.dag(FIXTURE))
+
+            -- The row order must still produce the shape this pins, or the test would
+            -- pass vacuously if the projection or the ordering changed.
+            local fnode
+            for _, it0 in ipairs(items) do
+                if it0.commit.hash == "f" then fnode = it0.commit end
+            end
+            assert.truthy(fnode, "the fixture must project `f` as a kept node")
+            assert.is_true(fnode.junction and not fnode.collapsed,
+                "`f` must be a kept JUNCTION — a non-subject row is what the bug needs")
+
+            local rows = build_graph(opts, items)
+            local frow
+            for _, row in ipairs(rows) do
+                if row.commit and row.commit.hash == "f" then frow = row end
+            end
+            assert.truthy(frow)
+            assert.equals(2, #frow.child_lanes)
+            assert.equals(2, #frow.parent_lanes)
+
+            -- The node is off the leftmost incoming lane (`place_gutter` puts it on
+            -- `trunk_entry`, §5) — the precondition the positional `freed` derivation
+            -- got wrong.
+            local ncol, inset = nil, {}
+            for _, l in ipairs(frow.child_lanes) do inset[l] = true end
+            for j, col in ipairs(frow.columns) do if col.has_commit then ncol = j end end
+            local left_child
+            for j = 1, ncol - 1 do
+                for _, s in ipairs(frow.columns[j].lanes or {}) do
+                    if s.connectivity.up and inset[s.edges and s.edges[1]] then left_child = j end
+                end
+            end
+            assert.truthy(left_child,
+                "the fixture must put a converging child LEFT of the node column")
+
+            -- The defect itself: both parents assigned one column.
+            assert.same({}, parent_column_clashes(frow))
+            -- And the full suite, incl. the spine (§5.6) — a colour handoff is
+            -- sanctioned only for `allow_merge_on_split`.
+            assert_ok(opts, items, "gutter/" .. case.name .. "/freed-own-column", case.exp)
+            assert.equals(0, #h.check_spine(rows))
+        end)
+    end
+
+    -- The class, over the whole matrix: whatever a placement stage does with the node
+    -- column, no extra parent may be given a column the row has already claimed.
+    it("never stacks two outgoing lanes in one column (every style x policy, projected)", function()
+        local bad = {}
+        for _, style in ipairs(STYLES) do
+            for _, policy in ipairs(POLICIES) do
+                local opts = policy_opts(style.ms, policy)
+                for seed = 1, 120 do
+                    local items = h.focused(h.dag(h.random_dag(3 + (seed % 12), seed)))
+                    local ok, rows = pcall(build_graph, opts, items)
+                    if not ok then
+                        bad[#bad + 1] = ("%s/%s seed=%d: LAYOUT ERROR %s")
+                            :format(style.name, policy, seed, tostring(rows))
+                    else
+                        for ri, row in ipairs(rows) do
+                            for _, e in ipairs(parent_column_clashes(row)) do
+                                bad[#bad + 1] = ("%s/%s seed=%d row=%d %s")
+                                    :format(style.name, policy, seed, ri, e)
+                            end
+                        end
+                    end
+                    if #bad >= 6 then break end
+                end
+            end
+        end
+        assert.equals(0, #bad, "\n" .. table.concat(bad, "\n"))
     end)
 end)
 
