@@ -737,6 +737,33 @@ local function make_rng(seed)
     end
 end
 
+--- Project `items` the way an opened graph does (§10.7 first-parent focus): every
+--- childless commit is a ref tip, the first of them is the pinned anchor, and
+--- `collapse_merged` is on — so the result holds `◍` collapsed heads and kept
+--- **junctions** as well as ordinary commits.
+---
+--- Why the layout matrix needs it: a raw `dag()` is all ordinary commits, and
+--- `owns_subject` (§5.6) is false only for a collapsed head or a junction marker.
+--- Every "non-subject row" branch in `columns.lua` — the whole reason the `gutter`
+--- policy has one — is therefore UNREACHABLE on a raw DAG, however much it is
+--- fuzzed. Feeding the same DAGs through the projection is what exercises them.
+---@param items table[]  -- dag() output
+---@return table[] display  -- projected display items, ready for columns.layout
+function M.focused(items)
+    local view = require("gitloom.graph.view")
+    local ro, pinned = {}, {}
+    for i, it in ipairs(items) do
+        if #(it.commit.children or {}) == 0 then
+            local id = "t" .. i
+            it.commit.refs = it.commit.refs or {}
+            it.commit.refs[#it.commit.refs + 1] = { name = id, kind = "local" }
+            ro[#ro + 1] = { id = id, tip = it.commit, mode = "normal" }
+            if #ro == 1 then pinned[id] = true end
+        end
+    end
+    return view.project(items, view.owners(items, ro, pinned, {}, true), nil).items
+end
+
 --- A random closed DAG of `n` commits in topo order: every non-last commit
 --- has 1–2 parents drawn from later commits; the last commit is a root.
 ---@param n integer

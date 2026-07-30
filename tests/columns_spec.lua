@@ -165,6 +165,37 @@ for style, ms in pairs(STYLES) do
                     assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
                 end
             end)
+
+            -- The same sweep over the §10.7 FOCUSED PROJECTION — what an opened graph
+            -- lays out. A raw `dag()` is all ordinary commits, so a row that owns no
+            -- SUBJECT (`owns_subject` false — a `◍` collapsed head or a junction
+            -- marker) never occurs, and every non-subject-row branch in `columns.lua`
+            -- goes untested however hard the raw DAGs are fuzzed. That gap is what let
+            -- `gutter` × `merge_on_separate_line` / `allow_merge_on_split` error out of
+            -- `columns.layout` outright with the whole matrix green (see
+            -- graph_layout_spec, "a freed fan-out column is never the node's own").
+            it("is well-formed across projected DAGs (§10.7)", function()
+                local failures = {}
+                for seed = 1, 80 do
+                    local n = 3 + (seed % 12) -- 3..14: projection contracts, so allow more
+                    local items = h.focused(h.dag(h.random_dag(n, seed)))
+                    local ok, rows = pcall(columns.layout, opts, items)
+                    if not ok then
+                        failures[#failures + 1] = ("seed=%d n=%d: LAYOUT ERROR %s")
+                            :format(seed, n, tostring(rows))
+                    else
+                        local errs = check(opts, rows)
+                        if #errs > 0 then
+                            failures[#failures + 1] = ("seed=%d n=%d:\n%s\n%s")
+                                :format(seed, n, render(opts, rows), table.concat(errs, "\n"))
+                        end
+                    end
+                    if #failures >= 3 then break end
+                end
+                if #failures > 0 then
+                    assert(false, "\n=== fuzz failures ===\n" .. table.concat(failures, "\n\n"))
+                end
+            end)
         end)
     end
 end
