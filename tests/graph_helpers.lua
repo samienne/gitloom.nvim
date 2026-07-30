@@ -633,13 +633,19 @@ end
 -- ~5% of random DAGs, 1–2 rows per real repository. `gutter` fixes the node column
 -- outright and holds this exactly, which is why it is asserted there.
 --
--- THE ONE LICENSED EXCEPTION (§5.6 gutter parent swap). `gutter` may deliberately
--- break the spine at a merge: it sends a NON-FIRST parent down the gutter so the
--- branch owning the next subject row is already in place, which removes that row's
--- handover rows entirely. The break is then not a defect but a trade, and this checker
--- prices it rather than exempting it. A break is licensed only if ALL of:
+-- TWO LICENSED EXCEPTIONS, ONE PER FAN (§5.6 gutter parent swap / split swap). `gutter`
+-- may deliberately break the spine to avoid a handover, and this checker PRICES each
+-- break rather than exempting the policy: a break must be shown, from the rendered rows
+-- alone, to have removed two handover rows.
 --
---   L1. it is in the GUTTER column (column 1) — the only column the policy constrains;
+-- Both licences share L1:
+--
+--   L1. the break is in the GUTTER column (column 1) — the only column the policy
+--       constrains.
+--
+-- THE MERGE SWAP (at a merge, a NON-FIRST parent takes the gutter so the branch owning
+-- the next subject row is already in place):
+--
 --   L2. the wire leaving below is one of this commit's **non-first** parent Lanes, and
 --       the wire arriving above is its **first** parent's Lane. (The first parent
 --       continues the arriving Lane's identity, §5, so the up wire's id IS
@@ -650,19 +656,48 @@ end
 --       different Lane would be arriving at that node, and the row would have paid the
 --       eviction and claim rows anyway on top of the break.
 --
--- So a break anywhere else, a break whose lanes are not a merge's parents, and a swap
--- that saved nothing all still fail. Returns the errors and, as a second value, the
--- number of LICENSED breaks — so a test can assert the gate actually fires rather than
--- passing vacuously.
+-- THE SPLIT SWAP (at a fork, the node takes the gutter from a converging child that is
+-- already in it, instead of evicting the child and claiming the column back):
+--
+--   L2'. the wire leaving below is this commit's **first** parent's Lane (the spine is
+--        intact below the node — the swap touched the other side), and the wire arriving
+--        above is one of its **converging child** Lanes that the first parent does NOT
+--        continue. §5 makes that test exact without knowing anything about the layout:
+--        the first parent inherits the id of the child lane it continues, so "a
+--        `child_lanes` entry whose id is not `parent_lanes[1]`'s" IS "a converging child
+--        that is not the continuation".
+--   L3'. THE LICENCE IS EARNED: this row emitted **no handover Line** — no eviction and
+--        no claim row above it. A handover row plus this break is a row that paid the
+--        two rows anyway, so the break bought nothing. (Reading `above` for it is the
+--        same discipline as the rest: a split fan always carries the shared multi-edge
+--        descent, §5; an eviction or claim row never does.)
+--
+-- Note the asymmetry: the merge swap's earning is on the NEXT row (it hands the gutter
+-- forward), the split swap's is on ITS OWN row (it declines to hand the gutter back).
+-- Neither licence lets the other's shape through: a merge swap has a non-first parent
+-- below, a split swap the first parent below, and a cell with a foreign child above AND a
+-- non-first parent below — the commit's own Lane on neither side — matches neither and is
+-- reported.
+--
+-- WHAT L2' DOES NOT SEPARATE, stated because it bounds the claim: the four lane-column
+-- policies place a node on the LEFTMOST arriving lane, which where that is not the
+-- commit's own lane produces a break of exactly the L2' shape (foreign child above, first
+-- parent below). Only the *policy* knows that column 1 is a gutter, so a checker reading
+-- the rendered rows cannot tell the two apart — which is why `check_spine` is asserted for
+-- `gutter` only, as it was before this licence existed. It is not a new exemption: the
+-- four policies were never asserted.
+--
+-- Returns the errors, the number of LICENSED breaks (so a test can prove the gate fires
+-- rather than passing vacuously), and a per-kind breakdown.
 ---@param rows table[]
 ---@param opts table?  -- needed to classify subject rows (§5.6); defaults to markers on
----@return string[] errors, integer licensed
+---@return string[] errors, integer licensed, table kinds  -- { merge = n, split = n }
 local function check_spine(rows, opts)
     local errors = {}
     local o = opts or {}
     -- Which rows own a subject (§5.6): a collapsed head and a junction drawn as a
     -- marker do not, so they are not where the gutter changes hands.
-    local subject, node = {}, {}
+    local subject, node, handover = {}, {}, {}
     for ri, row in ipairs(rows) do
         local C = row.commit
         subject[ri] = C ~= nil and not C.collapsed
@@ -677,37 +712,62 @@ local function check_spine(rows, opts)
                 node[ri] = e
             end
         end
+        -- A HANDOVER Line above this row: a virtual Line with no shared multi-edge
+        -- descent, i.e. an eviction or claim row rather than the split fan (§5/§5.6).
+        for _, line in ipairs(row.above or {}) do
+            local multi = false
+            for _, cell in ipairs(line) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    if #(s.edges or {}) > 1 then multi = true end
+                end
+            end
+            if not multi then handover[ri] = true end
+        end
     end
 
-    local licensed = 0
+    local licensed, kinds = 0, { merge = 0, split = 0 }
     for ri, row in ipairs(rows) do
         local e = node[ri]
         if e and e.u and e.d and e.u ~= e.d then
-            local why
-            local pl = row.parent_lanes or {}
-            local swapped -- is `d` a non-first parent lane?
+            local why, kind
+            local pl, cl = row.parent_lanes or {}, row.child_lanes or {}
+            local first = pl[1] and pl[1].id
+            local swapped -- is `d` a non-first parent lane? (the merge swap's shape)
             for i = 2, #pl do
                 if pl[i].id == e.d then swapped = pl[i] end
             end
+            local foreign -- is `u` a converging child the first parent does not continue?
+            for _, l in ipairs(cl) do
+                if l.id == e.u and l.id ~= first then foreign = l end
+            end
             if e.col ~= 1 then
                 why = "not in the gutter column"
-            elseif not swapped then
-                why = "the wire below is not a non-first parent lane"
-            elseif not (pl[1] and pl[1].id == e.u) then
-                why = "the wire above is not the first parent's lane"
+            elseif swapped then
+                kind = "merge"
+                if first ~= e.u then
+                    why = "the wire above is not the first parent's lane"
+                else
+                    local n
+                    for k = ri + 1, #rows do
+                        if subject[k] then n = k break end
+                    end
+                    if not n then
+                        why = "no subject row follows, so no handover could be saved"
+                    elseif not node[n] or node[n].col ~= 1 then
+                        why = ("the next subject row (%d) does not put its node in the gutter"):format(n)
+                    elseif node[n].u ~= e.d then
+                        why = ("the swap SAVED NOTHING: the next subject row (%d) is entered by lane %s, not %s")
+                            :format(n, tostring(node[n].u), tostring(e.d))
+                    end
+                end
+            elseif foreign and first == e.d then
+                kind = "split"
+                if handover[ri] then
+                    why = "the split swap SAVED NOTHING: this row paid a handover Line anyway"
+                end
             else
-                local n
-                for k = ri + 1, #rows do
-                    if subject[k] then n = k break end
-                end
-                if not n then
-                    why = "no subject row follows, so no handover could be saved"
-                elseif not node[n] or node[n].col ~= 1 then
-                    why = ("the next subject row (%d) does not put its node in the gutter"):format(n)
-                elseif node[n].u ~= e.d then
-                    why = ("the swap SAVED NOTHING: the next subject row (%d) is entered by lane %s, not %s")
-                        :format(n, tostring(node[n].u), tostring(e.d))
-                end
+                why = "neither swap: the wire below is not a non-first parent lane, and the"
+                    .. " wire above is not a converging child the first parent does not continue"
             end
             if why then
                 errors[#errors + 1] = ("row %d col %d (%s): unlicensed node spine change %s -> %s — %s")
@@ -715,10 +775,11 @@ local function check_spine(rows, opts)
                         tostring(e.u), tostring(e.d), why)
             else
                 licensed = licensed + 1
+                kinds[kind] = kinds[kind] + 1
             end
         end
     end
-    return errors, licensed
+    return errors, licensed, kinds
 end
 
 -- Exposed so a self-test can prove the checker catches broken grids.
