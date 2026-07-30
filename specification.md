@@ -842,10 +842,24 @@ already in place). The lane that claims is the one whose **chain the commit
 continues** (§5 lane identity), so the gutter cell's wire above the node and its
 wire below it are one Lane, one id, one colour.
 
+**The occupant is whoever is in the column** — a pass-through survivor, or one of
+this commit's *own* converging children. The second case is the frequent one and
+the easy one to miss: a run of commits on lane L holds the gutter, and where that
+run's last commit forks off a trunk, L's final edge terminates at the fork —
+still in the gutter, and still not the lane the fork continues on. It is evicted
+like any other occupant, and converges back in as an ordinary fan arm on the
+split Line. Skipping it instead leaves the gutter cell's wire above the node on
+the ending lane and its wire below on the continuing one, so the fork's split hub
+renders in the ending branch's colour while the spine below it renders in the
+trunk's — the very defect the rule above forbids, and the one the ordering makes
+routine (§3.1 emits a merged-in lineage right after its merge, so the lane
+adjacent to a fork is very often one that ends there).
+
 Either row is emitted only when it has work: a gutter already free needs no
-eviction, and a lane already in the gutter needs no claim — which, given the
-lineage grouping (§3.1), is the overwhelmingly common case. Only a subject row
-may claim the gutter, so it is guaranteed free when the claim row runs.
+eviction, and **the claiming lane** already in the gutter needs no claim — which,
+given the lineage grouping (§3.1), is the overwhelmingly common case. *Any* other
+lane in the gutter is a reason to evict, not a reason to skip the claim. Only a
+subject row may claim the gutter, so it is free by the time the claim row runs.
 
 **The general rule this is an instance of.** Two horizontal runs may share cells
 on a Line only when both are arms of the **same fan of the commit on that Line** —
@@ -901,6 +915,14 @@ and a 1028-commit real repository, against `compact` (the default):
 | ink (glyph cells) | 2068 → **2102** | 8751 → **10319** | 8319 → **8396** | 22578 → **29802** |
 | rendered rows | 335 → **336** | 661 → **715** | 392 → **393** | 1135 → **1400** |
 | max graph width | 54 → **54** | 54 → **54** | 60 → **64** | 60 → **62** |
+
+The table predates the clarification above (evicting a *converging child* that
+holds the gutter, not only a survivor), which buys the spine guarantee at the
+price of the handover rows those forks were previously skipping. It costs nothing
+in a **focused** view — rendered rows unchanged on both fixtures — and **+5.9%**
+(`large_topo`) / **+12.1%** (a 1040-commit repository) rows fully expanded, on top
+of the figures above. Adjacency is unchanged (100% focused, 99.0–99.8% expanded,
+the residue being the root column break).
 
 **Handover frequency** — the number that governs the design. Counted as subject
 rows whose owning lane differs from the previous subject row's: **0.6 per 100

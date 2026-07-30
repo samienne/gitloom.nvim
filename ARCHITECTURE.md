@@ -965,7 +965,17 @@ fan_line flags). Then the **layout strategy** chains the grid stages:
 - `seed_bars` — open the main line; write every survivor's bar (a vertical).
 - `place_commit` — the commit column `cc0` (leftmost incoming, or the leftmost free
   / non-blocked column for a tip), the incoming reservation, and the split reduction
-  (only the trunk reaches the commit line under `sep_split`). `cc` starts at `cc0`.
+  (only the lane the node sits on reaches the commit line under `sep_split`). `cc`
+  starts at `cc0`. "Leftmost incoming" is a **positional stand-in** for *this
+  commit's own lane* (`state.trunk_entry`, §5): they coincide wherever the trunk sits
+  leftmost, which on real histories is nearly always — the residue is 1–2 rows per
+  repository and ~5% of random DAGs, and there the node lands on a lane that ends at
+  it, so its spine changes colour mid-column (`check_spine`). Switching to
+  `trunk_entry` is the general fix, but the node column is what compaction ripples
+  off — 96 of 395 rendered lines on a 1040-commit focused view — so it is a visual
+  change to the default policy and is deliberately a separate decision.
+  `place_gutter` does read `trunk_entry`: with the node column fixed there is no
+  ripple.
 - `slide` — compact a *linear* commit leftward through the free run (a no-op on a
   fan line). Its own stage so the seam strategy can drop it (below).
 - `fan_in` — the split line above (when scheduled); reserve the commit jog; write
@@ -1069,13 +1079,15 @@ policy uses the `prepass` hook** — it is kept for the reserved `interval`
 placement (spec §5.6).
 
 *Node.* A subject row's node goes in the gutter; a marker or junction keeps its own
-lane column, and — because the claim rule keys on *subject* rows — a marker between
-two commits of one lane triggers nothing. The one case where a subject node is not
-in the gutter is a **root** having occupied it on the previous row: the §5.1 root
-column break blocks the column, exactly as for any other policy. Measured on a
-1028-commit repository, that accounts for all 10 of the 1028 rows whose node is off
-the gutter, and the defensive "a foreign lane is passing through" fallback never
-fires.
+lane column — **its own** meaning the incoming lane its first parent continues
+(`state.trunk_entry`), not merely the leftmost one arriving, so its spine is one
+lane through the node like any other — and, because the claim rule keys on *subject*
+rows, a marker between two commits of one lane triggers nothing. The one case where
+a subject node is not in the gutter is a **root** having occupied it on the previous
+row: the §5.1 root column break blocks the column, exactly as for any other policy.
+Measured on a 1028-commit repository, that accounts for all 10 of the 1028 rows
+whose node is off the gutter, and the defensive "a foreign lane is passing through"
+fallback never fires.
 
 *Reservation.* Every incoming column is reserved for its own row, so a lane born
 here cannot take one a terminating child just freed (the §5.1 fan-out placement
@@ -1106,16 +1118,29 @@ checker flags. So the handover gets two virtual rows of its own, run *before*
 `seed_bars` (they patch the recorded columns, so every later stage sees the new
 ones) and appended to `state.above` in render order:
 
-- **`evict_gutter`** — the occupant (a survivor, not incident to this commit) leaves
-  the gutter for the nearest free column to its right.
+- **`evict_gutter`** — the occupant leaves the gutter for the nearest free column to
+  its right. The occupant is whoever is in the column: a pass-through **survivor**,
+  or one of this commit's own **converging children** — that second case is the
+  frequent one, since §3.1's ordering emits a merged-in lineage right after its
+  merge, so the lane adjacent to a fork is routinely one that ends *at* the fork. It
+  is evicted like any other and converges back in as an ordinary fan arm on the
+  split Line. The one occupant needing no eviction is `state.trunk_in` itself.
 - **`claim_gutter`** — the arriving lane turns in from its own column to the gutter.
   *Which* lane is `state.trunk_in`, the chain this commit continues (§5 lane
   identity, chosen from the DAG in `spawn_lanes` — never from a column), so the
   gutter cell's wire above the node and its wire below it are one Lane and one
-  colour. It declines when there is nothing to move: a tip; one of this commit's own
-  children already in the gutter (then the commit's *fan* converges there, which is
-  a fan and may legitimately share its Line); a survivor still holding it (eviction
-  declined, so the node falls back off-gutter); or a root-blocked gutter.
+  colour. It declines when there is nothing to move: a tip; **the claimer** already
+  in the gutter; a root-blocked gutter; or — defensively — anything still holding the
+  column, which means the eviction declined and the node falls back off-gutter.
+
+  The claim's "already there" test is on the **claimer**, not on any incoming lane.
+  Reading it as *any* converging child is what produced the split-hub colour bug:
+  the handover was skipped at exactly the forks where the ending lineage held the
+  gutter, so the wire down into the fork's node was the topic's while the spine
+  below it was the trunk's — 85 of 986 nodes on a 1040-commit repository fully
+  expanded, 21 of 605 on `tests/large_topo`, and 0–1 under `compact`, which is why
+  it read as gutter-specific. `tests/graph_helpers.check_spine` is the invariant
+  (`gutter` holds it exactly; see `place_commit` for the other policies' residue).
 
 Each row moves **exactly one lane**, so it carries one horizontal run in one
 direction and nothing else turns on it. The commit Line below then carries only

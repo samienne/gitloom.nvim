@@ -342,6 +342,13 @@ function M.layout(opts, items, seed)
         for _, lane in ipairs(ended) do free_color(lane.color) end
         state.outgoing = outgoing
         state.trunk_in = trunk
+        -- The incoming ENTRY carrying that lane, so a placement stage can ask "which
+        -- column is this commit's own lane in?" without re-deriving identity. The
+        -- entry table is what the gutter's handover rows mutate (`e.col`), so holding
+        -- the reference — not the column — keeps every later stage in step.
+        for _, e in ipairs(incoming) do
+            if e.lane == trunk then state.trunk_entry = e end
+        end
     end
 
     -- DECIDE_STYLE (shell step): the merge-style flags for this item. A node-less
@@ -398,8 +405,23 @@ function M.layout(opts, items, seed)
 
     -- PLACE_COMMIT (stage): the commit column cc0 (leftmost incoming, or the
     -- leftmost free column for a tip); reserve the incoming columns; with a separate
-    -- split line reduce the fan-in to the trunk (the children's columns stay free
-    -- gaps). `cc` starts at cc0; the `slide` stage may move it left.
+    -- split line reduce the fan-in to the lane the node sits on (the other children's
+    -- columns stay free gaps). `cc` starts at cc0; the `slide` stage may move it left.
+    --
+    -- `incoming[1]` is the LEFTMOST incoming lane, which is a positional stand-in for
+    -- "this commit's own lane" — the incoming lane its first parent continues
+    -- (`state.trunk_entry`, chosen from the DAG in `spawn_lanes`). The two coincide
+    -- wherever the trunk sits leftmost, which on a real history is nearly always: the
+    -- residue is 1–2 rows per repository (0 on `tests/large_topo`) and ~5% of random
+    -- DAGs. Where they differ the node lands on a *different* child's column, so the
+    -- cell's wire from above belongs to a lane that ends here while its wire below
+    -- belongs to the continuing one, and the spine changes colour mid-column (the §5.6
+    -- defect, in the small). Putting the node on `trunk_entry` instead is the general
+    -- fix, but it moves the node, and compaction ripples off the node column — 96 of
+    -- 395 rendered lines on a 1040-commit repository's focused view — so it is a
+    -- deliberate visual change to the default policy, not a quiet bug fix, and is left
+    -- for its own decision. `place_gutter` (§5.6) does read `trunk_entry`: the gutter
+    -- fixes the node column outright, so there the same choice is not a ripple.
     local function place_commit(state)
         local g, incoming = state.g, state.incoming
         local cc0
@@ -431,20 +453,37 @@ function M.layout(opts, items, seed)
     --
     -- Exactly one lane moves here, so the row carries one horizontal in one
     -- direction. It runs FIRST in the chain, before `seed_bars` reads the survivor
-    -- columns, and patches the survivor's recorded column so every later stage sees
+    -- columns, and patches the occupant's recorded column so every later stage sees
     -- the new position. `state.above` is a LIST, so this row coexists with the claim
     -- row and with the commit's own split fan (§5 Line).
+    --
+    -- THE OCCUPANT IS WHOEVER IS IN THE COLUMN — a pass-through survivor, or one of
+    -- this commit's OWN converging children (§5.6 says "the occupant", not "a
+    -- survivor"). The second case is the common one and used to be skipped: a run of
+    -- commits on lane L puts L in the gutter, and where that run's last commit forks
+    -- off a trunk, L's final edge terminates at the fork — still in the gutter, still
+    -- not the lane the fork continues on. Declining then left the gutter cell's wire
+    -- ABOVE the node on L and its wire BELOW it on the continuing lane, so the fork
+    -- (the split hub) rendered in the ending branch's colour while the spine below it
+    -- rendered in the trunk's — exactly the two-colours-in-one-column defect §5.6
+    -- forbids ("the gutter cell's wire above the node and its wire below it are one
+    -- Lane, one id, one colour"). The occupant leaves like any other, and converges
+    -- back in as an ordinary fan arm on the split Line.
+    --
+    -- The one occupant that needs no eviction is the lane the commit CONTINUES
+    -- (`trunk_in`, chosen from the DAG in `spawn_lanes`): it is already where the
+    -- claim row would put it.
     local function evict_gutter(state)
         if not state.subject or blocked[GUTTER] then return end
-        -- our own incoming lane already holds it: nothing to do
-        for _, inc in ipairs(state.incoming) do
-            if inc.col == GUTTER then return end
-        end
-        local occ
+        local occ, occ_incoming
         for _, s in ipairs(state.survivors) do
             if s.col == GUTTER then occ = s end
         end
-        if not occ then return end -- already free
+        for _, inc in ipairs(state.incoming) do
+            if inc.col == GUTTER then occ, occ_incoming = inc, true end
+        end
+        if not occ then return end                    -- already free
+        if occ.lane == state.trunk_in then return end -- the claiming lane holds it
 
         local taken = {}
         for _, s in ipairs(state.survivors) do taken[s.col] = true end
@@ -453,19 +492,23 @@ function M.layout(opts, items, seed)
         while taken[f] or blocked[f] do f = f + 1 end
 
         local cells, draw = new_line()
-        for _, s in ipairs(state.survivors) do
-            if s == occ then
-                draw(s.lane, GUTTER, f, GUTTER, f) -- in at the gutter, out at f
-            else
-                draw(s.lane, s.col, s.col, s.col, s.col)
+        -- Every lane crosses this row where it stands; the occupant alone turns.
+        for _, list in ipairs({ state.survivors, state.incoming }) do
+            for _, e in ipairs(list) do
+                if e == occ then
+                    draw(e.lane, GUTTER, f, GUTTER, f) -- in at the gutter, out at f
+                else
+                    draw(e.lane, e.col, e.col, e.col, e.col)
+                end
             end
-        end
-        -- the incoming lanes cross this row on their way down to the commit
-        for _, inc in ipairs(state.incoming) do
-            draw(inc.lane, inc.col, inc.col, inc.col, inc.col)
         end
         state.above[#state.above + 1] = assemble(cells, nil, nil)
         occ.col = f
+        -- `incoming` is kept sorted by column (every later stage reads incoming[1] as
+        -- the leftmost), so a moved child has to be resorted into place.
+        if occ_incoming then
+            table.sort(state.incoming, function(a, b) return a.col < b.col end)
+        end
     end
 
     -- CLAIM_GUTTER (stage, `gutter` only): the swap-IN, on a row of its own.
@@ -485,27 +528,32 @@ function M.layout(opts, items, seed)
     -- the gutter cell's wire above the node and its wire below it are one Lane and
     -- the run reads as one colour.
     --
-    -- Declines when there is nothing to move: a tip (no incoming), one of this
-    -- commit's OWN children already in the gutter (then the commit's fan converges
-    -- there, which is a fan and legitimately shares its Line), a survivor still
-    -- holding it (eviction declined, so `place_gutter` falls back off-gutter), or a
-    -- root-blocked gutter (§5.1). Runs after `evict_gutter` and before `seed_bars`,
-    -- patching the incoming entry's column so every later stage sees the new one.
+    -- Declines when there is nothing to move: a tip (no incoming), the claiming lane
+    -- ALREADY in the gutter (the overwhelmingly common case, §5.6 — consecutive
+    -- subject rows share a lane), a root-blocked gutter (§5.1), or — defensively —
+    -- anything still holding the column, which means `evict_gutter` declined and
+    -- `place_gutter` will fall back off-gutter. The "already there" test is on the
+    -- CLAIMER, not on any incoming lane: a converging child that is not this commit's
+    -- continuation sitting in the gutter is a reason to evict (which `evict_gutter`
+    -- just did), not a reason to skip the claim. Runs after `evict_gutter` and before
+    -- `seed_bars`, patching the incoming entry's column so every later stage sees the
+    -- new one.
     local function claim_gutter(state)
         if not state.subject or blocked[GUTTER] then return end
         local incoming = state.incoming
         if #incoming == 0 then return end
+        local claimer
+        for _, inc in ipairs(incoming) do
+            if inc.lane == state.trunk_in then claimer = inc end
+        end
+        claimer = claimer or incoming[1]
+        if claimer.col == GUTTER then return end
         for _, inc in ipairs(incoming) do
             if inc.col == GUTTER then return end
         end
         for _, s in ipairs(state.survivors) do
             if s.col == GUTTER then return end
         end
-        local claimer
-        for _, inc in ipairs(incoming) do
-            if inc.lane == state.trunk_in then claimer = inc end
-        end
-        claimer = claimer or incoming[1]
 
         local cells, draw = new_line()
         for _, s in ipairs(state.survivors) do draw(s.lane, s.col, s.col, s.col, s.col) end
@@ -574,14 +622,19 @@ function M.layout(opts, items, seed)
         end
 
         -- NODE. A subject row's node goes in the gutter: its own lane is normally
-        -- already there (nothing is drawn), and when it is not, the fan-in turns it
-        -- in. A marker or junction (§10.4) keeps its lane column — the rule keys on
-        -- subject rows, so a marker between two trunk commits disturbs nothing.
+        -- already there (nothing is drawn), and when it is not, the handover rows
+        -- brought it in. A marker or junction (§10.4) keeps its lane column — the rule
+        -- keys on subject rows, so a marker between two trunk commits disturbs
+        -- nothing. Off the gutter the node still goes on **its own lane's column**
+        -- (`trunk_entry`, §5), never on some other converging child's: that is what
+        -- keeps the spine one colour through the node on a root-blocked row (§5.1) and
+        -- on a pane seam row, the two cases that legitimately land here.
+        local own = state.trunk_entry or incoming[1]
         local cc
         if state.subject and not held and not blocked[GUTTER] then
             cc = GUTTER
         else
-            cc = incoming[1] and incoming[1].col or free_lane_col()
+            cc = own and own.col or free_lane_col()
         end
 
         -- CONTINUATION. The gutter belongs to THIS row's own chain: when the node is
@@ -602,7 +655,7 @@ function M.layout(opts, items, seed)
 
         local commit_incoming = incoming
         if state.sep_split then
-            commit_incoming = { { col = cc, lane = incoming[1].lane } }
+            commit_incoming = { { col = cc, lane = own.lane } }
         end
         state.cc0, state.cc, state.commit_incoming = cc, cc, commit_incoming
     end
@@ -632,16 +685,30 @@ function M.layout(opts, items, seed)
         local incoming, survivors, outgoing = state.incoming, state.survivors, state.outgoing
         local cc0, cc, commit_incoming = state.cc0, state.cc, state.commit_incoming
         if state.sep_split then
-            local trunk = incoming[1]
+            -- WHICH lane owns the hub's verticals is not fan_in's choice: it is the
+            -- lane the placement stage put the node on, which it published as
+            -- `commit_incoming`'s single entry (the commit Line below draws that same
+            -- wire as an up-stub, and per-Lane continuity §5.1 demands one id for the
+            -- two). Reading it back — rather than re-picking `incoming[1]` — is what
+            -- keeps the hub, the node and the continuation below it on ONE lane, one
+            -- id, one colour under EVERY policy (§5.6), including where the policy put
+            -- the node somewhere `incoming[1]` is not. Every other converging child
+            -- reaches the hub as an arm.
+            local hub = commit_incoming[1].lane
+            local hub_col
+            for _, inc in ipairs(incoming) do
+                if inc.lane == hub then hub_col = inc.col end
+            end
             local cells, draw, add_seg = new_line()
-            if trunk.col == cc0 then
-                -- The node sits on the trunk's own column (every policy but
-                -- `gutter`): the trunk enters the hub as a bare up-stub.
-                add_seg(cc0, { up = true }, { trunk.lane }, trunk.lane.id, trunk.lane.color)
+            if hub_col == cc0 then
+                -- The node sits on the hub lane's own column (every policy but a
+                -- `gutter` pane seam row): it enters the hub as a bare up-stub.
+                add_seg(cc0, { up = true }, { hub }, hub.id, hub.color)
             else
-                -- The node column is elsewhere (the `gutter` policy, §5.6), so the
-                -- trunk reaches the hub as a fan arm like every other child.
-                draw(trunk.lane, math.min(trunk.col, cc0), math.max(trunk.col, cc0), trunk.col, nil)
+                -- The node column is elsewhere — a `gutter` pane SEAM row (§5.6/§6.2),
+                -- which may move no lane, so it cannot bring the node's lane into the
+                -- gutter. That lane then reaches the hub as a fan arm like the rest.
+                draw(hub, math.min(hub_col, cc0), math.max(hub_col, cc0), hub_col, nil)
             end
             local descent = {}
             for _, inc in ipairs(incoming) do descent[#descent + 1] = inc.lane end
@@ -649,11 +716,12 @@ function M.layout(opts, items, seed)
             -- is pinned by per-Lane continuity (§5.1): the commit Line below draws
             -- this same wire as `commit_incoming`'s up-stub, so the two must carry
             -- one id. It is not an identity choice — identity changes at the node,
-            -- below this wire — so it stays the arriving trunk's, as it always was.
-            add_seg(cc0, { down = true }, descent, trunk.lane.id, trunk.lane.color)
-            for i = 2, #incoming do
-                local inc = incoming[i]
-                draw(inc.lane, math.min(inc.col, cc0), math.max(inc.col, cc0), inc.col, nil)
+            -- below this wire — so it is the arriving lane the node sits on.
+            add_seg(cc0, { down = true }, descent, hub.id, hub.color)
+            for _, inc in ipairs(incoming) do
+                if inc.lane ~= hub then
+                    draw(inc.lane, math.min(inc.col, cc0), math.max(inc.col, cc0), inc.col, nil)
+                end
             end
             for _, s in ipairs(survivors) do draw(s.lane, s.col, s.col, s.col, s.col) end
             state.above[#state.above + 1] = assemble(cells, nil, nil)

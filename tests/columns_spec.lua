@@ -499,26 +499,34 @@ describe("columns.layout gutter policy (§5.6)", function()
             for _, hash in ipairs({ "wt", "c1", "c5", "c4" }) do
                 assert.equals(1, node_col(rows, hash), hash .. " should be in the gutter")
             end
-            -- A marker sits on its OWN lane. That lane may itself be the gutter —
-            -- a junction on the trunk is on the trunk — so the claim is "not
-            -- relocated", i.e. its node column is its incoming lane's column.
+            -- A marker sits on its OWN lane — the incoming lane its first parent
+            -- CONTINUES (§5 lane identity), which is the one whose id the outgoing
+            -- first parent carries. That lane may itself be the gutter — a junction on
+            -- the trunk is on the trunk — so the claim is "not relocated", i.e. its
+            -- node column is the column its own lane arrives in.
+            --
+            -- The oracle used to be `child_lanes[1]`, the LEFTMOST arriving lane. That
+            -- is a positional stand-in for "its own lane" and it is wrong at a fork
+            -- whose senior (trunk) child is not leftmost: it pinned the labelled
+            -- junction `c3` onto the *topic's* column, which is the §5.6 spine defect
+            -- in miniature (the wire above the node one lane, the wire below another).
             for _, hash in ipairs({ "topic", "c2", "c3" }) do
-                local col, inc = node_col(rows, hash), nil
+                local col, own = node_col(rows, hash), nil
                 for _, row in ipairs(rows) do
-                    if row.commit.hash == hash and row.child_lanes and row.child_lanes[1] then
+                    if row.commit.hash == hash and row.parent_lanes and row.parent_lanes[1] then
+                        local id = row.parent_lanes[1].id
                         for j, t in ipairs(row.columns) do
                             for _, sg in ipairs(t.lanes or {}) do
-                                if sg.connectivity.up and sg.edges and sg.edges[1] == row.child_lanes[1] then
-                                    inc = j
-                                end
+                                if sg.connectivity.up and sg.id == id then own = j end
                             end
                         end
                     end
                 end
-                if inc then
-                    assert.equals(inc, col, hash .. " is a marker: it keeps its own lane")
+                if own then
+                    assert.equals(own, col, hash .. " is a marker: it keeps its own lane")
                 end
             end
+            assert.equals(0, #h.check_spine(rows), "a node's spine changes lane mid-column")
             assert.equals(0, #check(opts, rows), "ill-formed")
         end
     end)
