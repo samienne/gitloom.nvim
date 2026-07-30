@@ -105,6 +105,118 @@ local function gutter_prepass(opts, items)
     return pre
 end
 
+--- The `gutter` merge-swap GATE (spec §5.6), as a pure predicate: which outgoing entry
+--- (if any) may take the gutter instead of the first parent. Extracted from
+--- `gutter_swap` because the SPLIT swap has to consult it too — a commit that both forks
+--- and merges can satisfy both gates, and the precedence between them is decided on the
+--- eviction row, before `gutter_swap` runs (see `split_swap`). Reads nothing but the
+--- lane/DAG facts already on `state`, so asking twice is free of side effects.
+---
+--- THREE CLAUSES AND ALL THREE ARE REQUIRED; the reasoning for each is on `gutter_swap`.
+---@param state table
+---@return integer? index  -- the outgoing entry that may continue in the gutter
+local function merge_swap_index(state)
+    if not state.subject then return nil end
+    local outgoing, pre = state.outgoing, state.pre
+    if not pre or #outgoing < 2 then return nil end
+    local p1 = outgoing[1].lane.parent
+    local r1 = p1 and pre.row[p1.hash]
+    if not r1 then return nil end
+    -- CLAUSE 1: the earliest-arriving parent, which for a two-parent merge is just
+    -- `row(p2) < row(p1)`; an octopus merge generalises to "the earliest of them".
+    local bi, br
+    for i = 2, #outgoing do
+        local p = outgoing[i].lane.parent
+        local ri = p and pre.row[p.hash]
+        if ri and (not br or ri < br) then bi, br = i, ri end
+    end
+    if not bi or br >= r1 then return nil end
+    -- CLAUSE 2: ... and that parent is the one that owns the next subject row, so the
+    -- gutter it is handed is the gutter that row was going to ask for.
+    local pk = outgoing[bi].lane.parent
+    if not pk or state.next_subject ~= pk.hash then return nil end
+    -- CLAUSE 3: ... and that row will continue on THIS lane, which is assured exactly
+    -- when this merge is its only in-set child: one arriving Lane, so it is the one
+    -- continued (§5). Otherwise a senior sibling Lane wins, ours is evicted anyway, and
+    -- the break buys nothing.
+    if (pre.kids[pk.hash] or 0) ~= 1 then return nil end
+    return bi
+end
+
+--- SPLIT_SWAP (`gutter` only, spec §5.6): the mirror of `gutter_swap` (below) at a
+--- **fork**. The gutter is held by a lane that is one of THIS commit's converging
+--- children but is not the one its first parent continues (§5 identity). Today's
+--- layout transposes the two — an eviction row moves the occupant out, a claim row
+--- turns the continuation in — for the sole purpose of putting the node over the
+--- continuation's wire. Instead the node simply takes the gutter **where the occupant
+--- already is**, and the continuation reaches it as an ordinary arm of the fork's own
+--- fan-in. Both handover rows are then never emitted.
+---
+--- The split side needs **no lookahead**. The sweep runs top to bottom, so by the time
+--- a fork is reached the gutter's occupant is already decided and the whole condition
+--- is a fact about the current row.
+---
+--- THREE CLAUSES, ALL REQUIRED:
+---
+---  1. **The occupant is one of this commit's own incoming lanes** (`occ_incoming`), not
+---     an unrelated PASS-THROUGH survivor. A survivor draws a through-vertical in the
+---     gutter, so the node cannot sit over its wire: that would put two lanes' verticals
+---     in the node cell and read as the commit sitting *on* an unrelated branch. It is
+---     also the hard floor — `place_gutter` reads `g.occ0[GUTTER]` (which `seed_bars`
+---     sets for survivors only) and falls back off-gutter, so declining the eviction
+---     there would cost a node-in-gutter row rather than save two Lines.
+---  2. **It is not the lane the commit continues** (`trunk_in`). If it is, no handover
+---     was going to be paid at all and there is nothing to swap.
+---  3. **No merge swap is also available on this row, unless the fan-in has a Line of
+---     its own.** See below: on a fully inline fan-in the two swaps would consume the
+---     same node cell from both sides and neither saving would be 1:1.
+---
+--- An incoming occupant that is not `trunk_in` means at least two lanes arrive, so this
+--- row is a fork by construction — which is why this is the split-side rule.
+---
+--- WHAT IT COSTS depends on where the fan-in is drawn, and only one of the two costs a
+--- spine break:
+---
+---  * **A separate split Line** (`sep_split`, the shipped style): the occupant
+---    terminates on that Line as a bare up-stub and the hub descent into the node
+---    carries the CONTINUATION's id (`fan_in` labels the hub from `commit_incoming`,
+---    which `place_gutter` pins to the commit's own lane), so the node's wire above and
+---    its wire below are one Lane. There is **no spine break at all** — the trunk simply
+---    converges as a fan arm, which §5.1 permits on a fan Line. Nothing is licensed
+---    because nothing is broken.
+---  * **A fully inline fan-in**: the fan is on the commit Line, so the occupant's
+---    up-stub IS the node cell's wire from above while the continuation arrives
+---    horizontally. The node's column then carries a different Lane above than below —
+---    a licensed spine break (§5.1/§5.6), priced 1:1 in the two handover rows it
+---    removes on this very row. The node still reads in its own Lane's colour, because
+---    a Column's colour comes from its DOWN wire by default (§5) and here the down wire
+---    is the first parent — so, unlike the merge swap, no `own_lane_up` mark is needed.
+---    `state.up_foreign` records this case for the finalize-time bookkeeping.
+---
+--- PRECEDENCE, on a commit that both forks and merges. With a separate split Line the
+--- two swaps compose: they touch opposite sides of a node cell whose wire from above is
+--- still the commit's own Lane, so this row pays no handover AND the next subject row
+--- pays none either. With an inline fan-in they cannot: the cell would hold a foreign
+--- child above and a non-first parent below, the commit's own Lane on neither side, so
+--- neither break is 1:1 with a saving and the node could not even be coloured from its
+--- own Lane. The **merge swap wins** there — it saves the same two rows (on the next
+--- subject row instead of this one) and keeps the node's colour — so clause 3 declines
+--- the split swap by consulting the merge gate directly. Measured on a 1040-commit
+--- repository expanded: 69 of 85 merge swaps sit on exactly such a row, so getting the
+--- precedence backwards costs about as many rows as the split swap saves.
+---@param state table
+---@param occ table            -- the entry holding the gutter
+---@param occ_incoming boolean -- is the occupant one of this commit's converging children?
+---@return boolean fired
+local function split_swap(state, occ, occ_incoming)
+    if not occ_incoming then return false end
+    if occ.lane == state.trunk_in then return false end
+    if not state.sep_split and merge_swap_index(state) then return false end
+    state.split_swap = occ
+    state.up_foreign = not state.sep_split
+    return true
+end
+
 --- GUTTER_SWAP (`gutter` only, spec §5.6): at a merge whose node is in the gutter,
 --- send a **non-first parent** down the gutter and the first parent out to the side,
 --- so the branch that owns the next subject row is already in place and the handover
@@ -161,34 +273,22 @@ end
 --- `state.own_lane_up` says the renderer must colour this node from its **up** wire
 --- (the node's own lane, §5) rather than the default `down`, so a swapped merge keeps
 --- the trunk's colour on the node and the topic lane merely *begins* below it.
+---
+--- COMPOSING WITH THE SPLIT SWAP (a commit that both forks and merges, §10.4's
+--- both-fans case). The two swaps act on opposite sides of the node cell, so they
+--- compose exactly when the node's wire from ABOVE is still its own Lane — which it is
+--- whenever the fan-in has a Line of its own: the hub descent carries the continuation's
+--- id, so the cell reads first-parent above / non-first parent below and the licence
+--- below applies unchanged. Where the fan-in is inline they cannot compose, and the
+--- precedence is resolved on the eviction row — `split_swap` declines by consulting
+--- `merge_swap_index`, so this gate needs no counterpart test and there is exactly one
+--- decision point.
 ---@param state table
 ---@param cc integer  -- the node column `place_gutter` chose
 local function gutter_swap(state, cc)
-    if not state.subject or cc ~= GUTTER then return end
-    local outgoing, pre = state.outgoing, state.pre
-    if not pre or #outgoing < 2 then return end
-    local p1 = outgoing[1].lane.parent
-    local r1 = p1 and pre.row[p1.hash]
-    if not r1 then return end
-    -- CLAUSE 1: the earliest-arriving parent, which for a two-parent merge is just
-    -- `row(p2) < row(p1)`; an octopus merge generalises to "the earliest of them".
-    local bi, br
-    for i = 2, #outgoing do
-        local p = outgoing[i].lane.parent
-        local ri = p and pre.row[p.hash]
-        if ri and (not br or ri < br) then bi, br = i, ri end
-    end
-    if not bi or br >= r1 then return end
-    -- CLAUSE 2: ... and that parent is the one that owns the next subject row, so the
-    -- gutter it is handed is the gutter that row was going to ask for.
-    local pk = outgoing[bi].lane.parent
-    if not pk or state.next_subject ~= pk.hash then return end
-    -- CLAUSE 3: ... and that row will continue on THIS lane, which is assured exactly
-    -- when this merge is its only in-set child: one arriving Lane, so it is the one
-    -- continued (§5). Otherwise a senior sibling Lane wins, ours is evicted anyway, and
-    -- the break buys nothing.
-    if (pre.kids[pk.hash] or 0) ~= 1 then return end
-    state.cont, state.own_lane_up = bi, true
+    if cc ~= GUTTER then return end
+    local bi = merge_swap_index(state)
+    if bi then state.cont, state.own_lane_up = bi, true end
 end
 
 ---@param t table
@@ -580,20 +680,25 @@ function M.layout(opts, items, seed)
     --
     -- THE OCCUPANT IS WHOEVER IS IN THE COLUMN — a pass-through survivor, or one of
     -- this commit's OWN converging children (§5.6 says "the occupant", not "a
-    -- survivor"). The second case is the common one and used to be skipped: a run of
-    -- commits on lane L puts L in the gutter, and where that run's last commit forks
-    -- off a trunk, L's final edge terminates at the fork — still in the gutter, still
-    -- not the lane the fork continues on. Declining then left the gutter cell's wire
-    -- ABOVE the node on L and its wire BELOW it on the continuing lane, so the fork
-    -- (the split hub) rendered in the ending branch's colour while the spine below it
-    -- rendered in the trunk's — exactly the two-colours-in-one-column defect §5.6
-    -- forbids ("the gutter cell's wire above the node and its wire below it are one
-    -- Lane, one id, one colour"). The occupant leaves like any other, and converges
-    -- back in as an ordinary fan arm on the split Line.
+    -- survivor"). The second case is the common one: a run of commits on lane L puts L
+    -- in the gutter, and where that run's last commit forks off a trunk, L's final edge
+    -- terminates at the fork — still in the gutter, still not the lane the fork
+    -- continues on.
     --
-    -- The one occupant that needs no eviction is the lane the commit CONTINUES
-    -- (`trunk_in`, chosen from the DAG in `spawn_lanes`): it is already where the
-    -- claim row would put it.
+    -- That second case is now handled by the **split swap** (`split_swap`, §5.6) rather
+    -- than by eviction: the node takes the gutter where the occupant already is and the
+    -- continuation converges into it as an ordinary arm of the fork's own fan-in, so both
+    -- handover rows are skipped. Evicting it instead was the *first* correct answer to
+    -- the fork-hub colour defect (the split hub rendering in the ending branch's colour
+    -- while the spine below it rendered in the trunk's), and it is no longer the only
+    -- one: `fan_in` labels the hub from `commit_incoming` — the commit's own lane,
+    -- wherever the placement stage put the node — so the wire above the node and the wire
+    -- below it are one Lane either way. Eviction remains what a **survivor** gets, since
+    -- the node may not sit over an unrelated branch's through-vertical.
+    --
+    -- The one occupant that needs neither eviction nor a swap is the lane the commit
+    -- CONTINUES (`trunk_in`, chosen from the DAG in `spawn_lanes`): it is already where
+    -- the claim row would put it.
     local function evict_gutter(state)
         if not state.subject or blocked[GUTTER] then return end
         local occ, occ_incoming
@@ -605,6 +710,9 @@ function M.layout(opts, items, seed)
         end
         if not occ then return end                    -- already free
         if occ.lane == state.trunk_in then return end -- the claiming lane holds it
+        -- A converging child keeps the gutter and the node sits on it (§5.6 split swap),
+        -- so neither this row nor the claim row is emitted at all.
+        if split_swap(state, occ, occ_incoming) then return end
 
         local taken = {}
         for _, s in ipairs(state.survivors) do taken[s.col] = true end
@@ -651,16 +759,16 @@ function M.layout(opts, items, seed)
     --
     -- Declines when there is nothing to move: a tip (no incoming), the claiming lane
     -- ALREADY in the gutter (the overwhelmingly common case, §5.6 — consecutive
-    -- subject rows share a lane), a root-blocked gutter (§5.1), or — defensively —
-    -- anything still holding the column, which means `evict_gutter` declined and
-    -- `place_gutter` will fall back off-gutter. The "already there" test is on the
-    -- CLAIMER, not on any incoming lane: a converging child that is not this commit's
-    -- continuation sitting in the gutter is a reason to evict (which `evict_gutter`
-    -- just did), not a reason to skip the claim. Runs after `evict_gutter` and before
-    -- `seed_bars`, patching the incoming entry's column so every later stage sees the
-    -- new one.
+    -- subject rows share a lane), a root-blocked gutter (§5.1), a **split swap** (the
+    -- gutter deliberately stays with a converging child and the node comes to it, §5.6),
+    -- or — defensively — anything still holding the column, which means `evict_gutter`
+    -- declined and `place_gutter` will fall back off-gutter. The "already there" test is
+    -- on the CLAIMER, not on any incoming lane: a converging child that is not this
+    -- commit's continuation sitting in the gutter is a reason to evict or to swap, not a
+    -- reason to skip the claim. Runs after `evict_gutter` and before `seed_bars`,
+    -- patching the incoming entry's column so every later stage sees the new one.
     local function claim_gutter(state)
-        if not state.subject or blocked[GUTTER] then return end
+        if not state.subject or blocked[GUTTER] or state.split_swap then return end
         local incoming = state.incoming
         if #incoming == 0 then return end
         local claimer
@@ -743,8 +851,12 @@ function M.layout(opts, items, seed)
         end
 
         -- NODE. A subject row's node goes in the gutter: its own lane is normally
-        -- already there (nothing is drawn), and when it is not, the handover rows
-        -- brought it in. A marker or junction (§10.4) keeps its lane column — the rule
+        -- already there (nothing is drawn), and when it is not, either the handover rows
+        -- brought it in or a **split swap** (§5.6) left a converging child there and the
+        -- node comes to *it* — in which case `own.col` is elsewhere and the commit's own
+        -- lane converges as a fan arm (`fan_in`'s "node column is elsewhere" arm, which
+        -- is also what a pane seam row takes). A marker or junction (§10.4) keeps its
+        -- lane column — the rule
         -- keys on subject rows, so a marker between two trunk commits disturbs
         -- nothing. Off the gutter the node still goes on **its own lane's column**
         -- (`trunk_entry`, §5), never on some other converging child's: that is what
@@ -832,9 +944,14 @@ function M.layout(opts, items, seed)
                 -- `gutter` pane seam row): it enters the hub as a bare up-stub.
                 add_seg(cc0, { up = true }, { hub }, hub.id, hub.color)
             else
-                -- The node column is elsewhere — a `gutter` pane SEAM row (§5.6/§6.2),
-                -- which may move no lane, so it cannot bring the node's lane into the
-                -- gutter. That lane then reaches the hub as a fan arm like the rest.
+                -- The node column is elsewhere, and the hub lane reaches it as a fan arm
+                -- like the rest. Two `gutter` rows land here (§5.6): a pane SEAM row
+                -- (§6.2), which may move no lane, so it cannot bring the node's lane into
+                -- the gutter; and a **split swap**, where the gutter is deliberately left
+                -- to a converging child and the node placed on it. In both cases the hub
+                -- LABEL is still the commit's own lane, which is what keeps the descent,
+                -- the node and the continuation below on one id (§5.1) — a swapped fork
+                -- therefore breaks no spine at all on this style.
                 draw(hub, math.min(hub_col, cc0), math.max(hub_col, cc0), hub_col, nil)
             end
             local descent = {}
