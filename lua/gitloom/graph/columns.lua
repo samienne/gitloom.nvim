@@ -278,8 +278,8 @@ end
 --- both-fans case). The two swaps act on opposite sides of the node cell, so they
 --- compose exactly when the node's wire from ABOVE is still its own Lane — which it is
 --- whenever the fan-in has a Line of its own: the hub descent carries the continuation's
---- id, so the cell reads first-parent above / non-first parent below and the licence
---- below applies unchanged. Where the fan-in is inline they cannot compose, and the
+--- id, so the cell reads first-parent above / non-first parent below and this gate's own
+--- licence applies unchanged. Where the fan-in is inline they cannot compose, and the
 --- precedence is resolved on the eviction row — `split_swap` declines by consulting
 --- `merge_swap_index`, so this gate needs no counterpart test and there is exactly one
 --- decision point.

@@ -729,7 +729,7 @@ describe("the gutter split swap (§5.6)", function()
             if s.connectivity.up and not up then up = s.id end
             if s.connectivity.down and not down then down = s.id end
         end
-        assert.are_not.equals(up, down)
+        assert.is_true(up ~= down, "the node's column must change lane at the node")
         assert.equals(f.parent_lanes[1].id, down, "the spine below the node is intact")
         local errors, licensed, kinds = h.check_spine(rows, o)
         assert.equals(0, #errors, table.concat(errors, "\n"))
