@@ -343,17 +343,20 @@ describe("compaction never crosses a lane (§5)", function()
     -- observably save the handover (see `graph_helpers`). So this stays a hard 0.
     it("keeps one lane through a node's spine, or licenses the swap (gutter)", function()
         local bad, licensed_raw, licensed_foc = {}, 0, 0
+        local kraw = { merge = 0, split = 0 }
         for _, ms in ipairs(STYLE_LIST) do
             local opts = policy_opts(ms, "gutter")
             for seed = 1, 200 do
                 local items = h.dag(h.random_dag(4 + (seed % 14), seed))
-                -- BOTH corpora: the raw DAG (all subject rows — where the swap can fire)
+                -- BOTH corpora: the raw DAG (all subject rows — where the swaps can fire)
                 -- and the §10.7 projection (◍ heads and junction markers, i.e. non-subject
-                -- rows, where clause 2 declines it). A raw-only sweep would miss the
-                -- decline entirely, which is the whole point of clause 2.
+                -- rows, where the merge swap's clause 2 declines it and the split swap has
+                -- no foreign occupant to keep). A raw-only sweep would miss the decline
+                -- entirely, which is the whole point of the merge swap's clause 2.
                 local raw = build_graph(opts, items)
-                local e1, n1 = h.check_spine(raw, opts)
+                local e1, n1, k1 = h.check_spine(raw, opts)
                 licensed_raw = licensed_raw + n1
+                kraw.merge, kraw.split = kraw.merge + k1.merge, kraw.split + k1.split
                 for _, e in ipairs(e1) do
                     if #bad < 6 then bad[#bad + 1] = ("raw seed=%d %s"):format(seed, e) end
                 end
@@ -366,8 +369,12 @@ describe("compaction never crosses a lane (§5)", function()
             end
         end
         assert.equals(0, #bad, "\nnode spine changes lane mid-column:\n" .. table.concat(bad, "\n"))
-        -- Not vacuous: the swap really does fire on the raw (fully expanded) corpus...
+        -- Not vacuous: the swaps really do fire on the raw (fully expanded) corpus, and
+        -- BOTH licences are exercised — the merge swap's on any style, the split swap's
+        -- only where the fan-in is inline (with a split Line of its own it breaks nothing).
         assert.is_true(licensed_raw > 0, "the gutter parent swap never fired — test is vacuous")
+        assert.is_true(kraw.merge > 0, "the MERGE swap licence never fired — test is vacuous")
+        assert.is_true(kraw.split > 0, "the SPLIT swap licence never fired — test is vacuous")
         -- ... and never in the focused projection, where a collapsed head sits after the
         -- merge and owns no subject row (§5.6 clause 2). This is the byte-identity claim
         -- in invariant form: no break, so nothing about the focused view moved.
@@ -582,6 +589,280 @@ describe("the gutter parent swap (§5.6)", function()
                     for _, r in ipairs(rows) do
                         for _, c in ipairs(r.columns) do assert.is_nil(c.own_lane_up) end
                     end
+                end
+            end
+        end
+    end)
+end)
+
+-- THE GUTTER SPLIT SWAP (§5.6), the mirror at a FORK. The gutter is held by one of this
+-- commit's converging children that is not the one it continues; instead of evicting that
+-- child and claiming the column back (two virtual rows), the node takes the gutter WHERE
+-- THE CHILD ALREADY IS and the commit's own lane converges into it as an ordinary fan arm.
+--
+-- No lookahead is involved: the sweep runs top to bottom, so the occupant is already
+-- decided when the fork is reached. What varies is where the fan-in is drawn, and it
+-- decides whether anything is broken at all:
+--
+--   * a separate split Line — the occupant terminates up there and the hub descent into
+--     the node carries the commit's own lane, so the spine is INTACT (nothing licensed);
+--   * an inline fan-in — the occupant's up-stub IS the node's wire from above, so the
+--     spine breaks and the break is licensed 1:1 against the two rows it removed.
+--
+-- Both are asserted, and on BOTH corpora: the raw DAG (expanded, where it fires) and
+-- `h.focused` (§10.7, the shipping default, where the gutter is already the trunk's and
+-- there is nothing to swap).
+describe("the gutter split swap (§5.6)", function()
+    local build_graph = require("gitloom.graph")._internal.build_graph
+    local SPLITLINE = { split_on_separate_line = true, merge_on_separate_line = false }
+    local INLINE = { split_on_separate_line = false, merge_on_separate_line = false }
+
+    local function row_of(rows, hash)
+        for i, r in ipairs(rows) do
+            if r.commit.hash == hash then return r, i end
+        end
+    end
+
+    --- Virtual above-rows that are HANDOVER rows (an eviction or a claim): a split fan
+    --- always carries the shared multi-edge descent (§5), a handover row never does.
+    local function handover_rows(row)
+        local n = 0
+        for _, ln in ipairs(row.above or {}) do
+            local multi = false
+            for _, cell in ipairs(ln) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    if #(s.edges or {}) > 1 then multi = true end
+                end
+            end
+            if not multi then n = n + 1 end
+        end
+        return n
+    end
+
+    --- Did the split swap fire on this row? Read off the RENDERED row only, so it works
+    --- on every merge style (under a separate split Line the swap leaves no spine break,
+    --- so `check_spine` cannot see it): the node is in the gutter, the row paid no
+    --- handover Line, and the gutter cell of the row's FIRST rendered Line is entered
+    --- from above by one of this commit's converging children that its first parent does
+    --- not continue (§5 identity: the first parent inherits the id of the child lane it
+    --- continues, so "a child lane whose id is not `parent_lanes[1]`'s" is exact).
+    local function split_swapped(row)
+        local ncol
+        for j, cell in ipairs(row.columns or {}) do
+            if cell.has_commit then ncol = j end
+        end
+        if ncol ~= 1 or handover_rows(row) > 0 then return false end
+        -- A ROOT continues nothing, so there is no gutter to keep and every arriving child
+        -- trivially "is not the continuation" — it must not read as a swap.
+        local first = row.parent_lanes[1] and row.parent_lanes[1].id
+        if not first then return false end
+        local kids = {}
+        for _, l in ipairs(row.child_lanes or {}) do kids[l.id] = true end
+        local line = (row.above or {})[1] or row.columns
+        for _, s in ipairs((line[1] or {}).lanes or {}) do
+            if s.connectivity.up and kids[s.id] and s.id ~= first then return true end
+        end
+        return false
+    end
+
+    local function swaps(rows)
+        local n = 0
+        for _, row in ipairs(rows) do
+            if split_swapped(row) then n = n + 1 end
+        end
+        return n
+    end
+
+    -- A fork `f` that three lines of history came out of — the trunk (`main`) plus two
+    -- topic branches — where §3.1's ordering puts a TOPIC's last commit (`t2`) directly
+    -- above the fork. `t2`'s lane therefore holds the gutter when `f` arrives, and it is
+    -- not the lane `f` continues (`main`'s is senior). Same shape as the fork-hub colour
+    -- fixture above, which is the shape this swap exists for.
+    local FORK = {
+        { "tip",   { "main", "topic" } },
+        { "main",  { "f" } }, -- the trunk: SENIOR lane, so `f` continues it
+        { "topic", { "t1", "t2" } },
+        { "t1",    { "f" } },
+        { "t2",    { "f" } }, -- junior, and directly above the fork => holds the gutter
+        { "f",     { "r" } },
+        { "r",     {} },
+    }
+
+    it("fires with a split Line: the node takes the gutter and BREAKS NOTHING", function()
+        local o = policy_opts(SPLITLINE, "gutter")
+        local rows = build_graph(o, h.dag(FORK))
+        local f = row_of(rows, "f")
+        assert.equals(3, #f.child_lanes) -- main's, t1's and t2's edges converge here
+        assert.is_true(split_swapped(f))
+        -- The whole point: no eviction row, no claim row — only the split fan.
+        assert.equals(0, handover_rows(f))
+        assert.equals(1, #f.above)
+        -- And the spine is intact, because `fan_in` labels the hub from the commit's own
+        -- lane wherever the node landed: the descent into the node, the node and the
+        -- continuation below it are one id. Nothing is licensed because nothing broke.
+        local errors, licensed = h.check_spine(rows, o)
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+        assert.equals(0, licensed)
+        local ncol
+        for j, cell in ipairs(f.columns) do if cell.has_commit then ncol = j end end
+        assert.equals(1, ncol)
+        local hub
+        for _, s in ipairs(f.above[1][ncol].lanes or {}) do
+            if s.connectivity.down then hub = s end
+        end
+        assert.equals(f.parent_lanes[1].id, assert(hub).id, "the hub must be the commit's own lane")
+        assert.equals(f.parent_lanes[1].color, hub.color)
+    end)
+
+    it("fires with an inline fan-in: the break is LICENSED, priced in the rows it saved", function()
+        local o = policy_opts(INLINE, "gutter")
+        local rows = build_graph(o, h.dag(FORK))
+        local f = row_of(rows, "f")
+        assert.is_true(split_swapped(f))
+        assert.equals(0, handover_rows(f))
+        -- Here the occupant's up-stub IS the node's wire from above, so the node's column
+        -- carries the ending topic above and the first parent below.
+        local cell
+        for _, c in ipairs(f.columns) do if c.has_commit then cell = c end end
+        local up, down
+        for _, s in ipairs(cell.lanes) do
+            if s.connectivity.up and not up then up = s.id end
+            if s.connectivity.down and not down then down = s.id end
+        end
+        assert.is_true(up ~= down, "the node's column must change lane at the node")
+        assert.equals(f.parent_lanes[1].id, down, "the spine below the node is intact")
+        local errors, licensed, kinds = h.check_spine(rows, o)
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+        assert.equals(1, licensed)
+        assert.equals(1, kinds.split)
+        -- The node still reads in its OWN lane's colour with no extra mark: a Column's
+        -- colour comes from its DOWN wire (§5), which here is the first parent. So,
+        -- unlike the merge swap, there is no `own_lane_up`.
+        assert.is_nil(cell.own_lane_up)
+        assert.equals(f.parent_lanes[1].id, assert(top_lane(cell.lanes, false, true)).id)
+    end)
+
+    -- THE PASS-THROUGH GUARD, and it is the hard floor rather than a nicety: a survivor
+    -- draws a through-vertical in the gutter, so a node placed over it would put two
+    -- lanes' verticals in one cell — and `place_gutter` would instead fall back
+    -- off-gutter, costing a node-in-gutter row (§5.6's whole purpose) to save two Lines.
+    -- `s` is a subject row whose lane continues PAST the fork, so it is in the gutter at
+    -- `f` while both of `f`'s children sit elsewhere.
+    local PASSTHROUGH = {
+        { "c1", { "f" } },
+        { "c2", { "f" } },
+        { "s",  { "z" } }, -- holds the gutter, and is not incident to `f` at all
+        { "f",  { "r" } },
+        { "z",  { "r" } },
+        { "r",  {} },
+    }
+
+    it("declines for a PASS-THROUGH occupant: it is evicted and the node stays in the gutter", function()
+        for _, ms in ipairs({ SPLITLINE, INLINE }) do
+            local o = policy_opts(ms, "gutter")
+            local rows = build_graph(o, h.dag(PASSTHROUGH))
+            local f = row_of(rows, "f")
+            -- precondition: the gutter's occupant is not one of `f`'s converging children
+            local kids = {}
+            for _, l in ipairs(f.child_lanes) do kids[l.id] = true end
+            assert.equals(2, #f.child_lanes)
+            local sz = row_of(rows, "s").parent_lanes[1]
+            assert.is_nil(kids[sz.id], "precondition: a pass-through holds the gutter")
+            assert.is_false(split_swapped(f))
+            assert.equals(2, handover_rows(f), "the pass-through is evicted and the column claimed")
+            local ncol
+            for j, cell in ipairs(f.columns) do if cell.has_commit then ncol = j end end
+            assert.equals(1, ncol, "the node must still be in the gutter — the hard floor")
+            assert.equals(0, #h.check_spine(rows, o))
+        end
+    end)
+
+    -- A COMMIT THAT BOTH FORKS AND MERGES (§10.4's both-fans case), satisfying BOTH gates:
+    -- `b`'s lane holds the gutter and `f` continues `a`'s (senior), so the split swap is
+    -- available; and `k` — a non-first parent — owns the next subject row, comes before
+    -- the first parent `t`, and has only `f` as an in-set child, so the merge gate passes.
+    local BOTH = {
+        { "a", { "f" } },      -- senior child: `f` continues its lane
+        { "b", { "f" } },      -- junior child, directly above => holds the gutter
+        { "f", { "t", "k" } }, -- merges (t, k) AND forks (a, b)
+        { "k", { "t" } },      -- the non-first parent, owning the next subject row
+        { "t", { "r" } },
+        { "r", {} },
+    }
+
+    it("composes with the merge swap when the fan-in has a Line of its own", function()
+        -- Both fire: this row pays no handover (the split swap) and the next subject row
+        -- pays none either (the merge swap). The node's wire from above is still the
+        -- commit's own lane — the hub descent — so it is the MERGE licence that applies,
+        -- unchanged, and the node keeps the trunk's colour via `own_lane_up`.
+        local o = policy_opts(SPLITLINE, "gutter")
+        local rows = build_graph(o, h.dag(BOTH))
+        local f = row_of(rows, "f")
+        assert.is_true(split_swapped(f))
+        assert.equals(0, handover_rows(f))
+        assert.equals(0, handover_rows(row_of(rows, "k")))
+        local cell
+        for _, c in ipairs(f.columns) do if c.has_commit then cell = c end end
+        assert.is_true(cell.own_lane_up)
+        local errors, licensed, kinds = h.check_spine(rows, o)
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+        assert.equals(1, licensed)
+        assert.equals(1, kinds.merge)
+        assert.equals(0, kinds.split)
+    end)
+
+    it("yields to the merge swap on an inline fan-in (they cannot share a node cell)", function()
+        -- Inline, the two swaps would leave the commit's own lane on NEITHER side of its
+        -- own node cell — a foreign child above, a non-first parent below — which no
+        -- licence can price and which could not even be coloured from its own lane. The
+        -- merge swap wins (same two rows saved, on the next row instead of this one), so
+        -- this row pays its handover and the break is the merge's.
+        local o = policy_opts(INLINE, "gutter")
+        local rows = build_graph(o, h.dag(BOTH))
+        local f = row_of(rows, "f")
+        assert.is_false(split_swapped(f))
+        assert.equals(2, handover_rows(f))
+        local cell
+        for _, c in ipairs(f.columns) do if c.has_commit then cell = c end end
+        assert.is_true(cell.own_lane_up)
+        local up
+        for _, s in ipairs(cell.lanes) do
+            if s.connectivity.up and not up then up = s.id end
+        end
+        assert.equals(f.parent_lanes[1].id, up, "the wire above is the commit's own lane")
+        local errors, _, kinds = h.check_spine(rows, o)
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+        assert.equals(1, kinds.merge)
+    end)
+
+    it("never fires in the FOCUSED projection (§10.7, the shipping default)", function()
+        -- §3.1's lineage grouping keeps consecutive subject rows on one lane, and every
+        -- other branch contracts to a `◍` head that claims no gutter (§5.6), so the
+        -- gutter at a kept fork is the trunk's own and there is nothing to swap. This is
+        -- the byte-identity claim in invariant form for the default view.
+        for _, ms in ipairs({ SPLITLINE, INLINE }) do
+            local o = policy_opts(ms, "gutter")
+            for _, spec in ipairs({ FORK, PASSTHROUGH, BOTH }) do
+                assert.equals(0, swaps(build_graph(o, h.focused(h.dag(spec)))))
+            end
+            local total = 0
+            for seed = 1, 60 do
+                total = total + swaps(build_graph(o, h.focused(h.dag(h.random_dag(4 + (seed % 14), seed)))))
+            end
+            assert.equals(0, total, "the split swap fired in a focused projection")
+        end
+    end)
+
+    it("never fires under any other policy (§5.6: only `gutter` constrains a column)", function()
+        for _, policy in ipairs({ "compact", "survivors", "linear", "straight" }) do
+            for _, style in ipairs(STYLES) do
+                local o = policy_opts(style.ms, policy)
+                for _, items in ipairs({ h.dag(FORK), h.focused(h.dag(FORK)) }) do
+                    local rows = build_graph(o, items)
+                    -- Without a gutter the node is not pinned to column 1, so the swap has
+                    -- no column to keep; asserted through the same rendered predicate.
+                    assert.equals(0, swaps(rows),
+                        ("%s/%s must not swap at a fork"):format(policy, style.name))
                 end
             end
         end
@@ -1186,5 +1467,71 @@ describe("invariant checker self-test", function()
         local rows = spine_rows({ next_collapsed = true })
         local errors = h.check_spine(rows, opts)
         assert(has(errors, "no subject row follows"), table.concat(errors, "\n"))
+    end)
+
+    -- THE SECOND LICENCE (§5.6 gutter SPLIT swap). At a fork the swap touches the other
+    -- side of the node cell: the wire BELOW stays the first parent and the wire ABOVE is a
+    -- converging child the first parent does not continue. Its earning is on its OWN row —
+    -- it declined to hand the gutter back, so the row must show no handover Line. One test
+    -- per clause, plus a fire that saved nothing.
+    --
+    -- The shape: a fork F at row 1 in the gutter, entered from above by child lane 3 (not
+    -- the continuation — the first parent carries lane 1's id, §5) and leaving on the first
+    -- parent's lane 1, with no eviction/claim row above it.
+    local function split_rows(o)
+        o = o or {}
+        local c_cont, c_foreign = { id = 1 }, { id = 3 }
+        local p1, p2 = { id = 1 }, { id = 2 }
+        local cols = { { lanes = {}, connectivity = {} }, { lanes = {}, connectivity = {} } }
+        cols[o.break_col or 1] = {
+            lanes = {
+                { id = o.above_id or 3, connectivity = { up = true } },
+                { id = o.below_id or 1, connectivity = { down = true } },
+            },
+            connectivity = {}, has_commit = true,
+        }
+        local row = {
+            commit = { hash = "F" },
+            child_lanes = { c_cont, c_foreign },
+            parent_lanes = o.below_id == 2 and { p1, p2 } or { p1 },
+            columns = cols,
+        }
+        if o.handover then
+            -- One virtual Line with only single-edge segments: an eviction/claim row.
+            row.above = { { { lanes = { { id = 3, connectivity = { up = true, right = true }, edges = { c_foreign } } } },
+                { lanes = { { id = 3, connectivity = { left = true, down = true }, edges = { c_foreign } } } } } }
+        end
+        return { row }
+    end
+
+    it("spine licenses a split swap that saved its own handover", function()
+        local errors, licensed, kinds = h.check_spine(split_rows(), opts)
+        assert.equals(0, #errors, table.concat(errors, "\n"))
+        assert.equals(1, licensed)
+        assert.equals(1, kinds.split)
+        assert.equals(0, kinds.merge)
+    end)
+
+    it("spine flags a split swap that SAVED NOTHING (a handover Line anyway)", function()
+        -- The gutter was kept for the converging child AND the row still emitted an
+        -- eviction/claim row, so the break bought nothing. Impossible by construction in
+        -- the layout, which is exactly what this pins.
+        local errors = h.check_spine(split_rows({ handover = true }), opts)
+        assert(has(errors, "SAVED NOTHING: this row paid a handover Line"), table.concat(errors, "\n"))
+    end)
+
+    it("spine flags a break whose wire above is not a converging child", function()
+        -- id 9 is on no `child_lanes` entry, so the node is simply mis-placed: neither
+        -- swap's shape.
+        local errors = h.check_spine(split_rows({ above_id = 9 }), opts)
+        assert(has(errors, "neither swap"), table.concat(errors, "\n"))
+    end)
+
+    it("spine flags a cell where BOTH swaps fired (own lane on neither side)", function()
+        -- A foreign converging child above AND a non-first parent below: the commit's own
+        -- Lane is on neither side of its own node cell, so no licence can price it. This is
+        -- the composition the layout forbids on an inline fan-in.
+        local errors = h.check_spine(split_rows({ below_id = 2 }), opts)
+        assert(has(errors, "the wire above is not the first parent's lane"), table.concat(errors, "\n"))
     end)
 end)

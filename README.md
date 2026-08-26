@@ -459,7 +459,11 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   column is handed straight to it at the merge and those rows are skipped entirely
   (~10% fewer rows and ~14% fewer crossings with every branch expanded, nothing at all
   in the default view); the merge's node keeps its own branch's colour and the
-  merged-in branch's lane simply starts below it.
+  merged-in branch's lane simply starts below it. Likewise at a **fork**: where the
+  column is held by a branch that ends at that fork, the commit simply takes the
+  column where that branch already is instead of moving both lanes, skipping another
+  two rows (a further ~12% fewer rows and ~44% fewer crossings expanded — again
+  nothing at all in the default view).
   Cycle live with `C` to compare them on a real repository; the
   live value is per-window and resets to this option on reopen. See
   [specification.md](specification.md) §5.6.

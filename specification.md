@@ -443,8 +443,10 @@ the model outward:
   the default mirror (§5.4) it renders as the **rightmost** cell, immediately
   beside the commit message. Only the Lane leading to the next subject-owning
   commit may enter it; every other Lane keeps out, so it never fills with an
-  unrelated branch and is always either the current subject Lane or empty. Every
-  other policy has no gutter and places each node in its own Lane's column
+  unrelated branch and is always either the current subject Lane or empty. (A Lane
+  already in it may be left there for the next subject row's node to land on, rather
+  than moved out and replaced — §5.6's *split swap*. Nothing new enters either way.)
+  Every other policy has no gutter and places each node in its own Lane's column
   wherever that falls.
 - **Segment** — a single wire within a Column: its `connectivity`
   {up, down, left, right} and the **Lane(s)** it carries. Each drawn edge gets
@@ -525,17 +527,31 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
 - **The spine through a node.** A commit's node sits in **its own Lane's** column —
   the Lane its first parent continues (§5) — so the wire arriving at the node cell
   from above and the wire leaving below carry one `id` and one colour, and a line of
-  history reads as one colour straight through its commits. *Exactly one exception is
-  licensed:* the `gutter` policy's **parent swap** (§5.6), which may hand the gutter
-  to a non-first parent at a merge, and only where doing so demonstrably removes a
-  handover — so a break is 1:1 with two rows saved, never a free allowance. The node
-  then takes its colour from the wire **above** (its own Lane), so the break shows as
-  a new lane beginning rather than as the trunk changing colour. The four
-  lane-column policies place a node on the leftmost *arriving* Lane, a positional
-  stand-in for its own that is right on real histories but not always, so they carry
-  a small unlicensed residue (1–2 rows per repository); fixing it moves the node
-  column, which compaction ripples off, so it is a deliberate visual decision of its
-  own rather than a quiet correction.
+  history reads as one colour straight through its commits. *Exactly two exceptions
+  are licensed, one per fan, and both belong to the `gutter` policy's handover
+  avoidance (§5.6):*
+  - the **parent swap**, at a **merge**, which may hand the gutter to a non-first
+    parent — so the wire below the node is a non-first parent's and the wire above is
+    still the node's own Lane. The node then takes its colour from the wire **above**,
+    so the break shows as a new lane beginning rather than as the trunk changing
+    colour.
+  - the **split swap**, at a **fork**, which may leave the gutter with a converging
+    child that is not the continuation and put the node on it — so the wire above the
+    node is that child's and the wire below is still the first parent's. The node's
+    colour needs no adjustment here: it comes from the wire below, which is its own
+    Lane. This one breaks the spine **only where the fan-in shares the commit Line**;
+    given a split Line of its own the child terminates up there, the hub descent
+    carries the node's own Lane, and nothing is broken at all.
+
+  Both are licensed **only where they demonstrably remove a handover** — a break is
+  1:1 with two rows saved, never a free allowance — and a cell with the node's own
+  Lane on *neither* side is a defect under both. The four lane-column policies place a
+  node on the leftmost *arriving* Lane, a positional stand-in for its own that is right
+  on real histories but not always, so they carry a small unlicensed residue (1–2 rows
+  per repository); fixing it moves the node column, which compaction ripples off, so it
+  is a deliberate visual decision of its own rather than a quiet correction. That
+  residue has the same *shape* as the split swap's licensed break, and only the policy
+  knows that a given column is a gutter, so the check is asserted for `gutter` alone.
 - **Root column break.** A root (a commit with no parents) ends its lane with
   nothing below it. The column it occupies is **not reused** by any vertical wire
   or commit node on the immediately following Line, so an independent history
@@ -871,22 +887,32 @@ wire below it are one Lane, one id, one colour.
 this commit's *own* converging children. The second case is the frequent one and
 the easy one to miss: a run of commits on lane L holds the gutter, and where that
 run's last commit forks off a trunk, L's final edge terminates at the fork —
-still in the gutter, and still not the lane the fork continues on. It is evicted
-like any other occupant, and converges back in as an ordinary fan arm on the
-split Line. Skipping it instead leaves the gutter cell's wire above the node on
-the ending lane and its wire below on the continuing one, so the fork's split hub
-renders in the ending branch's colour while the spine below it renders in the
-trunk's — the very defect the rule above forbids, and the one the ordering makes
-routine (§3.1 emits a merged-in lineage right after its merge, so the lane
-adjacent to a fork is very often one that ends there).
+still in the gutter, and still not the lane the fork continues on. Ignoring that
+case is what once left the gutter cell's wire above the node on the ending lane
+and its wire below on the continuing one, so the fork's split hub rendered in the
+ending branch's colour while the spine below it rendered in the trunk's — the
+very defect the rule above forbids, and the one the ordering makes routine (§3.1
+emits a merged-in lineage right after its merge, so the lane adjacent to a fork
+is very often one that ends there). A **pass-through** occupant is evicted like
+any other; a **converging child** is now handled by the *split swap* below, which
+leaves it where it is and brings the node to it — the fix for the colour defect
+being that the hub carries the commit's own Lane wherever the node landed, not
+that the child had to move.
 
 Either row is emitted only when it has work: a gutter already free needs no
 eviction, and **the claiming lane** already in the gutter needs no claim — which,
 given the lineage grouping (§3.1), is the overwhelmingly common case. *Any* other
-lane in the gutter is a reason to evict, not a reason to skip the claim. Only a
-subject row may claim the gutter, so it is free by the time the claim row runs.
+lane in the gutter is a reason to evict **or to swap** (below), not a reason to skip
+the claim. Only a subject row may claim the gutter, so it is free by the time the
+claim row runs.
 
-**The parent swap — avoiding a handover instead of paying for one.** A handover
+**Avoiding the handover instead of paying for it.** A handover costs two rows, and
+both fans give the layout one chance to avoid one — at a **merge** by choosing *which
+parent* continues in the gutter, and at a **fork** by choosing *not to take the gutter
+back*. The two are mirror images, they cost different things, and they are gated
+separately.
+
+**The parent swap (at a merge).** A handover
 costs two rows, and one class of it is avoidable at the source. At a **merge**, the
 gutter is about to be wanted by whichever branch the next subject row is on, and the
 merge is the one place the layout still has a free choice: *which of its parents*
@@ -943,6 +969,91 @@ guarantees (above). That is a real cost, so it is bounded rather than waived:
 So the break is **1:1 with a handover removed** — never a free allowance. It is
 checkable from the rendered output alone, without reference to the layout's internal
 decisions, which is how it is tested (`tests/graph_helpers.check_spine`).
+
+**The split swap (at a fork) — declining to take the gutter back.** The mirror case,
+and the more common one. The gutter is held by a lane that is one of this commit's own
+**converging children** but is not the one it continues (§5 identity) — the shape §3.1
+makes routine, since a merged-in lineage is emitted right after its merge, so the lane
+adjacent to a fork is very often one that *ends at* the fork. The handover above exists
+only to put the node over the continuation's wire: the child is evicted, the
+continuation claims the column, two rows. Instead the node simply takes the gutter
+**where the child already is**, and the continuation converges into it as an ordinary
+arm of the fork's own fan-in. Neither handover row is emitted.
+
+**No lookahead is involved.** The sweep runs top to bottom, so when a fork is reached
+the gutter's occupant is already decided; unlike the parent swap, the whole condition
+is a fact about the current row. **Three clauses:**
+
+1. **The occupant is one of this commit's own converging children**, not an unrelated
+   **pass-through** lane. A pass-through draws a through-vertical in the gutter, so a
+   node placed over it would put two Lanes' verticals in one cell and read as the
+   commit sitting *on* an unrelated branch — and the placement would in fact fall back
+   off the gutter, spending a node-in-gutter row (this policy's whole purpose) to save
+   two Lines. A pass-through is evicted, as before.
+2. **It is not the lane the commit continues.** If it is, no handover was going to be
+   paid and there is nothing to swap.
+3. **No parent swap is also available on this row, unless the fan-in has a Line of its
+   own** — see the composition rule below.
+
+**What it costs depends on where the fan-in is drawn, and only one case costs a break.**
+With a **separate split Line** (§5.2) the child terminates up there as a bare stub and
+the descent into the node carries the commit's **own** Lane, so the wire above the node
+and the wire below it are one Lane: the spine is intact and **nothing is licensed
+because nothing is broken**. The trunk's travel to the gutter is an ordinary fan arm on
+a fan Line, which §5.1 permits. With a **fully inline fan-in** the fan shares the commit
+Line, so the child's stub *is* the node's wire from above: the node's column carries a
+different Lane above than below — a licensed break, priced 1:1 in the two rows it
+removed. There the node needs no colour adjustment (unlike the parent swap): a Column's
+colour comes from its downward wire (§5), which here is the first parent — its own Lane.
+
+The licence is bounded exactly as the parent swap's is, and earned on **its own** row
+rather than the next one:
+
+> A commit's node cell may carry a converging child's Lane above it and its **first
+> parent's** Lane below it **only** at a fork where this swap fired, and **only** if
+> the row emitted **no handover Line** — no eviction and no claim. A break on a row
+> that paid its handover anyway saved nothing and is a defect.
+
+**Composing the two swaps.** A commit that both forks and merges (§10.4's both-fans
+case) can satisfy both gates. With a separate split Line they **compose**: they touch
+opposite sides of a node cell whose wire from above is still the commit's own Lane, so
+this row pays no handover *and* the next subject row pays none either, and it is the
+parent swap's licence that applies, unchanged. With an inline fan-in they **cannot**:
+the cell would hold a foreign child above and a non-first parent below — the commit's
+own Lane on neither side — which no licence prices and which could not even be coloured
+from its own Lane. The **parent swap wins** there; it saves the same two rows (on the
+next subject row instead of this one) and keeps the node's colour, so the split swap
+declines. Getting that precedence backwards is not free: on a 1040-commit repository
+expanded, 69 of the 85 parent swaps sit on exactly such a row, so blocking them costs
+about as many rows as the split swap saves.
+
+**What it buys, measured** over the same 1040-commit repository fully expanded, at
+split-on-its-own-line (against the parent swap alone):
+
+| | parent swap only | + the split swap |
+|---|---|---|
+| crossings | 512 | **285** (−44.3%) |
+| rendered Lines | 1423 | **1251** (−12.1%) |
+| ink (glyph cells) | 6339 | **5286** (−16.6%) |
+| handover Lines | 275 | **103** (−62.5%) |
+| mean / max width | 3.93 / 11 | 4.25 / **10** |
+| node-in-gutter (subject rows) | 0.990 | 0.990 |
+| within-sweep lane stability | 0.922 | **0.950** |
+| licensed spine breaks | 85 | 85 (**no new break** on this style) |
+
+`tests/large_topo` expanded: crossings 172 → 100, handover Lines 74 → 32, max width
+11 → 10. The mean width **rises** while the max width falls and the total number of
+drawn cells falls 5%: the Lines removed were narrower than average, so this is the mean
+moving rather than the graph widening. On a **fully inline** fan-in the same repository
+gives crossings 512 → 399, handover Lines 275 → 241 and 16 new licensed breaks — 1
+break per two rows saved, the same price as the parent swap's.
+
+In the **focused** (default) view: **nothing changes at all**, on either fixture and at
+every merge style. The reason is structural rather than a further clause: §3.1's lineage
+grouping keeps consecutive subject rows on one lane, and every branch that is not an
+anchor contracts to a `◍` head, which claims no gutter (above) — so the gutter at a kept
+fork is already the trunk's own and clause 2 declines. Measured: 0 fires over the whole
+focused corpus, and 0 differing over 20,651 cell-for-cell signature Lines.
 
 **The node keeps its own lane's colour.** A Column's colour normally comes from its
 downward wire (§5), which is a stand-in for "the node's own Lane" — exact wherever
@@ -1041,7 +1152,11 @@ figures and neither of which touches a focused view:
   repository) rows fully expanded, on top of the figures above;
 - the **parent swap** (above), which then takes most of that back — on the same
   repository expanded, rendered Lines −10.7%, crossings −14.4%, ink −12.3%,
-  handover Lines −38.2%, and `large_topo` crossings 197 → 172.
+  handover Lines −38.2%, and `large_topo` crossings 197 → 172;
+- the **split swap** (above), which takes the rest — on top of that, rendered Lines
+  −12.1%, crossings −44.3%, ink −16.6%, handover Lines −62.5%, max width 11 → 10, and
+  `large_topo` crossings 172 → 100. Together the two swaps put the expanded figures
+  back below the pre-eviction ones: crossings 598 → 285 and handover Lines 445 → 103.
 
 Adjacency is unchanged throughout (100% focused, 99.0–99.8% expanded, the residue
 being the root column break) — a swapped merge gives away its gutter only to a
@@ -1053,9 +1168,10 @@ rendered rows** (large_topo focused), 8.0 (expanded), **0.3** (real repo focused
 17.6 (expanded). It is a property of the DAG and the row order, not of the layout,
 so no placement change moves how often the gutter changes **hands**. What a
 placement *can* change is how many of those changes cost rows: the **parent swap**
-(above) absorbs the change into the merge that caused it, which is why it removes
-38% of the handover Lines while the handover frequency stays exactly what the DAG
-says. In the shipping default view the gutter effectively never changes hands; fully
+(above) absorbs the change into the merge that caused it and the **split swap**
+absorbs it into the fork, which is why the two together remove **62%** of the handover
+Lines while the handover frequency stays exactly what the DAG says. In the shipping
+default view the gutter effectively never changes hands; fully
 expanded it changes roughly every fifth subject row, which is where the extra rows
 and crossings come from — each handover that is *not* absorbed costs up to two
 virtual rows.
