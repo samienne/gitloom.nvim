@@ -622,6 +622,20 @@ when no folder is passed), stores it on `Repo.root`, and pushes it with
 **main module** instead of the cwd repo; the window's per-session view state
 (`saved_positions`, `recent_refs`) is keyed by `repo.root` accordingly.
 
+**Spawn diagnostics (`vim.g.gitloom_git_debug`).** Because *every* git job funnels
+through that one `js` wrapper, it is also the natural capture point. Set the
+global to a file path and `js` appends one record per spawn: the full argv (each
+element on its own line), the resolved cwd and executable, the fetch.lua → caller
+chain, the job id — or, on a failed spawn, the error, plus the command line's
+length priced against the **32766-character Windows ceiling** (the pure
+`quoted_len` / `cmdline_len` model the record shares with `tests/fetch_spec.lua`;
+see specification.md §3.4). That ceiling is the sole cause of `E903: Process
+failed to start: name too long`, an error which names the perfectly valid
+`git.exe` and therefore reads as the wrong problem. Unset, the hook costs one
+`type()` check; on failure it re-raises the original error unchanged, so it is
+invisible to behaviour either way. It follows the existing
+`vim.g.gitloom_pane_debug` convention (window.lua).
+
 **Repository picker (`:GitloomPick` → `window.pick`, §2.1).** `fetch_submodules(cwd)`
 runs `git submodule status` in an **explicit** `cwd` (the picker queries the cwd
 repo without disturbing any open graph's active root — `git_lines` now takes an

@@ -218,6 +218,17 @@ Coverage:
   a returned future flattens. Guards the regression where a synchronously-resolved
   future (the gitloom sort mode's `apply_sort`) dropped its chained callbacks, so
   the open-time worktree + reflow (the §10.7 default collapse) never ran
+- `tests/git_debug_spec.lua` — the `vim.g.gitloom_git_debug` spawn-capture hook
+  (fetch.lua's `js` wrapper): `quoted_len` / `cmdline_len` (libuv's
+  `quote_cmd_arg` model — verbatim, empty, space-wrapped, backslash-doubling —
+  pinned against the two bisected data points, `cmd` and a space-bearing `git`
+  path, that both land on exactly 32766), `spawn_record` (every argv element on
+  its own line, cwd, site, exe, argc, the `EXCEEDS` flag and the failure text),
+  `debug_log` (inert unset, appends one record per spawn) and `js` end to end
+  (a real spawn captured / nothing written when unset). Plus **the model against
+  the real OS**: two `jobstart`s, one command line of exactly `WIN_CMDLINE_MAX`
+  characters and one of `+1`, asserting the first spawns and the second does not
+  — so the number the diagnostic reports can never drift from the OS
 - `tests/fetch_spec.lua` — the git I/O layer's **argv bound** (§3.4):
   `git.new_commits_query`, the resync query builder — the one command whose
   revision list scales with the repository's ref count. Asserts the argv stays
@@ -1115,6 +1126,16 @@ Details not covered by the spec or architecture:
   `submodule.parse_submodules`) and opens the graph on the chosen repo; its
   discovery queries take an explicit `cwd` so they don't disturb the active
   root. `nil` active root = Neovim's cwd (the original behaviour).
+  `js` is also the **spawn-diagnostics seam**: with `vim.g.gitloom_git_debug` set
+  to a file path it appends one record per spawn — the full argv (one element per
+  line, so nothing is lost to concatenation), the resolved cwd + executable, the
+  call chain, the job id or the thrown error, and the command line's length
+  against the 32766-char Windows ceiling (see the resync bullet for the
+  measurement). Fully inert unset: one `type()` check, no traceback walk, no file
+  handle. On failure the original error is re-raised with `error(msg, 0)`, so
+  behaviour is identical whether or not the hook is armed. Pure pieces in
+  `fetch._internal` (`quoted_len` / `cmdline_len` / `spawn_record` / `debug_log`),
+  tested in `tests/git_debug_spec.lua`.
 - **Sort modes** (specification.md §3.1, cycled by `S`): gitloom owns the
   row-order *pipeline* (records, decides when to order, reflows), but each
   **sort mode** sources its sequence differently. `SORT_MODES`: `topo`
@@ -1158,8 +1179,18 @@ Details not covered by the spec or architecture:
   ref count and a command line does not: on Windows the whole line must fit
   32767 chars *including* the resolved exe path, and libuv rejects an overlong
   one with `UV_ENAMETOOLONG` → nvim's `E903 … name too long: <git.exe>`. Measured
-  on nvim 0.11.6: last spawnable line = 32766 chars; the environment block does
-  not count. The pure builder `git.new_commits_query` is the tested seam and
+  by bisecting `jobstart` on nvim 0.11.6 **and 0.12.5 — identical**: last
+  spawnable line = 32766 chars, counting the *quoted resolved* argv[0] (nvim
+  substitutes `exepath`) plus each quoted argument plus one separator each. It is
+  the **only** input that produces the error — a deep/UNC/missing cwd, a 300 KB
+  environment, 5000 variables and a 200 KB `$PATH` each moved the threshold by
+  exactly 0 (libuv short-path-shortens a cwd past MAX_PATH itself), and the
+  argument *count* is irrelevant (one 32 KB argument and 1600 small ones cross at
+  the same total). In gitloom's pre-fix shape that is **398 ref tips per side**
+  (399 fails) — i.e. roughly 400 distinct refs, since a resync passes nearly the
+  same set as both positives and exclusions. `vim.g.gitloom_git_debug` (fetch.lua's
+  `js` wrapper, README → Diagnostics) prices every spawn against that cap.
+  The pure builder `git.new_commits_query` is the tested seam and
   `fetch_new_commits` closes stdin after `chansend` — `--stdin` reads to EOF, so
   a missed close would wedge the resync silently) →
   `integrate_commit` (the shared stream/resync per-commit linker, extracted from

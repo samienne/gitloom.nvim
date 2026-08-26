@@ -8,8 +8,10 @@
 --
 --     E903: Process failed to start: name too long: 'C:\...\git.EXE'
 --
--- (measured on nvim 0.11.6 / Windows 11: the last command line that spawns is
--- 32766 characters; the environment block does not count toward it). A resync
+-- (measured on nvim 0.11.6 AND 0.12.5 / Windows 11 by bisecting `jobstart`: the
+-- last command line that spawns is 32766 characters, and it is the ONLY spawn
+-- input that produces the error — cwd depth/validity, environment size, variable
+-- count and `$PATH` length each move the threshold by exactly zero). A resync
 -- puts every current tip AND every previous tip on that line, so at 41 bytes per
 -- hash a repository with a few hundred distinct ref tips walks into the cap.
 --
@@ -20,18 +22,20 @@
 
 local fetch = require("gitloom.git.fetch")
 
--- A stand-in for the resolved executable path libuv prepends (it replaces
--- argv[0] with the absolute path, quoted when it holds a space —
--- `"C:\Program Files\Git\cmd\git.EXE"` is 34 characters with its quotes).
-local EXE = '"C:\\Program Files\\Git\\cmd\\git.EXE"'
-local WINDOWS_CMDLINE_MAX = 32766
+-- A stand-in for the resolved executable path Neovim substitutes for a bare
+-- argv[0] (`exepath("git")`); libuv then quotes it because it holds a space.
+local EXE = [[C:\Program Files\Git\cmd\git.EXE]]
+-- The measured budget and the measured length model live in the library, so the
+-- test and the `vim.g.gitloom_git_debug` records price a spawn the same way (see
+-- tests/git_debug_spec.lua, which pins the model against the bisected numbers).
+local WINDOWS_CMDLINE_MAX = fetch._internal.WIN_CMDLINE_MAX
 
 -- The command line libuv builds from an argv: argv[0] swapped for the resolved
--- exe path, the rest joined with single spaces.
+-- exe path, every element quoted as `quote_cmd_arg` would, joined with spaces.
 local function cmdline_len(argv)
-    local n = #EXE
-    for i = 2, #argv do n = n + 1 + #argv[i] end
-    return n
+    local resolved = { EXE }
+    for i = 2, #argv do resolved[i] = argv[i] end
+    return fetch._internal.cmdline_len(resolved)
 end
 
 local function fake_tips(n, seed)

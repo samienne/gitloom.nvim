@@ -22,6 +22,15 @@ local function read(path)
     return s
 end
 
+--- `read` for the cases that must have produced a file: asserts and narrows the
+--- optional away so the body can be searched directly.
+---@return string
+local function must_read(path)
+    local s = read(path)
+    assert.truthy(s)
+    return s or ""
+end
+
 describe("git spawn debug hook", function()
     after_each(function()
         vim.g.gitloom_git_debug = nil
@@ -67,6 +76,30 @@ describe("git spawn debug hook", function()
 
         it("charges one separator between elements", function()
             assert.equals(#"git log -1", D.cmdline_len({ "git", "log", "-1" }))
+        end)
+    end)
+
+    describe("the measured ceiling, against the real OS", function()
+        -- The whole diagnostic rests on `cmdline_len` being EXACT, not a
+        -- model: spawn one command line of exactly WIN_CMDLINE_MAX characters
+        -- and one of WIN_CMDLINE_MAX + 1, and require the OS to agree.
+        it("predicts a real jobstart failure to the character", function()
+            if vim.fn.has("win32") ~= 1 or vim.fn.executable("git") ~= 1 then return end
+            local exe = vim.fn.exepath("git")
+            local function spawn(pad)
+                local argv = { "git", "-c", "x=" .. string.rep("a", pad), "--version" }
+                local resolved = { exe, argv[2], argv[3], argv[4] }
+                local ok, id = pcall(vim.fn.jobstart, argv, { on_exit = function() end })
+                if ok and type(id) == "number" and id > 0 then pcall(vim.fn.jobstop, id) end
+                return D.cmdline_len(resolved), (ok and type(id) == "number" and id > 0)
+            end
+            local pad = D.WIN_CMDLINE_MAX - D.cmdline_len({ exe, "-c", "x=", "--version" })
+            local len_at, spawned_at = spawn(pad)
+            local len_over, spawned_over = spawn(pad + 1)
+            assert.equals(D.WIN_CMDLINE_MAX, len_at)
+            assert.equals(D.WIN_CMDLINE_MAX + 1, len_over)
+            assert.is_true(spawned_at)   -- exactly at the cap still spawns
+            assert.is_false(spawned_over) -- one character over does not
         end)
     end)
 
@@ -126,8 +159,7 @@ describe("git spawn debug hook", function()
             vim.g.gitloom_git_debug = path
             D.debug_log({ "git", "log" }, "C:/x", true, 1)
             D.debug_log({ "git", "status" }, "C:/x", true, 2)
-            local body = read(path)
-            assert.truthy(body)
+            local body = must_read(path)
             assert.truthy(body:find("|log|", 1, true))
             assert.truthy(body:find("|status|", 1, true))
             local n = select(2, body:gsub("gitloom git spawn", ""))
@@ -142,8 +174,7 @@ describe("git spawn debug hook", function()
             vim.g.gitloom_git_debug = path
             fetch.fetch_rev_order({ "--max-count=1", "--all" }, "--topo-order")
             vim.g.gitloom_git_debug = nil
-            local body = read(path)
-            assert.truthy(body)
+            local body = must_read(path)
             assert.truthy(body:find("|rev-list|", 1, true))
             assert.truthy(body:find("|--topo-order|", 1, true))
             assert.truthy(body:find("cmdline =", 1, true))
