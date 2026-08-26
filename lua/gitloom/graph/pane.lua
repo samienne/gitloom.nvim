@@ -1669,4 +1669,61 @@ function M.header(items, boundary, node_of, lane_of, col_of)
     return { rows = pack_heads(rows) }
 end
 
+--- The pane-rebuild **gate** (spec §6.2) — a tiny state machine, kept here so
+--- the rule it enforces is testable without a window.
+---
+--- The panes' topology depends only on where the window is scrolled to, so the
+--- cursor/scroll debounce rebuilds them only when the viewport actually moved
+--- and otherwise just re-dims the rows it already has. The gate is that
+--- decision plus the bookkeeping that makes it correct.
+---
+--- The rule: **the gate must remember what was BUILT, not what was attempted.**
+--- A pane build is async and cancellable — a scroll landing mid-build bumps the
+--- generation and the result is dropped. Crediting the gate at `started` (which
+--- is what it used to do, with a single stored key) leaves it claiming a
+--- viewport whose panes were never produced, so every later `decide` answers
+--- "repaint" — forever, until an unrelated scroll changes the key. The panes
+--- then stay stale, or, if the abandoned build had already declined and closed
+--- them, stay gone. That is why the key is credited in two stages:
+---
+---   * `started(key)` — a build for `key` is in flight. Enough to stop the
+---     debounce from tearing it down and restarting it on every tick, but NOT
+---     a claim that anything is on screen for `key`.
+---   * `built()` — that build finished and was kept. Only now is `key` the
+---     truth about the panes on screen.
+---   * `dropped()` — that build was abandoned or errored. It built nothing, so
+---     the pending claim goes away and the next `decide` rebuilds.
+---
+---@class PaneGate
+---@field started fun(self: PaneGate, key: string)  -- a build for `key` has begun
+---@field built fun(self: PaneGate)                 -- the in-flight build finished and was kept
+---@field dropped fun(self: PaneGate)               -- the in-flight build was abandoned/errored
+---@field decide fun(self: PaneGate, key: string): "rebuild"|"repaint"
+---@field key fun(self: PaneGate): string?          -- the key the panes on screen were built for
+
+--- A fresh pane gate: nothing built, nothing in flight.
+---@return PaneGate
+function M.gate()
+    local st = { done = nil, pending = nil }
+
+    function st:started(key) self.pending = key end
+
+    function st:built()
+        -- The build finished and was not superseded: only NOW do the panes on
+        -- screen describe this scroll.
+        if self.pending ~= nil then self.done, self.pending = self.pending, nil end
+    end
+
+    function st:dropped() self.pending = nil end
+
+    function st:key() return self.done end
+
+    function st:decide(key)
+        if key == self.done or key == self.pending then return "repaint" end
+        return "rebuild"
+    end
+
+    return st
+end
+
 return M

@@ -127,4 +127,61 @@ function M.trim_ws(s)
     return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- ===== pane-lifecycle trace (`vim.g.gitloom_pane_trace`) ====================
+--
+-- The context panes (spec §6.2) are rebuilt through an async, cancellable
+-- coroutine that is **scroll-gated**: `update_panes` records the scroll key the
+-- build targets and `maybe_update_panes` repaints instead of rebuilding while
+-- that key is unchanged. When the panes go missing (or go stale) after a
+-- programmatic reposition, the question is always the same one — did the build
+-- run, was it abandoned, did it decline, or was the gate simply never reopened?
+-- None of that is visible from outside, so this records it.
+--
+-- Set `vim.g.gitloom_pane_trace` to a file path and every `update_panes` /
+-- `maybe_update_panes` / drive / decline / close appends one line:
+--
+--     0001 +12ms maybe key=137:0 want=137:0 act=repaint
+--     0002 +0ms  update key=201:0 gen=8 site=jump_to_ref
+--     0003 +1ms  abandon gen=8 cur=9 at=post
+--
+-- A no-op — and free of any work at all — while the global is not a string, so
+-- the call sites cost one global read. Diagnostics only: every step is guarded,
+-- and a broken trace must never break the view.
+local trace_seq, trace_t0 = 0, nil
+
+--- Append one pane-lifecycle record. `fields` are rendered as `k=v` in sorted
+--- key order (so successive lines line up and diff cleanly).
+---@param event string
+---@param fields table<string, any>?
+function M.pane_trace(event, fields)
+    local path = vim.g.gitloom_pane_trace
+    if type(path) ~= "string" then return end
+    pcall(function()
+        local now = vim.uv and vim.uv.hrtime() or vim.loop.hrtime()
+        trace_t0 = trace_t0 or now
+        trace_seq = trace_seq + 1
+        local f = fields or {}
+        local keys = {}
+        for k in pairs(f) do keys[#keys + 1] = k end
+        table.sort(keys)
+        local parts = {}
+        for _, k in ipairs(keys) do
+            parts[#parts + 1] = ("%s=%s"):format(k, tostring(f[k]))
+        end
+        local line = ("%04d +%dms %s %s"):format(
+            trace_seq, math.floor((now - trace_t0) / 1e6), event, table.concat(parts, " "))
+        local fh = io.open(path, "a")
+        if not fh then return end
+        fh:write(line); fh:write(string.char(10))
+        fh:close()
+    end)
+end
+
+--- True while the pane trace is armed — for call sites that would otherwise do
+--- real work (a stack capture) just to build the fields.
+---@return boolean
+function M.pane_tracing()
+    return type(vim.g.gitloom_pane_trace) == "string"
+end
+
 return M

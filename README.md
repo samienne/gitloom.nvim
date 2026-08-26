@@ -543,8 +543,8 @@ make test-file FILE=tests/refs_spec.lua   # run a single spec
 
 ## Diagnostics
 
-Two opt-in dump globals, both off by default and both harmless to leave unset.
-Set either to a **file path** and gitloom writes a plain-text dump there.
+Three opt-in dump globals, all off by default and all harmless to leave unset.
+Set any of them to a **file path** and gitloom writes a plain-text dump there.
 
 ```lua
 -- Every git command gitloom spawns: the full argv (one element per line), the
@@ -556,7 +556,29 @@ vim.g.gitloom_git_debug = vim.fn.stdpath("data") .. "/gitloom_git.log"
 -- The live context-pane seam/boundary/header topology (also bound to <leader>wD
 -- inside the graph). Overwrites on each pane rebuild.
 vim.g.gitloom_pane_debug = vim.fn.stdpath("data") .. "/gitloom_pane_dump.txt"
+
+-- The context panes' LIFECYCLE: one line per rebuild decision, build outcome and
+-- close. Appends; unset it to stop.
+vim.g.gitloom_pane_trace = vim.fn.stdpath("data") .. "/gitloom_pane_trace.log"
 ```
+
+`gitloom_pane_trace` is the one to reach for when the header/footer overlays are
+missing, stale, or do not follow scrolling. It records, in order:
+
+| record | meaning |
+| --- | --- |
+| `maybe` | the scroll-gated entry point: the current scroll key, the key the panes on screen were **built** for, and whether it chose `rebuild` or `repaint` — plus whether each overlay is currently `up`/`down` |
+| `update` | a rebuild started, with the scroll key it targets and the call site |
+| `geom` | the viewport the build measured its seams from — cursor line, display index, `winline`, window height, `topline`, `topfill`, `w0` |
+| `yield` / `abandon` | the build spilled onto another tick / was dropped (a scroll landed mid-build, or a newer build superseded it) |
+| `built` | the build finished, with the **decline reason** for each pane (`ok`, `at top`, `no rows`, `past top@N`, `off`, `no HEAD`) |
+| `hide_all` / `close` | both panes were hidden, with the reason or a stack trace |
+
+The distinction that splits the search space fastest: a pane that is missing with
+a `built … ftr=<reason>` line **declined** (the seam or the topology said no),
+whereas one missing with a `close` line was torn down by the window layer. And a
+`maybe … act=repaint` where the panes are `down` means the gate believes they are
+current when they are not.
 
 `gitloom_git_debug` is the one to reach for when a git query fails to start —
 notably Windows' `E903: Process failed to start: name too long`, which names the

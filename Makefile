@@ -2,7 +2,7 @@ TESTS_DIR := tests
 INIT_FILE := tests/minimal_init.lua
 LUALS ?= lua-language-server
 
-.PHONY: test test-file lint smoke
+.PHONY: test test-file lint smoke smoke-refjump
 
 ## Run all tests
 test:
@@ -13,6 +13,15 @@ test:
 ## real repo + async waits. Exits non-zero on failure.
 smoke:
 	nvim --headless -u $(INIT_FILE) -c "lua require('tests.smoke.graph_smoke').run()"
+
+## Headless smoke-test for the <leader>b ref-picker jump vs. the context panes
+## (spec §2/§6.2): drives the REAL snacks picker in a real window and asserts
+## both overlays survive the jump. Steps run from vim.defer_fn, NOT vim.wait, so
+## nvim returns to its main loop and WinScrolled actually fires (see the file).
+## GL_REPO=<path> targets another (larger) repository and GL_NEXT=<n> picks how
+## far down the picker to confirm — sweep both; the defaults are a weak stress.
+smoke-refjump:
+	nvim --headless -u $(INIT_FILE) -c "lua require('tests.smoke.ref_jump_smoke').run()"
 
 ## Run a single test file: make test-file FILE=tests/refs_spec.lua
 test-file:

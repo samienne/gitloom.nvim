@@ -4285,12 +4285,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
         -- Async-pane-build state (assigned/used by update_panes, below). `pane_gen`
         -- is the cancellation token: bumping it abandons any in-flight chunked
-        -- build (so a scroll mid-calculation drops the stale panes). `pane_topline`
-        -- is the **scroll key** (`topline:topfill`, see `pane_scroll_key`) the panes were
-        -- last built for — the gate for `maybe_update_panes`. Declared here so the scroll
-        -- autocmd can cancel.
+        -- build (so a scroll mid-calculation drops the stale panes). `pane_gate` is
+        -- the rebuild gate for `maybe_update_panes` (`pane.gate`, the tested state
+        -- machine): it is told when a build for a **scroll key**
+        -- (`topline:topfill`, see `pane_scroll_key`) starts, finishes, or is dropped,
+        -- and answers "rebuild"/"repaint". Crucially it credits a key only once the
+        -- build FINISHED — crediting at start let an abandoned build leave the gate
+        -- claiming panes that were never produced, so the debounce repainted forever
+        -- and the panes stayed stale (or, if that build had declined and closed them,
+        -- stayed gone) until an unrelated scroll moved the key. Declared here so the
+        -- scroll autocmd can cancel.
         local pane_gen = 0
-        local pane_topline = nil
+        local pane_gate = require("gitloom.graph.pane").gate()
 
         -- The cone-update debounce generation + scroll-suppress guards (read by the
         -- module-level schedule_cone_update / WinScrolled, §12). `applying`
@@ -4361,6 +4367,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 -- seam is now stale) at once; the debounced pass below starts a
                 -- fresh one once scrolling settles.
                 pane_gen = pane_gen + 1
+                pane_gate:dropped() -- the in-flight build is abandoned: it built nothing
+                util.pane_trace("winscrolled", { gen = pane_gen })
                 ctx:schedule_cone_update()
             end,
         })
@@ -4475,6 +4483,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end
 
         local function close_panes()
+            if util.pane_tracing() then
+                util.pane_trace("close", { by = (debug.traceback("", 2) or ""):gsub("%s+", " "):sub(1, 220) })
+            end
             close_pane(footer); footer_seam, footer_height = nil, nil
             close_pane(header); header_seam, header_height = nil, nil
             pcall(vim.api.nvim_buf_clear_namespace, buf, seam_ns, 0, -1)
@@ -4774,6 +4785,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
         -- Hide both panes and record why (surfaced in the `i` status).
         local function hide_all(why)
+            util.pane_trace("hide_all", { why = why })
             footer_dbg, header_dbg = why, why
             close_panes()
             update_footer()
@@ -5076,6 +5088,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- any editor-state mutation so a build abandoned mid-walk (the view
             -- scrolled — `pane_gen` bumped) leaves BOTH previous overlays intact,
             -- never a new footer beside a stale header.
+            if util.pane_tracing() then
+                util.pane_trace("geom", vim.api.nvim_win_call(win, function()
+                    local v = vim.fn.winsaveview()
+                    local cur = vim.fn.line(".")
+                    local _, cdisp, sub = ctx:order_at(cur)
+                    return { cur = cur, cdisp = tostring(cdisp), sub = tostring(sub),
+                        wl = vim.fn.winline(), wh = vim.api.nvim_win_get_height(win),
+                        top = v.topline, fill = v.topfill or 0, w0 = vim.fn.line("w0"),
+                        nsm = #pane_sm.lines, ncols = #pane_sm.cols,
+                        cols = tostring(cdisp and pane_sm.cols[cdisp]) }
+                end))
+            end
             local frows, ftag, fH, fcond, fboundary = converge_footer()
             local hrows, htag, H, ovf, ovf_names, hclipped, hcond, hboundary = converge_header()
 
@@ -5364,10 +5388,19 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- contains any error in the build (returns false), so a broken build never
         -- wedges the main view — the same guarantee the old pcall gave.
         local function drive_panes(co, gen)
-            if gen ~= pane_gen or not vim.api.nvim_win_is_valid(win) then return end
+            if gen ~= pane_gen or not vim.api.nvim_win_is_valid(win) then
+                util.pane_trace("abandon", { gen = gen, cur = pane_gen, at = "pre" })
+                if gen == pane_gen then pane_gate:dropped() end -- the window went away
+                return
+            end
             local ok, err = coroutine.resume(co)
-            if gen ~= pane_gen then return end -- superseded mid-resume; drop the result
+            if gen ~= pane_gen then
+                util.pane_trace("abandon", { gen = gen, cur = pane_gen, at = "post" })
+                return
+            end -- superseded mid-resume; drop the result (whoever bumped `pane_gen`
+            -- already told the gate this build produced nothing)
             if not ok then
+                pane_gate:dropped() -- errored: the gate must not claim this scroll
                 close_panes() -- on any pane error, hide rather than leave a bad state
                 err = tostring(err)
                 if err ~= last_pane_err then -- surface once per distinct error
@@ -5377,7 +5410,15 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 return
             end
             if coroutine.status(co) ~= "dead" then
+                util.pane_trace("yield", { gen = gen })
                 vim.schedule(function() drive_panes(co, gen) end)
+            else
+                -- The build finished and was not superseded: only NOW do the panes on
+                -- screen describe this scroll, so only now may the gate be credited
+                -- with it (see `pane.gate`).
+                pane_gate:built()
+                util.pane_trace("built", { gen = gen, key = tostring(pane_gate:key()),
+                    ftr = footer_dbg or "ok", hdr = header_dbg or "ok" })
             end
         end
 
@@ -5401,10 +5442,16 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
         update_panes = function()
             if not vim.api.nvim_win_is_valid(win) then return end
-            -- Record the scroll this build targets so maybe_update_panes can skip a
-            -- rebuild while the view only moves the cursor.
-            pane_topline = pane_scroll_key()
+            -- Tell the gate which scroll this build TARGETS, so the debounce does not
+            -- restart an identical build every tick while it is in flight. It becomes
+            -- the gate's *built* key only once the build actually completes, in
+            -- `drive_panes` — see `pane.gate`.
+            local key = pane_scroll_key()
+            pane_gate:started(key)
             pane_gen = pane_gen + 1
+            util.pane_trace("update", { key = key, gen = pane_gen,
+                site = util.pane_tracing()
+                    and (debug.traceback("", 2) or ""):gsub("%s+", " "):sub(1, 220) or nil })
             drive_panes(coroutine.create(build_panes), pane_gen)
         end
 
@@ -5415,7 +5462,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- sub-scroll), otherwise just repaint the existing rows for the new cone.
         maybe_update_panes = function()
             if not vim.api.nvim_win_is_valid(win) then return end
-            if pane_scroll_key() ~= pane_topline then update_panes() else repaint_panes() end
+            local key = pane_scroll_key()
+            local act = pane_gate:decide(key)
+            util.pane_trace("maybe", { key = key, built = tostring(pane_gate:key()), act = act,
+                ftr = footer.win and "up" or "down", hdr = header.win and "up" or "down" })
+            if act == "rebuild" then update_panes() else repaint_panes() end
         end
         -- Kept nested (closes over the pane machinery + win); exposed so the
         -- extracted reflow / handlers can call ctx:update_panes() / ctx:maybe_update_panes().
