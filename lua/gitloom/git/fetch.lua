@@ -44,14 +44,174 @@ function M.set_cwd(path)
     active_cwd = path
 end
 
+-- ===== spawn diagnostics (`vim.g.gitloom_git_debug`) ========================
+--
+-- Windows' `CreateProcess` ceiling on the command line, measured against
+-- `vim.fn.jobstart` by bisection on nvim 0.11.6 AND 0.12.5 (identical): the
+-- final command line — the *quoted* resolved argv[0] plus each quoted argument,
+-- space-separated — may be at most this many characters. One more and the spawn
+-- fails with `ERROR_FILENAME_EXCED_RANGE`, which libuv translates to
+-- `UV_ENAMETOOLONG` and Neovim reports as
+--   E903: Process failed to start: name too long: "<resolved exe>"
+--
+-- It is the ONLY spawn input that produces that error: a deep/UNC/short cwd, a
+-- 300 KB environment, 5000 environment variables, a 200 KB `$PATH` and a bare
+-- vs. absolute argv[0] were each varied independently and moved the threshold by
+-- exactly zero (libuv even short-path-shortens a cwd past MAX_PATH before
+-- calling CreateProcess). Note Neovim resolves a bare argv[0] to its `exepath`
+-- before spawning, so the *resolved* path is what is charged, not `"git"`.
+local WIN_CMDLINE_MAX = 32766
+
+--- The number of characters one argv element occupies on the Windows command
+--- line, mirroring libuv's `quote_cmd_arg`: an empty argument becomes `""`; an
+--- argument with no space/tab/quote is emitted verbatim; anything else is
+--- wrapped in quotes, with embedded quotes escaped and the backslash run before
+--- a quote (or before the closing quote) doubled.
+---@param arg string
+---@return integer
+local function quoted_len(arg)
+    if arg == "" then return 2 end
+    if not arg:find('[ \t"]') then return #arg end
+    local n, i, len = 2, 1, #arg
+    while i <= len do
+        local b = 0
+        while arg:sub(i + b, i + b) == "\\" do b = b + 1 end
+        i = i + b
+        if i > len then
+            n = n + 2 * b -- trailing backslashes, doubled before the closing quote
+        elseif arg:sub(i, i) == '"' then
+            n = n + 2 * b + 2 -- doubled backslashes, then \"
+            i = i + 1
+        else
+            n = n + b + 1
+            i = i + 1
+        end
+    end
+    return n
+end
+
+--- The length of the Windows command line `argv` produces, i.e. what is charged
+--- against WIN_CMDLINE_MAX. `argv[1]` must ALREADY be the resolved executable
+--- path (Neovim substitutes `exepath(argv[1])` before spawning).
+---@param argv string[]
+---@return integer
+local function cmdline_len(argv)
+    local n = 0
+    for i, a in ipairs(argv) do
+        n = n + (i > 1 and 1 or 0) + quoted_len(a)
+    end
+    return n
+end
+
+-- Records written this Neovim session, so a dump can be read as a sequence.
+local spawn_seq = 0
+
+--- Format one spawn as a human-readable debug record (see `debug_log`).
+--- Pure — takes everything it reports.
+---@param r { argv: string[], exe: string, cwd: string?, site: string?, seq: integer, ok: boolean, id: any }
+---@return string
+local function spawn_record(r)
+    local argv = r.argv or {}
+    local resolved = {}
+    for i, a in ipairs(argv) do resolved[i] = a end
+    resolved[1] = r.exe ~= "" and r.exe or resolved[1]
+    local len = cmdline_len(resolved)
+    local out = {
+        ("=== gitloom git spawn #%d  %s"):format(r.seq or 0, os.date("%Y-%m-%d %H:%M:%S")),
+        ("    site    = %s"):format(r.site or "?"),
+        ("    cwd     = %s"):format(r.cwd or "(neovim cwd)"),
+        ("    exe     = %s   (argv[1] = %s)"):format(r.exe or "?", tostring(argv[1])),
+        ("    argc = %d"):format(#argv),
+        ("    cmdline = %d of %d chars"):format(len, WIN_CMDLINE_MAX),
+    }
+    if len > WIN_CMDLINE_MAX then
+        out[#out + 1] = ("    ** command line EXCEEDS the Windows limit by %d chars **")
+            :format(len - WIN_CMDLINE_MAX)
+    end
+    if r.ok then
+        out[#out + 1] = ("    result  = job id %s"):format(tostring(r.id))
+    else
+        out[#out + 1] = ("    result  = SPAWN FAILED: %s"):format(tostring(r.id))
+    end
+    out[#out + 1] = "    argv:"
+    for i, a in ipairs(argv) do
+        out[#out + 1] = ("      [%03d] |%s|"):format(i, a)
+    end
+    return table.concat(out, "\n") .. "\n\n"
+end
+
+--- Append one spawn record to `vim.g.gitloom_git_debug` (a file path). A no-op —
+--- and free of any work at all — when the global is not a string. Diagnostics
+--- only: never let it break a fetch, so every step is guarded.
+---@param cmd string[]
+---@param cwd string?
+---@param ok boolean       -- did jobstart return without throwing?
+---@param id any           -- the job id, or the error jobstart threw
+---@param site string?     -- the fetch.lua/window.lua call chain that issued it
+local function debug_log(cmd, cwd, ok, id, site)
+    local path = vim.g.gitloom_git_debug
+    if type(path) ~= "string" then return end
+    spawn_seq = spawn_seq + 1
+    pcall(function()
+        local exe = cmd[1] or ""
+        if not exe:find("[/\\]") then exe = vim.fn.exepath(exe) end
+        local rec = spawn_record({
+            argv = cmd, exe = exe, cwd = cwd, site = site,
+            seq = spawn_seq, ok = ok, id = id,
+        })
+        local fh = io.open(path, "a")
+        if fh then
+            fh:write(rec)
+            fh:close()
+        end
+    end)
+end
+
+--- The fetch.lua → caller chain that issued a spawn, so a record names its call
+--- site. Only walked when the debug hook is armed.
+---@return string
+local function call_site()
+    local parts = {}
+    for lvl = 3, 7 do
+        local i = debug.getinfo(lvl, "Sln")
+        if not i then break end
+        local src = (i.short_src or "?"):gsub(".*[/\\]", "")
+        parts[#parts + 1] = ("%s:%d%s"):format(src, i.currentline or 0,
+            i.name and ("(" .. i.name .. ")") or "")
+    end
+    return table.concat(parts, " <- ")
+end
+
 -- jobstart wrapper that pins every git job to the active repository root, so a
 -- single setter retargets the whole I/O layer. Drop-in for `vim.fn.jobstart`:
 -- it only fills in `cwd` (when unset). When `active_cwd` is nil the field stays
 -- nil and jobstart observes Neovim's cwd, as before.
+--
+-- When `vim.g.gitloom_git_debug` names a file, every spawn is appended to it
+-- (full argv, resolved cwd + exe, command-line length vs. the Windows ceiling,
+-- the job id or the failure). The failure path re-raises the original error, so
+-- behaviour is unchanged either way; with the global unset this costs one type
+-- check.
 local function js(cmd, o)
     o.cwd = o.cwd or active_cwd
-    return vim.fn.jobstart(cmd, o)
+    if type(vim.g.gitloom_git_debug) ~= "string" then
+        return vim.fn.jobstart(cmd, o)
+    end
+    local site = call_site()
+    local ok, id = pcall(vim.fn.jobstart, cmd, o)
+    debug_log(cmd, o.cwd, ok, id, site)
+    if not ok then error(id, 0) end
+    return id
 end
+
+-- Test seam for the spawn diagnostics (not the public API; see CLAUDE.md).
+M._internal = {
+    WIN_CMDLINE_MAX = WIN_CMDLINE_MAX,
+    quoted_len = quoted_len,
+    cmdline_len = cmdline_len,
+    spawn_record = spawn_record,
+    debug_log = debug_log,
+}
 
 -- The `%x1f`-delimited `git log` pretty-format shared by the initial stream and
 -- the resync's bounded fetch: %H %P %an %at %ai %ct %s (author epoch + iso feed
@@ -324,8 +484,13 @@ function M.fetch_commits(opts)
     -- progressive painting, the verbatim order of the `git` sort mode, and the
     -- input the `gitloom` sort mode re-clusters on top of. The active sort mode
     -- (applied at completion) decides the final row order.
-    local command = { "git", "log", "--topo-order", "--parents", unpack(branch),
-        "--pretty=format:" .. COMMIT_LOG_FMT }
+    -- The refspec is appended by hand rather than with `unpack(branch)`: LuaJIT
+    -- caps how many values unpack may return, and this list is the caller's
+    -- (`opts.branches`, default the single `--all`), so its length is not ours
+    -- to assume.
+    local command = { "git", "log", "--topo-order", "--parents" }
+    for _, b in ipairs(branch) do command[#command + 1] = b end
+    command[#command + 1] = "--pretty=format:" .. COMMIT_LOG_FMT
     if opts.count then
         table.insert(command, "-n")
         table.insert(command, tostring(opts.count))
@@ -409,14 +574,38 @@ function M.fetch_commits(opts)
     return future
 end
 
+--- Build the resync query (§3.4) — the argv plus the revision list it walks.
+--- Pure and exposed so the **argv bound** is testable: the revision list scales
+--- with the repository's ref count, and an argv is a hard-capped resource (on
+--- Windows the whole command line must fit 32767 characters *including* the
+--- resolved executable path, and libuv rejects an overlong one with
+--- `UV_ENAMETOOLONG` — surfacing as nvim's `E903 … name too long: <git.exe>`).
+--- So the revisions go on **stdin** (`git log --stdin`, a rev-list option `git
+--- log` shares: one revision per line, `^<hash>` excluding) instead of on the
+--- command line, which removes the bound rather than raising it.
+---@param new_tips string[]  current ref tip hashes (positive revisions)
+---@param old_tips string[]  previous ref tip hashes (negative revisions)
+---@return string[] argv   -- constant size, whatever the tip counts
+---@return string stdin    -- the newline-terminated revision list
+function M.new_commits_query(new_tips, old_tips)
+    local argv = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT, "--stdin" }
+    -- One revision per line: a bare hash includes it, `^<hash>` excludes it —
+    -- exactly what `<new tips> --not <old tips>` meant on the command line.
+    local revs = {}
+    for _, h in ipairs(new_tips) do revs[#revs + 1] = h end
+    for _, h in ipairs(old_tips) do revs[#revs + 1] = "^" .. h end
+    if #revs == 0 then return argv, "" end
+    return argv, table.concat(revs, "\n") .. "\n"
+end
+
 --- Fetch the commits newly reachable since the last read — the resync's bounded
---- query (§3.4): `git log --parents <new tips> --not <old tips>` returns exactly
---- the commits reachable from the current ref tips but not from the previous
---- ones (usually a handful after a fetch / commit). Buffered (the set is small)
---- and resolves to a list of parsed `Commit`s; their already-present parents are
---- linked back into the model by the caller (`integrate_commit`). With no new
---- tips it resolves empty; with no old tips it omits `--not` (fetches all
---- reachable, the cold-start case the stream normally covers).
+--- query (§3.4): `git log --parents --stdin` fed `<new tips>` and `^<old tips>`
+--- returns exactly the commits reachable from the current ref tips but not from
+--- the previous ones (usually a handful after a fetch / commit). Buffered (the
+--- set is small) and resolves to a list of parsed `Commit`s; their already-present
+--- parents are linked back into the model by the caller (`integrate_commit`).
+--- With no new tips it resolves empty; with no old tips no `^` line is written
+--- (fetches all reachable, the cold-start case the stream normally covers).
 ---@param new_tips string[]  current ref tip hashes (positive refs)
 ---@param old_tips string[]  previous ref tip hashes (negative refs)
 ---@return Future
@@ -427,15 +616,10 @@ function M.fetch_new_commits(new_tips, old_tips)
         return future
     end
 
-    local command = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT }
-    for _, h in ipairs(new_tips) do command[#command + 1] = h end
-    if #old_tips > 0 then
-        command[#command + 1] = "--not"
-        for _, h in ipairs(old_tips) do command[#command + 1] = h end
-    end
+    local command, revs = M.new_commits_query(new_tips, old_tips)
 
     local commits = {}
-    js(command, {
+    local jid = js(command, {
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, line in ipairs(lines) do
@@ -450,6 +634,17 @@ function M.fetch_new_commits(new_tips, old_tips)
         end,
     })
 
+    -- Feed the revision list, then **close stdin** — `--stdin` reads until EOF,
+    -- so a missed close wedges the resync forever with no error to show for it.
+    -- pcall'd because the job may already be gone (a failed spawn returns 0/-1
+    -- and fires no on_exit, so resolve here rather than leave the future hanging).
+    if type(jid) == "number" and jid > 0 then
+        pcall(vim.fn.chansend, jid, revs)
+        pcall(vim.fn.chanclose, jid, "stdin")
+    else
+        vim.schedule(function() promise.resolve({}) end)
+    end
+
     return future
 end
 
@@ -461,7 +656,10 @@ end
 ---@return Future
 function M.fetch_rev_order(branch, flag)
     local future, promise = make_future()
-    local command = { "git", "rev-list", flag, unpack(branch) }
+    -- Appended by hand, not `unpack(branch)` — see fetch_commits: the refspec is
+    -- the caller's list and LuaJIT caps unpack's return count.
+    local command = { "git", "rev-list", flag }
+    for _, b in ipairs(branch) do command[#command + 1] = b end
     local hashes = {}
     js(command, {
         stdout_buffered = true,

@@ -541,6 +541,29 @@ make test                          # run all specs
 make test-file FILE=tests/refs_spec.lua   # run a single spec
 ```
 
+## Diagnostics
+
+Two opt-in dump globals, both off by default and both harmless to leave unset.
+Set either to a **file path** and gitloom writes a plain-text dump there.
+
+```lua
+-- Every git command gitloom spawns: the full argv (one element per line), the
+-- resolved cwd and executable, the call site, the resulting job id — and, on a
+-- failed spawn, the error plus the command-line length measured against the
+-- 32766-character Windows ceiling. Appends; unset it to stop.
+vim.g.gitloom_git_debug = vim.fn.stdpath("data") .. "/gitloom_git.log"
+
+-- The live context-pane seam/boundary/header topology (also bound to <leader>wD
+-- inside the graph). Overwrites on each pane rebuild.
+vim.g.gitloom_pane_debug = vim.fn.stdpath("data") .. "/gitloom_pane_dump.txt"
+```
+
+`gitloom_git_debug` is the one to reach for when a git query fails to start —
+notably Windows' `E903: Process failed to start: name too long`, which names the
+(perfectly valid) `git.exe` and so reads as the wrong problem entirely. It is
+really `UV_ENAMETOOLONG`: the command line exceeded 32766 characters. The dump
+prices every spawn against that cap and says outright which one went over.
+
 ## Documentation
 
 - [specification.md](specification.md) — behavioral contract (what gitloom does)

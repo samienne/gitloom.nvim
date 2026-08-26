@@ -622,6 +622,20 @@ when no folder is passed), stores it on `Repo.root`, and pushes it with
 **main module** instead of the cwd repo; the window's per-session view state
 (`saved_positions`, `recent_refs`) is keyed by `repo.root` accordingly.
 
+**Spawn diagnostics (`vim.g.gitloom_git_debug`).** Because *every* git job funnels
+through that one `js` wrapper, it is also the natural capture point. Set the
+global to a file path and `js` appends one record per spawn: the full argv (each
+element on its own line), the resolved cwd and executable, the fetch.lua → caller
+chain, the job id — or, on a failed spawn, the error, plus the command line's
+length priced against the **32766-character Windows ceiling** (the pure
+`quoted_len` / `cmdline_len` model the record shares with `tests/fetch_spec.lua`;
+see specification.md §3.4). That ceiling is the sole cause of `E903: Process
+failed to start: name too long`, an error which names the perfectly valid
+`git.exe` and therefore reads as the wrong problem. Unset, the hook costs one
+`type()` check; on failure it re-raises the original error unchanged, so it is
+invisible to behaviour either way. It follows the existing
+`vim.g.gitloom_pane_debug` convention (window.lua).
+
 **Repository picker (`:GitloomPick` → `window.pick`, §2.1).** `fetch_submodules(cwd)`
 runs `git submodule status` in an **explicit** `cwd` (the picker queries the cwd
 repo without disturbing any open graph's active root — `git_lines` now takes an
@@ -759,7 +773,10 @@ instead of `git show`.
 - `resync()` (the `R` key) is the **general history refresh**: re-read refs
   (`fetch_refs`), diff against the model for added / removed / moved tips
   (`diff_ref_tips`), pull the newly-reachable commits (`git rev-list --parents
-  <new tips> --not <old tips>`, via `fetch_new_commits`) and link them into the
+  --stdin` fed `<new tips>` + `^<old tips>`, via `fetch_new_commits` — the
+  revision list is written to **stdin**, not the command line, because it scales
+  with the ref count and a command line is capped by the OS; the pure builder
+  `new_commits_query` is the tested seam) and link them into the
   identity-stable DAG by hash, re-point moved ref bindings, prune commits no
   longer reachable from any ref (`prune_unreachable`), re-run `order_commits`,
   then fold in `refresh_worktree` and `reflow()` — restoring the hash-keyed
