@@ -5919,8 +5919,9 @@ end
 --- (e.g. `<leader>wG`); `:GitloomPick` forwards setup() config here.
 ---
 --- The picker **opens immediately** with the entries whose paths are known up
---- front (the main module, then each submodule as `git submodule status`
---- resolves) and **fills each row's branch / commit summary asynchronously** as
+--- front (the main module, then each submodule as `fetch_submodules` resolves —
+--- one spawn, so in practice they all arrive at once) and **fills each row's
+--- branch / commit summary asynchronously** as
 --- git returns it (spec §2/§2.1) — mutating the item and re-rendering, so a slow
 --- or large submodule never blocks the list. An uninitialized submodule is shown
 --- disabled (no local repo to open). Confirming opens `M.open` on that repo.

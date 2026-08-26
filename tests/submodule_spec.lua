@@ -3,7 +3,9 @@
 --- relationship from a merge-base), `split_budget` (the even-with-spill height
 --- distribution between the added/removed sides) and `truncate` (keep the newest
 --- N, report the dropped middle). The git I/O, layout, and render splice in
---- graph.lua are window/IO glue and not unit-tested.
+--- graph.lua are window/IO glue and not unit-tested. The module's *other* half —
+--- the repository picker's submodule discovery (§2.1) — is covered by
+--- `tests/repo_picker_spec.lua`.
 
 local submodule = require("gitloom.submodule")
 
@@ -79,53 +81,6 @@ describe("submodule.parse_changes", function()
     it("returns nothing for an empty or nil patch", function()
         assert.equals(0, #submodule.parse_changes(""))
         assert.equals(0, #submodule.parse_changes(nil))
-    end)
-end)
-
-describe("submodule.parse_submodules", function()
-    it("parses the four checkout states from git submodule status", function()
-        local lines = {
-            " " .. H("a") .. " libs/ok (v1.0-2-g" .. H("a"):sub(1, 7) .. ")",
-            "+" .. H("b") .. " libs/modified (heads/main)",
-            "U" .. H("c") .. " libs/conflict",
-            "-" .. H("d") .. " libs/uninit",
-        }
-        local subs = submodule.parse_submodules(lines)
-        assert.equals(4, #subs)
-
-        assert.same({ name = "libs/ok", path = "libs/ok", sha = H("a"),
-            state = "ok", checked_out = true }, subs[1])
-        assert.equals("modified", subs[2].state)
-        assert.is_true(subs[2].checked_out)
-        assert.equals("conflict", subs[3].state)
-        assert.is_true(subs[3].checked_out)
-        -- An uninitialized submodule has no local repo to open.
-        assert.equals("uninitialized", subs[4].state)
-        assert.is_false(subs[4].checked_out)
-        assert.equals("libs/uninit", subs[4].path)
-    end)
-
-    it("strips the trailing (describe) suffix from the path", function()
-        local subs = submodule.parse_submodules({
-            "+" .. H("e") .. " deps/foo (remotes/origin/HEAD)",
-        })
-        assert.equals("deps/foo", subs[1].path)
-        assert.equals(H("e"), subs[1].sha)
-    end)
-
-    it("ignores blank and malformed lines", function()
-        local subs = submodule.parse_submodules({
-            "",
-            "not a status line",
-            " " .. H("f") .. " vendor/bar",
-        })
-        assert.equals(1, #subs)
-        assert.equals("vendor/bar", subs[1].path)
-    end)
-
-    it("returns an empty list for no submodules (empty / nil input)", function()
-        assert.same({}, submodule.parse_submodules({}))
-        assert.same({}, submodule.parse_submodules(nil))
     end)
 end)
 

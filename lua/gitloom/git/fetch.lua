@@ -717,35 +717,149 @@ local function git_string(args)
     return future
 end
 
+-- ===== the repository picker (spec §2.1) ===================================
+--
+-- The picker's cost is **process spawns**, not git's work: on the author's
+-- Windows machine a trivial `git` spawn is ~30 ms warm and was measured at
+-- ~225 ms on a slower one, and the old flow paid one spawn to discover the
+-- submodules plus **two per repository** to summarize it. Worse, the discovery
+-- spawn was `git submodule status`, which opens every submodule's repository
+-- in turn: ~650 ms of fixed cost plus ~150 ms *per submodule* here (~2.0 s for
+-- nine), so the list was gated on a cost linear in the submodule count.
+--
+-- So discovery reads the index's gitlinks (`git ls-files --stage`, ONE spawn
+-- whatever the submodule count — the same path set `submodule status` walks,
+-- see submodule.parse_gitlinks) and answers "is it checked out / at which
+-- commit" from the **filesystem**, and a summary reads its branch from `HEAD`
+-- and spends its single remaining spawn on `git log -1`. Total: 1 + N spawns
+-- instead of 1 + 2N, with the linear-in-N git work gone entirely.
+
+-- The `git log -1` format one picker-row summary needs (spec §2.1): short hash,
+-- subject, and `%D` — the ref decoration, whose `HEAD -> <branch>` names the
+-- current branch, so the branch needs no second spawn. Parsed by
+-- parse.parse_summary.
+local SUMMARY_LOG_FMT = "%h%x1f%s%x1f%D"
+
+--- Read a repository's first line of `path` (a short plumbing file), or nil when
+--- it cannot be read. Never throws — a missing/locked file is a normal answer.
+---@param path string
+---@return string?
+local function read_first(path)
+    local ok, lines = pcall(vim.fn.readfile, path, "", 1)
+    return (ok and lines[1]) or nil
+end
+
+--- The **git directory** of the repository whose work tree is `root`, or nil
+--- when there is none (an uninitialized submodule). A checked-out submodule
+--- normally has a `.git` *file* pointing into the superproject's
+--- `.git/modules/…`, usually by a relative path — resolved here against `root`.
+--- Filesystem only; no spawn.
+---@param root string
+---@return string?
+local function git_dir(root)
+    local dot = root .. "/.git"
+    local st = vim.uv.fs_stat(dot)
+    if not st then return nil end
+    if st.type == "directory" then return dot end
+    if st.type ~= "file" then return nil end
+    local p = parse.parse_gitdir(read_first(dot))
+    if not p then return nil end
+    p = p:gsub("\\", "/")
+    -- A drive-letter or root-anchored gitdir is absolute; anything else is
+    -- relative to the submodule's work tree.
+    if p:match("^%a:") or p:match("^/") then return p end
+    return root .. "/" .. p
+end
+
+--- HEAD's short branch name and commit for the repository at `root`, read
+--- straight off the filesystem (spec §2.1) — **no spawn at all**. `branch` is
+--- empty on a detached HEAD; `hash` is nil when it cannot be resolved (an unborn
+--- branch, or a ref this simple reader cannot follow). Returns nil only when
+--- `root` is not a checked-out repository at all, so `head_info(root) ~= nil` is
+--- exactly the picker's "there is a local repository to open" test.
+---@param root string
+---@return { branch: string, hash: string? }?
+local function head_info(root)
+    local dir = git_dir(root)
+    if not dir then return nil end
+    local h = parse.parse_head(read_first(dir .. "/HEAD"))
+    if h.hash then return { branch = "", hash = h.hash } end -- detached
+    if not h.ref then return { branch = "" } end
+    local loose = read_first(dir .. "/" .. h.ref)
+    local hash = loose and loose:match("^(%x+)") or nil
+    if not hash then
+        -- No loose ref file: the branch is packed (or unborn).
+        local ok, packed = pcall(vim.fn.readfile, dir .. "/packed-refs")
+        hash = ok and parse.packed_ref(packed, h.ref) or nil
+    end
+    return { branch = h.branch, hash = hash }
+end
+
 --- List the direct submodules of the repository at `cwd` (the repository
---- picker, spec §2.1). Runs `git submodule status` in `cwd` explicitly — the
---- picker is an entry point that must query the cwd's repo without disturbing
---- any open graph's active root. Resolves the parsed entries (empty when the
---- repo has no submodules), via the pure submodule.parse_submodules.
+--- picker, spec §2.1). **One** spawn, whatever the submodule count: the index's
+--- `160000` gitlinks come from `git ls-files --stage` run in `cwd` explicitly —
+--- the picker is an entry point that must query the cwd's repo without
+--- disturbing any open graph's active root — and each entry's checkout state is
+--- then read off the filesystem (`submodule.submodule_state`) rather than by
+--- opening its repository. Resolves `{ name, path, sha, state, checked_out }`
+--- per submodule (empty when the repo has none); `sha` is the **recorded**
+--- gitlink.
 ---@param cwd string
 ---@return Future
 function M.fetch_submodules(cwd)
-    return git_lines({ "submodule", "status" }, cwd).next(function(lines)
-        return submodule.parse_submodules(lines)
-    end)
+    local future, promise = make_future()
+    local gitlinks = {}
+    -- Filter in the stdout handler: the index of a large repository is mostly
+    -- ordinary files, and only the gitlinks are worth keeping.
+    js({ "git", "ls-files", "--stage" }, {
+        cwd = cwd,
+        stdout_buffered = true,
+        on_stdout = function(_, lines)
+            for _, l in ipairs(lines or {}) do
+                if l:sub(1, 6) == "160000" then gitlinks[#gitlinks + 1] = l end
+            end
+        end,
+        on_exit = function()
+            local out = {}
+            for _, e in ipairs(submodule.parse_gitlinks(gitlinks)) do
+                local head = head_info(cwd .. "/" .. e.path)
+                local state = submodule.submodule_state(e.sha, {
+                    gitdir = head ~= nil,
+                    head = head and head.hash or nil,
+                    conflict = e.conflict,
+                })
+                out[#out + 1] = {
+                    name = e.name,
+                    path = e.path,
+                    sha = e.sha,
+                    state = state,
+                    checked_out = state ~= "uninitialized",
+                }
+            end
+            promise.resolve(out)
+        end,
+    })
+    return future
 end
 
 --- A one-line summary of the repository at `cwd` for a picker row (spec §2.1):
 --- the current branch (empty on a detached HEAD), the HEAD short hash, and its
---- subject. Two cheap queries (branch, then `log -1`) run in `cwd`. Resolves
---- `{ branch, short, subject }`; an empty repo (no HEAD) resolves empty fields.
+--- subject. **One** spawn: the branch is read from `HEAD` on the filesystem
+--- (`head_info`, free) and only the short hash + subject need `git log -1`,
+--- whose `%D` decoration is the fallback branch for a repository layout the file
+--- read cannot follow. Resolves `{ branch, short, subject }`; an empty repo (no
+--- HEAD commit) resolves its branch with empty hash/subject.
 ---@param cwd string
 ---@return Future
 function M.fetch_repo_summary(cwd)
-    return git_lines({ "rev-parse", "--abbrev-ref", "HEAD" }, cwd).next(function(bl)
-        -- `HEAD` means a detached HEAD — report no branch name.
-        local branch = bl[1]
-        if branch == "HEAD" then branch = "" end
-        return git_lines({ "log", "-1", "--format=%h%x1f%s" }, cwd).next(function(ll)
-            local parts = vim.split(ll[1] or "", "\x1f")
-            return { branch = branch or "", short = parts[1] or "", subject = parts[2] or "" }
+    local head = head_info(cwd)
+    return git_lines({ "log", "-1", "--format=" .. SUMMARY_LOG_FMT }, cwd)
+        .next(function(ll)
+            local s = parse.parse_summary(ll[1])
+            local branch = head and head.branch or ""
+            if branch == "" then branch = s.branch end
+            return { branch = branch, short = s.short, subject = s.subject }
         end)
-    end)
 end
 
 --- Read HEAD's hash and the dirty-state counts (spec §3.3). Resolves
