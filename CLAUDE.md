@@ -229,6 +229,24 @@ Coverage:
   the real OS**: two `jobstart`s, one command line of exactly `WIN_CMDLINE_MAX`
   characters and one of `+1`, asserting the first spawns and the second does not
   — so the number the diagnostic reports can never drift from the OS
+- `tests/repo_picker_spec.lua` — the repository picker's **discovery core**
+  (§2.1), the pure pieces behind its 1 + N spawns: `submodule.parse_gitlinks`
+  (`git ls-files --stage` → the index's `160000` gitlinks — non-gitlink modes
+  skipped, index order kept, a path with spaces, a conflicted path's stages
+  collapsed to one flagged entry taking the best object name whatever the line
+  order, malformed lines ignored), `submodule.submodule_state` (the four states
+  from the recorded sha + the on-disk head: no gitdir ⇒ `uninitialized` even when
+  conflicted — "is there a repository to open" is the one distinction the picker
+  acts on — conflict, moved-off ⇒ `modified`, and an unknown head degrading to
+  `ok` rather than guessing), and the on-disk plumbing parsers
+  `parse.parse_gitdir` (relative + absolute `gitdir:` pointers), `parse.parse_head`
+  (attached branch / a symref outside `refs/heads` / a detached hash / a trailing
+  CR / an unreadable HEAD), `parse.packed_ref` (a refname's hash, never a `^peel`
+  line or the header) and `parse.parse_summary` (`%h%x1f%s%x1f%D` — the branch
+  ONLY from `%D`'s `HEAD -> x` arrow, so a branch merely coinciding with a
+  detached HEAD is not reported as current; empty repo ⇒ empty fields). The
+  filesystem reads (`git_dir`/`head_info`) and the async picker orchestration are
+  I/O and window glue, not unit-tested
 - `tests/fetch_spec.lua` — the git I/O layer's **argv bound** (§3.4):
   `git.new_commits_query`, the resync query builder — the one command whose
   revision list scales with the repository's ref count. Asserts the argv stays
@@ -1122,10 +1140,35 @@ Details not covered by the spec or architecture:
   `repo.root`, and keys the per-session view state by it. So the graph can
   target a **submodule** or the **main module**, not just the cwd repo. The
   repository picker (`:GitloomPick` / `window.pick`, default `<leader>wG`) lists
-  the main module + direct submodules (`git.fetch_submodules` +
-  `submodule.parse_submodules`) and opens the graph on the chosen repo; its
-  discovery queries take an explicit `cwd` so they don't disturb the active
-  root. `nil` active root = Neovim's cwd (the original behaviour).
+  the main module + direct submodules (`git.fetch_submodules`) and opens the
+  graph on the chosen repo; its discovery queries take an explicit `cwd` so they
+  don't disturb the active root. `nil` active root = Neovim's cwd (the original
+  behaviour).
+- **The picker is spawn-bound** (spec §2.1): its whole cost is process creation
+  (~30 ms per `git` spawn warm on the author's Windows box, ~225 ms on a slower
+  one) — **nothing in it touches the network**. It costs **1 + N** spawns for N
+  submodules. Discovery is ONE `git ls-files --stage` (the index's `160000`
+  gitlinks → `submodule.parse_gitlinks`), with the checkout state read off the
+  **filesystem**: `git_dir` resolves a submodule's `.git` *file*
+  (`parse.parse_gitdir`), `head_info` reads `HEAD` (`parse.parse_head`) + the
+  loose ref, falling back to `packed-refs` (`parse.packed_ref`), and
+  `submodule.submodule_state` joins them into git's four states. This replaced
+  `git submodule status`, which opens every submodule's repository in turn —
+  measured 650 ms fixed **+ ~145 ms per submodule** (2.0 s at N=9, 2.8 s at
+  N=16), gating the entire list. A row summary is now ONE spawn too: the branch
+  comes from `head_info` (free) and `git log -1 --format=%h%x1f%s%x1f%D` carries
+  the short hash, subject and — via `%D`'s `HEAD -> <branch>` — the fallback
+  branch (`parse.parse_summary`), replacing a *sequential* `rev-parse` + `log -1`
+  pair. Measured end to end (best of 3, same process): full population
+  648 + 143·N ms → **52 + 7.1·N** ms — 2141 → 130 ms at N=9, 2994 → 181 ms at
+  N=16, 5237 → 278 ms at N=32 — and every row is listed within ~40 ms instead of
+  648 + 130·N. Verified identical to `git submodule status` (paths, states,
+  recorded shas) and to the old two-spawn summary (branch/short/subject) over 12
+  repositories incl. detached, modified, de-initialized, packed-ref and
+  linked-worktree checkouts. The blocking `resolve_root` spawn ahead of it was
+  measured at 21 ms and deliberately left alone (a `vim.fs` walk cannot promise
+  the identical string `git rev-parse --show-toplevel` returns, and that string
+  keys the per-repository session state).
   `js` is also the **spawn-diagnostics seam**: with `vim.g.gitloom_git_debug` set
   to a file path it appends one record per spawn — the full argv (one element per
   line, so nothing is lost to concatenation), the resolved cwd + executable, the

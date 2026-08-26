@@ -42,40 +42,76 @@ function M.parse_changes(patch)
     return out
 end
 
---- Parse `git submodule status` output into one entry per **direct** submodule
---- (spec §2.1), for the repository picker. Each status line is
---- `<flag><sha> <path>[ (<describe>)]`, where the leading flag character is the
---- submodule's checkout state:
----   ` ` — checked out at the recorded commit (`ok`),
----   `+` — checked out but at a **different** commit than recorded (`modified`),
----   `U` — has merge conflicts (`conflict`),
----   `-` — **not initialized / checked out** (`uninitialized`) — there is no
----         local repository to open, so the picker shows it disabled.
---- Returns `{ name, path, sha, state, checked_out }` per submodule, in status
---- order. `path` is relative to the repository root; `checked_out` is false only
---- for the `uninitialized` state. Pure.
----@param lines string[]?  -- `git submodule status` output lines
----@return { name: string, path: string, sha: string, state: "ok"|"modified"|"conflict"|"uninitialized", checked_out: boolean }[]
-function M.parse_submodules(lines)
-    local STATE = { [" "] = "ok", ["+"] = "modified", ["U"] = "conflict", ["-"] = "uninitialized" }
-    local out = {}
+-- ===== repository-picker discovery (spec §2.1) =============================
+--
+-- The picker's direct-submodule list used to come from `git submodule status`,
+-- whose cost is linear in the submodule count because it opens each submodule's
+-- repository in turn (~650 ms fixed + ~150 ms per submodule on the author's
+-- Windows machine — ~2.0 s for nine, and the whole list was gated on it). The
+-- same answer is one cheap `git ls-files --stage` plus a few filesystem stats
+-- away, which is what these two pure helpers decode; the reads live in
+-- git/fetch.lua.
+
+-- Which index stage's object name is the one to report for a path, best first:
+-- the resolved entry (0), else "ours" (2), else "theirs" (3), else the merge
+-- base (1). A conflicted gitlink has no stage 0.
+local STAGE_RANK = { ["0"] = 1, ["2"] = 2, ["3"] = 3, ["1"] = 4 }
+
+--- Parse `git ls-files --stage` output into one entry per **direct submodule**
+--- (spec §2.1) — the index's `160000`-mode **gitlink** entries, which is exactly
+--- the path set `git submodule status` walks, for one cheap spawn instead of the
+--- per-submodule repository opens that command performs.
+---
+--- Each line is `<mode> <object> <stage>\t<path>`; non-gitlink modes are
+--- skipped. A path with a merge conflict appears at several stages and is
+--- reported **once**, flagged `conflict`, carrying the best available object
+--- name (STAGE_RANK). `sha` is the **recorded** gitlink — what the superproject
+--- points at — which is what the checkout state is judged against
+--- (`submodule_state`). Returns entries in index (path) order. Pure.
+---@param lines string[]?  -- `git ls-files --stage` output lines
+---@return { name: string, path: string, sha: string, conflict: boolean }[]
+function M.parse_gitlinks(lines)
+    local out, by_path, rank = {}, {}, {}
     for _, line in ipairs(lines or {}) do
-        local flag, sha, rest = line:match("^([%-%+U ])(%x+) (.+)$")
-        if sha and STATE[flag] then
-            -- `rest` is the path, optionally followed by a ` (<describe>)`
-            -- suffix git appends for a checked-out submodule; strip it.
-            local path = rest:match("^(.-) %(.*%)%s*$") or rest
-            local state = STATE[flag]
-            out[#out + 1] = {
-                name = path,
-                path = path,
-                sha = sha,
-                state = state,
-                checked_out = state ~= "uninitialized",
-            }
+        local mode, sha, stage, path = line:match("^(%d+) (%x+) (%d+)\t(.+)$")
+        local r = STAGE_RANK[stage or ""]
+        if mode == "160000" and r then
+            local e = by_path[path]
+            if not e then
+                e = { name = path, path = path, sha = sha, conflict = false }
+                by_path[path], rank[path] = e, r
+                out[#out + 1] = e
+            elseif r < rank[path] then
+                e.sha, rank[path] = sha, r
+            end
+            if stage ~= "0" then e.conflict = true end
         end
     end
     return out
+end
+
+--- The checkout state of one direct submodule (spec §2.1), from its **recorded**
+--- gitlink `sha` and what the working tree shows — the same four states
+--- `git submodule status` reports, derived without running it:
+---   `uninitialized` — no local repository at the path (`probe.gitdir` false):
+---                     nothing to open, so the picker shows the row disabled,
+---   `conflict`      — the gitlink is unmerged in the index,
+---   `modified`      — checked out at a **different** commit than recorded,
+---   `ok`            — checked out at the recorded commit.
+--- `probe.head` is the submodule's own HEAD commit; when it is unknown (an
+--- unreadable HEAD) the state cannot be `modified` and degrades to `ok`, which
+--- keeps the row openable. Pure.
+---@param sha string?      -- the recorded gitlink object name
+---@param probe { gitdir: boolean, head: string?, conflict: boolean? }?
+---@return "ok"|"modified"|"conflict"|"uninitialized"
+function M.submodule_state(sha, probe)
+    probe = probe or {}
+    -- "Is there a repository to open?" outranks everything: it is the one
+    -- distinction the picker acts on.
+    if not probe.gitdir then return "uninitialized" end
+    if probe.conflict then return "conflict" end
+    if probe.head and sha and probe.head ~= sha then return "modified" end
+    return "ok"
 end
 
 --- Classify the relationship between the old pointer `old` and the new pointer

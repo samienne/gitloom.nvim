@@ -1,6 +1,8 @@
 --- git output parsers — turning raw `git log` / `git show` / `git diff` /
---- `git status` text into structured data. Pure (no I/O); the fetch layer feeds
---- these. Part of the gitloom.git data library.
+--- `git status` text into structured data, plus the parsers for the few git
+--- **on-disk plumbing files** the repository picker reads directly instead of
+--- spawning git for (`.git`, `HEAD`, `packed-refs`; spec §2.1). Pure (no I/O);
+--- the fetch layer feeds these. Part of the gitloom.git data library.
 
 local date = require("gitloom.git.date")
 
@@ -280,6 +282,80 @@ function M.parse_worktrees(lines)
     end
     flush()
     return out
+end
+
+-- ===== on-disk plumbing (the picker's spawn-free reads, spec §2.1) =========
+--
+-- A picker row needs a repository's branch name, and discovery needs each
+-- submodule's checked-out commit. Both are one short file read away, and a
+-- process spawn is the picker's dominant cost (§2.1), so gitloom reads `HEAD`
+-- (and `packed-refs`) itself rather than paying `git rev-parse` per repository.
+-- The reads live in fetch.lua; the parsing is here, and pure.
+
+--- Parse a submodule's `.git` **file** — a checked-out submodule normally has a
+--- one-line `gitdir: <path>` pointer into the superproject's `.git/modules/…`
+--- instead of a real `.git` directory. Returns the pointed-at path (usually
+--- *relative* to the submodule's work tree), or nil when the line is not a
+--- gitdir pointer. Pure.
+---@param line string?
+---@return string?
+function M.parse_gitdir(line)
+    local p = (line or ""):match("^gitdir:%s*(.-)%s*$")
+    return (p and p ~= "") and p or nil
+end
+
+--- Parse a `HEAD` file's first line. A **symref** (`ref: refs/heads/<name>`)
+--- yields the full `ref` plus the short `branch` (empty for a ref outside
+--- `refs/heads/`); a bare object name yields a detached HEAD — no `branch`, but
+--- the `hash` directly. An unreadable/odd line yields neither. Pure.
+---@param line string?
+---@return { branch: string, ref: string?, hash: string? }
+function M.parse_head(line)
+    local text = (line or ""):match("^%s*(.-)%s*$")
+    local ref = text:match("^ref:%s*(.+)$")
+    if ref then
+        return { branch = ref:match("^refs/heads/(.+)$") or "", ref = ref }
+    end
+    -- A detached HEAD stores the object name itself.
+    if text:match("^%x+$") and #text >= 7 then
+        return { branch = "", hash = text }
+    end
+    return { branch = "" }
+end
+
+--- Look one full refname up in `packed-refs` content — the fallback when a
+--- branch has no loose ref file. Peel lines (`^<hash>`, the annotated tag's
+--- target) and the leading `# pack-refs` header are skipped. Pure.
+---@param lines string[]?
+---@param ref string?     -- a full refname, e.g. "refs/heads/main"
+---@return string?
+function M.packed_ref(lines, ref)
+    if not ref then return nil end
+    for _, l in ipairs(lines or {}) do
+        local hash, name = l:match("^(%x+)%s+(%S+)%s*$")
+        if hash and name == ref then return hash end
+    end
+    return nil
+end
+
+--- Parse the repository-picker summary line, `git log -1` with
+--- `%h%x1f%s%x1f%D` (spec §2.1): short hash, subject, and the ref decoration —
+--- which names the current branch as `HEAD -> <branch>` when HEAD is attached
+--- and is a bare `HEAD` when it is detached. So one `git log` yields all three
+--- fields; the branch is only read from here when the spawn-free `HEAD` read
+--- could not follow the repository's layout. Empty input (an unborn branch)
+--- yields empty fields. Pure.
+---@param line string?
+---@return { short: string, subject: string, branch: string }
+function M.parse_summary(line)
+    local parts = vim.split(line or "", "\x1f")
+    return {
+        short = parts[1] or "",
+        subject = parts[2] or "",
+        -- `HEAD -> x` only appears for an attached HEAD; a branch that merely
+        -- coincides with a detached HEAD is listed without the arrow.
+        branch = (parts[3] or ""):match("HEAD %-> ([^,]+)") or "",
+    }
 end
 
 return M

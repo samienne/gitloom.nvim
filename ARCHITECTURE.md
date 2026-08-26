@@ -636,13 +636,40 @@ failed to start: name too long`, an error which names the perfectly valid
 invisible to behaviour either way. It follows the existing
 `vim.g.gitloom_pane_debug` convention (window.lua).
 
-**Repository picker (`:GitloomPick` → `window.pick`, §2.1).** `fetch_submodules(cwd)`
-runs `git submodule status` in an **explicit** `cwd` (the picker queries the cwd
-repo without disturbing any open graph's active root — `git_lines` now takes an
-optional `cwd` that overrides `active_cwd`) and parses it with the pure
-`submodule.parse_submodules` into `{ name, path, sha, state, checked_out }` per
-direct submodule. `fetch_repo_summary(cwd)` returns `{ branch, short, subject }`
-for a picker row. `window.pick` opens the snacks picker immediately with the
+**Repository picker (`:GitloomPick` → `window.pick`, §2.1).** The picker's cost
+is **process spawns**, not git's work — a trivial `git` spawn is ~30 ms warm on
+the author's Windows machine and ~225 ms on a slower one — so discovery and the
+row summaries are built to spend as few as possible: **1 + N** spawns for a
+superproject with N submodules, none of which scales worse than linearly, and
+none of which touches the network.
+
+`fetch_submodules(cwd)` lists the index's `160000` **gitlinks** with one
+`git ls-files --stage` in an **explicit** `cwd` (the picker queries the cwd repo
+without disturbing any open graph's active root — `git_lines` takes an optional
+`cwd` that overrides `active_cwd`), filtering non-gitlink lines in the stdout
+handler so a large repository's index is not materialized. The pure
+`submodule.parse_gitlinks` decodes them (one entry per path, a conflicted
+gitlink's several stages collapsed and flagged), and each entry's checkout state
+comes from the **filesystem** — `git_dir` resolves a submodule's `.git` *file*
+(`parse.parse_gitdir`) and `head_info` reads its `HEAD` (`parse.parse_head`) and
+the branch's loose ref, falling back to `packed-refs` (`parse.packed_ref`) —
+joined by the pure `submodule.submodule_state` into the same four states
+`git submodule status` reports. That command is what this replaces: it opens
+every submodule's repository in turn, measured at ~650 ms fixed plus ~150 ms per
+submodule (~2.0 s for nine, ~2.8 s for sixteen), and the whole list was gated on
+it. Path set, states and recorded shas were verified identical to
+`git submodule status` across 12 repositories (0…32 submodules, incl. detached,
+modified, de-initialized and packed-ref submodules).
+
+`fetch_repo_summary(cwd)` returns `{ branch, short, subject }` for a picker row
+in **one** spawn: the branch is read off `HEAD` by the same spawn-free
+`head_info`, and `git log -1 --format=%h%x1f%s%x1f%D` supplies the short hash and
+subject — with `%D`'s `HEAD -> <branch>` decoration (pure `parse.parse_summary`)
+as the fallback branch for a repository layout the file read cannot follow. It
+replaces a sequential `rev-parse --abbrev-ref HEAD` **then** `log -1` pair, so
+the per-row spawn count halves and the two are no longer serialized.
+
+`window.pick` opens the snacks picker immediately with the
 known entries (main module first, submodules appended as discovery resolves via
 `picker:find{refresh}`) and fills each row's summary asynchronously
 (`picker:update{force}` after mutating the item), so a slow submodule never
@@ -650,9 +677,11 @@ blocks the list; an uninitialized submodule is shown disabled, and confirming
 opens `M.open` on that repo. `M.open` **re-shows** that repo's host window if one
 already exists, or builds it on first entry — one window per repository, never
 stacked (§14.1); the picker is the explicit cross-repository switcher (`q` hides
-the current window, this opens/raises another). The pure `parse_submodules` is
-unit-tested; the async picker orchestration is window glue (not unit-tested, like
-the rest).
+the current window, this opens/raises another). The pure pieces
+(`parse_gitlinks` / `submodule_state` / `parse_gitdir` / `parse_head` /
+`packed_ref` / `parse_summary`) are unit-tested in `tests/repo_picker_spec.lua`;
+the filesystem reads and the async picker orchestration are I/O and window glue
+(not unit-tested, like the rest).
 
 ### Parsing / ref resolution
 
