@@ -409,14 +409,37 @@ function M.fetch_commits(opts)
     return future
 end
 
+--- Build the resync query (§3.4) — the argv plus the revision list it walks.
+--- Pure and exposed so the **argv bound** is testable: the revision list scales
+--- with the repository's ref count, and an argv is a hard-capped resource (on
+--- Windows the whole command line must fit 32767 characters *including* the
+--- resolved executable path, and libuv rejects an overlong one with
+--- `UV_ENAMETOOLONG` — surfacing as nvim's `E903 … name too long: <git.exe>`).
+--- So the revisions go on **stdin** (`git log --stdin`, a rev-list option `git
+--- log` shares: one revision per line, `^<hash>` excluding) instead of on the
+--- command line, which removes the bound rather than raising it.
+---@param new_tips string[]  current ref tip hashes (positive revisions)
+---@param old_tips string[]  previous ref tip hashes (negative revisions)
+---@return string[] argv   -- constant size, whatever the tip counts
+---@return string stdin    -- the newline-terminated revision list
+function M.new_commits_query(new_tips, old_tips)
+    local argv = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT }
+    for _, h in ipairs(new_tips) do argv[#argv + 1] = h end
+    if #old_tips > 0 then
+        argv[#argv + 1] = "--not"
+        for _, h in ipairs(old_tips) do argv[#argv + 1] = h end
+    end
+    return argv, ""
+end
+
 --- Fetch the commits newly reachable since the last read — the resync's bounded
---- query (§3.4): `git log --parents <new tips> --not <old tips>` returns exactly
---- the commits reachable from the current ref tips but not from the previous
---- ones (usually a handful after a fetch / commit). Buffered (the set is small)
---- and resolves to a list of parsed `Commit`s; their already-present parents are
---- linked back into the model by the caller (`integrate_commit`). With no new
---- tips it resolves empty; with no old tips it omits `--not` (fetches all
---- reachable, the cold-start case the stream normally covers).
+--- query (§3.4): `git log --parents --stdin` fed `<new tips>` and `^<old tips>`
+--- returns exactly the commits reachable from the current ref tips but not from
+--- the previous ones (usually a handful after a fetch / commit). Buffered (the
+--- set is small) and resolves to a list of parsed `Commit`s; their already-present
+--- parents are linked back into the model by the caller (`integrate_commit`).
+--- With no new tips it resolves empty; with no old tips no `^` line is written
+--- (fetches all reachable, the cold-start case the stream normally covers).
 ---@param new_tips string[]  current ref tip hashes (positive refs)
 ---@param old_tips string[]  previous ref tip hashes (negative refs)
 ---@return Future
@@ -427,12 +450,7 @@ function M.fetch_new_commits(new_tips, old_tips)
         return future
     end
 
-    local command = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT }
-    for _, h in ipairs(new_tips) do command[#command + 1] = h end
-    if #old_tips > 0 then
-        command[#command + 1] = "--not"
-        for _, h in ipairs(old_tips) do command[#command + 1] = h end
-    end
+    local command = M.new_commits_query(new_tips, old_tips)
 
     local commits = {}
     js(command, {
