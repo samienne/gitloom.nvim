@@ -632,26 +632,93 @@ end
 -- history but not always (see `place_commit`), so they carry a small residue —
 -- ~5% of random DAGs, 1–2 rows per real repository. `gutter` fixes the node column
 -- outright and holds this exactly, which is why it is asserted there.
+--
+-- THE ONE LICENSED EXCEPTION (§5.6 gutter parent swap). `gutter` may deliberately
+-- break the spine at a merge: it sends a NON-FIRST parent down the gutter so the
+-- branch owning the next subject row is already in place, which removes that row's
+-- handover rows entirely. The break is then not a defect but a trade, and this checker
+-- prices it rather than exempting it. A break is licensed only if ALL of:
+--
+--   L1. it is in the GUTTER column (column 1) — the only column the policy constrains;
+--   L2. the wire leaving below is one of this commit's **non-first** parent Lanes, and
+--       the wire arriving above is its **first** parent's Lane. (The first parent
+--       continues the arriving Lane's identity, §5, so the up wire's id IS
+--       `parent_lanes[1]`'s. Anything else is a mis-placed node, not a swap.)
+--   L3. THE LICENCE IS EARNED: at the **next subject-owning row**, the node sits in
+--       the gutter and the wire arriving there is that very Lane. That is observably
+--       "the handover was saved" — had the swapped Lane been evicted after all, a
+--       different Lane would be arriving at that node, and the row would have paid the
+--       eviction and claim rows anyway on top of the break.
+--
+-- So a break anywhere else, a break whose lanes are not a merge's parents, and a swap
+-- that saved nothing all still fail. Returns the errors and, as a second value, the
+-- number of LICENSED breaks — so a test can assert the gate actually fires rather than
+-- passing vacuously.
 ---@param rows table[]
----@return string[] errors
-local function check_spine(rows)
+---@param opts table?  -- needed to classify subject rows (§5.6); defaults to markers on
+---@return string[] errors, integer licensed
+local function check_spine(rows, opts)
     local errors = {}
+    local o = opts or {}
+    -- Which rows own a subject (§5.6): a collapsed head and a junction drawn as a
+    -- marker do not, so they are not where the gutter changes hands.
+    local subject, node = {}, {}
     for ri, row in ipairs(rows) do
+        local C = row.commit
+        subject[ri] = C ~= nil and not C.collapsed
+            and not (C.junction and o.junction_markers ~= false)
         for j, cell in ipairs(row.columns or {}) do
             if cell.has_commit then
-                local u, d
+                local e = { col = j }
                 for _, s in ipairs(cell.lanes or {}) do
-                    if s.connectivity.up and not u then u = s end
-                    if s.connectivity.down and not d then d = s end
+                    if s.connectivity.up and not e.u then e.u = s.id end
+                    if s.connectivity.down and not e.d then e.d = s.id end
                 end
-                if u and d and u.id ~= d.id then
-                    errors[#errors + 1] = ("row %d col %d (%s): node spine changes lane %s -> %s")
-                        :format(ri, j, tostring(row.commit and row.commit.hash), tostring(u.id), tostring(d.id))
-                end
+                node[ri] = e
             end
         end
     end
-    return errors
+
+    local licensed = 0
+    for ri, row in ipairs(rows) do
+        local e = node[ri]
+        if e and e.u and e.d and e.u ~= e.d then
+            local why
+            local pl = row.parent_lanes or {}
+            local swapped -- is `d` a non-first parent lane?
+            for i = 2, #pl do
+                if pl[i].id == e.d then swapped = pl[i] end
+            end
+            if e.col ~= 1 then
+                why = "not in the gutter column"
+            elseif not swapped then
+                why = "the wire below is not a non-first parent lane"
+            elseif not (pl[1] and pl[1].id == e.u) then
+                why = "the wire above is not the first parent's lane"
+            else
+                local n
+                for k = ri + 1, #rows do
+                    if subject[k] then n = k break end
+                end
+                if not n then
+                    why = "no subject row follows, so no handover could be saved"
+                elseif not node[n] or node[n].col ~= 1 then
+                    why = ("the next subject row (%d) does not put its node in the gutter"):format(n)
+                elseif node[n].u ~= e.d then
+                    why = ("the swap SAVED NOTHING: the next subject row (%d) is entered by lane %s, not %s")
+                        :format(n, tostring(node[n].u), tostring(e.d))
+                end
+            end
+            if why then
+                errors[#errors + 1] = ("row %d col %d (%s): unlicensed node spine change %s -> %s — %s")
+                    :format(ri, e.col, tostring(row.commit and row.commit.hash),
+                        tostring(e.u), tostring(e.d), why)
+            else
+                licensed = licensed + 1
+            end
+        end
+    end
+    return errors, licensed
 end
 
 -- Exposed so a self-test can prove the checker catches broken grids.

@@ -38,10 +38,10 @@
 --- IS `layout_seam`, reused verbatim), and `gutter` (lanes never move AND the lane
 --- owning the current subject row is held in a fixed column). The first four are
 --- chains of the stages already here and add no stage code; `gutter` adds three
---- stages (`evict_gutter`, `claim_gutter`, `place_gutter`) and touches the shared
---- ones only through `state.gutter` — nil, and therefore inert, under every other
---- policy. It is also the only one that varies the *seam* chain (it is its own
---- seam; see `POLICY` below).
+--- stages (`evict_gutter`, `claim_gutter`, `place_gutter`) plus a `prepass`, and
+--- touches the shared ones only through `state.gutter` / `state.cont` — both nil,
+--- and therefore inert, under every other policy. It is also the only one that
+--- varies the *seam* chain (it is its own seam; see `POLICY` below).
 ---
 --- A row renders as `[above…] columns [merge]`: `above` is a LIST of virtual lines
 --- (the split fan, plus `gutter`'s handover rows), topmost first (§5 Line).
@@ -68,6 +68,127 @@ local function owns_subject(C, opts)
     if C.collapsed then return false end
     if C.junction and opts.junction_markers ~= false then return false end
     return true
+end
+
+--- The `gutter` policy's `prepass` (spec §5.6): the two forward facts the
+--- top-to-bottom sweep cannot see for itself, both pure functions of `(opts, items)`.
+---
+---   * `pre[i]`      — the hash of the next **subject-owning** commit BELOW row `i`
+---                     (nil past the last one). `run_item` threads it onto
+---                     `state.next_subject`, so a row can ask "who reads the gutter
+---                     after me?".
+---   * `pre.row[h]`  — each commit's row index, so "which of my parents comes first"
+---                     is answerable at the merge.
+---   * `pre.kids[h]` — how many **in-set** children a commit has, so "is this merge
+---                     its only child?" is too. Counted over the projected item list,
+---                     not `commit.children`, because a projection drops and re-points
+---                     edges (§10.3) and only the in-set ones become Lanes.
+---
+--- Together they are exactly the parent-swap gate's three clauses (`gutter_swap`).
+--- Nothing is written back onto the caller's `items`.
+---@param opts table
+---@param items table[]
+---@return table
+local function gutter_prepass(opts, items)
+    local pre = { row = {}, kids = {} }
+    for i, it in ipairs(items) do pre.row[it.commit.hash] = i end
+    for _, it in ipairs(items) do
+        for _, p in ipairs(it.commit.parents or {}) do
+            if pre.row[p.hash] then pre.kids[p.hash] = (pre.kids[p.hash] or 0) + 1 end
+        end
+    end
+    local ahead = nil
+    for i = #items, 1, -1 do
+        pre[i] = ahead
+        if owns_subject(items[i].commit, opts) then ahead = items[i].commit.hash end
+    end
+    return pre
+end
+
+--- GUTTER_SWAP (`gutter` only, spec §5.6): at a merge whose node is in the gutter,
+--- send a **non-first parent** down the gutter and the first parent out to the side,
+--- so the branch that owns the next subject row is already in place and the handover
+--- rows are not needed at all.
+---
+--- Writes `state.cont` — the INDEX of the outgoing entry that continues at the node
+--- column. `nil` means 1 (the first parent), which is what every other policy, and
+--- every un-gated `gutter` row, leaves it as; the stages read `state.cont or 1`, so
+--- the un-swapped path is unchanged by construction.
+---
+--- THE GATE HAS THREE CLAUSES AND ALL THREE ARE REQUIRED.
+---
+---  1. **That parent comes first.** Its next commit is earlier in row order than the
+---     first parent's — the merged-in lineage is what continues immediately below
+---     this merge, so the first parent's own line resumes further down.
+---  2. **That parent owns the next subject row.** `state.next_subject` — the next
+---     commit that carries a message (§5.6 keys the gutter on subject rows) — IS that
+---     parent.
+---  3. **That parent can KEEP the gutter it is handed** — this merge is its only
+---     in-set child, so the lane born here is the only Lane arriving at it and is
+---     therefore the lane it continues (§5 identity, tier 2 with a single candidate).
+---
+--- Clause 2 is not a refinement, it is the whole gate. With clause 1 alone the gate
+--- fires at **every** merge in the shipping focused view and buys nothing: §3.1's
+--- lineage grouping parks the merged-in branch's `◍` collapsed head immediately after
+--- its merge, so clause 1 passes — but a collapsed head owns no subject row, so it
+--- never wanted the gutter and no handover is saved. Measured on a 1040-commit
+--- repository focused: 62 of 62 merges fired, 62 spine breaks, and **negative**
+--- savings (+117 rendered rows, crossings 116 → 209, node-in-gutter 1.000 → 0.943).
+--- With clause 2 the same 62 all decline and the focused view is byte-identical to
+--- the un-swapped policy.
+---
+--- Clause 3 is what makes the saving **provable** instead of merely likely. Clause 2
+--- says the next subject row is that parent; it does not say that row will *continue*
+--- on the lane we just handed it. If some other, more senior Lane also arrives there
+--- (another child of that parent, laid out earlier, so a smaller id), that Lane is the
+--- one it continues (§5), the swapped lane is evicted after all, and the row pays the
+--- handover anyway — on top of a spine break that bought nothing, which is strictly
+--- worse than not firing. "Its only in-set child is this merge" removes the contest:
+--- one candidate Lane, so it wins by construction. Measured, it declines EXACTLY the
+--- unearned fires and no others — 15 of 100 (a 1040-commit repository expanded),
+--- 38 of 60 (fuzz), 0 of 11 (`tests/large_topo`) — leaving every surviving fire
+--- earned. In a real history the merged-in tip normally has just this one child, which
+--- is why the cost is small.
+---
+--- The price of a fire is a **licensed spine break**: the gutter cell's wire above
+--- the node is the first parent's lane and its wire below is the swapped-in parent's,
+--- so they are different Lanes (§5.1's per-Lane continuity still holds — they are
+--- distinct Segments — but the node's column is no longer one id top to bottom). The
+--- break is licensed only because the clauses make it pay for itself, 1:1, in a
+--- handover it removes; `tests/graph_helpers.check_spine` re-derives that licence
+--- from the rendered output and fails on any break that did not earn it.
+---
+--- `state.own_lane_up` says the renderer must colour this node from its **up** wire
+--- (the node's own lane, §5) rather than the default `down`, so a swapped merge keeps
+--- the trunk's colour on the node and the topic lane merely *begins* below it.
+---@param state table
+---@param cc integer  -- the node column `place_gutter` chose
+local function gutter_swap(state, cc)
+    if not state.subject or cc ~= GUTTER then return end
+    local outgoing, pre = state.outgoing, state.pre
+    if not pre or #outgoing < 2 then return end
+    local p1 = outgoing[1].lane.parent
+    local r1 = p1 and pre.row[p1.hash]
+    if not r1 then return end
+    -- CLAUSE 1: the earliest-arriving parent, which for a two-parent merge is just
+    -- `row(p2) < row(p1)`; an octopus merge generalises to "the earliest of them".
+    local bi, br
+    for i = 2, #outgoing do
+        local p = outgoing[i].lane.parent
+        local ri = p and pre.row[p.hash]
+        if ri and (not br or ri < br) then bi, br = i, ri end
+    end
+    if not bi or br >= r1 then return end
+    -- CLAUSE 2: ... and that parent is the one that owns the next subject row, so the
+    -- gutter it is handed is the gutter that row was going to ask for.
+    local pk = outgoing[bi].lane.parent
+    if not pk or state.next_subject ~= pk.hash then return end
+    -- CLAUSE 3: ... and that row will continue on THIS lane, which is assured exactly
+    -- when this merge is its only in-set child: one arriving Lane, so it is the one
+    -- continued (§5). Otherwise a senior sibling Lane wins, ours is evicted anyway, and
+    -- the break buys nothing.
+    if (pre.kids[pk.hash] or 0) ~= 1 then return end
+    state.cont, state.own_lane_up = bi, true
 end
 
 ---@param t table
@@ -637,16 +758,22 @@ function M.layout(opts, items, seed)
             cc = own and own.col or free_lane_col()
         end
 
-        -- CONTINUATION. The gutter belongs to THIS row's own chain: when the node is
-        -- in the gutter its first parent continues there, full stop. No other parent
-        -- may enter it — that is the whole point. Letting the parent that starts the
-        -- merged-in lineage claim the gutter on the MERGE's own row looked free (the
-        -- lane is born there, no wire moves) but it put the topic's lane under the
-        -- merge's node, and `top_lane` colours a node from the cell's `down` segment,
-        -- so the merge rendered as the topic. The handover the lineage needs happens
-        -- on its own row instead (`evict_gutter`).
-        -- The node's own column carries that continuation, so reserve it: no other
-        -- lane may lay a horizontal through it on this row.
+        -- CONTINUATION. The gutter belongs to the row being read. Its first parent
+        -- continues there by default and no other parent may wander in — a parent
+        -- taking the gutter *opportunistically* (it is born there, so no wire moves)
+        -- is what once drew a trunk merge in the merged-in topic's colour, since a
+        -- node is coloured from its cell's `down` Segment.
+        --
+        -- `gutter_swap` (§5.6) is the ONE sanctioned exception, and it is sanctioned
+        -- because it is not opportunistic: it fires only where the next subject row IS
+        -- that parent, so the swap replaces a handover instead of stealing a column,
+        -- and it hands the renderer `own_lane_up` so the node still shows the trunk's
+        -- colour. Everywhere else the handover pays for itself on its own rows
+        -- (`evict_gutter` / `claim_gutter`).
+        gutter_swap(state, cc)
+
+        -- Whichever parent continues, it continues HERE, so reserve the node's own
+        -- column: no other lane may lay a horizontal through it on this row.
         if outgoing[1] then g.used[cc] = true end
         -- No node and nothing continuing here: hold the gutter empty rather than
         -- letting a generic fan-out grab it, so it is free when the next subject
@@ -730,12 +857,17 @@ function M.layout(opts, items, seed)
         for _, inc in ipairs(commit_incoming) do
             g.draw(inc.lane, math.min(inc.col, cc), math.max(inc.col, cc), inc.col, nil)
         end
-        -- The first parent turns down out of the node. The node always sits on its
-        -- own lane's column — under `gutter` too, since `claim_gutter` brings that
+        -- The continuing parent turns down out of the node. The node always sits on
+        -- its own lane's column — under `gutter` too, since `claim_gutter` brings that
         -- lane into the gutter a row earlier — so this is a one-cell down stub. With
         -- a separate merge Line the fan happens below and the commit Line carries
         -- only the stub into the ascent, at the same column either way.
-        if outgoing[1] then g.draw(outgoing[1].lane, cc, cc, nil, cc) end
+        --
+        -- WHICH parent continues is `state.cont` (§5.6 `gutter_swap`): the first,
+        -- except at a gated swap, where the parent owning the next subject row takes
+        -- the gutter instead. `nil` means 1, so every other policy is untouched.
+        local cont = outgoing[state.cont or 1]
+        if cont then g.draw(cont.lane, cc, cc, nil, cc) end
     end
 
     -- COMPACT (stage): each survivor slides into the run of free columns to its
@@ -826,9 +958,16 @@ function M.layout(opts, items, seed)
                 end
             end
         end
-        if outgoing[1] then outgoing[1].out = cc end
+        -- `cont` is the INDEX of the parent that continues at the node column, so every
+        -- OTHER parent is a diverging arm placed below. It is 1 for every policy and
+        -- every un-gated row; `gutter_swap` (§5.6) names another, and then the first
+        -- parent is the one that fans out sideways. With `cont == 1` the loop yields
+        -- exactly `2..#outgoing` in order, which is why the change is inert.
+        local cont = state.cont or 1
+        if outgoing[cont] then outgoing[cont].out = cc end
         local fi = 1
-        for i = 2, #outgoing do
+        for i = 1, #outgoing do
+          if i ~= cont then
             -- `place_gutter` may have pinned this parent to the gutter already; every
             -- other policy leaves `out` unset here, so the generic placement runs.
             local k = outgoing[i].out
@@ -845,23 +984,29 @@ function M.layout(opts, items, seed)
             if not sep_merge then
                 g.draw(outgoing[i].lane, math.min(k, cc), math.max(k, cc), nil, k)
             end
+          end
         end
 
-        -- MERGE LINE (below): the first parent continues at the commit column; the
-        -- shared ascent carries every parent; the extra parents fan out. Survivors
-        -- pass through at their compacted column.
+        -- MERGE LINE (below): the continuing parent carries on at the commit column;
+        -- the shared ascent carries every parent; the other parents fan out. Survivors
+        -- pass through at their compacted column. The ascent's label is pinned by
+        -- per-Lane continuity (§5.1) to whatever the commit Line drew as its `down` at
+        -- `cc` — the CONTINUING parent, not positionally the first.
         if sep_merge then
             local mcells, mdraw, madd = new_line()
             for _, s in ipairs(survivors) do mdraw(s.lane, s.out, s.out, s.out, s.out) end
-            if outgoing[1] then
+            local lead = outgoing[cont]
+            if lead then
                 local ascent = {}
                 for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
-                madd(cc, { up = true }, ascent, outgoing[1].lane.id, outgoing[1].lane.color)
-                madd(cc, { down = true }, { outgoing[1].lane }, outgoing[1].lane.id, outgoing[1].lane.color)
+                madd(cc, { up = true }, ascent, lead.lane.id, lead.lane.color)
+                madd(cc, { down = true }, { lead.lane }, lead.lane.id, lead.lane.color)
             end
-            for i = 2, #outgoing do
-                local o = outgoing[i]
-                mdraw(o.lane, math.min(o.out, cc), math.max(o.out, cc), nil, o.out)
+            for i = 1, #outgoing do
+                if i ~= cont then
+                    local o = outgoing[i]
+                    mdraw(o.lane, math.min(o.out, cc), math.max(o.out, cc), nil, o.out)
+                end
             end
             state.below[#state.below + 1] = assemble(mcells, nil, nil)
         end
@@ -870,8 +1015,10 @@ function M.layout(opts, items, seed)
         -- one row so nothing stacks under it).
         active = {}
         for _, s in ipairs(survivors) do active[s.out] = s.lane end
-        if outgoing[1] then active[cc] = outgoing[1].lane end
-        for i = 2, #outgoing do active[outgoing[i].out] = outgoing[i].lane end
+        if outgoing[cont] then active[cc] = outgoing[cont].lane end
+        for i = 1, #outgoing do
+            if i ~= cont then active[outgoing[i].out] = outgoing[i].lane end
+        end
         blocked = {}
         if #outgoing == 0 then blocked[state.cc] = true end
     end
@@ -886,6 +1033,12 @@ function M.layout(opts, items, seed)
     local function finalize(state)
         local C = state.commit
         local main = assemble(state.g.cells, state.cc, C)
+        -- A licensed spine break (§5.6 `gutter_swap`): the node's OWN lane is the wire
+        -- arriving from above, not the one leaving below, so the renderer must take the
+        -- cell's colour from `up`. Marked on the node's Column rather than inferred by
+        -- the renderer, because only the layout knows the break was deliberate — and
+        -- the flag is nil everywhere else, so no other cell's colour moves.
+        if state.own_lane_up and main[state.cc] then main[state.cc].own_lane_up = true end
         local row = {
             type = state.item.type or "commit",
             commit = C,
@@ -994,19 +1147,20 @@ function M.layout(opts, items, seed)
     ---@field seam fun(state: table)  -- a seeded pane's boundary (seam) row
     ---@field prepass? fun(opts: table, items: table[]): any  -- a once-per-sweep pass
     ---   computing forward hints the sweep cannot (it runs top-to-bottom). Its return
-    ---   value is threaded onto each row's `state.pre`, indexed by `state.index`, so
-    ---   nothing is written onto the caller's `items`. NO policy uses it today —
-    ---   `gutter` did (the next subject-owning commit, so a fan-out could hand the
-    ---   gutter over early), but that is the very move §5.6's identity rule forbids,
-    ---   and its handover rows need only what the current row already knows. Kept for
-    ---   the reserved `interval` placement (§5.6), which needs lane lifespans.
+    ---   value is threaded onto each row's `state.pre`, and `pre[state.index]` onto
+    ---   `state.next_subject`, so nothing is written onto the caller's `items`.
+    ---   `gutter` uses it (`gutter_prepass`): the parent-swap gate (§5.6) has to know
+    ---   which commit owns the NEXT subject row, which is by definition below this one.
+    ---   Reading it does not let a fan-out hand the gutter over *early* — the swap only
+    ---   chooses which of THIS commit's parents continues in it. Also the hook the
+    ---   reserved `interval` placement (§5.6) will use for lane lifespans.
     ---@type table<string, LayoutPolicy>
     local POLICY = {
         compact   = { body = layout_compact,   seam = layout_seam },
         survivors = { body = layout_survivors, seam = layout_seam },
         linear    = { body = layout_linear,    seam = layout_seam },
         straight  = { body = layout_seam,      seam = layout_seam },
-        gutter    = { body = layout_gutter,    seam = layout_gutter_seam },
+        gutter    = { body = layout_gutter,    seam = layout_gutter_seam, prepass = gutter_prepass },
     }
 
     local function active_contains(lane)

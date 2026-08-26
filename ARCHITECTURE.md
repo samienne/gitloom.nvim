@@ -987,15 +987,20 @@ fan_line flags). Then the **layout strategy** chains the grid stages:
   fan line). Its own stage so the seam strategy can drop it (below).
 - `fan_in` — the split line above (when scheduled); reserve the commit jog; write
   the fan-in converging into the node (crossing survivors, sharing the bus) and the
-  first parent's descent.
+  **continuing** parent's descent — `outgoing[state.cont or 1]`, which is the first
+  parent under every policy and every un-gated row.
 - `compact` — slide each survivor left into free columns, redrawn as a turn,
   reserving its jog in `used` (suppressed on a fan line, where a pass-through crosses
   the fan vertically).
 - `fan_out` — the diverging parents' columns (endpoint-only reservation, plus
   freed-column reuse filtered through the row's `used` ledger), drawn inline or on
-  the merge line below; then advance `active` / `blocked`.
+  the merge line below; then advance `active` / `blocked`. "Diverging" is *every
+  parent but `state.cont`*, and the merge Line's shared ascent is labelled with that
+  same continuing parent — pinned by §5.1's per-Lane continuity to whatever the commit
+  Line drew as its `down` at `cc`, which is not necessarily the ordinal first.
 - `finalize` — assemble the main line, build the `OrderItem` (`above` list /
-  `columns` / `merge` + parent/child lanes).
+  `columns` / `merge` + parent/child lanes), and carry `state.own_lane_up` onto the
+  node's `GraphColumn`.
 
 The draw order — survivors, then fan-in, then the moved survivors, then fan-out —
 is what keeps the grid byte-identical to the old algorithm.
@@ -1074,16 +1079,20 @@ does three things.
 *Claim.* Only a **subject** row may claim the gutter (`state.subject`, derived in
 `decide_style` from the same `collapsed` / `junction` test `inline_junction`
 makes), and it claims for its **own** chain: the node goes there and its first
-parent continues there, full stop — no other parent may enter. Everything else
-keeps out, so the gutter is always either the current subject lane or empty.
+parent continues there — unless `gutter_swap` (below) hands it to another parent in
+exchange for a handover. Nothing else may enter, so the gutter is always either the
+current subject lane or empty.
 
 An earlier version had the *outgoing* lane whose `parent` was the next subject
-commit claim the gutter one row early, which needed a `prepass` lookahead. That was
-a bug, not an optimisation: a node's colour is read from its cell's downward
-segment, so a merge whose merged-in lineage had claimed the gutter rendered as the
-topic branch. The claim now happens on the row that uses it (below), and **no
-policy uses the `prepass` hook** — it is kept for the reserved `interval`
-placement (spec §5.6).
+commit claim the gutter one row early, unconditionally. That was a bug, not an
+optimisation: a node's colour is read from its cell's downward segment, so a merge
+whose merged-in lineage had claimed the gutter rendered as the topic branch. The
+claim normally happens on the row that uses it (`claim_gutter`, below). The one
+sanctioned exception is `gutter_swap` (below), which differs from that early version
+in the two ways that mattered: it is **gated** on the handover actually being saved,
+and it marks the node to take its colour from the wire **above**. It does use the
+`prepass` hook — its clauses are forward-looking by nature — so `gutter` is now the
+policy the hook exists for as well as the reserved `interval` placement (spec §5.6).
 
 *Node.* A subject row's node goes in the gutter; a marker or junction keeps its own
 lane column — **its own** meaning the incoming lane its first parent continues
@@ -1128,11 +1137,26 @@ rows put that lane in the gutter a row before the node lands there — so `fan_i
 and `fan_out` need no notion of "the first parent's column is elsewhere". There was
 one (`state.kt`, published by `place_gutter` and read as `state.kt or cc`), from the
 version where a merge's node could sit off its lane; it was provably equal to `cc`
-and has been removed. The only thing `gutter` still writes into a shared stage is
-`state.gutter`, which stops a fan-out reclaiming the gutter as a freed column; it is
-`nil` under every other policy, so adding this policy is provably inert for the
-other four (verified cell-for-cell against the shipped baseline: 5 policies × 5
-merge styles × 154 fixtures, 0 differing in glyphs or colour).
+and has been removed.
+
+What `gutter` writes into the shared stages is three `state` fields, all `nil` under
+every other policy, which is why adding the policy is **provably** inert for the
+other four rather than merely measured so:
+
+- `state.gutter` — stops a fan-out reclaiming the gutter as a freed column;
+- `state.cont` — the **index** of the outgoing entry that continues at the node
+  column. `fan_in`, `fan_out` and the merge Line all read `state.cont or 1`, and with
+  `cont == 1` every loop over "the other parents" yields exactly `2..#outgoing` in
+  order, so the un-swapped path is unchanged by construction;
+- `state.own_lane_up` — carried by `finalize` onto the node's `GraphColumn`, telling
+  the renderer to take that cell's colour from its **up** wire.
+
+Verified cell-for-cell against the `af82a92` baseline (glyphs, highlight groups, and
+every Segment's `id.colour.connectivity`, on every rendered Line): **0 differing over
+191,364 signature Lines** for the four lane-column policies — 4 policies × 4 merge
+styles × 3 corpora (fuzz ×300, `tests/large_topo`, a 1040-commit repository) × 2
+projections — and 0 differing over 20,601 for `gutter` itself in the **focused**
+projection, which is the parent swap's own claim (below).
 
 **The handover is two virtual rows, one move each** (spec §5.6). When a subject row
 belongs to a different lane than the one in the gutter, the column changes hands —
@@ -1182,6 +1206,57 @@ became `OrderItem.above`. Before, a row whose own split fan occupied the single
 above-slot could not also carry an eviction row and silently degraded to placing its
 node off the gutter; now an eviction row, a claim row and a split fan coexist on one
 commit.
+
+**`gutter_swap` — not paying for the handover at all** (spec §5.6). A merge is the
+one row where the layout still has a free choice about the gutter: *which of its
+parents* continues in it. Where the next subject row belongs to a **non-first**
+parent, handing that parent the gutter and fanning the first parent out sideways puts
+the branch that needs the column in it already, and the two handover rows are never
+emitted. `gutter_swap` runs inside `place_gutter`, after the node column `cc` is
+fixed, and writes `state.cont` / `state.own_lane_up`. It is a pure function of the
+row plus the `gutter_prepass` result — no grid state — so it is testable in
+isolation, and it moves no wire: only the *labelling* of which outgoing lane leaves
+through the node cell changes.
+
+The three clauses (all required) and the reason each exists are in spec §5.6. The
+implementation notes worth keeping here:
+
+- **The prepass supplies all three.** `gutter_prepass(opts, items)` returns
+  `pre[i]` = the hash of the next subject-owning commit below row `i` (threaded onto
+  `state.next_subject` by `run_item`), `pre.row[hash]` = row indices, and
+  `pre.kids[hash]` = **in-set** child counts. The last is counted over the projected
+  item list rather than `commit.children`, because a projection drops and re-points
+  edges (§10.3) and only in-set edges become Lanes.
+- **Clause 3 is what makes the licence provable.** "This merge is that parent's only
+  in-set child" means the Lane born here is the only Lane arriving there, so it wins
+  §5 identity's tier 2 uncontested and cannot be evicted. Without it, a more senior
+  sibling Lane wins, the handed Lane is evicted anyway, and the row pays its handover
+  *plus* a spine break that bought nothing. Measured, clause 3 declines exactly the
+  unearned fires and no others: 15 of 100 (a 1040-commit repository expanded),
+  38 of 60 (fuzz), 0 of 11 (`tests/large_topo`).
+- **`check_spine` is the price tag, not an exemption.** It now accepts a break only
+  when it is in the gutter column, is between the row's first and a non-first parent
+  Lane, *and* the next subject row's node is in the gutter entered by the swapped
+  Lane — i.e. only when the handover was observably saved. All three are read off the
+  rendered rows, so the checker never consults the layout's own bookkeeping, and a
+  swap that saved nothing still fails. It returns the licensed count as a second
+  value so a test can prove the gate fires rather than passing vacuously.
+- **The colour.** `render.top_lane` normally prefers a cell's `down` Segment (spec
+  §5), a stand-in for "the node's own Lane" that is exact wherever the spine is
+  continuous. On a swapped node that would name the merged-in branch, so the cell
+  carries `own_lane_up` and `top_lane` inverts the vertical preference for that cell
+  alone (`up` then `down`, in the emphasis tiers too). A root has no `up` Segment, and
+  a tip's node cell has none either — the fallback chain is unchanged, so both keep
+  taking `down`. The flag is only ever set on a real, subject-owning node (the gate
+  requires `state.subject`), so the node-less-junction and packed-marker paths never
+  see it, and the `allow_merge_on_split` two-turn cell is never a node cell (the
+  freed-column list excludes anything in `used`, and the node's column always is).
+
+Numbers, on a 1040-commit repository fully expanded at split-on-its-own-line:
+crossings 598 → 512, rendered Lines 1593 → 1423, ink −12.3%, handover Lines
+445 → 275, max width unchanged, node-in-gutter unchanged at 0.990, within-sweep lane
+stability 0.912 → 0.922, and 85 licensed spine breaks each removing one handover.
+Focused: nothing changes.
 
 `opts.layout_policy` selects the record; an unknown or absent value falls back to
 `compact`, since it is read from user config and must never error.

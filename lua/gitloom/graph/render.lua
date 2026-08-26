@@ -258,17 +258,31 @@ end
 --- fan/branch stub, then a both-sided bus when the cell has no through-vertical
 --- (a ┴/┬ fan, never a │ crossing). Without emphasis (or as fallback) it is the
 --- plain §5 down-before-up order, so the picture is pivot-independent.
+---
+--- `own_lane_up` INVERTS that vertical preference for this one cell: take the colour
+--- from the wire arriving from **above**. Set by the layout only on a node whose
+--- **own** lane is the up wire while a different lane leaves below — today only the
+--- `gutter` policy's licensed parent swap (§5.6). Down-before-up is a stand-in for
+--- "the node's own lane", true wherever the spine is continuous; where the layout
+--- deliberately broke the spine it would name the *arriving branch*, so a merge on the
+--- trunk would render in the colour of the topic it merged. Flipping it keeps the
+--- trunk's colour on the node and lets the topic lane simply begin below it. Every
+--- other cell — every other policy — leaves the flag nil and is untouched.
 ---@param segs Segment[]|nil
 ---@param emphasis boolean|nil
+---@param is_node boolean|nil
+---@param own_lane_up boolean|nil
 ---@return Segment|nil
-local function top_lane(segs, emphasis, is_node)
+local function top_lane(segs, emphasis, is_node, own_lane_up)
     if not segs then return nil end
+    local first, second = "down", "up"
+    if own_lane_up then first, second = "up", "down" end
     if emphasis then
         for _, s in ipairs(segs) do
-            if seg_hl(s) and s.connectivity.down then return s end
+            if seg_hl(s) and s.connectivity[first] then return s end
         end
         for _, s in ipairs(segs) do
-            if seg_hl(s) and s.connectivity.up then return s end
+            if seg_hl(s) and s.connectivity[second] then return s end
         end
         for _, s in ipairs(segs) do
             local l, r = s.connectivity.left, s.connectivity.right
@@ -285,7 +299,7 @@ local function top_lane(segs, emphasis, is_node)
         end
     end
     for _, s in ipairs(segs) do
-        if s.connectivity.down then return s end
+        if s.connectivity[first] then return s end
     end
     -- On a NODE-LESS cell, a horizontal arm/bus outranks a pure-UP stub so a fork bus
     -- keeps ONE colour: the branch's own colour begins in the row ABOVE (at the junction),
@@ -299,7 +313,7 @@ local function top_lane(segs, emphasis, is_node)
         end
     end
     for _, s in ipairs(segs) do
-        if s.connectivity.up then return s end
+        if s.connectivity[second] then return s end
     end
     return segs[1]
 end
@@ -436,7 +450,7 @@ function M.get_column_chars(opts, columns, emphasis)
         -- Colour (and dim state) from the Column's "top" Segment (§5): the
         -- Segment whose edge colours the glyph (a highlighted edge wins, but
         -- only with emphasis — so the picture is unchanged when it is off).
-        local color_seg = top_lane(track.lanes, emphasis, is_node)
+        local color_seg = top_lane(track.lanes, emphasis, is_node, track.own_lane_up)
         local track_color = seg_color(color_seg, emphasis)
         if track.override ~= nil then
             char = track.override

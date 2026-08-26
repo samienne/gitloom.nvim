@@ -1434,8 +1434,12 @@ describe("several above-rows on ONE commit (§5 Line, §5.6 gutter handover)", f
     -- class the screen-row model exists to prevent, so it is asserted head-on.
     local DEF = { split_on_separate_line = true, merge_on_separate_line = false }
 
-    -- c3 gets an eviction row + a claim row.
-    local TWO = { { "c1", { "c2" } }, { "c2", { "c4", "c3" } }, { "c3", { "c4" } }, { "c4", {} } }
+    -- c3 gets an eviction row + a claim row. A plain diamond: c1 forks, its first
+    -- parent c2 keeps the gutter down to c4, so when c3's own (junior) lane reaches its
+    -- commit the gutter is held by a survivor — evict, then claim. Deliberately NOT a
+    -- merge whose second parent owns the next subject row: that is the one shape the
+    -- §5.6 parent swap removes the handover from (it used to be this fixture).
+    local TWO = { { "c1", { "c2", "c3" } }, { "c2", { "c4" } }, { "c3", { "c4" } }, { "c4", {} } }
     -- c3 gets an eviction row + a claim row + its own split fan.
     local THREE = { { "c1", { "c2", "c3" } }, { "c2", { "c4", "c3" } }, { "c3", { "c4" } }, { "c4", {} } }
 

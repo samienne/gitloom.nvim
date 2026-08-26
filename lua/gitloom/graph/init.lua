@@ -61,6 +61,8 @@ local M = {}
 ---@field override? string
 ---@field lanes? Segment[]  per-wire decomposition of the cell (Segments; §5)
 ---@field active? boolean  commit-marker emphasis state, set by mark_reachable (§12)
+---@field own_lane_up? boolean  this node's OWN lane is the wire above, not the one
+---   below, so its colour comes from `up` — a licensed spine break (§5.6 gutter swap)
 
 ---@class OrderItem
 ---@field type "commit"|"merge"|"split"|"markers"

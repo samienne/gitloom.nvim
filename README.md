@@ -454,7 +454,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   commit belongs to a different branch. Each handover is drawn on rows of its own —
   one lane moves out, then one moves in — so no row ever carries two wires along the
   same run. It costs those extra rows (a few percent in the default focused view,
-  more with every branch expanded) and the crossings they draw.
+  more with every branch expanded) and the crossings they draw. Where the branch that
+  needs the column next is one a **merge** on the current row is merging in, the
+  column is handed straight to it at the merge and those rows are skipped entirely
+  (~10% fewer rows and ~14% fewer crossings with every branch expanded, nothing at all
+  in the default view); the merge's node keeps its own branch's colour and the
+  merged-in branch's lane simply starts below it.
   Cycle live with `C` to compare them on a real repository; the
   live value is per-window and resets to this option on reopen. See
   [specification.md](specification.md) §5.6.
