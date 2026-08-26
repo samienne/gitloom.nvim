@@ -50,7 +50,7 @@ describe("new_commits_query (§3.4)", function()
         -- The argv is the bare command: no revision, and no `--not`, on it.
         for _, a in ipairs(argv) do
             assert.is_nil(a:match("^%^?%x%x%x%x%x%x%x%x"))
-            assert.are_not.equal("--not", a)
+            assert.is_true(a ~= "--not")
         end
         assert.is_true(#argv < 10)
     end)
@@ -66,12 +66,12 @@ describe("new_commits_query (§3.4)", function()
 
     it("writes positives plain and exclusions with a caret, one per line", function()
         local _, stdin = fetch.new_commits_query({ "aaa", "bbb" }, { "ccc" })
-        assert.are.equal("aaa\nbbb\n^ccc\n", stdin)
+        assert.equals("aaa\nbbb\n^ccc\n", stdin)
     end)
 
     it("writes no exclusion when there are no old tips", function()
         local _, stdin = fetch.new_commits_query({ "aaa" }, {})
-        assert.are.equal("aaa\n", stdin)
+        assert.equals("aaa\n", stdin)
     end)
 
     it("asks git to read the revisions from stdin", function()
@@ -101,7 +101,7 @@ describe("new_commits_query (§3.4)", function()
             head, "--not", base }
         local via_argv = vim.fn.system(inline)
 
-        assert.are.equal(via_argv, via_stdin)
+        assert.equals(via_argv, via_stdin)
         assert.is_true(#via_stdin > 0)
     end)
 end)

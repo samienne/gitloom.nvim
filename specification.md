@@ -294,8 +294,11 @@ are distinguished, and they are independent:
   changed (`commit`, `fetch`, `rebase`, a `checkout` that moves HEAD). This is
   **supported** in place via *resync* (the `R` key, §2): gitloom re-reads the
   refs (§3.2), diffs them against the model to find added / removed / moved tips,
-  fetches only the newly-reachable commits (`git rev-list --parents <new tips>
-  --not <previous tips>`) and links them into the identity-stable model (§4) by
+  fetches only the newly-reachable commits (`git rev-list --parents --stdin`, fed
+  the new tips plus `^<previous tip>` per previous tip — the revision list scales
+  with the repository's ref count, so it goes on **stdin** rather than the command
+  line, which has a hard OS-level size cap) and links them into the
+  identity-stable model (§4) by
   hash, re-points moved ref bindings, prunes commits no longer reachable from any
   ref (history rewrites / force-pushes), re-runs the owned sort (§3.1), and
   `reflow()`s — preserving hash-keyed view state (selection, folds, cursor,

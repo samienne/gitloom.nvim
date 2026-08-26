@@ -324,8 +324,13 @@ function M.fetch_commits(opts)
     -- progressive painting, the verbatim order of the `git` sort mode, and the
     -- input the `gitloom` sort mode re-clusters on top of. The active sort mode
     -- (applied at completion) decides the final row order.
-    local command = { "git", "log", "--topo-order", "--parents", unpack(branch),
-        "--pretty=format:" .. COMMIT_LOG_FMT }
+    -- The refspec is appended by hand rather than with `unpack(branch)`: LuaJIT
+    -- caps how many values unpack may return, and this list is the caller's
+    -- (`opts.branches`, default the single `--all`), so its length is not ours
+    -- to assume.
+    local command = { "git", "log", "--topo-order", "--parents" }
+    for _, b in ipairs(branch) do command[#command + 1] = b end
+    command[#command + 1] = "--pretty=format:" .. COMMIT_LOG_FMT
     if opts.count then
         table.insert(command, "-n")
         table.insert(command, tostring(opts.count))
@@ -423,13 +428,14 @@ end
 ---@return string[] argv   -- constant size, whatever the tip counts
 ---@return string stdin    -- the newline-terminated revision list
 function M.new_commits_query(new_tips, old_tips)
-    local argv = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT }
-    for _, h in ipairs(new_tips) do argv[#argv + 1] = h end
-    if #old_tips > 0 then
-        argv[#argv + 1] = "--not"
-        for _, h in ipairs(old_tips) do argv[#argv + 1] = h end
-    end
-    return argv, ""
+    local argv = { "git", "log", "--parents", "--pretty=format:" .. COMMIT_LOG_FMT, "--stdin" }
+    -- One revision per line: a bare hash includes it, `^<hash>` excludes it —
+    -- exactly what `<new tips> --not <old tips>` meant on the command line.
+    local revs = {}
+    for _, h in ipairs(new_tips) do revs[#revs + 1] = h end
+    for _, h in ipairs(old_tips) do revs[#revs + 1] = "^" .. h end
+    if #revs == 0 then return argv, "" end
+    return argv, table.concat(revs, "\n") .. "\n"
 end
 
 --- Fetch the commits newly reachable since the last read — the resync's bounded
@@ -450,10 +456,10 @@ function M.fetch_new_commits(new_tips, old_tips)
         return future
     end
 
-    local command = M.new_commits_query(new_tips, old_tips)
+    local command, revs = M.new_commits_query(new_tips, old_tips)
 
     local commits = {}
-    js(command, {
+    local jid = js(command, {
         stdout_buffered = true,
         on_stdout = function(_, lines)
             for _, line in ipairs(lines) do
@@ -468,6 +474,17 @@ function M.fetch_new_commits(new_tips, old_tips)
         end,
     })
 
+    -- Feed the revision list, then **close stdin** — `--stdin` reads until EOF,
+    -- so a missed close wedges the resync forever with no error to show for it.
+    -- pcall'd because the job may already be gone (a failed spawn returns 0/-1
+    -- and fires no on_exit, so resolve here rather than leave the future hanging).
+    if type(jid) == "number" and jid > 0 then
+        pcall(vim.fn.chansend, jid, revs)
+        pcall(vim.fn.chanclose, jid, "stdin")
+    else
+        vim.schedule(function() promise.resolve({}) end)
+    end
+
     return future
 end
 
@@ -479,7 +496,10 @@ end
 ---@return Future
 function M.fetch_rev_order(branch, flag)
     local future, promise = make_future()
-    local command = { "git", "rev-list", flag, unpack(branch) }
+    -- Appended by hand, not `unpack(branch)` — see fetch_commits: the refspec is
+    -- the caller's list and LuaJIT caps unpack's return count.
+    local command = { "git", "rev-list", flag }
+    for _, b in ipairs(branch) do command[#command + 1] = b end
     local hashes = {}
     js(command, {
         stdout_buffered = true,

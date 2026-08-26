@@ -759,7 +759,10 @@ instead of `git show`.
 - `resync()` (the `R` key) is the **general history refresh**: re-read refs
   (`fetch_refs`), diff against the model for added / removed / moved tips
   (`diff_ref_tips`), pull the newly-reachable commits (`git rev-list --parents
-  <new tips> --not <old tips>`, via `fetch_new_commits`) and link them into the
+  --stdin` fed `<new tips>` + `^<old tips>`, via `fetch_new_commits` — the
+  revision list is written to **stdin**, not the command line, because it scales
+  with the ref count and a command line is capped by the OS; the pure builder
+  `new_commits_query` is the tested seam) and link them into the
   identity-stable DAG by hash, re-point moved ref bindings, prune commits no
   longer reachable from any ref (`prune_unreachable`), re-run `order_commits`,
   then fold in `refresh_worktree` and `reflow()` — restoring the hash-keyed

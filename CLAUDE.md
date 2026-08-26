@@ -218,6 +218,14 @@ Coverage:
   a returned future flattens. Guards the regression where a synchronously-resolved
   future (the gitloom sort mode's `apply_sort`) dropped its chained callbacks, so
   the open-time worktree + reflow (the §10.7 default collapse) never ran
+- `tests/fetch_spec.lua` — the git I/O layer's **argv bound** (§3.4):
+  `git.new_commits_query`, the resync query builder — the one command whose
+  revision list scales with the repository's ref count. Asserts the argv stays
+  constant-size at any tip count (no hash, no `--not`, on the command line), that
+  the modelled Windows command line stays under the measured 32766-character cap
+  for 0…5000 tips per side, the `^`-per-exclusion stdin encoding, and — against
+  the real repository — that the `--stdin` form's output is **byte-identical** to
+  the old command-line form. Guards the E903 `name too long` resync regression
 - `tests/ordering_spec.lua` — gitloom's owned row order + the resync pure pieces
   (spec §3.1/§3.4): `order_commits` (the DFS topological sort reproducing git's
   `--topo-order` — child-before-parent validity is the hard invariant, plus
@@ -1145,7 +1153,15 @@ Details not covered by the spec or architecture:
   `resync` (the `R` key) is the in-place
   history refresh: snapshot the old ref tips → `fetch_ref_entries` (non-mutating)
   → `reconcile_refs` (`diff_ref_tips`-driven add/move/remove) → `fetch_new_commits`
-  (`git log <new tips> --not <old tips>`, only the newly-reachable) →
+  (`git log --parents --stdin` fed `<new tips>` + `^<old tips>`, only the
+  newly-reachable — the revision list rides **stdin** because it scales with the
+  ref count and a command line does not: on Windows the whole line must fit
+  32767 chars *including* the resolved exe path, and libuv rejects an overlong
+  one with `UV_ENAMETOOLONG` → nvim's `E903 … name too long: <git.exe>`. Measured
+  on nvim 0.11.6: last spawnable line = 32766 chars; the environment block does
+  not count. The pure builder `git.new_commits_query` is the tested seam and
+  `fetch_new_commits` closes stdin after `chansend` — `--stdin` reads to EOF, so
+  a missed close would wedge the resync silently) →
   `integrate_commit` (the shared stream/resync per-commit linker, extracted from
   `on_batch`) → `prune_to_reachable` (`reachable_hashes` orphan prune) →
   `apply_sort` (re-establish the active sort mode) → `refresh_worktree` +
