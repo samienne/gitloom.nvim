@@ -18,6 +18,8 @@ smoke:
 ## (spec §2/§6.2): drives the REAL snacks picker in a real window and asserts
 ## both overlays survive the jump. Steps run from vim.defer_fn, NOT vim.wait, so
 ## nvim returns to its main loop and WinScrolled actually fires (see the file).
+## GL_REPO=<path> targets another (larger) repository and GL_NEXT=<n> picks how
+## far down the picker to confirm — sweep both; the defaults are a weak stress.
 smoke-refjump:
 	nvim --headless -u $(INIT_FILE) -c "lua require('tests.smoke.ref_jump_smoke').run()"
 
