@@ -378,7 +378,13 @@ Coverage:
   off — and no non-active branch is introduced), and the **chunking hook** (the
   async pane build, §6.2): a deep first-parent chain invokes `continue`/
   `continue_up`/`condense`'s optional `yield`, and the chunked output is identical
-  to the synchronous (no-yield) path
+  to the synchronous (no-yield) path, and the **rebuild gate** `pane.gate` (§6.2):
+  the three-call state machine `started`/`built`/`dropped` + `decide`, driven as
+  SEQUENCES because the defect it pins is one of timing — an ABANDONED build must
+  leave the gate uncredited (so the next debounce rebuilds), an in-flight one must
+  not be restarted every tick, `built` must promote only a live `started`, and a
+  later abandonment must not disturb the key already on screen. Reverting the
+  credit to `started` fails four of them
 - `tests/header_replay_spec.lua` + `tests/large_topo.lua` — the header replayed end
   to end over a **large real-world repository's full (`--all`) topology** (anonymised to
   synthetic ids — topology only, no hashes/names/messages), driven through the **full
@@ -1071,7 +1077,34 @@ Details not covered by the spec or architecture:
   `line("w0")` stays constant — gating on `line("w0")` alone left the footer stale
   (a direction-dependent discontinuity `F`-`F`/refocus "fixed"; see
   `tests/pane_scroll_gate_spec`). Forced callers (reflow / `M`/`B`/`F`/… toggles) call
-  `update_panes` directly. The repo.order hash→index
+  `update_panes` directly.
+  **The gate is `pane.gate()`** — a state machine in pane.lua, not a bare key
+  comparison, so its rule is testable without a window: **it remembers what was
+  BUILT, not what was attempted.** `update_panes` calls `started(key)` (an in-flight
+  target, enough that the debounce does not tear down and restart an identical build
+  every tick); `drive_panes` calls `built()` only when the coroutine finished and was
+  not superseded, and `dropped()` on a build error or a vanished window; the
+  `WinScrolled` handler calls `dropped()` when it bumps `pane_gen`. Crediting the key
+  at *start* (the old single-field `pane_topline`) let an abandoned build leave the
+  gate claiming panes that were never produced, so every later `maybe_update_panes`
+  took the cheap repaint path — panes stale, or GONE if that build had already
+  declined and closed them — until an unrelated scroll moved the key. The exposure is
+  the **programmatic reposition** shape: `jump_to_ref` (`<leader>b`, the §10.6.1
+  dialog `<CR>`), the §16 filter `<CR>`/`<Esc>` and the §15 commit-search confirm all
+  move the view and then call `update_panes` synchronously, so the `WinScrolled`
+  their own `center_view` emits arrives *after* the gate has been told this scroll is
+  current. Reachability is narrow — nvim drains scheduled callbacks (hence the whole
+  chunked build) before `may_trigger_win_scrolled_resized` runs, measured identically
+  on 0.11.6 and 0.12.5 — but the invariant is unconditional, so the gate enforces it
+  rather than relying on that ordering.
+  **`vim.g.gitloom_pane_trace`** (README → Diagnostics) is the armable diagnostic for
+  the whole lifecycle: one appended line per `maybe` (key, built key,
+  rebuild-vs-repaint, each overlay up/down), `update` (target key + call site),
+  `geom` (the viewport the seams were measured from — `winline`/height/`topline`/
+  `topfill`/`w0`), `yield`/`abandon`, `built` (the per-pane decline reason) and
+  `hide_all`/`close` (with a stack). Inert unset: one `vim.g` read, no traceback
+  walk, no file handle (`util.pane_trace` / `util.pane_tracing`).
+  The repo.order hash→index
   map is cached (`order_idx`), rebuilt only when the order length changes. Full
   cross-level head packing (all unpinned heads on ONE row, vs. today's consecutive
   packing) is pending. listview.lua is a git-agnostic reusable widget.
