@@ -144,6 +144,24 @@ are computed before any overlay mutation (a no-yield tail), so a cancelled build
 leaves the prior panes intact. The first chunk runs synchronously, so small panes
 still land in the same tick. The repo.order index is cached (`order_idx`).
 
+The gate itself is `pane.gate()` — a three-call state machine (`started(key)` /
+`built()` / `dropped()`, answering `decide(key)`), kept in `pane.lua` so the rule
+it enforces is testable without a window. The rule is that **the gate remembers
+what was BUILT, not what was attempted**. Because a build is cancellable, a key
+credited at *start* can belong to a build that was then abandoned and produced
+nothing; the gate would answer "repaint" for a viewport whose panes never
+existed, and keep doing so until an unrelated scroll moved the key — leaving the
+panes stale, or gone if that build had already declined and closed them. So
+`started` only records an in-flight target (enough to stop the debounce
+restarting an identical build every tick) and `built` promotes it; every path
+that drops a build — the `WinScrolled` handler that bumps `pane_gen`, a build
+error, a vanished window — calls `dropped`, so the next decision rebuilds. This
+is the shape a *programmatic reposition* hits: `jump_to_ref` (`<leader>b` and the
+pinned-branches dialog), the filter and commit-search confirms all move the view
+and then call `update_panes` synchronously, so the `WinScrolled` their own
+`center_view` emits arrives afterwards — against a gate that has already been
+told this scroll's panes are current.
+
 **The footer pipeline** (`build_panes`, gated by `opts.panes`), per rebuild:
 
 1. **Seam by whole commit blocks.** The footer is a **borderless overlay** over the

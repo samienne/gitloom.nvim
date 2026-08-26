@@ -2083,3 +2083,84 @@ describe("pane.continue / condense — chunking hook (async pane build, §6.2)",
         end
     end)
 end)
+--- The pane-rebuild gate (spec §6.2). The panes' topology is a function of the
+--- scroll, not the cursor row, so the cursor/scroll debounce rebuilds them only
+--- when the viewport actually moved and otherwise re-dims the rows it has.
+---
+--- The regression these pin is one of TIMING, not of the comparison: the gate
+--- used to store a single key, credited the moment a build STARTED. A pane
+--- build is async and cancellable — a scroll landing mid-build bumps the
+--- generation and the result is dropped — so an abandoned build left the gate
+--- claiming a viewport whose panes were never produced. Every later decision
+--- then answered "repaint", forever, until an unrelated scroll changed the key:
+--- the panes stay stale, or (when that build had already declined and closed
+--- them) stay gone. That is the "gone and staying gone after a reposition"
+--- shape, and only a *sequence* can catch it — hence a state machine rather
+--- than a predicate.
+describe("pane rebuild gate (§6.2)", function()
+    it("repaints while the view has not moved since the panes were built", function()
+        local g = pane.gate()
+        g:started("42:0")
+        g:built()
+        assert.equals("42:0", g:key())
+        assert.equals("repaint", g:decide("42:0"))
+    end)
+
+    it("rebuilds once the view moves away from what was built", function()
+        local g = pane.gate()
+        g:started("42:0")
+        g:built()
+        assert.equals("rebuild", g:decide("43:0"))
+        -- A sub-scroll through a line's virtual rows moves only `topfill`.
+        assert.equals("rebuild", g:decide("42:1"))
+    end)
+
+    it("does not restart an identical build that is still in flight", function()
+        local g = pane.gate()
+        g:started("42:0")
+        -- Nothing is on screen for 42:0 yet, but a build for it is running: the
+        -- debounce must not tear that down and start it again on every tick.
+        assert.equals("repaint", g:decide("42:0"))
+        assert.is_nil(g:key()) -- ... and it must NOT claim to have built it
+    end)
+
+    it("rebuilds after an in-flight build is ABANDONED (the regression)", function()
+        local g = pane.gate()
+        g:started("36:0"); g:built() -- panes on screen for the old viewport
+
+        -- The reposition shape (`jump_to_ref`, the pinned dialog, the filter and
+        -- commit-search confirms): the view is moved, a build is started for the
+        -- new scroll, and the WinScrolled the move emits lands while that build
+        -- is still yielding. The scroll handler abandons it.
+        g:started("83:0")
+        assert.equals("repaint", g:decide("83:0")) -- in flight: leave it alone
+        g:dropped()                                -- abandoned: it built NOTHING
+
+        -- Therefore the next debounce MUST rebuild. Crediting the key at
+        -- `started` answers "repaint" here and the panes never come back.
+        assert.equals("rebuild", g:decide("83:0"))
+        assert.equals("36:0", g:key()) -- still only the old build is on screen
+    end)
+
+    it("rebuilds when nothing has been built or is pending", function()
+        assert.equals("rebuild", pane.gate():decide("1:0"))
+    end)
+
+    it("keeps the built key when a later build is abandoned", function()
+        local g = pane.gate()
+        g:started("10:0"); g:built()
+        g:started("20:0"); g:dropped()
+        assert.equals("10:0", g:key())
+        assert.equals("repaint", g:decide("10:0")) -- the old panes are still valid there
+        assert.equals("rebuild", g:decide("20:0"))
+    end)
+
+    it("ignores a completion that no build is pending for", function()
+        -- `built()` can only ever promote a live `started()`; a stray call after
+        -- an abandonment must not resurrect the dropped key.
+        local g = pane.gate()
+        g:started("7:0"); g:dropped(); g:built()
+        assert.is_nil(g:key())
+        assert.equals("rebuild", g:decide("7:0"))
+    end)
+end)
