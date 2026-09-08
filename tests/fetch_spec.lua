@@ -109,3 +109,75 @@ describe("new_commits_query (§3.4)", function()
         assert.is_true(#via_stdin > 0)
     end)
 end)
+
+--- The range diff's **exit code** (spec §13.5).
+---
+--- `fetch_range_diff` is the one diff fetch whose arguments are *derived* rather
+--- than named by the user: `from` is the older selected end's first parent and
+--- `to` is the newer end. It used to resolve `table.concat(out, "\n")` from
+--- `on_exit` whatever git returned, so a `git diff` that failed arrived as an
+--- empty string and the range view rendered its commit list with no patch and no
+--- error — indistinguishable from a range that genuinely changed nothing. It now
+--- resolves `git_code`'s `{ code, out, err }` so the caller can say so.
+---
+--- Driven against the real repository (like the stdin test above): this is I/O,
+--- and the point is precisely that git's exit code survives the transport, which
+--- a stub could only assume.
+describe("fetch_range_diff exit code (§13.5)", function()
+    -- Spin the event loop until the future resolves; returns the result or nil.
+    local function await(future)
+        local res
+        future.next(function(r) res = r end)
+        vim.wait(10000, function() return res ~= nil end, 20)
+        return res
+    end
+
+    -- A minimal Commit for a DiffRange endpoint: only `hash` is read here.
+    ---@param hash string
+    ---@return Commit
+    local function commit(hash)
+        return { hash = hash, parents = {}, children = {}, refs = {} }
+    end
+
+    local function head_pair()
+        local newer = vim.fn.systemlist({ "git", "rev-parse", "HEAD" })[1]
+        if vim.v.shell_error ~= 0 or not newer or #newer ~= 40 then return nil end
+        local older = vim.fn.systemlist({ "git", "rev-parse", "HEAD~3" })[1]
+        if vim.v.shell_error ~= 0 or not older or #older ~= 40 then return nil end
+        return newer, older
+    end
+
+    it("resolves code 0 and the patch for a real range", function()
+        local newer, older = head_pair()
+        if not (newer and older) then
+            pending("not inside a git repository with enough history")
+            return
+        end
+        local res = await(fetch.fetch_range_diff({
+            rev = older .. ".." .. newer, from = commit(older), to = commit(newer),
+        }))
+        assert.is_not_nil(res)
+        assert.equals(0, res.code)
+        assert.is_true(#res.out > 0)
+        assert.truthy(res.out:find("diff --git", 1, true))
+    end)
+
+    -- The shape that used to vanish: a `to` git cannot resolve. Before the fix
+    -- this resolved "" and the view showed the commit list with nothing under it.
+    it("reports a failing git diff instead of an empty patch", function()
+        local newer = head_pair()
+        if not newer then
+            pending("not inside a git repository")
+            return
+        end
+        local absent = "000000000000000000000000000000000000dead"
+        local res = await(fetch.fetch_range_diff({
+            rev = newer .. ".." .. absent, from = commit(newer), to = commit(absent),
+        }))
+        assert.is_not_nil(res)
+        assert.is_true(res.code ~= 0)
+        assert.equals("", res.out)
+        -- git's own diagnosis is carried through, so the view can show it.
+        assert.is_true(#res.err > 0)
+    end)
+end)

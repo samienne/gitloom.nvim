@@ -2717,6 +2717,14 @@ the **combined diff** (§11.3 / §11.4) for the range. Its diff **action label**
 (§11.5) opens the same range in the external diff viewer; `D` likewise opens the
 range while selection is active.
 
+If the range diff **fails**, the view says so: git's exit code and its own error
+message replace the diffstat/diff region (and are notified), instead of the
+commit list appearing over an empty diff. The two are otherwise
+indistinguishable — a range that genuinely changed nothing looks exactly like a
+`git diff` that never ran — and this range's endpoints are *derived* (`from` is
+the older end's first parent, `to` the newer end), so a failure is a real
+possibility rather than a typo the user can see.
+
 ### 13.6 Open / deferred
 
 - **First-parent-restricted range** — the literal `from..to` pulls in a merged-in

@@ -971,58 +971,59 @@ function M.fetch_commit_diff(hash)
     return future
 end
 
---- Fetch the **combined** patch for a `DiffRange` (spec §13.5): `git diff
---- <base> <to>`, where `base` is the range's `from` (its older end's first
---- parent) or the empty tree for a root. Buffered; resolves the patch as a
---- single string. Used by the range commit view; mirrors fetch_commit_diff.
----@param range_arg DiffRange
-function M.fetch_range_diff(range_arg)
-    local future, promise = make_future()
-    local out = {}
-    local base = (range_arg.from and range_arg.from.hash) or EMPTY_TREE
-
-    js(
-        { "git", "diff", base, range_arg.to.hash },
-        {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                for _, l in ipairs(lines) do
-                    out[#out + 1] = l
-                end
-            end,
-            on_exit = function()
-                promise.resolve(table.concat(out, "\n"))
-            end,
-        })
-
-    return future
-end
-
---- Run a git command and resolve `{ code, out }` (stdout joined with newlines).
---- A thin future over `jobstart` for the submodule change view (§11.7). The
---- submodule is addressed with `git -C <path>` by the caller (the path is
---- relative to the active repository root, §2.1) rather than jobstart's own
---- `cwd`, so a missing checkout fails the command (nonzero exit) instead of
---- throwing on an invalid working directory. Resolves `{ code = -1 }` if the
---- job cannot be spawned.
+--- Run a git command and resolve `{ code, out, err }` (stdout/stderr joined with
+--- newlines). A thin future over `jobstart` for the submodule change view (§11.7)
+--- and the range diff (§13.5). The submodule is addressed with `git -C <path>` by
+--- the caller (the path is relative to the active repository root, §2.1) rather
+--- than jobstart's own `cwd`, so a missing checkout fails the command (nonzero
+--- exit) instead of throwing on an invalid working directory. Resolves
+--- `{ code = -1 }` if the job cannot be spawned.
 ---@param args string[]
----@return table  -- future resolving { code: integer, out: string }
+---@return table  -- future resolving { code: integer, out: string, err: string }
 local function git_code(args)
     local future, promise = make_future()
-    local out = {}
+    local out, err = {}, {}
     local ok, jid = pcall(js, args, {
         stdout_buffered = true,
+        stderr_buffered = true,
         on_stdout = function(_, lines)
             for _, l in ipairs(lines) do out[#out + 1] = l end
         end,
+        on_stderr = function(_, lines)
+            for _, l in ipairs(lines) do err[#err + 1] = l end
+        end,
         on_exit = function(_, code)
-            promise.resolve({ code = code, out = table.concat(out, "\n") })
+            promise.resolve({
+                code = code,
+                out = table.concat(out, "\n"),
+                err = trim_ws(table.concat(err, "\n")),
+            })
         end,
     })
     if not ok or jid <= 0 then
-        vim.schedule(function() promise.resolve({ code = -1, out = "" }) end)
+        vim.schedule(function()
+            promise.resolve({ code = -1, out = "", err = (not ok) and tostring(jid) or "" })
+        end)
     end
     return future
+end
+
+--- Fetch the **combined** patch for a `DiffRange` (spec §13.5): `git diff
+--- <base> <to>`, where `base` is the range's `from` (its older end's first
+--- parent) or the empty tree for a root. Buffered; used by the range commit view.
+---
+--- Unlike `fetch_commit_diff` it resolves `git_code`'s `{ code, out, err }`
+--- rather than a bare patch string, because this is the one diff whose arguments
+--- are *derived* — `from` is the older end's parent, `to` the newer end — so a
+--- bad endpoint is a live possibility. Swallowing the exit code made such a
+--- failure indistinguishable from "this range has no changes": the range view
+--- rendered its commit list with no patch and no error. The caller reports a
+--- non-zero code instead of showing an empty diff.
+---@param range_arg DiffRange
+---@return table  -- future resolving { code: integer, out: string, err: string }
+function M.fetch_range_diff(range_arg)
+    local base = (range_arg.from and range_arg.from.hash) or EMPTY_TREE
+    return git_code({ "git", "diff", base, range_arg.to.hash })
 end
 
 --- Fetch the change graph for one parsed submodule bump (spec §11.7), gated and

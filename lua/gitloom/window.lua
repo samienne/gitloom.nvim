@@ -806,6 +806,7 @@ local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 ---   range?        table    range mode (§13.5): { commits, range, title }
 ---   meta?         string   `git show -s` output for `commit` (real commits)
 ---   diff?         string   patch (`git show -p` / range diff), or nil
+---   diff_error?   string   the git failure that replaced the patch (§13.5), or nil
 ---   sub_results?  table    per-path submodule change results (§11.7), or {}
 ---   root?         string   parent repo root; enables submodule commit links
 ---   action?       boolean  include the diff action label (§11.5); default true
@@ -844,6 +845,13 @@ local function build_commit_rows(opts, spec)
     end
     for _, r in ipairs(meta_rows) do
         rows[#rows + 1] = r
+    end
+
+    -- A git failure the fetch reported (§13.5): say so where the patch would be,
+    -- so an empty diff region is never mistaken for "no changes in this range".
+    if spec.diff_error and spec.diff_error ~= "" then
+        rows[#rows + 1] = highlight_text("")
+        rows[#rows + 1] = highlight_text(spec.diff_error, "ErrorMsg")
     end
 
     -- `git show --format=` prints a leading blank line; drop it.
@@ -1256,6 +1264,10 @@ local function open_commit_view(opts, commit, range, root)
     -- fills the buffer in place once git returns.
     nav.push_frame(root, { kind = "commit", buf = buf, label = title, on_enter = on_enter })
 
+    -- A git failure the diff fetch reported (§13.5), rendered in place of the
+    -- patch so a broken spawn never reads as "this range has no changes".
+    local diff_error = nil
+
     -- Render the metadata (format_commit_detail), then the diffstat
     -- (format_diffstat), then the diff (format_diff) into one buffer: real lines
     -- + namespaced extmarks (the diff is highlighted this way, not via
@@ -1273,7 +1285,8 @@ local function open_commit_view(opts, commit, range, root)
         -- header read. Row indices are buffer lines here (we write at line 0).
         local rows, info = build_commit_rows(opts, {
             commit = commit, range = range, root = root,
-            meta = meta_output, diff = diff_output, sub_results = sub_results,
+            meta = meta_output, diff = diff_output, diff_error = diff_error,
+            sub_results = sub_results,
         })
         action_line = info.action_line
         file_jumps = info.file_jumps
@@ -1315,8 +1328,16 @@ local function open_commit_view(opts, commit, range, root)
     -- list is supplied — so it fetches only the combined range diff.
     local fetched
     if range then
-        fetched = fetch_range_diff(range.range).next(function(diff_output)
-            return { meta = nil, diff = diff_output }
+        -- Resolves { code, out, err }: a failing `git diff` must not read as an
+        -- empty patch (§13.5), so a non-zero exit becomes a visible error row +
+        -- a notification instead of a commit list with nothing under it.
+        fetched = fetch_range_diff(range.range).next(function(res)
+            if res.code ~= 0 then
+                diff_error = git.format_git_error("git diff", res)
+                vim.notify("gitloom: " .. diff_error, vim.log.levels.ERROR)
+                return { meta = nil, diff = nil }
+            end
+            return { meta = nil, diff = res.out }
         end)
     elseif commit and commit.virtual then
         -- Working-tree commit view (§11.8): the node's own diff (staged = index

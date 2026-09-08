@@ -254,7 +254,13 @@ Coverage:
   the modelled Windows command line stays under the measured 32766-character cap
   for 0…5000 tips per side, the `^`-per-exclusion stdin encoding, and — against
   the real repository — that the `--stdin` form's output is **byte-identical** to
-  the old command-line form. Guards the E903 `name too long` resync regression
+  the old command-line form. Guards the E903 `name too long` resync regression.
+  Plus the **range diff's exit code** (§13.5): `fetch_range_diff` resolves
+  `git_code`'s `{ code, out, err }`, so a real range gives `code == 0` + the patch
+  while an unresolvable endpoint gives a non-zero code, empty `out` and git's own
+  stderr — driven against the real repository, since the point is that the exit
+  code survives the transport. Guards the swallowed-exit regression where a failing
+  `git diff` reached the range view as an empty patch
 - `tests/ordering_spec.lua` — gitloom's owned row order + the resync pure pieces
   (spec §3.1/§3.4): `order_commits` (the DFS topological sort reproducing git's
   `--topo-order` — child-before-parent validity is the hard invariant, plus
@@ -278,7 +284,9 @@ Coverage:
   anchor, clamp at tip/root) and `sel_switch` (rotate the parent at a merge /
   child at a split, no-op on a linear path; §13.2/§13.3), and `format_range_detail`
   (the range view's metadata: `N commits  (oldest..newest)` then newest-first
-  hash + subject rows; §13.5)
+  hash + subject rows; §13.5), and `format_git_error` (the one line the range view
+  shows in place of the diff when `git diff` fails: label + exit code, git's stderr
+  appended but only its first line, CR-trimmed, `exit -1` for an unspawnable job)
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
   the three nodes staged / unstaged / untracked (spec §3.3/§4.2/§11.8):
   `parse_status` (the `git status --porcelain` staged/unstaged/untracked counter —

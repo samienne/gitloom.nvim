@@ -1674,6 +1674,15 @@ and the diff is the combined range patch from `fetch_range_diff` (`git diff
 jumps, the §11.6 context header — is the shared pipeline, so range mode reuses it
 unchanged.
 
+`fetch_range_diff` is the one diff fetch that resolves `git_code`'s
+`{ code, out, err }` rather than a bare patch string. The other fetches name an
+object the user pointed at; this one's endpoints are *derived*, so a failing
+`git diff` is a live possibility — and resolving `table.concat(out, "\n")` from
+`on_exit` regardless of the code turned that failure into an empty patch, which
+the range view renders identically to "nothing changed here". The caller turns a
+non-zero code into `spec.diff_error` (rendered where the patch would be, via
+`format_git_error`) plus a notification.
+
 While assembling the rows it records, for each changed file, the buffer line of
 its diffstat row and the buffer line where its diff section begins
 (`diff_start + start - 1`, from `diffstat_files`). A buffer-local `<CR>` mapping
