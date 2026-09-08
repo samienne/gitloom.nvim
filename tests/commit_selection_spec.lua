@@ -113,6 +113,37 @@ describe("sel_ascend_children (§13.3)", function()
         local kids = sel_ascend_children(g.base)
         assert.same({ "x", "m" }, hashes(kids))
     end)
+
+    -- §4.2/§13.2: the working-tree nodes are children of HEAD, and their sentinel
+    -- hashes are not git objects -- ascending into one produced a range git could
+    -- not diff, which rendered as an empty patch. `enter_selection` already
+    -- refuses to start on one; the walk must refuse to enter one.
+    it("never ascends into a working-tree virtual commit", function()
+        local g = graph({ wt = { "head" }, x = { "head" }, head = {} })
+        g.wt.virtual = "unstaged"
+        local kids = sel_ascend_children(g.head)
+        assert.same({ "x" }, hashes(kids))
+    end)
+
+    it("clamps at HEAD when the virtual node is its only child", function()
+        local g = graph({ wt = { "head" }, head = {} })
+        g.wt.virtual = "staged"
+        assert.same({}, hashes(sel_ascend_children(g.head)))
+    end)
+
+    -- Under a real projection the flag sits on the Commit the display node wraps,
+    -- not on the node itself; both shapes must be recognised.
+    it("recognises the flag on a wrapped commit too", function()
+        local g = graph({ wt = { "head" }, head = {} })
+        g.wt.commit = { virtual = "untracked" }
+        assert.same({}, hashes(sel_ascend_children(g.head)))
+    end)
+
+    it("leaves an ordinary child with a commit field alone", function()
+        local g = graph({ x = { "head" }, head = {} })
+        g.x.commit = { hash = "x" } -- a real commit, no `virtual`
+        assert.same({ "x" }, hashes(sel_ascend_children(g.head)))
+    end)
 end)
 
 describe("sel_step (§13.2)", function()
@@ -189,5 +220,46 @@ describe("sel_switch (§13.3)", function()
         sel_step(st, "down") -- {a,b,c}, no junction
         assert.is_false(sel_switch(st, 1))
         assert.same({ "a", "b", "c" }, hashes(st.path))
+    end)
+end)
+
+--- The range view's git-failure line (§13.5). `fetch_range_diff` resolves a
+--- `git_code` result rather than a bare patch string precisely so a failing
+--- `git diff` cannot arrive as an empty patch; `format_git_error` is the pure
+--- piece that turns that result into the one line the view shows in place of the
+--- diff (and into the notification text). Guards the regression where a non-zero
+--- exit was swallowed and a broken spawn rendered as "no changes in this range".
+describe("format_git_error (§13.5)", function()
+    local format_git_error = require("gitloom.git.format").format_git_error
+
+    it("names the command and the exit code", function()
+        assert.equals("git diff failed (exit 128)",
+            format_git_error("git diff", { code = 128, out = "", err = "" }))
+    end)
+
+    it("appends git's own stderr, which is the useful part", function()
+        assert.equals(
+            "git diff failed (exit 128): fatal: bad object 000000000000000000000000000000000000dead",
+            format_git_error("git diff", {
+                code = 128,
+                out = "",
+                err = "fatal: bad object 000000000000000000000000000000000000dead",
+            }))
+    end)
+
+    it("keeps only the first stderr line — the message is one row", function()
+        assert.equals("git diff failed (exit 1): fatal: first",
+            format_git_error("git diff", { code = 1, out = "", err = "fatal: first\nsecond\nthird" }))
+    end)
+
+    it("strips a trailing CR from git's stderr (Windows)", function()
+        assert.equals("git diff failed (exit 128): fatal: bad object",
+            format_git_error("git diff", { code = 128, out = "", err = "fatal: bad object\r\n" }))
+    end)
+
+    it("reports an unspawnable job as exit -1", function()
+        assert.equals("git diff failed (exit -1)", format_git_error("git diff", nil))
+        assert.equals("git diff failed (exit -1)",
+            format_git_error("git diff", { code = -1, out = "", err = "" }))
     end)
 end)

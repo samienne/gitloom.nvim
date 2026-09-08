@@ -9,6 +9,7 @@ local parse = require("gitloom.git.parse")
 
 local highlight_text = util.highlight_text
 local compose = util.compose
+local trim_ws = util.trim_ws
 
 local M = {}
 
@@ -206,6 +207,26 @@ function M.format_diffstat(files, palette)
     end
 
     return rows
+end
+
+--- One-line description of a failed git command, from a `git_code` result
+--- (`{ code, out, err }`). Used where a swallowed exit code would otherwise be
+--- indistinguishable from empty output — today the range diff (§13.5), whose
+--- endpoints are *derived* rather than typed by the user. `label` names the
+--- command (e.g. `"git diff"`). git's own stderr is the useful part, so it is
+--- appended when there is any; only its **first** line, since the message goes in
+--- a single row / notification. Pure.
+---@param label string
+---@param res { code: integer, out: string, err: string? }?
+---@return string
+function M.format_git_error(label, res)
+    local code = res and res.code or -1
+    local msg = ("%s failed (exit %d)"):format(label, code)
+    local err = res and res.err or ""
+    local first = err:match("^[^\r\n]*") or ""
+    first = trim_ws(first)
+    if first ~= "" then msg = msg .. ": " .. first end
+    return msg
 end
 
 return M

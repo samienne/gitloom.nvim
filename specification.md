@@ -2643,6 +2643,11 @@ commits.
 - `o` swaps the anchor and the cursor (as visual-mode `o`): the moving end becomes
   the other end; the path itself is unchanged.
 - Movement clamps at the branch tip / root and at the fetched-range boundary.
+- Movement also clamps **below the working-tree virtual commits** (§4.2): they are
+  not selectable endpoints, so a selection can neither start on one nor ascend
+  into one. They are children of HEAD, so without this `k` from HEAD would walk
+  into one, and their sentinel hashes are not git objects — the resulting range
+  asks git to diff against a hash it cannot resolve.
 
 ### 13.3 Branch switching at junctions
 
@@ -2716,6 +2721,14 @@ subject) in place of the single-commit fields, followed by the **diffstat** and
 the **combined diff** (§11.3 / §11.4) for the range. Its diff **action label**
 (§11.5) opens the same range in the external diff viewer; `D` likewise opens the
 range while selection is active.
+
+If the range diff **fails**, the view says so: git's exit code and its own error
+message replace the diffstat/diff region (and are notified), instead of the
+commit list appearing over an empty diff. The two are otherwise
+indistinguishable — a range that genuinely changed nothing looks exactly like a
+`git diff` that never ran — and this range's endpoints are *derived* (`from` is
+the older end's first parent, `to` the newer end), so a failure is a real
+possibility rather than a typo the user can see.
 
 ### 13.6 Open / deferred
 
