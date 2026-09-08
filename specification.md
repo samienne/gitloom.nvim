@@ -2643,6 +2643,11 @@ commits.
 - `o` swaps the anchor and the cursor (as visual-mode `o`): the moving end becomes
   the other end; the path itself is unchanged.
 - Movement clamps at the branch tip / root and at the fetched-range boundary.
+- Movement also clamps **below the working-tree virtual commits** (§4.2): they are
+  not selectable endpoints, so a selection can neither start on one nor ascend
+  into one. They are children of HEAD, so without this `k` from HEAD would walk
+  into one, and their sentinel hashes are not git objects — the resulting range
+  asks git to diff against a hash it cannot resolve.
 
 ### 13.3 Branch switching at junctions
 

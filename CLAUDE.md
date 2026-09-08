@@ -280,7 +280,9 @@ Coverage:
 - `tests/commit_selection_spec.lua` — the commit-selection (range) pure helpers
   (spec §13): `range_endpoints` (single-commit `^!`, span `<older>^..<newer>`,
   empty-tree when the older end is a root), `sel_ascend_children` (first-parent
-  children first), `sel_step` (extend/contract along the branch, flip at the
+  children first; a §4.2 working-tree virtual commit is never ascended into —
+  the flag recognised both on the node and on a wrapped `commit`, with an
+  ordinary child asserted unaffected), `sel_step` (extend/contract along the branch, flip at the
   anchor, clamp at tip/root) and `sel_switch` (rotate the parent at a merge /
   child at a split, no-op on a linear path; §13.2/§13.3), and `format_range_detail`
   (the range view's metadata: `N commits  (oldest..newest)` then newest-first

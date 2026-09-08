@@ -113,6 +113,37 @@ describe("sel_ascend_children (§13.3)", function()
         local kids = sel_ascend_children(g.base)
         assert.same({ "x", "m" }, hashes(kids))
     end)
+
+    -- §4.2/§13.2: the working-tree nodes are children of HEAD, and their sentinel
+    -- hashes are not git objects -- ascending into one produced a range git could
+    -- not diff, which rendered as an empty patch. `enter_selection` already
+    -- refuses to start on one; the walk must refuse to enter one.
+    it("never ascends into a working-tree virtual commit", function()
+        local g = graph({ wt = { "head" }, x = { "head" }, head = {} })
+        g.wt.virtual = "unstaged"
+        local kids = sel_ascend_children(g.head)
+        assert.same({ "x" }, hashes(kids))
+    end)
+
+    it("clamps at HEAD when the virtual node is its only child", function()
+        local g = graph({ wt = { "head" }, head = {} })
+        g.wt.virtual = "staged"
+        assert.same({}, hashes(sel_ascend_children(g.head)))
+    end)
+
+    -- Under a real projection the flag sits on the Commit the display node wraps,
+    -- not on the node itself; both shapes must be recognised.
+    it("recognises the flag on a wrapped commit too", function()
+        local g = graph({ wt = { "head" }, head = {} })
+        g.wt.commit = { virtual = "untracked" }
+        assert.same({}, hashes(sel_ascend_children(g.head)))
+    end)
+
+    it("leaves an ordinary child with a commit field alone", function()
+        local g = graph({ x = { "head" }, head = {} })
+        g.x.commit = { hash = "x" } -- a real commit, no `virtual`
+        assert.same({ "x" }, hashes(sel_ascend_children(g.head)))
+    end)
 end)
 
 describe("sel_step (§13.2)", function()
