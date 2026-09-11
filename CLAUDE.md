@@ -255,6 +255,13 @@ Coverage:
   for 0…5000 tips per side, the `^`-per-exclusion stdin encoding, and — against
   the real repository — that the `--stdin` form's output is **byte-identical** to
   the old command-line form. Guards the E903 `name too long` resync regression.
+  Plus the **range diff to the working tree** (§4.2/§13.5), driven against a REAL
+  dirty scratch repository (a staged edit, an unstaged edit, an untracked file):
+  `fetch_range_diff` builds its argv from the endpoints' *shape*, so staged gives
+  `--cached <base>` (the staged edit only), unstaged gives `<base>` (staged +
+  unstaged, never untracked — `git diff` does not list those) and untracked gives
+  the **same rev** plus the §3.3 synthesized additions, which is the only thing
+  distinguishing the two and hence the reason for the `untracked` flag.
   Plus the **range diff's exit code** (§13.5): `fetch_range_diff` resolves
   `git_code`'s `{ code, out, err }`, so a real range gives `code == 0` + the patch
   while an unresolvable endpoint gives a non-zero code, empty `out` and git's own
@@ -279,14 +286,22 @@ Coverage:
   (single-commit `DiffRange`: `^!`, empty-tree for roots, `from` = first parent)
 - `tests/commit_selection_spec.lua` — the commit-selection (range) pure helpers
   (spec §13): `range_endpoints` (single-commit `^!`, span `<older>^..<newer>`,
-  empty-tree when the older end is a root), `sel_ascend_children` (first-parent
-  children first; a §4.2 working-tree virtual commit is never ascended into —
-  the flag recognised both on the node and on a wrapped `commit`, with an
+  empty-tree when the older end is a root, plus the **working-tree newer end**
+  (§4.2/§13.5): staged → `--cached <base>`/`to=index`, unstaged → `<base>`/
+  `to=worktree`, untracked → the same plus the `untracked` flag, the base still
+  the older end's first parent (empty tree at a root) and a *virtual* base
+  resolved to its own tree state — asserted as an invariant too: never a sentinel
+  hash in the rev, never a `..` span), `sel_ascend_children` (first-parent
+  children first; a §4.2 working-tree virtual commit **is** ascended into, the
+  whole stack HEAD → staged → unstaged → untracked walkable and clamping at its
+  top on its own, with an
   ordinary child asserted unaffected), `sel_step` (extend/contract along the branch, flip at the
   anchor, clamp at tip/root) and `sel_switch` (rotate the parent at a merge /
   child at a split, no-op on a linear path; §13.2/§13.3), and `format_range_detail`
   (the range view's metadata: `N commits  (oldest..newest)` then newest-first
-  hash + subject rows; §13.5), and `format_git_error` (the one line the range view
+  hash + subject rows, plus the **synthesized working-tree row** — a `working` id
+  cell instead of the sentinel, and `worktree_label`'s text for each of the three
+  states; §13.5), and `format_git_error` (the one line the range view
   shows in place of the diff when `git diff` fails: label + exit code, git's stderr
   appended but only its first line, CR-trimmed, `exit -1` for an unspawnable job)
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
@@ -1291,7 +1306,8 @@ Details not covered by the spec or architecture:
   `diff.open` callback takes a **`DiffRange`** (`{ rev, from, to }`), not a
   commit, so graph range-selection reuses it. `commit_range(commit)` builds a
   single-commit range (`<hash>^!`, empty-tree for roots); `range_endpoints(newer,
-  older)` builds a commit-selection span (`<older>^..<newer>`; §13.5).
+  older)` builds a commit-selection span (`<older>^..<newer>`; §13.5) — or a
+  **single-rev** working-tree range when the newer end is a §4.2 node (see below).
   The default `open` runs diffview guarded; diffview is the only optional
   dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
   `commit_range` is.
@@ -1305,14 +1321,17 @@ Details not covered by the spec or architecture:
   (`.parents` first = trunk, `.children`); the window glue resolves rows
   (`goto_hash`), lane/marker emphasis (`mark_path`, reusing the §12 dimming via
   `view_state.cone`), the cursor-on-lane parking, and the range (`selection_range`
-  → `range_endpoints` → the **literal** `<older>^..<newer>` `DiffRange`). `j`/`k`
+  → `range_endpoints` → the **literal** `<older>^..<newer>` `DiffRange` — or, when
+  the newer end is a §4.2 working-tree node, a **single-rev** `DiffRange` to a
+  tree state, see below). `j`/`k`
   and `<C-d>`/`<C-u>` are bound to walk while active and **fall through to the
   builtin motions** (fed without remap) when inactive; `h`/`l` switch branch while
   active (else the §2 ref selection). `<CR>` opens the **range commit view**
   (§13.5): `open_commit_view(opts, nil, { range, commits, title })` — the same
   view generalised with a `range` arg, listing the selected commits
   (`selection_commits` → `format_range_detail`) and rendering the combined range
-  diff (`fetch_range_diff` = `git diff <base> <to>`) through the existing
+  diff (`fetch_range_diff`, shaped from the endpoints — `git diff <base> <to>`,
+  `git diff <base>`, or `git diff --cached <base>`) through the existing
   diffstat/diff/context-header pipeline; its action label and `D` open the range
   in the external provider. A `reflow()` recreates DisplayNodes, so it drops any live selection
   (stale references). Navigation walks the DisplayNode edges directly, so it
@@ -1330,6 +1349,34 @@ Details not covered by the spec or architecture:
   `winrestview` topline) so the view holds.
   Selection isn't started *on* a packed-marker line. The pure helpers are tested;
   the window glue is not (like the other window glue).
+- **A selection may end at the working tree** (spec §4.2/§13.2/§13.5): the three
+  §4.2 virtual nodes are selectable endpoints, as the **newer** end only. That is
+  structural, not a rule — they have no children, so ascending into one ends there
+  and it can only ever be the path's newest member; `sel_ascend_children` and
+  `enter_selection` therefore carry **no** virtual special case at all (both
+  guards added 2026-09-08 were reworked away, not merely deleted). The invariant
+  they existed for — *a sentinel hash must never reach a git rev* — is enforced in
+  exactly two places instead: `range_endpoints` maps a virtual newer end to a
+  **tree state** (`to = "index"|"worktree"`) and emits a **single** rev
+  (`--cached <base>` / `<base>`), never an `<a>..<b>` span; and `fetch_range_diff`
+  builds its argv from the endpoints' *shape*, asking only a **table** endpoint
+  for its `.hash`. Single-rev is the whole point: verified against diffview's own
+  `GitAdapter:parse_revs`, a lone rev resolves the right side to `RevType.LOCAL`
+  — the real file on disk, so LSP attaches — while `<a>..<b>` gives `COMMIT` blobs
+  and `--cached` gives `STAGE` (the index has no on-disk path either; inherent,
+  not a defect). The base stays the older end's first parent, run through the same
+  tree-state map when *that* parent is virtual (a worktree-only selection), so the
+  degenerate `untracked..unstaged` span is `from = "index"`, `rev = ""` — the
+  provider's own working-tree-vs-index default. The **untracked** endpoint carries
+  `untracked = true` and gets the §3.3 synthesized additions appended to the
+  *in-graph* patch only (`git diff <base>` never lists untracked files; without
+  them the untracked endpoint would render byte-identically to the unstaged one,
+  making the selection invisible) — the external provider needs nothing, since a
+  working-tree view lists untracked files itself. `selection_range` /
+  `real_newest` / `selection_commits` are unchanged: they still hand over the
+  virtual `Commit` and let the range builder decide what it denotes.
+  `format_range_detail` synthesizes its row (`working` in the id cell, never the
+  sentinel; `worktree_label`'s text).
 - **Reachability dimming = Lane model + walk** (specification.md §5, §12):
   Phase 1 (`columns.layout`) makes one **Lane** (edge `{id, begin, parent,
   highlighted}`) per parent/child edge, wires `OrderItem.parent_lanes`/

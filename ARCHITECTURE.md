@@ -758,14 +758,32 @@ the filesystem reads and the async picker orchestration are I/O and window glue
 - `range_endpoints(newer, older)` — the `DiffRange` for a **commit selection**
   span (specification.md §13.5): `<older>^..<newer>` (empty-tree base for a root,
   and exactly `commit_range` when the ends coincide). The graph range-selection
-  constructor that feeds the same provider and the commit view's range mode. Pure.
+  constructor that feeds the same provider and the commit view's range mode.
+  **It is also where the sentinel-hash invariant lives.** A §4.2 working-tree
+  virtual commit can only ever be the *newer* end (it has no children), and its
+  hash is a reserved sentinel, not a git object — so a virtual newer end is mapped
+  to a **tree state** (`to = "index" | "worktree"`) and `rev` becomes a **single**
+  rev (`--cached <base>` / `<base>`), never an `<a>..<b>` span. Single-rev is the
+  behaviour the feature exists for, not a detail: diffview resolves a lone rev's
+  right-hand side to `RevType.LOCAL` — the real file on disk, so LSP clients
+  attach — where a two-rev span gives `COMMIT` blobs and `--cached` gives `STAGE`
+  (the index has no on-disk path either, which is inherent, not a gap). The base
+  is still the older end's first parent, resolved through the same tree-state map
+  when *that* parent is itself virtual (a selection covering only worktree rows).
+  Because the mapping lives here, no caller can leak a sentinel. Pure.
 - `format_range_detail(commits, palette)` — the range commit view's metadata rows
   (specification.md §13.5): an `N commits (oldest..newest)` summary then one
-  newest-first `<abbrev> <subject>` row per selected commit. Pure.
+  newest-first `<abbrev> <subject>` row per selected commit. A §4.2 working-tree
+  node has neither hash nor subject, so its row is synthesized — the id cell reads
+  `working` (never the sentinel, which would look like an object name) and the
+  text is `worktree_label`'s, the same wording the graph row and the §11.8 header
+  use. Pure.
 - `sel_ascend_children` / `sel_step` / `sel_switch` — the commit-selection path
   walking over the DisplayNode graph (specification.md §13.2/§13.3): the children
   to ascend into, a one-commit step along the branch (extend/contract), and the
-  branch switch at the nearest junction. Pure.
+  branch switch at the nearest junction. The walk carries **no** working-tree
+  special case: it ascends into a virtual node like any child, and clamps there on
+  its own because a virtual commit has no children. Pure.
 
 - `reachable_cone(order, pivot_index, top, bottom)` — the pivot's causal cone
   (specification.md §12.1): two monotonic sweeps from `order[pivot_index].commit`
@@ -809,6 +827,14 @@ render via the `Commit.virtual` branches in `get_column_chars` (the `◌` glyph)
 `display_item` (a synthesized `worktree_label`, blank date/author), and the commit
 view branches on `virtual` to use `fetch_worktree_diff` + `format_worktree_detail`
 instead of `git show`.
+
+They are also **commit-selection endpoints** (§13.2) — the newer end of a range,
+so "this branch point versus what I have right now" is one selection. Nothing
+about the walk knows that: they are children of HEAD like any other child, and
+being childless they clamp the ascent themselves. The sentinel hash is dealt with
+exactly once, in `range_endpoints`, which maps a virtual newer end to a tree
+state; see the §13.5 discussion above for why the resulting single-rev range is
+what keeps LSP attached to the opened files.
 
 **Refresh seam (§3.4).** Two refreshes share this seam, at different radii:
 
@@ -1626,6 +1652,15 @@ under mirroring), `<Tab>` folds/unfolds the cursor's head in place (re-resolving
 the selection by hash), `<CR>` opens the range commit view and `D` the range in
 the external provider. Emphasis reuses the §12 dimming via a path-derived cone.
 
+The §4.2 **working-tree nodes are valid endpoints** (§13.2) — `enter_selection`
+starts on one and the walk ascends into one — but only ever as the *newer* end,
+which is structural rather than policed: they have no children. Their sentinel
+hashes are handled once, in `range_endpoints` (above), by denoting a tree state
+instead of a commit; `selection_range` / `real_newest` need no change, because
+they still hand the range builder the virtual `Commit` and the builder decides
+what it means. `selection_commits` likewise pushes it unchanged, and
+`format_range_detail` synthesizes its row.
+
 **Initial focus and position retention** (specification.md §2). When the stream
 completes, after the final `reflow` the window focuses a target commit via
 `goto_hash` (which resolves a folded commit to its collapsed head and returns
@@ -1673,6 +1708,19 @@ and the diff is the combined range patch from `fetch_range_diff` (`git diff
 `git show`. Everything below the metadata — the diffstat, the diff, the file
 jumps, the §11.6 context header — is the shared pipeline, so range mode reuses it
 unchanged.
+
+`fetch_range_diff` builds that argv from the endpoints' **shape**, not by reading
+`.hash` off both: only a *table* endpoint contributes a rev, so `to = "index"`
+adds `--cached` and `to = "worktree"` adds nothing, and a `from` that is itself a
+tree state contributes nothing either (`git diff`'s own default, working tree vs
+index). That is the I/O half of the sentinel invariant — the half `range_endpoints`
+cannot enforce. A range whose newer end is the **untracked** node carries
+`untracked = true` and gets the §3.3 synthesized additions
+(`fetch_untracked_diff`, capped) appended, because `git diff <base>` never lists
+untracked files: without them an untracked endpoint would render byte-identically
+to an unstaged one and the user's selection would have no visible effect. The
+external provider needs nothing extra — a working-tree view lists untracked files
+itself — so `rev` is unchanged between the two.
 
 `fetch_range_diff` is the one diff fetch that resolves `git_code`'s
 `{ code, out, err }` rather than a bare patch string. The other fetches name an

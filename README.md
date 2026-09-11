@@ -253,6 +253,16 @@ follows the branch, skipping rows that belong to other branches:
   viewer;
 - `V` again or `<Esc>` ends selection.
 
+A selection can end at the **working tree**: start on (or extend `k` into) one of
+the `◌` uncommitted-change rows and the range runs from the older commit to your
+live tree rather than to another commit — "what has changed since that branch
+point, including everything I have not committed". Because the newer end is a tree
+state and not a commit, gitloom hands the diff viewer a **single rev**, so it opens
+the **real files on disk**: they are editable and your LSP attaches, which a
+commit-to-commit range (read-only git blobs) cannot do. The *unstaged* and
+*untracked* rows give you that; the *staged* row diffs against the index, whose
+content has no file on disk, so LSP does not attach there.
+
 The selected path is highlighted and everything else dims (reusing the
 reachability emphasis). The footer shows a `SELECT N` indicator. See
 [specification.md §13](specification.md).
