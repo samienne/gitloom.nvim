@@ -71,7 +71,7 @@ local function nlines(r) return 1 + #(r.above or {}) + (r.merge and 1 or 0) end
 --- Feed `rows` (a dag() spec) through `extend_columns` in batches of `batch`,
 --- exactly as window.lua's `on_batch` does: a growing `order` array, appended to,
 --- with the session carried across calls.
----@return table[] order, table stream, integer sweeps  -- sweeps = extend_columns calls
+---@return table[] order, table? stream, integer sweeps  -- sweeps = extend_columns calls
 local function stream(opts, rows, batch)
     local items = h.dag(rows)
     local order = {}
