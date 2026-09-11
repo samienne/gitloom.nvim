@@ -1019,11 +1019,41 @@ end
 --- failure indistinguishable from "this range has no changes": the range view
 --- rendered its commit list with no patch and no error. The caller reports a
 --- non-zero code instead of showing an empty diff.
+--- An endpoint that is a **tree state** (`"index"` / `"worktree"`, §4.2/§13.5)
+--- contributes a flag or nothing at all, never a rev: the working-tree virtual
+--- commits carry reserved sentinel hashes, so this is where the invariant "a
+--- sentinel hash never reaches a git rev" is kept on the I/O side — only a *table*
+--- endpoint is ever asked for its `.hash`. An **untracked** newer end additionally
+--- appends the §3.3 synthesized additions, which `git diff` never lists.
 ---@param range_arg DiffRange
 ---@return table  -- future resolving { code: integer, out: string, err: string }
 function M.fetch_range_diff(range_arg)
-    local base = (range_arg.from and range_arg.from.hash) or EMPTY_TREE
-    return git_code({ "git", "diff", base, range_arg.to.hash })
+    local from, to = range_arg.from, range_arg.to
+    local args = { "git", "diff" }
+    if to == "index" then args[#args + 1] = "--cached" end
+    -- The base. A Commit contributes its hash; a root (`nil`) the empty tree; the
+    -- `"index"` tree state contributes nothing, which is `git diff`'s own default
+    -- (working tree vs index). `"worktree"` as a base is degenerate (a range from
+    -- the working tree to itself) and likewise contributes nothing.
+    if type(from) == "table" then
+        args[#args + 1] = from.hash
+    elseif from == nil then
+        args[#args + 1] = EMPTY_TREE
+    end
+    if type(to) == "table" then args[#args + 1] = to.hash end
+    local diff = git_code(args)
+    if range_arg.untracked then
+        return diff.next(function(res)
+            if res.code ~= 0 then return res end
+            return fetch_untracked_diff().next(function(extra)
+                if extra and extra ~= "" then
+                    res.out = (res.out ~= "" and (res.out .. "\n") or "") .. extra
+                end
+                return res
+            end)
+        end)
+    end
+    return diff
 end
 
 --- Fetch the change graph for one parsed submodule bump (spec §11.7), gated and

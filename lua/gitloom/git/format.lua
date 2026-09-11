@@ -83,11 +83,26 @@ function M.format_commit_detail(detail, opts)
     return lines
 end
 
+--- The §13.5 range list's identity cell for one selected node: the abbreviated
+--- hash, or `working` for a §4.2 working-tree virtual commit — whose hash is a
+--- reserved sentinel and must never be shown as though it were an object name.
+--- Seven cells either way, so the list stays aligned. Pure.
+---@param c { hash: string, virtual?: string }
+---@return string
+local function range_row_id(c)
+    if c.virtual then return "working" end
+    return c.hash:sub(1, 7)
+end
+M.range_row_id = range_row_id
+
 --- Metadata rows for the **range** commit view (spec §13.5): a summary line
 --- (`N commits  (oldest..newest)`) then one row per selected commit, newest
 --- first — abbreviated hash + subject. Replaces the single-commit detail block
---- when the commit view is opened on a selection. Pure.
----@param commits { hash: string, message?: string }[]   selected commits, newest first
+--- when the commit view is opened on a selection. A §4.2 working-tree node on the
+--- path carries no hash and no subject, so its row is synthesized: the `working`
+--- id cell plus `worktree_label`'s text, the same wording the graph row and the
+--- §11.8 header use, so the three never disagree. Pure.
+---@param commits { hash: string, message?: string, virtual?: string, wt?: table }[]   selected commits, newest first
 ---@param palette table
 ---@return table[]
 function M.format_range_detail(commits, palette)
@@ -96,15 +111,15 @@ function M.format_range_detail(commits, palette)
     local n = #commits
     local summary = (n == 1) and "1 commit" or (("%d commits"):format(n))
     if n >= 2 then
-        summary = summary .. ("  (%s..%s)"):format(commits[n].hash:sub(1, 7), commits[1].hash:sub(1, 7))
+        summary = summary .. ("  (%s..%s)"):format(range_row_id(commits[n]), range_row_id(commits[1]))
     end
     rows[#rows + 1] = highlight_text(summary, palette.author)
     rows[#rows + 1] = highlight_text("")
     for _, c in ipairs(commits) do
         rows[#rows + 1] = compose({
-            highlight_text(c.hash:sub(1, 7), palette.date),
+            highlight_text(range_row_id(c), palette.date),
             highlight_text("  "),
-            highlight_text(c.message or "", palette.message),
+            highlight_text(c.virtual and M.worktree_label(c) or (c.message or ""), palette.message),
         })
     end
     return rows

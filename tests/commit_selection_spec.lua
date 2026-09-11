@@ -77,6 +77,101 @@ describe("range_endpoints (§13.5)", function()
     end)
 end)
 
+-- §4.2/§13.5: a range whose NEWER end is a working-tree virtual commit denotes a
+-- TREE STATE, not a commit. Its hash is a reserved sentinel, so it must never
+-- appear in `rev`, and `rev` must be a SINGLE rev -- that is what makes the diff
+-- provider open the real on-disk files (LSP attaches) instead of read-only blobs.
+describe("range_endpoints to the working tree (§13.5)", function()
+    -- HEAD <- staged <- unstaged <- untracked, the §4.2 stack, plus a real BASE
+    -- under HEAD so a span has somewhere to start from.
+    local function stack()
+        local base = { hash = "BASE" }
+        local head = { hash = "HEADC", parents = { base } }
+        local staged = { hash = "0000000000000000000000000000000000000001",
+            virtual = "staged", parents = { head } }
+        local unstaged = { hash = "0000000000000000000000000000000000000000",
+            virtual = "unstaged", parents = { staged } }
+        local untracked = { hash = "0000000000000000000000000000000000000002",
+            virtual = "untracked", parents = { unstaged } }
+        return base, head, staged, unstaged, untracked
+    end
+
+    it("a staged newer end is `--cached <base>` to the index", function()
+        local base, head, staged = stack()
+        local r = range_endpoints(staged, head)
+        assert.equals("--cached BASE", r.rev)
+        assert.equals(base, r.from)
+        assert.equals("index", r.to)
+        assert.is_nil(r.untracked)
+    end)
+
+    it("an unstaged newer end is the bare base rev, to the working tree", function()
+        local base, head, _, unstaged = stack()
+        local r = range_endpoints(unstaged, head)
+        assert.equals("BASE", r.rev)
+        assert.equals(base, r.from)
+        assert.equals("worktree", r.to)
+        assert.is_nil(r.untracked)
+    end)
+
+    it("an untracked newer end is the same range, flagged for the synthesized additions", function()
+        local base, head, _, _, untracked = stack()
+        local r = range_endpoints(untracked, head)
+        assert.equals("BASE", r.rev)
+        assert.equals(base, r.from)
+        assert.equals("worktree", r.to)
+        assert.is_true(r.untracked)
+    end)
+
+    -- The invariant, stated directly: whatever the shape, no sentinel hash is in
+    -- the rev and no `..` span is emitted.
+    it("never puts a sentinel hash in the rev, and never emits a span", function()
+        local _, head, staged, unstaged, untracked = stack()
+        for _, newer in ipairs({ staged, unstaged, untracked }) do
+            local r = range_endpoints(newer, head)
+            assert.is_nil(r.rev:find("0000000", 1, true))
+            assert.is_nil(r.rev:find("..", 1, true))
+            assert.is_true(r.to == "index" or r.to == "worktree")
+        end
+    end)
+
+    -- A deeper span still bases on the OLDER end's first parent, exactly as a
+    -- commit span does -- only the head becomes a tree state.
+    it("bases on the older end's first parent, not on HEAD", function()
+        local base = { hash = "BASE" }
+        local head = { hash = "HEADC", parents = { base } }
+        local older = { hash = "OLD", parents = { { hash = "OLDPARENT" } } }
+        local unstaged = { hash = "0000000000000000000000000000000000000000",
+            virtual = "unstaged", parents = { head } }
+        assert.equals("OLDPARENT", range_endpoints(unstaged, older).rev)
+    end)
+
+    it("uses the empty tree when the older end is a root", function()
+        local root = { hash = "ROOT", parents = {} }
+        local unstaged = { hash = "0000000000000000000000000000000000000000",
+            virtual = "unstaged", parents = { root } }
+        local r = range_endpoints(unstaged, root)
+        -- newer ~= older, so this is the span path with a rootless base.
+        assert.equals(EMPTY_TREE, r.rev)
+        assert.is_nil(r.from)
+        assert.equals("worktree", r.to)
+    end)
+
+    -- Both ends inside the worktree stack: the older end's first parent is
+    -- itself virtual, so the base is ITS tree state -- never its sentinel hash.
+    it("resolves a virtual base to its own tree state", function()
+        local _, _, staged, unstaged, untracked = stack()
+        local r = range_endpoints(untracked, unstaged)
+        assert.equals("", r.rev) -- the provider's own default: working tree vs index
+        assert.equals("index", r.from) -- unstaged's parent is the staged node
+        assert.equals("worktree", r.to)
+        assert.is_true(r.untracked)
+        -- and the staged node's own parent is the real HEAD commit
+        local r2 = range_endpoints(untracked, staged)
+        assert.equals("HEADC", r2.rev)
+    end)
+end)
+
 describe("format_range_detail (§13.5)", function()
     local function texts(rows)
         local out = {}
@@ -103,6 +198,39 @@ describe("format_range_detail (§13.5)", function()
             "3333333  oldest",
         }, texts(rows))
     end)
+
+    -- §4.2/§13.5: a working-tree node on the path has no hash and no subject, so
+    -- its row is synthesized. The id cell must NOT be its sentinel hash (which
+    -- would read as a real object name) and the text must be `worktree_label`'s,
+    -- the same wording the graph row and the §11.8 header use.
+    it("synthesizes a row for a working-tree node instead of showing its sentinel", function()
+        local rows = format_range_detail({
+            { hash = "0000000000000000000000000000000000000000",
+                virtual = "unstaged", wt = { changed = 3 } },
+            { hash = "1111111aaa", message = "newest real" },
+            { hash = "3333333ccc", message = "oldest" },
+        }, {})
+        assert.same({
+            "3 commits  (3333333..working)",
+            "",
+            "working  Unstaged changes · 3 files",
+            "1111111  newest real",
+            "3333333  oldest",
+        }, texts(rows))
+    end)
+
+    it("names each working-tree state the way the graph row does", function()
+        local function one(virtual, changed)
+            local rows = format_range_detail({
+                { hash = "0000000000000000000000000000000000000002",
+                    virtual = virtual, wt = { changed = changed } },
+            }, {})
+            return texts(rows)[3]
+        end
+        assert.equals("working  Staged changes · 1 file", one("staged", 1))
+        assert.equals("working  Unstaged changes · 2 files", one("unstaged", 2))
+        assert.equals("working  Untracked files · 5 files", one("untracked", 5))
+    end)
 end)
 
 describe("sel_ascend_children (§13.3)", function()
@@ -114,29 +242,36 @@ describe("sel_ascend_children (§13.3)", function()
         assert.same({ "x", "m" }, hashes(kids))
     end)
 
-    -- §4.2/§13.2: the working-tree nodes are children of HEAD, and their sentinel
-    -- hashes are not git objects -- ascending into one produced a range git could
-    -- not diff, which rendered as an empty patch. `enter_selection` already
-    -- refuses to start on one; the walk must refuse to enter one.
-    it("never ascends into a working-tree virtual commit", function()
+    -- §4.2/§13.2: the working-tree nodes ARE selectable, as the newer end. They
+    -- are children of HEAD, so `k` from HEAD must walk into them. Their sentinel
+    -- hashes never reach a git rev because `range_endpoints` maps a virtual newer
+    -- end to a tree state (§13.5) -- the walk needs no guard of its own.
+    it("ascends into a working-tree virtual commit", function()
         local g = graph({ wt = { "head" }, x = { "head" }, head = {} })
         g.wt.virtual = "unstaged"
         local kids = sel_ascend_children(g.head)
-        assert.same({ "x" }, hashes(kids))
+        assert.same({ "wt", "x" }, hashes(kids))
     end)
 
-    it("clamps at HEAD when the virtual node is its only child", function()
+    it("reaches the virtual node when it is HEAD's only child", function()
         local g = graph({ wt = { "head" }, head = {} })
         g.wt.virtual = "staged"
-        assert.same({}, hashes(sel_ascend_children(g.head)))
+        assert.same({ "wt" }, hashes(sel_ascend_children(g.head)))
     end)
 
-    -- Under a real projection the flag sits on the Commit the display node wraps,
-    -- not on the node itself; both shapes must be recognised.
-    it("recognises the flag on a wrapped commit too", function()
-        local g = graph({ wt = { "head" }, head = {} })
-        g.wt.commit = { virtual = "untracked" }
-        assert.same({}, hashes(sel_ascend_children(g.head)))
+    -- The whole worktree stack is walkable: HEAD -> staged -> unstaged ->
+    -- untracked, and the ascent clamps on its own at the top because a virtual
+    -- commit has no children (§4.2). That is what makes it the path's NEWEST
+    -- member by construction rather than by a rule.
+    it("walks the whole worktree stack and clamps at its top", function()
+        local g = graph({ untracked = { "unstaged" }, unstaged = { "staged" },
+            staged = { "head" }, head = {} })
+        g.staged.virtual, g.unstaged.virtual, g.untracked.virtual =
+            "staged", "unstaged", "untracked"
+        assert.same({ "staged" }, hashes(sel_ascend_children(g.head)))
+        assert.same({ "unstaged" }, hashes(sel_ascend_children(g.staged)))
+        assert.same({ "untracked" }, hashes(sel_ascend_children(g.unstaged)))
+        assert.same({}, hashes(sel_ascend_children(g.untracked)))
     end)
 
     it("leaves an ordinary child with a commit field alone", function()

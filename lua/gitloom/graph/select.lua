@@ -85,36 +85,24 @@ end
 ---@field dparent table<string,integer>  per-merge chosen parent index (h/l, down)
 ---@field dchild table<string,integer>   per-split chosen child index (h/l, up)
 
---- True when `n` is a §4.2 working-tree virtual commit. The flag lives on the
---- Commit; under the identity projection the display node IS that commit, and
---- under a real projection it wraps one -- so check both shapes.
----@param n table?
----@return boolean
-local function is_virtual(n)
-    if not n then return false end
-    if n.virtual then return true end
-    return not not (n.commit and n.commit.virtual)
-end
-
 --- The children of `node` to ascend into, first-parent continuation(s) first
 --- (a child `ch` is on the same branch when `ch.parents[1] == node`), then the
 --- rest in edge order. The default ascent (index 1) keeps the mainline; `h`/`l`
 --- rotate among the others at a split (§13.3).
 ---
---- A **working-tree virtual commit is never ascended into** (§4.2/§13.2).
---- `enter_selection` already refuses to START a selection on one, but the
---- worktree nodes are children of HEAD, so without this the walk stepped into
---- one anyway -- `V` on HEAD then `k` in any dirty worktree. Their sentinel
---- hashes are not git objects, so the resulting range asked git to diff against
---- `0000000000000000000000000000000000000002`, which fails. Skipping them here
---- makes the ascent clamp at HEAD, matching the entry guard.
+--- The §4.2 **working-tree virtual commits are ascended into like any other
+--- child** (§13.2): `k` from HEAD walks up the stack HEAD -> staged -> unstaged
+--- -> untracked. Nothing has to stop the walk there, because a virtual commit has
+--- no children -- the ascent clamps on its own, and a virtual node can therefore
+--- only ever be the path's NEWEST member. Their sentinel hashes never reach a git
+--- rev: `range_endpoints` maps a virtual newer end to a tree state instead
+--- (§13.5), which is where that invariant lives.
 ---@param node table
 ---@return table[]
 function M.sel_ascend_children(node)
     local fp, other = {}, {}
     for _, ch in ipairs(node.children or {}) do
-        if is_virtual(ch) then -- not a selectable endpoint (§4.2)
-        elseif (ch.parents or {})[1] == node then
+        if (ch.parents or {})[1] == node then
             fp[#fp + 1] = ch
         else
             other[#other + 1] = ch

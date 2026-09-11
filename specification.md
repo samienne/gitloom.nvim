@@ -392,7 +392,12 @@ A virtual commit:
 - carries **no refs** and is **placed directly above** the HEAD commit in the row
   order;
 - carries **no `author`/`date`/`message` from the model** — its detail is read on
-  demand in the commit view (§11.8), not from the graph stream.
+  demand in the commit view (§11.8), not from the graph stream;
+- **is** a selectable commit-selection endpoint (§13.2), but only ever the
+  **newer** one — having no children, it can never be the older end of a path.
+  Because its hash is a sentinel rather than a git object, a range ending at it
+  names a **tree state** (`"index"` / `"worktree"`) instead of a commit, so the
+  sentinel never reaches a git rev (§13.5).
 
 Because a virtual commit sits *above* HEAD, no owner's first-parent reach (§10.2,
 which descends toward ancestors) touches it: its reachability signature is
@@ -2279,6 +2284,18 @@ for the working-tree virtual commits (§4.2) it may instead name a **tree state*
 rather than to a commit (the staged node is `from = HEAD, to = "index"` with
 `rev = "--cached"`; the unstaged node is `to = "worktree"` with `rev = "HEAD"`; the
 untracked node reuses the unstaged node's range, having no range of its own).
+
+A `rev` naming **one** rev rather than an `<a>..<b>` span is the **working-tree**
+form: the provider diffs that rev against the working tree (or, with `--cached`,
+against the index). This is what preserves **LSP attachment** — the right-hand
+side is the real file on disk, so it is editable and language servers attach to
+it. A two-rev range has no working-tree side: both ends are built from git blobs,
+which are read-only and have no path, so no LSP client attaches. The commit
+selection (§13.5) relies on this: a range whose newer end is a working-tree node
+emits a single rev for exactly this reason. The `--cached` form is the exception
+that proves it — its head is the **index**, which likewise has no on-disk path, so
+LSP does not attach there either; that is inherent to the index, not a defect.
+
 The provider's `open(range)` is
 called to display it; the default opener runs diffview on `range.rev` and, when
 diffview is not installed, reports that instead of erroring. Overriding `open`
@@ -2643,11 +2660,17 @@ commits.
 - `o` swaps the anchor and the cursor (as visual-mode `o`): the moving end becomes
   the other end; the path itself is unchanged.
 - Movement clamps at the branch tip / root and at the fetched-range boundary.
-- Movement also clamps **below the working-tree virtual commits** (§4.2): they are
-  not selectable endpoints, so a selection can neither start on one nor ascend
-  into one. They are children of HEAD, so without this `k` from HEAD would walk
-  into one, and their sentinel hashes are not git objects — the resulting range
-  asks git to diff against a hash it cannot resolve.
+- The **working-tree virtual commits** (§4.2) **are** selectable, but only as the
+  **newer** end. A selection may start on one (`V` on a working-tree row) and may
+  ascend into one (`k` from HEAD walks into the stack HEAD → staged → unstaged →
+  untracked). This is structural, not a rule the walk has to enforce: a virtual
+  commit has no children (§4.2), so ascending into one ends there and it can only
+  ever be the path's newest member. Everything below it on the path is a real
+  commit.
+- A virtual endpoint does **not** put its hash into a git rev. Its sentinel hash is
+  not a git object, so a range ending at one denotes a **tree state** (`"index"` /
+  `"worktree"`) rather than a commit — see §13.5. The range builder is where that
+  mapping happens, so no caller can leak a sentinel into a `git diff`.
 
 ### 13.3 Branch switching at junctions
 
@@ -2714,6 +2737,47 @@ ends, **including any side merged in** along the path when it crosses a merge
 (restricting it to the followed branch's own first-parent changes is an open
 refinement, §13.6). `range_endpoints(newer, older)` constructs it beside the
 single-commit `commit_range` (§11.5).
+
+**A range ending at the working tree.** When the **newer** end is a working-tree
+virtual commit (§4.2 — the only end it can be, §13.2) the range does not name two
+commits: its head is a **tree state**, so `to` is `"index"` or `"worktree"` and
+`rev` is a **single rev**, not an `<a>..<b>` span. `from` (and the base in `rev`)
+is still the older end's first parent, exactly as for a commit span. Which node
+the selection actually reached decides the form:
+
+| newer end | `rev` | `from` | `to` | in-graph patch |
+|---|---|---|---|---|
+| `staged` | `--cached <base>` | `<base>` | `"index"` | `git diff --cached <base>` |
+| `unstaged` | `<base>` | `<base>` | `"worktree"` | `git diff <base>` |
+| `untracked` | `<base>` | `<base>` | `"worktree"` | `git diff <base>` + the synthesized untracked additions (§3.3) |
+
+The single-rev form is the point, not an implementation detail: a two-rev range
+makes the diff provider build both sides from git blobs, which are read-only and
+have no path on disk, whereas a single rev diffs against the **working tree** and
+opens the real files — so LSP clients attach and the files are editable (§11.5).
+
+`<base>` is the older end's first parent. It degenerates the same way a commit
+span does, and the same way *up* the worktree stack:
+
+- the older end is a **root** → `from` is `nil` and the base is the empty tree;
+- the older end is itself a virtual commit (a selection that covers only
+  working-tree rows) → its first parent is the next node **down the stack**, which
+  is another tree state: the `staged` node is `"index"`, the `unstaged` /
+  `untracked` nodes are `"worktree"`. `rev` is then the empty string — the
+  provider's own default, working tree vs index. A sentinel hash is never read.
+
+The **staged** endpoint is the one case that does *not* get on-disk files: its
+head is the index, whose content has no path in the working tree. That is
+inherent to what the index is, not a gap — `--cached` is exactly the right
+answer, and the files it shows are read-only for the same reason `git show` output
+is.
+
+The untracked endpoint reuses the §3.3 synthesized additions
+(`git diff --no-index -- /dev/null <file>`, capped) for the **in-graph** view,
+because `git diff <base>` never lists untracked files: without them an untracked
+endpoint would render byte-identically to an unstaged one, and the selection the
+user made would have no visible effect. The **external** provider needs nothing
+extra — a working-tree view lists untracked files itself — so `rev` is unchanged.
 
 `<CR>` in selection mode opens the **commit view** (§11) in **range mode**: the
 metadata region lists the selected commits (newest first — abbreviated hash +
