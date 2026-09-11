@@ -908,3 +908,93 @@ describe("view.owners — the tip-owner backstop (§10.2)", function()
         assert.equals(1, #os) -- the ref owner only
     end)
 end)
+
+--- The **chunking hook** on the projection (spec §10.5, the async reflow).
+---
+--- `signatures` and `project` are the two whole-repository passes the open path
+--- has to run before a single branch can be collapsed. `window.reflow_async`
+--- drives them as a coroutine so the editor stays live while they land, which
+--- needs them to call an optional `yield` from their loop bodies. The contract is
+--- the same as pane.lua's: the hook must actually fire on a large input, and the
+--- chunked output must be identical to the synchronous one.
+describe("view chunking hook (§10.5)", function()
+    --- A deep first-parent chain, big enough that a YIELD_EVERY-sized counter
+    --- has to trip.
+    ---@param n integer
+    ---@return table[] items, table<string, table> by_hash
+    local function deep(n)
+        local rows = {}
+        for i = 1, n - 1 do rows[i] = { "c" .. i, { "c" .. (i + 1) } } end
+        rows[n] = { "c" .. n, {} }
+        local items = helpers.dag(rows)
+        local by = {}
+        for _, it in ipairs(items) do by[it.commit.hash] = it.commit end
+        return items, by
+    end
+
+    --- A comparable string for a whole projection: the row order, each node's
+    --- kind/region, and the re-pointed edges.
+    ---@param proj table
+    ---@return string
+    local function proj_sig(proj)
+        local out = {}
+        for i, it in ipairs(proj.items) do
+            local n = it.commit
+            local ps = {}
+            for _, p in ipairs(n.parents or {}) do ps[#ps + 1] = tostring(p.hash) end
+            out[#out + 1] = ("%d %s c=%s j=%s n=%s [%s]"):format(i, tostring(n.hash),
+                tostring(n.collapsed), tostring(n.junction), tostring(n.count),
+                table.concat(ps, ","))
+        end
+        for h, m in pairs(proj.mode) do out[#out + 1] = "m:" .. h .. "=" .. m end
+        table.sort(out)
+        return table.concat(out, "\n")
+    end
+
+    it("signatures calls the hook on a large set and gives identical output", function()
+        local items, by = deep(5000)
+        local owners = view.owners(items, { { id = "master", tip = by.c1 } }, { master = true }, {}, true)
+        local plain = view.signatures(items, owners)
+        local n = 0
+        local chunked = view.signatures(items, owners, function() n = n + 1 end)
+        assert.is_true(n > 0, "the yield hook never fired")
+        for h, s in pairs(plain) do
+            local o = chunked[h]
+            assert.is_not_nil(o)
+            for k in pairs(s) do assert.is_true(o[k]) end
+            for k in pairs(o) do assert.is_true(s[k]) end
+        end
+    end)
+
+    it("project calls the hook on a large set and gives identical output", function()
+        local items, by = deep(5000)
+        local owners = view.owners(items, { { id = "master", tip = by.c1 } }, { master = true }, {}, true)
+        local sig = view.signatures(items, owners)
+        local plain = view.project(items, owners, sig)
+        local n = 0
+        local chunked = view.project(items, owners, sig, nil, function() n = n + 1 end)
+        assert.is_true(n > 0, "the yield hook never fired")
+        assert.equals(#plain.items, #chunked.items)
+        assert.equals(proj_sig(plain), proj_sig(chunked))
+    end)
+
+    it("runs the passes inside a coroutine, suspending and resuming (the driver's shape)", function()
+        local items, by = deep(5000)
+        local owners = view.owners(items, { { id = "master", tip = by.c1 } }, { master = true }, {}, true)
+        local reference = proj_sig(view.project(items, owners, view.signatures(items, owners)))
+        local slices = 0
+        ---@type table
+        local result
+        local co = coroutine.create(function()
+            local sig = view.signatures(items, owners, coroutine.yield)
+            result = view.project(items, owners, sig, nil, coroutine.yield)
+        end)
+        while coroutine.status(co) ~= "dead" do
+            local ok, err = coroutine.resume(co)
+            assert.is_true(ok, tostring(err))
+            slices = slices + 1
+        end
+        assert.is_true(slices > 2, ("expected several slices, got %d"):format(slices))
+        assert.equals(reference, proj_sig(result))
+    end)
+end)

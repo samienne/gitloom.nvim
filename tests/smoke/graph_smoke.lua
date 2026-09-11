@@ -113,6 +113,37 @@ function M.run()
         fail("graph buffer never populated (" .. vim.api.nvim_buf_line_count(gbuf) .. " lines)")
     end
     if async_error() then fail("async error during open: " .. async_error()) end
+    -- The §10.7 default collapse must have LANDED, not merely been scheduled:
+    -- the projection is applied by an async reflow (§10.5) driven across
+    -- event-loop ticks, so "the buffer stopped growing" is also true of a reflow
+    -- that never ran. Headless has no UI, so the rendered text does not exist to
+    -- be inspected -- the listview draws through a decoration provider, and the
+    -- buffer lines themselves are empty. Read the projected model instead.
+    local sess = require("gitloom.window")._internal.ctx
+    local function collapsed_heads()
+        local n = 0
+        for _, it in ipairs((sess and sess.repo.display) or {}) do
+            if it.type == "markers" then
+                n = n + #(it.markers or {})
+            elseif it.commit and it.commit.collapsed then
+                n = n + 1
+            end
+        end
+        return n
+    end
+    if not sess then
+        fail("no graph session was recorded")
+    else
+        -- `repo.display ~= repo.order` is NOT the signal: `apply_sort` rebuilds
+        -- repo.order into a fresh table, and `view.project` always returns fresh
+        -- OrderItems. The collapse itself is: this repository has unpinned
+        -- branches, so a focused view must carry collapsed heads.
+        vim.wait(6000, function() return collapsed_heads() > 0 end, 50)
+        if collapsed_heads() == 0 then
+            fail(("the §10.7 default collapse never landed (no collapsed head over %d rows)")
+                :format(#((sess and sess.repo.display) or {})))
+        end
+    end
 
     -- Navigation.
     focus(); step("nav-down", "jjjj"); step("nav-up", "kk")

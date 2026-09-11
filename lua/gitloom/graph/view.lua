@@ -31,6 +31,29 @@ local M = {}
 ---@field tip? Commit                 newest member, for the label/subject (head only)
 ---@field signature? table<string,boolean>  the owners reaching the region (head only)
 
+-- Chunking support for the async reflow (spec §10.5, window.lua `reflow_async`).
+-- `signatures` and `project` are O(commits x owners) passes over the whole
+-- repository; when the caller passes a `yield`, they call it once per
+-- `YIELD_EVERY` commits so a coroutine driver can suspend between event-loop
+-- ticks and the editor stays live while a large graph is projected. Synchronous
+-- callers (every test, every keypress-driven reflow on a small repo) pass no
+-- `yield`, so the output and the code path are unchanged.
+--
+-- `yield` is only ever called from a loop *body*, never across a C-call boundary
+-- (a `table.sort` comparator, a metamethod), so it is safe under LuaJIT
+-- coroutines. The same discipline as pane.lua's chunker.
+local YIELD_EVERY = 2048
+---@param yield (fun())?
+---@return fun()  -- call once per unit of work
+local function chunker(yield)
+    if not yield then return function() end end
+    local n = 0
+    return function()
+        n = n + 1
+        if n % YIELD_EVERY == 0 then yield() end
+    end
+end
+
 --- Owner ids of a signature set, sorted — a stable region key.
 ---@param set table<string, boolean>
 ---@return string
@@ -52,8 +75,9 @@ end
 --- the merged-in side. Ordinary owners flow to every parent (full reachability).
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired
 ---@param owners table[] -- { id, tip = Commit, mode?, fp_only? }
+---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY commits
 ---@return table<string, table<string, boolean>>  -- hash -> owner-id set
-function M.signatures(items, owners)
+function M.signatures(items, owners, yield)
     local tips = {} -- hash -> { owner id, ... }
     local fp = {}   -- owner id -> true if first-parent-only
     for _, o in ipairs(owners) do
@@ -63,7 +87,9 @@ function M.signatures(items, owners)
         if o.fp_only then fp[o.id] = true end
     end
     local sig = {}
+    local tick = chunker(yield)
     for _, it in ipairs(items) do
+        tick()
         local c = it.commit
         local s = {}
         for _, oid in ipairs(tips[c.hash] or {}) do s[oid] = true end
@@ -190,19 +216,22 @@ end
 ---@param owners table[] -- { id, tip = Commit, mode? = "normal"|"collapsed"|"hidden" }
 ---@param sig table<string, table<string, boolean>>?  -- precomputed signatures
 ---@param keep table<string, boolean>?  -- hashes never contracted (§16.3)
+---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY commits
 ---@return table  -- { items = OrderItem[], nodes = DisplayNode[], sig, mode, node_of_hash }
-function M.project(items, owners, sig, keep)
+function M.project(items, owners, sig, keep, yield)
     owners = owners or {}
+    local tick = chunker(yield)
     local owner_mode = {}
     for _, o in ipairs(owners) do owner_mode[o.id] = o.mode or "normal" end
 
     local idx = {} -- hash -> position in items (newest-first; smaller = newer)
     for i, it in ipairs(items) do idx[it.commit.hash] = i end
 
-    sig = sig or M.signatures(items, owners)
+    sig = sig or M.signatures(items, owners, yield)
 
     local mode = {}
     for _, it in ipairs(items) do
+        tick()
         local h = it.commit.hash
         mode[h] = mode_of(sig[h], owner_mode)
     end
@@ -253,6 +282,7 @@ function M.project(items, owners, sig, keep)
         if is_head_member(it.commit) then uf[it.commit.hash] = it.commit.hash end
     end
     for _, it in ipairs(items) do
+        tick()
         local c = it.commit
         if is_head_member(c) then
             local sk = sig_key(sig[c.hash])
@@ -271,6 +301,7 @@ function M.project(items, owners, sig, keep)
     local node_of_hash = {} -- hash -> DisplayNode (head for head-members)
     local head_of_root = {}
     for _, it in ipairs(items) do
+        tick()
         local c = it.commit
         local h = c.hash
         if mode[h] == "hidden" then
@@ -315,6 +346,7 @@ function M.project(items, owners, sig, keep)
     -- self-edges inside a contracted region; keep first-occurrence order.
     local pseen, cseen = {}, {}
     for _, it in ipairs(items) do
+        tick()
         local c = it.commit
         local n = node_of_hash[c.hash]
         if n then
@@ -381,6 +413,7 @@ function M.project(items, owners, sig, keep)
     end
     local ordered = {}
     while #heap > 0 do
+        tick()
         local n = hpop()
         ordered[#ordered + 1] = { type = "commit", commit = n }
         for _, p in ipairs(n.parents) do

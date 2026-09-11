@@ -3756,6 +3756,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     --- == debounce state (Phase B4) ==
+    ---@field reflow_gen? integer  async-reflow generation (§10.5): a newer reflow
+    ---                           bumps it and the in-flight one drops itself
     ---@field cone_gen integer       cone-update debounce generation
     ---@field applying boolean       suppresses the WinScrolled emitted by the deferred refresh
     ---@field pending boolean        a real scroll dropped during `applying`, replayed after
@@ -3776,6 +3778,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field mark_node_cone fun(self:GraphCtx, pivot:table, top:integer, bottom:integer):table
     --- == extracted helpers (Phase B2; attached from GRAPH_HELPERS) ==
     ---@field reflow fun(self:GraphCtx)
+    ---@field reflow_owners fun(self:GraphCtx, cm:boolean):table[]
+    ---@field reflow_build fun(self:GraphCtx, yield?:fun(), on_signatures?:fun():boolean?):table
+    ---@field reflow_apply fun(self:GraphCtx, display:table)
+    ---@field reflow_async fun(self:GraphCtx, done?:fun(), on_signatures?:fun():boolean?)
     ---@field update_cone fun(self:GraphCtx)
     ---@field goto_hash fun(self:GraphCtx, hash:string?, record:boolean?):boolean
     ---@field place_cursor fun(self:GraphCtx)
@@ -3981,6 +3987,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
     -- reference here — GRAPH_HELPERS — instead of one upvalue per helper).
     for k, f in pairs(GRAPH_HELPERS) do ctx[k] = f end
+    -- Diagnostic / test seam: the most recently assembled graph session. The
+    -- window glue has no busted coverage (it needs a real window), so the
+    -- headless smoke test reads the projected model through here rather than
+    -- guessing at it from the buffer -- which, without a UI, holds no rendered
+    -- text at all (the listview draws through a decoration provider).
+    M._internal.ctx = ctx
 
 
     -- Re-establish gitloom's owned row order (§3.1): run order_commits over the
@@ -4199,29 +4211,48 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     end
                 end
                 -- Stream done: apply the projection (the first-parent default
-                -- collapse, §10.7) and compute the initial dimming (§12). reflow
-                -- swaps in the projected graph, recomputes the cone, and refreshes.
-                reflow()
-                update_footer()
-                -- Reveal the focus target (§11.7.6) if the first-parent default
-                -- (§10.7) folded its branch into a collapsed head: the clicked
-                -- commit may be an intermediate (not a pinned pointer). Set that
-                -- head's collapsed owners to normal **by hash** (via the
-                -- projection signature) — robust even when the head is packed onto
-                -- a shared marker line (§10.4). Then reflow once if it changed.
-                local revealed = false
-                local function reveal(hash)
+                -- collapse, §10.7) and compute the initial dimming (§12).
+                --
+                -- ASYNC (§10.5): this first projection is the one unavoidable
+                -- whole-repository computation on the open path — signatures,
+                -- contraction and a full lane layout, seconds of work on a large
+                -- `--all` graph. It is chunked across event-loop ticks so the
+                -- streamed graph stays scrollable and the keymaps stay live while
+                -- it lands; the swap into the view is still atomic, because a
+                -- half-collapsed projection is not a graph anyone can read or act
+                -- on (every signature would have to be recomputed per branch, and
+                -- the row a keypress landed on would move underneath it).
+                --
+                -- The focus-reveal (§11.7.6) rides INSIDE that one projection via
+                -- `on_signatures`: it needs the signatures and the resolved modes,
+                -- both of which exist before anything is projected, and the mode
+                -- override it writes does not invalidate the signature cache — so
+                -- the owners are re-resolved and the projection still runs once,
+                -- instead of the whole reflow running a second time.
+                local function reveal_focus()
+                    local hash = focus_hash
                     local sig = hash and sig_cache.sig and sig_cache.sig[hash]
-                    if not sig then return end
+                    if not sig then return false end
+                    -- Reveal the focus target if the first-parent default (§10.7)
+                    -- folded its branch into a collapsed head: the clicked commit
+                    -- may be an intermediate (not a pinned pointer). Set that head's
+                    -- collapsed owners to normal **by hash** (via the projection
+                    -- signature) — robust even when the head is packed onto a
+                    -- shared marker line (§10.4).
+                    local revealed = false
                     for oid in pairs(sig) do
                         if (view_state.effective[oid] or "normal") == "collapsed" then
                             view_state.modes[oid] = "normal"
                             revealed = true
                         end
                     end
+                    return revealed
                 end
-                reveal(focus_hash)
-                if revealed then reflow() end
+                local fut, promise = make_future()
+                ctx:reflow_async(function() promise.resolve() end, reveal_focus)
+                return fut
+            end).next(function()
+                update_footer()
                 -- Focus an explicit commit if asked (the submodule link, §11.7.6),
                 -- else the remembered position for this repo, else HEAD; center the
                 -- view on it (§2). goto_hash resolves a folded commit to its
@@ -5581,36 +5612,73 @@ end
 -- delegates here, so its existing bare call sites are unchanged. The live window
 -- is read fresh via `ctx:win()` (§14 hide/show changes the id), never frozen.
 
--- A full reflow (§10.5): project the raw commit order under the current branch
--- modes into a fresh OrderItem graph, lay it out, and swap it into the listview.
-local function reflow(ctx)
+-- The owner set for a reflow (§10.5/§10.7), plus the resolved per-owner mode it
+-- writes onto `view_state.effective`. Split out because the async reflow may have
+-- to redo it once, after the focus-reveal (§11.7.6) writes a mode override --
+-- owners are cheap and a mode never enters a signature, so redoing the owners is
+-- what lets ONE projection account for the reveal.
+---@param ctx GraphCtx
+---@param cm boolean
+---@return table[] owners
+GRAPH_HELPERS.reflow_owners = function(ctx, cm)
     local viewbuilder = require("gitloom.graph.view")
-    local cm = ctx.opts.collapse_merged ~= false
     local owners = viewbuilder.owners(
         ctx.repo.order, owners_from_refs(ctx.repo.refs, {}), ctx:effective_pinned(), ctx.view_state.modes, cm)
-    -- Filter-search (§16.3): contract *everything* — force every owner collapsed,
-    -- so only the matches (the `keep` set, below) and junctions stay visible. This
-    -- is a mode-only override (the owner tips are unchanged), so it does not
-    -- invalidate the signature cache.
+    -- Filter-search (§16.3): contract *everything* -- force every owner collapsed,
+    -- so only the matches (the `keep` set) and junctions stay visible. This is a
+    -- mode-only override (the owner tips are unchanged), so it does not invalidate
+    -- the signature cache.
     if ctx.filter then
         for _, o in ipairs(owners) do o.mode = "collapsed" end
     end
     ctx.view_state.effective = {}
     for _, o in ipairs(owners) do ctx.view_state.effective[o.id] = o.mode end
+    return owners
+end
+
+-- The COMPUTE half of a reflow (§10.5): owners -> signatures -> projection ->
+-- layout -> marker packing, ending in the display list. Touches no window and
+-- swaps nothing in, so abandoning it half-way leaves the view exactly as it was
+-- (the same discipline as the pane build, §6.2).
+--
+-- `yield`, when given, is threaded into the three passes that scale with the
+-- repository, so a coroutine driver can spread them over event-loop ticks.
+-- `on_signatures` runs once the signatures (and `view_state.effective`) exist but
+-- before anything is projected; returning true means it changed a mode override,
+-- so the owners are re-resolved. Modes do not enter a signature, so the cache
+-- stays valid and the projection still runs exactly once.
+---@param ctx GraphCtx
+---@param yield (fun())?
+---@param on_signatures (fun(): boolean?)?
+---@return table display  -- the new repo.display
+GRAPH_HELPERS.reflow_build = function(ctx, yield, on_signatures)
+    local viewbuilder = require("gitloom.graph.view")
+    local cm = ctx.opts.collapse_merged ~= false
+    local owners = ctx:reflow_owners(cm)
     -- Reuse cached signatures unless the commit/owner set or focus changed.
     if ctx.sig_cache.norder ~= #ctx.repo.order or ctx.sig_cache.nowners ~= #owners
         or ctx.sig_cache.cm ~= cm or not ctx.sig_cache.sig then
-        ctx.sig_cache.sig = viewbuilder.signatures(ctx.repo.order, owners)
+        ctx.sig_cache.sig = viewbuilder.signatures(ctx.repo.order, owners, yield)
         ctx.sig_cache.norder, ctx.sig_cache.nowners, ctx.sig_cache.cm = #ctx.repo.order, #owners, cm
     end
+    if on_signatures and on_signatures() then owners = ctx:reflow_owners(cm) end
     local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig,
-        ctx.filter and ctx.filter.keep)
+        ctx.filter and ctx.filter.keep, yield)
+    refresh_columns(ctx.opts, proj.items, yield)
+    return (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
+end
+
+-- The APPLY half: swap the computed display into the listview and re-derive
+-- everything keyed off it. Runs to completion with no yields, so the view never
+-- shows a half-swapped state.
+---@param ctx GraphCtx
+---@param display table
+GRAPH_HELPERS.reflow_apply = function(ctx, display)
     -- The streamed sweep described `repo.order` in its arrival order; a reflow
     -- lays out the projection (and `apply_sort` may have reordered the rows
-    -- underneath), so the session can no longer be continued.
+    -- underneath), so that session can no longer be continued.
     ctx.colstream = nil
-    refresh_columns(ctx.opts, proj.items)
-    ctx.repo.display = (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
+    ctx.repo.display = display
     -- A reflow recreates the DisplayNodes, so drop any in-flight commit selection.
     ctx.sel.active, ctx.sel.path, ctx.sel.anchor, ctx.sel.cursor = false, nil, nil, nil
     if ctx.lv and ctx.lv.controller and ctx.lv.controller.set_items then
@@ -5621,7 +5689,55 @@ local function reflow(ctx)
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
     ctx:update_panes()
 end
+
+-- A full reflow (§10.5): project the raw commit order under the current branch
+-- modes into a fresh OrderItem graph, lay it out, and swap it into the listview.
+-- Synchronous -- every keypress-driven reflow goes through here, and it also
+-- supersedes any async reflow still in flight.
+local function reflow(ctx)
+    ctx.reflow_gen = (ctx.reflow_gen or 0) + 1
+    ctx:reflow_apply(ctx:reflow_build())
+end
 GRAPH_HELPERS.reflow = reflow
+
+-- The same reflow, driven across event-loop ticks (§10.5, and §10.8's "reflow
+-- must stay responsive"). Used on the open path, where the FIRST projection of a
+-- large repository is the one unavoidable multi-second computation: every commit
+-- has to be attributed to owners before a single branch can be collapsed, so
+-- there is no correct partial answer to show. Chunking keeps the window
+-- scrollable and the keymaps live while it lands; the swap itself stays atomic.
+--
+-- A newer reflow (`reflow`, or another `reflow_async`) bumps `reflow_gen`, and
+-- the in-flight one is dropped at its next resume without having touched
+-- anything.
+---@param ctx GraphCtx
+---@param done (fun())?                    called after the display is swapped in
+---@param on_signatures (fun(): boolean?)? see reflow_build
+GRAPH_HELPERS.reflow_async = function(ctx, done, on_signatures)
+    ctx.reflow_gen = (ctx.reflow_gen or 0) + 1
+    local gen = ctx.reflow_gen
+    local co = coroutine.create(function()
+        return ctx:reflow_build(coroutine.yield, on_signatures)
+    end)
+    local function drive()
+        if ctx.reflow_gen ~= gen then return end
+        local ok, res = coroutine.resume(co)
+        if not ok then
+            vim.notify("gitloom: reflow failed: " .. tostring(res), vim.log.levels.ERROR)
+            return
+        end
+        if coroutine.status(co) == "dead" then
+            ctx:reflow_apply(res)
+            if done then done() end
+            return
+        end
+        -- A 0ms timer, not vim.schedule: a scheduled callback is drained inside
+        -- the same pass of the event queue, so the screen would not update
+        -- between slices (the same reason §3.1's stream worker uses one).
+        vim.defer_fn(drive, 0)
+    end
+    drive()
+end
 
 -- Recompute the pivot's cone over the visible rows and re-mark track activeness
 -- (§12). The window gives *buffer* lines; map them to order indices.
@@ -6076,6 +6192,7 @@ end
 -- linker (integrate_commit), and the pin resolution (effective_pinned). These
 -- mutate only their `ctx.repo`, touching no window. Mirrors graph._internal.
 M._internal = {
+    ctx = nil, -- set by open_graph; the live session (diagnostics / smoke test)
     effective_pins = GRAPH_HELPERS.effective_pins,
     effective_pinned = effective_pinned,
     pin_dialog = GRAPH_HELPERS.pin_dialog, -- §10.6.1; windowed smoke test seam
