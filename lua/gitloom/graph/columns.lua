@@ -55,6 +55,12 @@ local M = {}
 --- out, so it never fills up with an unrelated branch.
 local GUTTER = 1
 
+-- Rows swept between calls to a sweep's optional `yield` hook (the async reflow,
+-- spec §10.5). A row on a wide `--all` graph is ~100 drawn cells, so this is a
+-- few milliseconds of work per slice — small enough that a keypress is never
+-- waiting long, large enough that the driver's overhead stays invisible.
+local YIELD_ROWS = 64
+
 --- Does this node own its row's SUBJECT? False for a collapsed head and for a kept
 --- junction drawn as a marker (§10.4): the renderer blanks date/author/message for
 --- both, so their row's flex column holds ref labels, not a subject. `gutter`
@@ -310,8 +316,21 @@ local function union_conn(segs)
     return u
 end
 
---- Build the per-row lines for the inline merge style (every fan on the commit
---- line; no separate split/merge lines). Other styles are layered on later.
+--- Open a layout **session** — the sweep with its state held open so it can be
+--- **resumed**. `M.layout` (below) is the one-shot form: open a session, extend it
+--- over the whole list, done. Streaming (spec §3.1) keeps the session and extends
+--- it batch by batch instead, which is the same fold run once rather than once per
+--- batch.
+---
+--- WHY RESUMING IS EXACT. The sweep is a strict **top-down fold**: each row's
+--- output is a function of (the state after the previous row, this row's commit).
+--- No stage reads a row below the current one, and the streamed order APPENDS
+--- older commits at the bottom — `git log --topo-order` emits a parent only after
+--- every child, so a row's `.parents`/`.children` are final the moment it is
+--- appended. Hence laying out a prefix yields exactly the first rows of laying out
+--- the whole list. The one exception is a policy with a `prepass`, which by
+--- definition reads ahead (`gutter`, whose parent-swap gate needs the NEXT subject
+--- row); a session reports that as `lookahead` and the caller must rebuild in full.
 ---
 --- `seed` (optional) pre-populates the sweep's `active` map with lanes crossing
 --- in **from above** — the boundary lanes of a context pane (spec §6.2). Each
@@ -323,10 +342,9 @@ end
 --- only constrains the sweep **start**, so it pins a footer's top seam exactly;
 --- a header's bottom seam needs a different mechanism (see ARCHITECTURE.md).
 ---@param opts table
----@param items table[]  -- { type, commit } newest-first; commit.parents/children are Commits
 ---@param seed table<integer, table>?  -- col -> Lane crossing in from above
----@return table[] rows
-function M.layout(opts, items, seed)
+---@return LayoutSession
+function M.session(opts, seed)
     local next_id = 0
     local function new_id()
         next_id = next_id + 1
@@ -1280,11 +1298,18 @@ function M.layout(opts, items, seed)
         gutter    = { body = layout_gutter,    seam = layout_gutter_seam, prepass = gutter_prepass },
     }
 
+    -- Membership in `active`, as a set built once per `complete_check` run. The
+    -- oracle asks it once per incoming/survivor/outgoing lane, and a wide graph
+    -- has as many survivors as columns — a linear scan per question made the
+    -- check O(width^2) per row, which on a `--all` graph 100 lanes wide was the
+    -- single largest term in the whole layout (spec §3.1 open path).
+    local live = {}
+    local function refresh_live()
+        for k in pairs(live) do live[k] = nil end
+        for _, l in pairs(active) do live[l] = true end
+    end
     local function active_contains(lane)
-        for _, l in pairs(active) do
-            if l == lane then return true end
-        end
-        return false
+        return live[lane] == true
     end
 
     -- Structural oracle (spec: "check that everything has been handled"): the
@@ -1292,6 +1317,7 @@ function M.layout(opts, items, seed)
     -- flags the stages flip — it reads the output, like the test invariants — and
     -- errors on any violation.
     local function complete_check(state)
+        refresh_live()
         local C = state.commit
         local hash = tostring(C.hash)
         local sections = {}
@@ -1370,12 +1396,47 @@ function M.layout(opts, items, seed)
     -- `layout_policy` falls back to `compact`: this comes from user config, so it
     -- must never error.
     local policy = POLICY[opts.layout_policy] or POLICY.compact
-    local pre = policy.prepass and policy.prepass(opts, items) or nil
-    for i, item in ipairs(items) do
-        run_item(item, i, pre, (seed and i == 1) and policy.seam or policy.body)
+
+    ---@class LayoutSession
+    ---@field n integer         rows swept so far
+    ---@field rows table[]      every row swept so far, in order
+    ---@field lookahead boolean the policy reads rows below the current one, so it
+    ---                         cannot be resumed — the caller must rebuild in full
+    ---@field extend fun(items: table[], from: integer?, yield: (fun())?): table[]
+    local session = { n = 0, rows = rows, lookahead = policy.prepass ~= nil }
+
+    --- Sweep `items[from..]` onto the end of the session and return **just the rows
+    --- it appended** (`session.rows` holds the whole sweep). `from` defaults to 1;
+    --- it is the index into `items`, which for a streaming caller is the whole
+    --- growing order, so `state.index` stays the global row number. The optional
+    --- `yield` is called every `YIELD_ROWS` rows so a coroutine driver can chunk a
+    --- long sweep across event-loop ticks; it is only ever called from this loop
+    --- body, never across a C-call boundary.
+    function session.extend(items, from, yield)
+        local pre = policy.prepass and policy.prepass(opts, items) or nil
+        local out, since = {}, 0
+        for i = from or 1, #items do
+            run_item(items[i], i, pre, (seed and session.n == 0) and policy.seam or policy.body)
+            session.n = session.n + 1
+            out[#out + 1] = rows[#rows]
+            since = since + 1
+            if yield and since % YIELD_ROWS == 0 then yield() end
+        end
+        return out
     end
 
-    return rows
+    return session
+end
+
+--- Build the full graph layout from an ordered list of items, from scratch — the
+--- reflow primitive and the entry point for tests. A session extended once.
+---@param opts table
+---@param items table[]  -- { type, commit } newest-first; commit.parents/children are Commits
+---@param seed table<integer, table>?  -- col -> Lane crossing in from above
+---@param yield (fun())?  -- chunking hook; called every YIELD_ROWS rows
+---@return table[] rows
+function M.layout(opts, items, seed, yield)
+    return M.session(opts, seed).extend(items, 1, yield)
 end
 
 return M

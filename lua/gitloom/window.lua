@@ -3745,6 +3745,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field node_loc table<string,{item:table,col:integer}>
     ---@field view_state { cone?:table, modes:table, effective:table, pins:PinEntry[], unpinned:table<string,boolean> }
     ---@field sig_cache { norder:integer, nowners:integer, cm?:boolean, sig?:table }
+    ---@field colstream? table       the streaming Phase-1 sweep held open across
+    ---                              batches (graph.extend_columns; §3.1). Cleared by
+    ---                              any reflow — the projection is a different list.
     ---@field worktree_commits table
     ---@field worktree_head? string
     ---@field last_line? integer
@@ -4150,13 +4153,19 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
                         -- Fast path while the projection is the identity (the
                         -- common all-normal case): lay out and append the batch.
+                        -- The sweep CONTINUES from where the last batch left off
+                        -- (graph.extend_columns) — the stream only appends below,
+                        -- and the layout is a top-down fold, so the rows above are
+                        -- already final. Relaying the whole order per batch made
+                        -- the stream O(N²/batch) (spec §3.1).
                         -- Once a branch mode makes the display a separate
                         -- projection, a streamed batch needs a full reflow (§10).
                         if repo.display == repo.order then
                             local from = #repo.order - #new_items + 1
-                            refresh_columns(opts, repo.order, from)
+                            ctx.colstream = graph.extend_columns(opts, repo.order, from, ctx.colstream)
                             controller.insert(new_items, from)
                         else
+                            ctx.colstream = nil
                             reflow()
                         end
                     end,
@@ -5596,6 +5605,10 @@ local function reflow(ctx)
     end
     local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig,
         ctx.filter and ctx.filter.keep)
+    -- The streamed sweep described `repo.order` in its arrival order; a reflow
+    -- lays out the projection (and `apply_sort` may have reordered the rows
+    -- underneath), so the session can no longer be continued.
+    ctx.colstream = nil
     refresh_columns(ctx.opts, proj.items)
     ctx.repo.display = (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
     -- A reflow recreates the DisplayNodes, so drop any in-flight commit selection.
