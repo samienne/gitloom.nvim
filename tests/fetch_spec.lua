@@ -181,3 +181,126 @@ describe("fetch_range_diff exit code (§13.5)", function()
         assert.is_true(#res.err > 0)
     end)
 end)
+
+--- A range ending at the **working tree** (spec §4.2/§13.5).
+---
+--- `range_endpoints` maps a virtual newer end to a TREE STATE (`"index"` /
+--- `"worktree"`), never to its sentinel hash. `fetch_range_diff` is the other
+--- half of that invariant: it must build its argv from the endpoints' *shape* —
+--- only a table endpoint is ever asked for its `.hash` — so the three states
+--- produce three genuinely different patches and no sentinel can reach git.
+---
+--- Driven against a REAL dirty repository built in a scratch directory (never a
+--- repo under the user's tree). A stub would only re-assert the mapping; the
+--- point here is that git accepts these argvs and returns the right content.
+describe("fetch_range_diff to the working tree (§13.5)", function()
+    local range = require("gitloom.git.range")
+
+    local function await(future)
+        local res
+        future.next(function(r) res = r end)
+        vim.wait(20000, function() return res ~= nil end, 20)
+        return res
+    end
+
+    local repo
+
+    local function sh(...)
+        local out = vim.fn.system({ "git", "-C", repo, ... })
+        assert.equals(0, vim.v.shell_error, out)
+    end
+
+    -- HEAD~1 <- HEAD, then: `tracked` modified and staged, `tracked2` modified
+    -- and left unstaged, and `newfile` untracked. So all three §4.2 nodes exist
+    -- and each carries content the other two do not. Built once, lazily
+    -- (plenary.busted has no `setup`), into a scratch directory -- never a repo
+    -- under the user's tree.
+    before_each(function()
+        if repo then return end
+        repo = vim.fn.tempname()
+        vim.fn.mkdir(repo, "p")
+        vim.fn.system({ "git", "init", "-q", repo })
+        assert.equals(0, vim.v.shell_error)
+        sh("config", "user.email", "t@example.invalid")
+        sh("config", "user.name", "T")
+        vim.fn.writefile({ "base" }, repo .. "/tracked")
+        vim.fn.writefile({ "base2" }, repo .. "/tracked2")
+        sh("add", "-A")
+        sh("commit", "-q", "-m", "root")
+        vim.fn.writefile({ "second" }, repo .. "/tracked")
+        sh("commit", "-q", "-am", "second")
+        -- Dirty it: a staged edit, an unstaged edit, and an untracked file.
+        vim.fn.writefile({ "STAGED" }, repo .. "/tracked")
+        sh("add", "tracked")
+        vim.fn.writefile({ "UNSTAGED" }, repo .. "/tracked2")
+        vim.fn.writefile({ "UNTRACKED" }, repo .. "/newfile")
+        -- The fetch layer pins every spawn to the active root (§2.1).
+        fetch.set_cwd(repo)
+    end)
+
+    -- The §4.2 stack over the scratch repo's real HEAD~1 / HEAD.
+    local function stack()
+        local head = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD" })[1]
+        local prev = vim.fn.systemlist({ "git", "-C", repo, "rev-parse", "HEAD~1" })[1]
+        local headc = { hash = head, parents = { { hash = prev, parents = {} } } }
+        local staged = { hash = ("0"):rep(39) .. "1", virtual = "staged", parents = { headc } }
+        local unstaged = { hash = ("0"):rep(40), virtual = "unstaged", parents = { staged } }
+        local untracked = { hash = ("0"):rep(39) .. "2", virtual = "untracked", parents = { unstaged } }
+        return headc, staged, unstaged, untracked, prev
+    end
+
+    it("staged: --cached <base> shows the staged edit and not the unstaged one", function()
+        local headc, staged, _, _, prev = stack()
+        local r = range.range_endpoints(staged, headc)
+        assert.equals("--cached " .. prev, r.rev) -- single rev, no `..`
+        local res = await(fetch.fetch_range_diff(r))
+        assert.equals(0, res.code)
+        assert.truthy(res.out:find("STAGED", 1, true))
+        assert.is_nil(res.out:find("UNSTAGED", 1, true))
+        assert.is_nil(res.out:find("UNTRACKED", 1, true))
+    end)
+
+    it("unstaged: <base> shows both the staged and the unstaged edits", function()
+        local headc, _, unstaged, _, prev = stack()
+        local r = range.range_endpoints(unstaged, headc)
+        assert.equals(prev, r.rev) -- a bare single rev: the working-tree form
+        local res = await(fetch.fetch_range_diff(r))
+        assert.equals(0, res.code)
+        assert.truthy(res.out:find("STAGED", 1, true))
+        assert.truthy(res.out:find("UNSTAGED", 1, true))
+        -- `git diff <rev>` never lists untracked files.
+        assert.is_nil(res.out:find("UNTRACKED", 1, true))
+    end)
+
+    it("untracked: the same rev, plus the synthesized untracked additions", function()
+        local headc, _, _, untracked, prev = stack()
+        local r = range.range_endpoints(untracked, headc)
+        assert.equals(prev, r.rev) -- identical rev to the unstaged case...
+        local res = await(fetch.fetch_range_diff(r))
+        assert.equals(0, res.code)
+        assert.truthy(res.out:find("STAGED", 1, true))
+        assert.truthy(res.out:find("UNSTAGED", 1, true))
+        -- ...but the patch differs, which is the whole reason for the flag: an
+        -- untracked endpoint that rendered identically to the unstaged one would
+        -- make the user's selection invisible.
+        assert.truthy(res.out:find("UNTRACKED", 1, true))
+        assert.truthy(res.out:find("newfile", 1, true))
+    end)
+
+    it("a failing endpoint is still reported, not swallowed", function()
+        local absent = ("0"):rep(36) .. "dead"
+        local res = await(fetch.fetch_range_diff({
+            rev = absent, to = "worktree", untracked = true,
+            from = { hash = absent, parents = {}, children = {}, refs = {} },
+        }))
+        assert.is_true(res.code ~= 0)
+        assert.equals("", res.out)
+        assert.is_true(#res.err > 0)
+    end)
+
+    it("releases the scratch repository", function()
+        fetch.set_cwd(nil)
+        vim.fn.delete(repo, "rf")
+        assert.equals(0, vim.fn.isdirectory(repo))
+    end)
+end)

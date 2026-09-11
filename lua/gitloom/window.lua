@@ -2017,7 +2017,9 @@ local function open_selection_view(ctx)
     if not r then return end
     local commits = ctx:selection_commits()
     local n = #commits
-    local title = (n == 1) and ("Commit " .. (commits[1] and commits[1].hash:sub(1, 7) or ""))
+    -- A §4.2 working-tree node has no hash to name the view by (§13.5).
+    local one = (n == 1) and commits[1] or nil
+    local title = one and (one.virtual and worktree_label(one) or ("Commit " .. one.hash:sub(1, 7)))
         or (("Selection: %d commits"):format(n))
     open_commit_view(ctx.opts, nil, { range = r, commits = commits, title = title }, ctx.repo.root)
 end
@@ -2034,14 +2036,17 @@ local function selection_redraw(ctx)
     ctx:maybe_update_panes()
 end
 
--- V: start selection on the row's commit (a normal commit or a collapsed head;
--- a packed marker line is not a start point in v1). anchor = cursor = it.
+-- V: start selection on the row's commit (a normal commit, a collapsed head, or a
+-- §4.2 working-tree node; a packed marker line is not a start point in v1).
+-- anchor = cursor = it.
+--
+-- A working-tree node IS a valid start (§13.2): having no children it can only
+-- ever be the path's newest end, and `range_endpoints` turns a virtual newer end
+-- into a tree state (§13.5), so its sentinel hash never reaches a git rev.
 local function enter_selection(ctx, line)
     local sel = ctx.sel
     local item = ctx:order_at(line)
     if not item or not item.commit or item.type == "markers" then return end
-    -- A working-tree virtual commit (§4.2) is not a selectable endpoint (v1).
-    if item.commit.virtual then return end
     ctx:build_display_index()
     ctx.selection_state.index = nil -- drop the ref selection (§13.3)
     sel.active, sel.anchor, sel.cursor = true, item.commit, item.commit
