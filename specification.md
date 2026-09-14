@@ -1809,6 +1809,14 @@ descendants'. Commits therefore partition into **regions** — maximal connected
 runs of equal signature — whose boundaries fall exactly at junctions where an
 owner joins or leaves.
 
+A first-parent line **does not stop where it rejoins another branch**: a merged-in
+branch's own first parent leads back to the trunk commit it forked from, and the
+owner continues down the trunk from there to the root. So a shared ancestor is
+covered by an owner for every merge above it, and on a trunk where most commits
+are merges each trunk commit sits in a region of its own. That is the intended
+attribution — the branch *is* reachable from there — but it is also why the cost
+of this pass tracks the repository's merge density rather than its size (§10.8).
+
 **Owner coverage is total.** Every **real** commit in the model is reached by at
 least one owner. This is not an accident of the ref set — it is guaranteed by
 construction, because the owner set is closed under the two ways reachability can

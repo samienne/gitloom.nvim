@@ -47,9 +47,9 @@ describe("open_trace (§10.8)", function()
         util.open_trace("owners", { n = 12, merges = 7, ms = 3 })
         local lines = read(path)
         assert.equals(2, #lines)
-        assert.is_truthy(lines[1]:match("^0001 %+%d+ms open repo=/r$"))
+        assert.is_not_nil(lines[1]:match("^0001 %+%d+ms open repo=/r$"))
         -- sorted keys: merges, ms, n
-        assert.is_truthy(lines[2]:match("^0002 %+%d+ms owners merges=7 ms=3 n=12$"))
+        assert.is_not_nil(lines[2]:match("^0002 %+%d+ms owners merges=7 ms=3 n=12$"))
     end)
 
     it("restarts the sequence and the clock on each `open`", function()
@@ -60,8 +60,8 @@ describe("open_trace (§10.8)", function()
         util.open_trace("done", { ms = 2 })
         local lines = read(path)
         assert.equals(4, #lines)
-        assert.is_truthy(lines[3]:match("^0001 %+%d+ms open repo=/b$"))
-        assert.is_truthy(lines[4]:match("^0002 "))
+        assert.is_not_nil(lines[3]:match("^0001 %+%d+ms open repo=/b$"))
+        assert.is_not_nil(lines[4]:match("^0002 "))
     end)
 
     it("records every phase name the open path emits", function()
@@ -72,7 +72,7 @@ describe("open_trace (§10.8)", function()
         local lines = read(path)
         assert.equals(#phases, #lines)
         for i, p in ipairs(phases) do
-            assert.is_truthy(lines[i]:match(" " .. p .. " "), p .. " missing from the trace")
+            assert.is_not_nil(lines[i]:match(" " .. p .. " "), p .. " missing from the trace")
         end
     end)
 

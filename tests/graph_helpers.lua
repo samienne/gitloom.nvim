@@ -892,6 +892,88 @@ function M.focused(items)
     return view.project(items, view.owners(items, ro, pinned, {}, true), nil).items
 end
 
+--- A rendered Line's full cell content, as a comparable string: every column's
+--- connectivity, lane id, palette slot, node flag and `own_lane_up`, plus every
+--- Segment's id, colour, connectivity and endpoints. Cell-for-cell equality of
+--- two layouts is equality of these.
+---@param line table?
+---@return string
+function M.line_sig(line)
+    if not line then return "-" end
+    local out = {}
+    for j, col in ipairs(line) do
+        local c = col.connectivity or {}
+        local segs = {}
+        for _, sg in ipairs(col.lanes or {}) do
+            local sc = sg.connectivity or {}
+            segs[#segs + 1] = ("%s:%s:%s%s%s%s:%s>%s"):format(tostring(sg.id), tostring(sg.color),
+                sc.up and "u" or "", sc.down and "d" or "", sc.left and "l" or "", sc.right and "r" or "",
+                sg.begin and tostring(sg.begin.hash) or "-",
+                sg.parent and tostring(sg.parent.hash) or "-")
+        end
+        out[#out + 1] = ("%d[%s%s%s%s|%s|%s|%s|%s]{%s}"):format(j,
+            c.up and "u" or "", c.down and "d" or "", c.left and "l" or "", c.right and "r" or "",
+            tostring(col.id), tostring(col.color), col.has_commit and "N" or "",
+            col.own_lane_up and "^" or "", table.concat(segs, ","))
+    end
+    return table.concat(out, " ")
+end
+
+--- Every Line of one laid-out row, plus the lanes the reachability walk reads.
+---@param r table  -- OrderItem
+---@return string
+function M.row_sig(r)
+    local parts = {}
+    for _, a in ipairs(r.above or {}) do parts[#parts + 1] = "A" .. M.line_sig(a) end
+    parts[#parts + 1] = "C" .. M.line_sig(r.columns)
+    if r.merge then parts[#parts + 1] = "M" .. M.line_sig(r.merge) end
+    local pl, cl = {}, {}
+    for _, l in ipairs(r.parent_lanes or {}) do pl[#pl + 1] = tostring(l.id) end
+    for _, l in ipairs(r.child_lanes or {}) do cl[#cl + 1] = tostring(l.id) end
+    parts[#parts + 1] = "P" .. table.concat(pl, ",") .. "/K" .. table.concat(cl, ",")
+    return table.concat(parts, "\n")
+end
+
+--- The **reference** signature pass (spec §10.2), as one materialised
+--- `table<string, boolean>` per commit — the shape `view.signatures` produced
+--- before it was interned (gitloom.graph.sigset). Kept as an independent oracle:
+--- it is a direct transcription of the definition (a commit's signature is the
+--- owners tipped at it unioned with every child's, an `fp_only` owner crossing
+--- only a first-parent edge), with no sharing, no memoisation and no trie.
+---
+--- `view.project` takes its slower path for a plain table like this, so feeding
+--- one in exercises the pre-interning projection too — which is what makes a
+--- comparison against it a genuine before/after, not a self-check.
+---@param items table[]  -- { type, commit }, newest-first
+---@param owners table[] -- { id, tip, mode?, fp_only? }
+---@return table<string, table<string, boolean>>
+function M.reference_signatures(items, owners)
+    local tips, fp = {}, {}
+    for _, o in ipairs(owners) do
+        local h = o.tip.hash
+        tips[h] = tips[h] or {}
+        tips[h][#tips[h] + 1] = o.id
+        if o.fp_only then fp[o.id] = true end
+    end
+    local sig = {}
+    for _, it in ipairs(items) do
+        local c = it.commit
+        local s = {}
+        for _, oid in ipairs(tips[c.hash] or {}) do s[oid] = true end
+        for _, ch in ipairs(c.children or {}) do
+            local cs = sig[ch.hash]
+            if cs then
+                local first = ch.parents and ch.parents[1] == c
+                for oid in pairs(cs) do
+                    if first or not fp[oid] then s[oid] = true end
+                end
+            end
+        end
+        sig[c.hash] = s
+    end
+    return sig
+end
+
 --- A random closed DAG of `n` commits in topo order: every non-last commit
 --- has 1–2 parents drawn from later commits; the last commit is a root.
 ---@param n integer
