@@ -2208,7 +2208,14 @@ all-normal.
   streaming is incremental, §10.5's opening projection is sliced), but the total
   work is still linear in the whole history — a repository large enough still
   spends seconds projecting it, just without freezing. Bounding what is read and
-  laid out at all remains open.
+  laid out at all remains open. The total is also a function of the repository's
+  **shape**, not only its size: the per-commit signature is computed against the
+  whole owner set (§10.2) and an owner is minted per non-first merge parent, so a
+  trunk of merges costs several times what a linear history of the same length
+  does. The phase breakdown of an open — the ref query, each streamed batch, then
+  sort / owners / signatures / projection / layout / packing / apply, with the
+  counts each scales with — is recorded by the armable `gitloom_open_trace`
+  diagnostic (README → Diagnostics), so this is measured rather than estimated.
 - **Auto-refresh** — history refresh (§3.4) is in place via the manual `R`
   resync; triggering it automatically when the repository changes underneath
   (watching `.git` refs / `HEAD` via an fs-event or autocmd, debounced) is a

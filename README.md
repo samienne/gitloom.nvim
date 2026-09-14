@@ -555,7 +555,7 @@ make test-file FILE=tests/refs_spec.lua   # run a single spec
 
 ## Diagnostics
 
-Three opt-in dump globals, all off by default and all harmless to leave unset.
+Four opt-in dump globals, all off by default and all harmless to leave unset.
 Set any of them to a **file path** and gitloom writes a plain-text dump there.
 
 ```lua
@@ -572,6 +572,12 @@ vim.g.gitloom_pane_debug = vim.fn.stdpath("data") .. "/gitloom_pane_dump.txt"
 -- The context panes' LIFECYCLE: one line per rebuild decision, build outcome and
 -- close. Appends; unset it to stop.
 vim.g.gitloom_pane_trace = vim.fn.stdpath("data") .. "/gitloom_pane_trace.log"
+
+-- The OPEN path, phase by phase: the ref query, every streamed commit batch, then
+-- the completion pass (sort / owners / signatures / projection / layout / marker
+-- packing / apply) with the counts each phase scales with. Appends; unset it to
+-- stop. Arm it, open the repository, and send the file.
+vim.g.gitloom_open_trace = vim.fn.stdpath("data") .. "/gitloom_open.log"
 ```
 
 `gitloom_pane_trace` is the one to reach for when the header/footer overlays are
@@ -591,6 +597,32 @@ a `built … ftr=<reason>` line **declined** (the seam or the topology said no),
 whereas one missing with a `close` line was torn down by the window layer. And a
 `maybe … act=repaint` where the panes are `down` means the gate believes they are
 current when they are not.
+
+`gitloom_open_trace` is the one to reach for when a repository is slow to open.
+Each line is one phase, with the elapsed time since the open began and that
+phase's own cost:
+
+| record | meaning |
+| --- | --- |
+| `open` | the open began (it restarts the clock, so several opens read as separate timelines) |
+| `refs` | the ref query finished — `n` refs |
+| `batch` | one streamed commit batch was linked in, laid out and inserted — `i` the batch number, `n` its commits, `rows` the running total. The **first** `batch` line is when something was first painted |
+| `stream` | `git log` closed — total `rows` over `batches`, and the wall time of the whole stream |
+| `sort` | the active sort mode was applied (§3.1) |
+| `owners` | the owner set was resolved — `n` owners of which `merges` are the anonymous per-merge-parent family (§10.2), over `rows` commits |
+| `signatures` | per-commit owner signatures (§10.2); `cached=true` means the cache was reused and nothing was computed |
+| `project` | the projection (§10.3) — `rows` is what it produced, so `rows` here against the `owners` line's `rows` says how many rows the collapse actually removed |
+| `layout` | Phase 1 lane layout over the projection |
+| `pack` | marker packing (§10.4) |
+| `apply` | the atomic swap into the view (§10.5) |
+| `done` | the graph is on screen; `ms` is the whole open |
+
+The two questions it settles: how much of the wait is `git log` (the `stream`
+line) versus the completion pass (`sort` … `apply`), and — inside the completion
+pass — whether the cost tracks the repository's *size* or its *shape*.
+`signatures` is O(commits × owners) and an owner is minted per non-first merge
+parent (§10.2), so a trunk of merges pays several times what a linear history of
+the same length does.
 
 `gitloom_git_debug` is the one to reach for when a git query fails to start —
 notably Windows' `E903: Process failed to start: name too long`, which names the
