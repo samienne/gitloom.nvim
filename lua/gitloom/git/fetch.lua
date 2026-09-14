@@ -182,6 +182,29 @@ local function call_site()
     return table.concat(parts, " <- ")
 end
 
+-- Hand control back to the main loop **and let it go idle**, so nvim redraws
+-- before the next slice of work (spec §3.1: "the view paints progressively").
+--
+-- `vim.schedule` is NOT enough, and that is the whole reason this exists. A
+-- scheduled callback lands on the main loop's *event* queue, which nvim drains to
+-- empty before it returns to the point where it flushes the screen — so a worker
+-- that reschedules itself keeps the queue non-empty and the screen never updates
+-- until the queue finally runs dry. Measured on 0.12.5 with a 60-step chain of
+-- 8 ms slices: `vim.schedule` produced **0** SafeState events (nvim's idle point,
+-- where the redraw happens) across the whole chain, a 0 ms timer produced 59.
+--
+-- A 0 ms `uv` timer fires on the next loop iteration instead, which is a real
+-- return to the top of the loop: the screen updates and a keypress is seen.
+---@param fn fun()
+local function next_tick(fn)
+    local t = assert(vim.uv.new_timer())
+    t:start(0, 0, function()
+        t:stop()
+        t:close()
+        vim.schedule(fn)
+    end)
+end
+
 -- jobstart wrapper that pins every git job to the active repository root, so a
 -- single setter retargets the whole I/O layer. Drop-in for `vim.fn.jobstart`:
 -- it only fills in `cwd` (when unset). When `active_cwd` is nil the field stays
@@ -211,6 +234,7 @@ M._internal = {
     cmdline_len = cmdline_len,
     spawn_record = spawn_record,
     debug_log = debug_log,
+    next_tick = next_tick,
 }
 
 -- The `%x1f`-delimited `git log` pretty-format shared by the initial stream and
@@ -524,9 +548,9 @@ function M.fetch_commits(opts)
 
         if qhead <= qtail then
             -- More queued (incl. lines that arrived while we worked): yield to
-            -- the loop, then continue.
+            -- the loop, then continue. NOT `vim.schedule` — see next_tick.
             scheduled = true
-            vim.schedule(process_batch)
+            next_tick(process_batch)
         elseif stream_done then
             promise.resolve()
         end
@@ -535,7 +559,7 @@ function M.fetch_commits(opts)
     local function schedule_drain()
         if not scheduled then
             scheduled = true
-            vim.schedule(process_batch)
+            next_tick(process_batch)
         end
     end
 

@@ -90,36 +90,97 @@ local M = {}
 --- Build the full graph layout from an ordered list of items, from scratch.
 --- Pure and deterministic (fresh lane-id sequence each call). Returns new row
 --- tables (does not mutate the inputs). This is the reflow primitive and the
---- entry point for tests.
+--- entry point for tests. `yield` (optional) chunks a long sweep across
+--- event-loop ticks (spec §10.5).
 ---@param opts GraphOptions
 ---@param items OrderItem[]   ordered items, each carrying a wired `.commit`
+---@param yield (fun())?
 ---@return OrderItem[]
-local function build_graph(opts, items)
+local function build_graph(opts, items, yield)
     -- Phase 1 of the two-phase pipeline (see lua/gitloom/graph/columns.lua): lane
     -- layout into columns with per-segment connectivity, validated for continuity.
     -- Phase 2 (get_column_chars) renders glyphs/colour from the segments.
-    return columns.layout(opts, items)
+    return columns.layout(opts, items, nil, yield)
 end
 M.build_graph = build_graph
 
+--- Copy one freshly-swept row's lines/lanes onto the OrderItem the view holds.
+---@param item OrderItem
+---@param r OrderItem
+local function adopt_row(item, r)
+    item.columns = r.columns
+    item.above = r.above
+    item.merge = r.merge
+    item.parent_lanes = r.parent_lanes
+    item.child_lanes = r.child_lanes
+end
+
 --- Re-run Phase 1 over the whole order and copy the fresh lines/lanes back into
---- the existing OrderItems (the view holds references to them). `start_pos` is
---- ignored — the lane layout (with compaction) is global, so a partial relayout
---- would be incorrect; a full rebuild is simplest and cheap enough here.
+--- the existing OrderItems (the view holds references to them). This is the
+--- from-scratch form — `extend_columns` is the streaming one. `yield` (optional)
+--- chunks the sweep across event-loop ticks.
 ---@param opts GraphOptions
 ---@param order OrderItem[]
-local function refresh_columns(opts, order, _start_pos)
-    local rebuilt = columns.layout(opts, order)
-    for i = 1, #order do
-        local r = rebuilt[i]
-        order[i].columns = r.columns
-        order[i].above = r.above
-        order[i].merge = r.merge
-        order[i].parent_lanes = r.parent_lanes
-        order[i].child_lanes = r.child_lanes
-    end
+---@param yield (fun())?
+local function refresh_columns(opts, order, yield)
+    local rebuilt = columns.layout(opts, order, nil, yield)
+    for i = 1, #order do adopt_row(order[i], rebuilt[i]) end
 end
 M.refresh_columns = refresh_columns
+
+--- The layout-relevant part of `opts`, as a comparable string. A streaming
+--- session may only be continued while these hold still; anything that changes
+--- them (`m`, `C`, a palette change) goes through a reflow anyway, so this is a
+--- safety net rather than a hot path.
+---@param opts GraphOptions
+---@return string
+local function layout_fingerprint(opts)
+    local ms = opts.merge_style or {}
+    local p = opts.palette or {}
+    return table.concat({
+        tostring(opts.layout_policy), tostring(opts.junction_markers),
+        tostring(ms.allow_merge_on_split), tostring(ms.merge_on_separate_line),
+        tostring(ms.split_on_separate_line),
+        tostring(p.tracks and #p.tracks or 0), tostring(p.generate), tostring(p.buffer),
+    }, "")
+end
+
+--- **Streaming** Phase 1 (spec §3.1): lay out the rows appended at `start_pos`
+--- by CONTINUING the sweep that laid out the rows above them, instead of redoing
+--- the whole order for every batch. The sweep is a strict top-down fold and the
+--- stream only ever appends *below*, so continuing is exact (see
+--- `columns.session`) — and it turns the stream's total layout cost from
+--- O(N²/batch) into one sweep.
+---
+--- `stream` is the opaque state to pass back on the next batch; pass nil to start
+--- one. The session is dropped and the order rebuilt in full whenever it cannot
+--- be continued: a different layout fingerprint, a rewound/reordered `order`, or
+--- a policy that reads ahead (`gutter`). So the fast path is an optimisation and
+--- the slow path is always available, never a correctness cliff.
+---@param opts GraphOptions
+---@param order OrderItem[]
+---@param start_pos integer  first appended row (1-based)
+---@param stream table?      previous return value
+---@return table stream
+local function extend_columns(opts, order, start_pos, stream)
+    local fp = layout_fingerprint(opts)
+    if not (stream and stream.session and stream.fp == fp and stream.n == start_pos - 1) then
+        local session = columns.session(opts)
+        if session.lookahead then
+            -- The policy needs the whole list up front; today's full rebuild is the
+            -- only correct answer (and `gutter` is never the streaming default).
+            refresh_columns(opts, order)
+            return { fp = fp, n = #order, session = nil }
+        end
+        stream = { fp = fp, n = 0, session = session }
+        start_pos = 1
+    end
+    local fresh = stream.session.extend(order, start_pos)
+    for k = 1, #fresh do adopt_row(order[start_pos + k - 1], fresh[k]) end
+    stream.n = #order
+    return stream
+end
+M.extend_columns = extend_columns
 
 --- Pack adjacent **marker** rows (collapsed heads, spec §10.4) that overlay
 --- cleanly into one *marker-group* row, so concurrent collapsed branches share a
