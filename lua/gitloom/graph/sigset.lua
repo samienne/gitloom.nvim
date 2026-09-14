@@ -67,6 +67,7 @@ local BITS, ARITY = 5, 32
 ---@field step table<integer, integer>         indices one of its slots covers
 ---@field uscratch table<integer, table>       per-level child buffer for `union`
 ---@field iscratch table<integer, table>       per-level child buffer for `intersect`
+---@field sealed? boolean                      construction finished; see `seal`
 local U = {}
 U.__index = U
 
@@ -150,6 +151,7 @@ end
 ---@param oid string
 ---@return SigHandle
 function U:singleton(oid)
+    if self.sealed then error("sigset: the universe is sealed", 2) end
     local i = self.idx[oid]
     if i == nil then return nil end
     local got = self.single[i]
@@ -204,6 +206,7 @@ function U:union(a, b)
     if a == nil then return b end
     if b == nil then return a end
     if a == b then return a end
+    if self.sealed then error("sigset: the universe is sealed", 2) end
     return self:_union(a, b, self.top, 0)
 end
 
@@ -245,6 +248,7 @@ end
 function U:intersect(a, b)
     if a == nil or b == nil then return nil end
     if a == b then return a end
+    if self.sealed then error("sigset: the universe is sealed", 2) end
     return self:_intersect(a, b, self.top, 0)
 end
 
@@ -314,6 +318,21 @@ end
 ---@return integer
 function U:nodes()
     return self.count
+end
+
+--- Drop the construction-time scaffolding: the hash-cons table, the operation
+--- memos and the per-level buffers. The built sets are reachable from the caller's
+--- handles and answer `members` / `summary` on their own, but the scaffolding is
+--- retained for the life of the signature cache (§10.5) otherwise — on a
+--- merge-heavy trunk that is one intern key per node and one memo table per commit.
+---
+--- A sealed universe can no longer build sets, and says so rather than silently
+--- minting a second node for a set that already has one (which would break the
+--- "equal sets are the same node" invariant everything downstream rests on).
+function U:seal()
+    self.sealed = true
+    self.intern, self.umemo, self.imemo = {}, {}, {}
+    self.single, self.uscratch, self.iscratch = {}, {}, {}
 end
 
 -- The metatable field the projection reads a signature map's interned form back

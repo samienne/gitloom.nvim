@@ -209,6 +209,31 @@ describe("sigset — the interned set", function()
         assert.equals(3, u:summary(normal, flags, memo))
     end)
 
+    it("seal releases the scaffolding but keeps the built sets readable", function()
+        local u = sigset.universe(owners)
+        local a = u:union(u:singleton("o3"), u:singleton("o99"))
+        local b = u:singleton("o150")
+        local before = u:nodes()
+        local flags, memo = {}, {}
+        for i = 0, 199 do flags[i] = 1 end
+        u:seal()
+        assert.same({ o3 = true, o99 = true }, u:members(a))
+        assert.equals(1, u:summary(a, flags, memo))
+        assert.equals(before, u:nodes())
+        -- Building again after the seal would mint a SECOND node for a set that
+        -- already has one, breaking "equal sets are the same node".
+        assert.has_error(function() u:union(a, b) end)
+        assert.has_error(function() u:intersect(a, b) end)
+        assert.has_error(function() u:singleton("o1") end)
+    end)
+
+    it("view.signatures hands back a sealed universe", function()
+        local items = h.dag(merge_trunk(4))
+        local S = sigset.of(view.signatures(items, focus_owners(items)))
+        assert.is_not_nil(S)
+        assert.is_true(S and S.universe.sealed or false)
+    end)
+
     it("sigset.of finds the interned form only behind view.signatures", function()
         local items = h.dag(merge_trunk(4))
         assert.is_not_nil(sigset.of(view.signatures(items, focus_owners(items))))

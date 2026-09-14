@@ -141,6 +141,13 @@ Consequences for the build:
     `sigset.summary`, computed once per *node* instead of once per commit —
     O(nodes) rather than O(commits × owners).
 
+  The pass ends by **sealing** the universe — the hash-cons table and the operation
+  memos are released, since no further sets will be built — which halves what the
+  signature cache retains for the life of the window (18.3 → 9.7 MB on that
+  repository, against 813 MB materialised). A sealed universe raises rather than
+  minting a second node for a set that already has one, which would break the
+  identity everything downstream rests on.
+
   `view.signatures` still returns a `hash -> { [owner id] = true }` table: indexing
   it materialises that one commit's set on the spot, so every consumer outside the
   projection (`collapse_owners`, a head's stored `signature`, the §11.7.6 reveal)

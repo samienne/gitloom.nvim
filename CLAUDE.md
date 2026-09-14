@@ -998,7 +998,11 @@ Details not covered by the spec or architecture:
   (814 → 97 MB). Two consequences the projection consumes directly: a set has ONE
   representation (interned on level+base+contents), so "same region" is `a == b`
   instead of a sorted-and-concatenated `sig_key` per commit; and the mode join
-  memoises **per node** (`summary`) instead of per commit. `view.signatures` still
+  memoises **per node** (`summary`) instead of per commit. The pass ends by
+  **sealing** the universe (releasing the hash-cons table + the memos — nothing
+  builds sets after it), halving what the §10.5 cache retains, 18.3 → 9.7 MB; a
+  sealed universe raises rather than minting a second node for an existing set.
+  `view.signatures` still
   returns a `hash -> { [owner id] = true }` table — indexing it materialises that
   one commit's set — so `collapse_owners`, a head's stored `signature` and the
   §11.7.6 reveal are unchanged; it is deliberately NOT cached per hash (caching

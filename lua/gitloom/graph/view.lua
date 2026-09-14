@@ -123,6 +123,10 @@ function M.signatures(items, owners, yield)
         end
         handles[c.hash] = s or false
     end
+    -- No more sets will be built: release the hash-cons table and the operation
+    -- memos. The map is cached for the life of the window (§10.5), and that
+    -- scaffolding is an intern key per node plus a memo table per commit.
+    U:seal()
     return sigset.view(U, handles)
 end
 
