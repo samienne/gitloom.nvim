@@ -179,7 +179,10 @@ Coverage:
   stay visible, so it gets no `tip:` owner and still projects normal). Plus the
   regression the backstop fixes: a ref-less branch (a linked worktree's detached
   HEAD, a `refs/original/*` commit) must have a non-empty signature and collapse
-  to one `◍`, not render as a run of expanded commits
+  to one `◍`, not render as a run of expanded commits. Plus the **chunking hook**
+  (§10.5, the async reflow): `signatures` / `project` fire an optional `yield` on a
+  large set and give byte-identical output, including driven from inside a real
+  coroutine that suspends and resumes (the driver's shape)
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), `window_right` (the selection-windowed
@@ -213,6 +216,27 @@ Coverage:
   date formatters (`format_absolute`, `format_relative`), and `make_line_buffer`
   (the unbuffered-stdout de-chunker: whole lines vs. the held trailing partial,
   cross-chunk stitching, byte-by-byte reassembly, blank lines; spec §3 streaming)
+- `tests/stream_layout_spec.lua` — the **streaming** Phase-1 sweep (§3.1,
+  `graph.extend_columns`): the streamed layout is byte-identical to the one-shot
+  one (every rendered Line's connectivity, lane id, colour, node flag,
+  `own_lane_up` and per-segment endpoints, plus the row's parent/child lanes) over
+  fixtures x batch sizes, a fuzz sweep, and the `large_topo` real-world topology,
+  each x 5 merge styles x 5 layout policies. Plus what gives that teeth: the
+  session is **carried** across batches (the same table, row counts growing in
+  batch-sized steps, each row swept once) — without which "parity" passes
+  trivially by rebuilding — and it is **dropped** when it cannot be continued (a
+  non-append `start_pos`, changed layout options, and a `prepass` policy, which
+  `columns.session` reports as `lookahead`). Deleting the lookahead guard fails
+  the fuzz + `large_topo` blocks on `gutter`: the prefix property genuinely does
+  not hold there
+- `tests/stream_tick_spec.lua` — the stream worker's hand-off (§3.1's "paints
+  progressively"): `fetch._internal.next_tick` defers rather than running inline,
+  a `next_tick` self-chain lets the **event loop iterate** between slices, and a
+  `vim.schedule` self-chain does **not** — both sides pinned, since the second is
+  the regression (a scheduled callback is drained inside the same pass of the
+  event queue, so nothing reaches the screen until the whole log is processed).
+  Observed through a libuv **idle handle** (one callback per loop iteration),
+  which unlike `SafeState` still fires while `vim.wait` holds the loop
 - `tests/future_spec.lua` — the vendored promise `make_future`: a `.next` callback
   runs whether attached before **or after** the future resolves, values chain, and
   a returned future flattens. Guards the regression where a synchronously-resolved
@@ -632,8 +656,12 @@ owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
 `pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
 `reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), and `smartcase_match` /
 `filter_keep` (the filter-search matcher + keep-set; §16.2).
-`window._internal` additionally exposes `effective_pins` / `effective_pinned` and
-`pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam).
+`window._internal` additionally exposes `effective_pins` / `effective_pinned`,
+`pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live
+graph session, recorded by `open_graph`. The headless smoke test reads the
+projected model through `ctx` because without a UI there is no rendered text to
+inspect: the listview draws through a decoration provider, so the graph buffer's
+lines are all empty.
 `columns.layout` is reached via
 `require("gitloom.graph.columns")`; the view builder `view.project` (which takes
 the §16.3 `keep` set) / `view.signatures` / `view.owners` via
@@ -717,8 +745,49 @@ Details not covered by the spec or architecture:
   (`columns.layout`) owns lane placement — it assigns lanes to columns and emits
   one Segment per drawn edge with its own connectivity, validated for
   continuity. **Phase 2** `get_column_chars` (in graph.lua) renders glyphs and
-  colour from those Segments. `build_graph`/`refresh_columns` are Phase 1 entry
-  points (both go through `columns.layout`).
+  colour from those Segments. `build_graph`/`refresh_columns`/`extend_columns` are
+  the Phase 1 entry points, and all three run the same sweep.
+- **The sweep is resumable** (§3.1): `columns.session(opts, seed)` holds the
+  per-row state open and `session.extend(items, from, yield)` sweeps more rows
+  onto the end; `columns.layout` IS a session extended once, so the one-shot path
+  is unchanged by construction. `graph.extend_columns(opts, order, start_pos,
+  stream)` is the streaming caller — `on_batch` continues the sweep instead of
+  re-laying the whole accumulated order, which is what the ignored `start_pos`
+  argument used to cost (N²/2B commit-layouts per stream; 355 s of layout for
+  12,000 commits of a 293-ref repository, vs 4.3 s resumed).
+  **Why resuming is exact, and where it stops being exact.** The sweep is a strict
+  top-down fold — a row's output is a function of (state after the previous row,
+  this row's commit) — and `git log --topo-order` emits a parent only after every
+  one of its children, so a streamed row's `.parents`/`.children` are final the
+  moment it is appended and nothing below can change it. Hence a prefix layout is
+  exactly the first rows of the whole layout. Verified, not assumed: 0 differing
+  rows for `compact` / `survivors` / `linear` / `straight` over two real
+  repositories x 5 merge styles, and **106–128 differing rows for `gutter`**,
+  whose `gutter_prepass` reads the NEXT subject row. A policy with a `prepass`
+  therefore reports `lookahead` and `extend_columns` rebuilds in full there.
+  It also falls back on a changed layout fingerprint or a non-append `order`, so
+  the fast path is an optimisation and never a correctness cliff.
+- **The reflow splits into compute and apply** (§10.5): `reflow_build` produces
+  the display and touches no window, `reflow_apply` swaps it in; `reflow` is both,
+  `reflow_async` drives the compute half as a coroutine across event-loop turns
+  (the pane build's shape) for the one reflow that scales with the repository —
+  the opening projection. Both bump `ctx.reflow_gen`, so a keypress supersedes an
+  in-flight build, which then drops itself having changed nothing on screen. The
+  swap stays atomic: a half-collapsed projection is not a cheaper intermediate
+  (signatures are computed against the whole owner set) and rows would move under
+  the cursor at every step. The §11.7.6 focus-reveal rides inside the single
+  projection via the `on_signatures` hook — it needs only the signatures and the
+  resolved modes, and a mode never enters a signature — instead of triggering a
+  second whole reflow as it used to.
+- **`vim.schedule` does not yield the screen.** A scheduled callback lands on the
+  main loop's event queue, which nvim drains to empty before it iterates — so a
+  worker that reschedules itself with `vim.schedule` starves the loop for its
+  whole run and nothing is drawn. Measured on 0.12.5, 60 chained 8 ms slices:
+  **0** `SafeState` events under `vim.schedule`, **59** under a 0 ms `uv` timer.
+  `fetch.lua`'s `next_tick` is that timer, and it is why the commit stream now
+  actually paints progressively. Use it (or `vim.defer_fn(fn, 0)`) for any
+  self-rescheduling chunked worker; `vim.schedule` is still correct for a single
+  hop out of a fast-event context.
 - **Layout policy** (`opts.layout_policy`, default `"compact"`, cycled by `C`;
   spec §5.6): lane placement is a named enum — `compact` (linear-commit slide +
   survivor compaction, today's behaviour), `survivors` (no slide), `linear` (no

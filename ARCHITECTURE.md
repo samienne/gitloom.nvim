@@ -45,14 +45,21 @@ place; **view state** does not yet exist:
 - The repository model exists as `repo.commits` (an identity-stable DAG), and
   **gitloom owns the row ordering**: commits are read without an ordering flag
   and `order_commits` runs its own topological sort (spec §3.1).
-- Layout (Phase 1) is `columns.layout(opts, items)` — a pure, deterministic
-  pass that lays out an ordered item list from scratch. Two entry points wrap it:
+- Layout (Phase 1) is `columns.session(opts, seed)` — a pure, deterministic
+  top-down sweep, held open so it can be **extended**. Three entry points wrap it:
   - `build_graph(opts, items)` — the from-scratch reflow primitive and the test
-    entry point (just calls `columns.layout`).
-  - `refresh_columns(opts, order)` — the production path: re-runs
-    `columns.layout` over the live order and copies the fresh lines/lanes back
-    onto each `OrderItem` in place (the view holds references). The lane layout
-    with compaction is global, so it is a full rebuild rather than incremental.
+    entry point (a session extended once, which is what `columns.layout` is).
+  - `refresh_columns(opts, order, yield)` — the from-scratch production path:
+    re-runs the whole sweep over the live order and copies the fresh lines/lanes
+    back onto each `OrderItem` in place (the view holds references).
+  - `extend_columns(opts, order, start_pos, stream)` — the **streaming** path
+    (§3.1): continues the sweep that laid out the rows above `start_pos` instead
+    of redoing them. Exact for an append, because the sweep is a fold that never
+    reads below the current row and `--topo-order` fixes a row's neighbourhood at
+    the moment it is appended. It falls back to a full rebuild whenever the
+    session cannot be continued — a policy with a `prepass` (which reads ahead;
+    `gutter`), changed layout options, or an `order` that was not purely
+    appended to — so the fast path is an optimisation, never a correctness cliff.
 - There is no view state yet. The view is a single fixed projection.
 
 What remains for the target is **ordering ownership** (move ordering out of
@@ -111,6 +118,26 @@ Consequences for the build:
 - Row order is derived from gitloom's owned topological sort (`order_commits`,
   §3.1) by dropping hidden rows and contracting collapsed regions to their tip's
   position.
+- **Compute and apply are separate** (spec §10.5). `reflow_build(ctx, yield,
+  on_signatures)` produces the new display and touches no window;
+  `reflow_apply(ctx, display)` swaps it in and re-derives everything keyed off it
+  (display index, cone, panes) with no yields, so the view never shows a
+  half-swapped graph. `reflow(ctx)` is the two run back to back — what every
+  keypress uses — and `reflow_async(ctx, done, on_signatures)` drives the compute
+  half as a coroutine across event-loop turns, the same shape as the pane build.
+  Both bump `ctx.reflow_gen`, so a keypress-driven reflow supersedes an in-flight
+  async one, which then drops itself at its next resume having changed nothing on
+  screen. `view.signatures`, `view.project` and `refresh_columns` each take the
+  optional `yield` and call it from loop bodies only (never across a C-call
+  boundary), so the chunked and synchronous paths are the same code.
+- **The opening projection uses it, and the focus-reveal rides inside it.** The
+  reflow at stream completion is the one whose cost scales with the whole
+  repository, so it runs async. `on_signatures` is a hook invoked once the
+  signatures and `view_state.effective` exist but before anything is projected:
+  the §11.7.6 focus-reveal flips a mode there and returns true, the owners are
+  re-resolved, and the projection still runs **once**. It used to be a second
+  full reflow. This is sound because a mode never enters a signature, so the
+  signature cache stays valid across the change.
 
 **Ordering ownership** is now in place: commits are read without an ordering
 flag and `order_commits` (`gitloom.git.order`) runs the topological sort that produces
@@ -450,11 +477,13 @@ on_controller(controller)
           │    resolve parent hashes → Commit refs (+ child links, placeholders)
           │    append OrderItem to repo.order   ← provisional arrival order
           │  then once per batch:
-          │    refresh_columns(order)          ← Phase 1 relayout (columns.layout)
+          │    extend_columns(order, from)     ← Phase 1, resumed (columns.session)
           │    controller.insert(new_items)    ← inserts the batch's blank lines
           │  on stream completion:
           │    apply_sort() → order_commits     ← owned topological sort (§3.1):
-          │      rebuilds repo.order in the authoritative row order, then reflow()
+          │      rebuilds repo.order in the authoritative row order, then
+          │      reflow_async() — the opening projection (§10.7) computed in
+          │      slices across event-loop turns, applied atomically (§10.5)
           ▼
    (rendering is deferred)
 ```
@@ -590,11 +619,19 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   (spec §3, §10.5): the `on_stdout` handler is kept light — `make_line_buffer`
   stitches the partial line at each chunk seam, the complete lines are enqueued,
   and the heavy per-commit work (`parse_commit_line` + `on_batch`) runs in a
-  `vim.schedule`d worker that drains `COMMIT_BATCH` lines per turn and reschedules
-  until the queue is empty, so a large log never blocks the event loop in one
-  callback. `on_batch` does one `refresh_columns` + one `controller.insert` for
-  the whole batch. The returned future resolves only once the stream has closed
-  *and* the queue is fully drained.
+  worker that drains `COMMIT_BATCH` lines per turn and reschedules itself until
+  the queue is empty, so a large log never blocks the event loop in one callback.
+  It reschedules through `next_tick` (a 0 ms `uv` timer), **not** `vim.schedule`:
+  a scheduled callback goes on the main loop's event queue, which is drained to
+  empty before the loop iterates, so a `vim.schedule` self-chain keeps that queue
+  non-empty for the whole log and nothing reaches the screen until the last
+  commit. A timer returns to the top of the loop instead, which is where the
+  redraw and the keypress check happen (measured: 60 chained 8 ms slices produced
+  0 `SafeState` events under `vim.schedule`, 59 under a 0 ms timer;
+  `tests/stream_tick_spec.lua` pins both sides through a libuv idle handle).
+  `on_batch` does one `extend_columns` — continuing the sweep, not redoing it —
+  plus one `controller.insert` for the whole batch. The returned future resolves
+  only once the stream has closed *and* the queue is fully drained.
 - `fetch_commit_detail(hash)` — `git show -s --date=iso` with a `%x1f`-delimited
   format (`%H %an %ae %ad %cn %ce %cd %P %B`), buffered and resolved as one raw
   string. The on-demand source for the **commit view** (specification.md §11);
@@ -975,10 +1012,22 @@ Per-column well-formedness (validated by the tests): at most one vertical
 reuses a freed merge column. Empty columns are allowed.
 
 `build_graph(opts, items)` lays out a whole ordered list from scratch (the test
-entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs
-`columns.layout` over the live order and copies the fresh lines/lanes back into
-the existing `OrderItem`s (the view holds references). Both go through
-`columns.layout` — there is no separate incremental algorithm.
+entry point and the reflow primitive); `refresh_columns(opts, order)` re-runs the
+sweep over the live order and copies the fresh lines/lanes back into the existing
+`OrderItem`s (the view holds references). `extend_columns(opts, order, start_pos,
+stream)` is the streaming path and **continues** a sweep rather than redoing it.
+
+There is still no separate incremental *algorithm*: all three run the same
+`columns.session` sweep over the same stages, and the streaming one differs only
+in that its state is carried across calls instead of being rebuilt. That is what
+makes the streamed graph byte-identical to the one-shot one by construction
+rather than by agreement — and it is why the exception is stated in terms of the
+sweep's own structure: a stage that reads a row *below* the current one breaks
+the fold, and `gutter`'s `prepass` is the one that does.
+
+Both `refresh_columns` and `build_graph` take an optional `yield`, called every
+`YIELD_ROWS` rows, so a coroutine driver can spread a long sweep across
+event-loop turns (the async reflow, §10.5).
 
 ### Layout as a staged pipeline
 

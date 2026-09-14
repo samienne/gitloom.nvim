@@ -1301,8 +1301,15 @@ function M.session(opts, seed)
     -- Membership in `active`, as a set built once per `complete_check` run. The
     -- oracle asks it once per incoming/survivor/outgoing lane, and a wide graph
     -- has as many survivors as columns — a linear scan per question made the
-    -- check O(width^2) per row, which on a `--all` graph 100 lanes wide was the
-    -- single largest term in the whole layout (spec §3.1 open path).
+    -- check O(width^2) per row rather than O(width).
+    --
+    -- Worth measuring before believing: on a `--all` graph ~100 lanes wide this is
+    -- 5-16% of one sweep (isolated, best of 3: 110 -> 105 ms at 1k commits,
+    -- 1576 -> 1321 at 4k, 4228 -> 3924 at 16k). The quadratic term is real but it
+    -- is NOT what dominates — the sweep is allocation-bound, at roughly six tables
+    -- per drawn cell (the segment, its edge list, its connectivity, the column,
+    -- its union connectivity, the per-cell connectivity literal). Reducing THAT is
+    -- the open lead for lane-layout cost, not this.
     local live = {}
     local function refresh_live()
         for k in pairs(live) do live[k] = nil end

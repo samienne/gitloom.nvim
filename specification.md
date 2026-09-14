@@ -215,6 +215,27 @@ arrival order so the view paints progressively. When the stream completes the
 active sort mode is applied once to produce the authoritative `repo.order`, after
 which the §10 projection / reflow proceeds.
 
+Two properties make "progressively" mean what it says, and both are obligations
+on the implementation rather than free consequences of batching:
+
+- **The loop must go idle between batches.** A batch is laid out and inserted,
+  and then control returns to the event loop far enough that Neovim redraws and
+  a keypress is seen, before the next batch starts. Handing off in a way that
+  merely re-enters the same drain (a self-rescheduling callback on the event
+  queue) satisfies neither: the queue never empties, so nothing reaches the
+  screen until the last commit has been processed.
+- **A batch costs its own rows, not the whole history.** The lane layout
+  (§5) of a streamed batch **continues** the sweep that laid out the rows above
+  it; it does not re-lay the accumulated order. This is exact rather than an
+  approximation: the sweep is a strict top-down fold whose per-row output depends
+  only on the state after the previous row, and `--topo-order` emits a parent
+  only after every one of its children, so a row's parents and children are final
+  the moment it is appended and nothing below it can change it. Laying out a
+  prefix therefore yields exactly the first rows of laying out the whole list.
+  A lane-placement policy that reads *ahead* of the current row (§5.6 `gutter`,
+  whose parent-swap gate needs the next subject row) is the stated exception and
+  is re-laid in full.
+
 ### 3.2 Refs
 
 Refs are read via `git for-each-ref` over `refs/heads`, `refs/remotes`, and
@@ -1948,6 +1969,24 @@ by dropping hidden rows and contracting each collapsed region to its tip's
 position — so ordering ownership (§1.1) is *not* a prerequisite for this
 feature.
 
+**A reflow is applied atomically, and may be computed incrementally.** The new
+projection is computed in full — owners, signatures, contraction, layout,
+marker packing — before any of it is shown; the view never displays a partly
+reprojected graph. A collapse is therefore a single transition, not a branch-by-
+branch animation: signatures are computed against the whole owner set, so
+"collapse one more branch" is not a cheaper intermediate but a re-run of the
+entire pipeline, and a row the cursor or a keypress is addressing would move
+under it at every step.
+
+Computing it, however, need not block the editor. Where a reflow is not the
+direct result of a keypress — today, the first projection after the commit
+stream closes (§10.7), which is the one reflow whose cost scales with the whole
+repository — it is computed in slices across event-loop turns, leaving the
+window scrollable and the keymaps live while it lands, and the result is swapped
+in when it is complete. Such a computation is **abandonable**: a reflow driven by
+a keypress supersedes one in flight, and an abandoned one has changed nothing
+that was on screen.
+
 ### 10.6 Pinned branches (anchors)
 
 **Pin** is a per-owner flag, **orthogonal to mode** (§10.1): it marks an owner
@@ -2165,7 +2204,11 @@ all-normal.
 - **Hidden connectivity** — phantom indicator vs. vanish.
 - **Scale** — unbounded reads in large repositories; the loading strategy
   (limits, lazy/streamed loading, on-demand reachability) must keep reflow
-  responsive.
+  responsive. The open path no longer *blocks* on either half of this (§3.1
+  streaming is incremental, §10.5's opening projection is sliced), but the total
+  work is still linear in the whole history — a repository large enough still
+  spends seconds projecting it, just without freezing. Bounding what is read and
+  laid out at all remains open.
 - **Auto-refresh** — history refresh (§3.4) is in place via the manual `R`
   resync; triggering it automatically when the repository changes underneath
   (watching `.git` refs / `HEAD` via an fs-event or autocmd, debounced) is a

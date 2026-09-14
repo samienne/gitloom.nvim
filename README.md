@@ -34,7 +34,9 @@ even though it ships as part of the same suite. See
 - **Lane-based commit graph** — commits, merges, and splits rendered with
   box-drawing glyphs and per-lane color
 - **Asynchronous** — commits stream into the view as `git log` produces
-  them; the window opens immediately
+  them; the window opens immediately and fills in as rows arrive, and the
+  first-branch-collapse pass that follows the stream is computed in the
+  background, so the editor stays responsive on a large repository
 - **Virtualized rendering** — only the visible range is laid out and drawn,
   so large histories stay responsive
 - **Configurable merge style** — render merges/splits inline or on their
