@@ -1809,6 +1809,14 @@ descendants'. Commits therefore partition into **regions** — maximal connected
 runs of equal signature — whose boundaries fall exactly at junctions where an
 owner joins or leaves.
 
+A first-parent line **does not stop where it rejoins another branch**: a merged-in
+branch's own first parent leads back to the trunk commit it forked from, and the
+owner continues down the trunk from there to the root. So a shared ancestor is
+covered by an owner for every merge above it, and on a trunk where most commits
+are merges each trunk commit sits in a region of its own. That is the intended
+attribution — the branch *is* reachable from there — but it is also why the cost
+of this pass tracks the repository's merge density rather than its size (§10.8).
+
 **Owner coverage is total.** Every **real** commit in the model is reached by at
 least one owner. This is not an accident of the ref set — it is guaranteed by
 construction, because the owner set is closed under the two ways reachability can
@@ -2208,7 +2216,14 @@ all-normal.
   streaming is incremental, §10.5's opening projection is sliced), but the total
   work is still linear in the whole history — a repository large enough still
   spends seconds projecting it, just without freezing. Bounding what is read and
-  laid out at all remains open.
+  laid out at all remains open. The total is also a function of the repository's
+  **shape**, not only its size: the per-commit signature is computed against the
+  whole owner set (§10.2) and an owner is minted per non-first merge parent, so a
+  trunk of merges costs several times what a linear history of the same length
+  does. The phase breakdown of an open — the ref query, each streamed batch, then
+  sort / owners / signatures / projection / layout / packing / apply, with the
+  counts each scales with — is recorded by the armable `gitloom_open_trace`
+  diagnostic (README → Diagnostics), so this is measured rather than estimated.
 - **Auto-refresh** — history refresh (§3.4) is in place via the manual `R`
   resync; triggering it automatically when the repository changes underneath
   (watching `.git` refs / `HEAD` via an fs-event or autocmd, debounced) is a

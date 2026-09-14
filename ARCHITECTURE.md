@@ -115,6 +115,49 @@ Consequences for the build:
   changes — *not* by mode toggles; the per-region join is recomputed cheaply on
   every toggle; contraction + `columns.layout` rebuild only when the display
   set actually changes.
+- **Signatures are interned persistent sets** (`graph/sigset.lua`), not one
+  materialised `table<string, boolean>` per commit. The reason is the *shape* of
+  the owner set, not its size: an `fp_only` owner flows down its tip's
+  first-parent chain, and a merged-in branch's first-parent chain **rejoins the
+  trunk** at its fork point — so on a trunk of merges every merge above a commit
+  contributes an owner to it, and the materialised form costs Θ(commits × owners)
+  entries. Measured on a 12,999-commit repository with 6,499 merges (6,800
+  owners): **22.1 million entries, 813 MB, 847 ms**, against 13,000 entries for a
+  linear history of the same length.
+
+  The sets are extremely shareable, though — walking down that trunk each one is
+  its predecessor plus a single owner — so `sigset` represents them as a
+  **hash-consed 32-way bitwise trie** over dense owner indices: adding an owner
+  allocates O(depth) nodes and shares the rest. The same repository stores
+  **40,579 nodes**, and signatures fall to **98 ms** with the projection's own
+  pass from 267 ms to 80 ms (the whole completion pass 1219 → 374 ms, 814 → 97 MB).
+
+  Two properties are what the projection actually consumes, and both come out of
+  the interning rather than being bolted on:
+  - **Region identity is pointer identity.** A node is interned on (level, base,
+    contents), so a set has exactly one representation and "same region" (§10.2)
+    is `a == b` — replacing a sorted-and-concatenated `sig_key` string per commit.
+  - **The mode join memoises per node.** `mode_of`'s OR over a set becomes
+    `sigset.summary`, computed once per *node* instead of once per commit —
+    O(nodes) rather than O(commits × owners).
+
+  The pass ends by **sealing** the universe — the hash-cons table and the operation
+  memos are released, since no further sets will be built — which halves what the
+  signature cache retains for the life of the window (18.3 → 9.7 MB on that
+  repository, against 813 MB materialised). A sealed universe raises rather than
+  minting a second node for a set that already has one, which would break the
+  identity everything downstream rests on.
+
+  `view.signatures` still returns a `hash -> { [owner id] = true }` table: indexing
+  it materialises that one commit's set on the spot, so every consumer outside the
+  projection (`collapse_owners`, a head's stored `signature`, the §11.7.6 reveal)
+  is unchanged. It is deliberately *not* cached per hash — caching would let a
+  cursor walked down a merge-heavy trunk re-accumulate the footprint this exists
+  to avoid — and `pairs()` over the map does not enumerate commits (nothing in
+  gitloom iterates it). `view.project` still accepts a plain table of sets and
+  takes an equivalent slower path for one, which is what `tests/view_sigset_spec`
+  compares against: 435,012 rendered Lines over 65 corpora × 2 projections × 5
+  merge styles × 5 layout policies, 0 differing.
 - Row order is derived from gitloom's owned topological sort (`order_commits`,
   §3.1) by dropping hidden rows and contracting collapsed regions to their tip's
   position.
@@ -408,6 +451,7 @@ lua/gitloom/
                     refresh_columns, pack_markers, owners_from_refs) + the
                     `_internal` test seam (re-exports the pure surface)
     view.lua        View builder: commit DAG + view state → OrderItem graph (§10)
+    sigset.lua      Interned persistent owner sets — the signature representation (§10.2)
     columns.lua     Phase 1: lane layout (lanes → columns + per-segment connectivity)
     render.lua      Phase 2: glyphs, colour, reachability dimming, row rendering
     reach.lua       Reachability cone + the Lane-graph emphasis walk (§12)
@@ -2119,6 +2163,7 @@ gitloom.nvim/
 │   ├── graph/             The graph engine (gitloom.graph)
 │   │   ├── init.lua       Engine entry: types + layout glue + _internal seam
 │   │   ├── view.lua       View builder: projection under view state (§10)
+│   │   ├── sigset.lua     Interned owner sets behind the signatures (§10.2)
 │   │   ├── columns.lua    Phase 1 lane layout
 │   │   ├── render.lua     Phase 2 render (glyphs/colour/dimming/rows)
 │   │   ├── reach.lua      Reachability cone + emphasis walk (§12)

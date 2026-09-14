@@ -3762,6 +3762,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field applying boolean       suppresses the WinScrolled emitted by the deferred refresh
     ---@field pending boolean        a real scroll dropped during `applying`, replayed after
     ---@field wt_gen integer         working-tree refresh debounce generation
+    --- == open-path trace (§10.8; only written while `vim.g.gitloom_open_trace` is armed) ==
+    ---@field open_t0? integer       hrtime at the start of this open
+    ---@field open_tstream? integer  hrtime at the start of the commit stream
+    ---@field open_tsort? integer    hrtime at the start of the completion pass
+    ---@field open_nbatch? integer   streamed batches seen so far
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
     ---@field build_display_index fun(self:GraphCtx)
@@ -4143,9 +4148,17 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- Refs first: they create sparse Commit placeholders with refs
             -- attached, which the commit stream then fills in (identity
             -- preserved), so rows render with their refs already present.
+            -- Open-path phase trace (§10.8, README → Diagnostics). Inert unless
+            -- `vim.g.gitloom_open_trace` names a file; see util.open_trace.
+            ctx.open_t0 = util.open_now()
+            util.open_trace("open", { repo = repo.root })
             fetch_refs(repo).next(function()
                 return fetch_head(repo)
             end).next(function()
+                local nrefs = 0
+                for _ in pairs(repo.refs) do nrefs = nrefs + 1 end
+                util.open_trace("refs", { n = nrefs, ms = util.open_ms(ctx.open_t0) })
+                ctx.open_tstream = util.open_now()
                 return fetch_commits({
                     branch = opts.branches or { "--all" },
                     -- One batch of streamed commits (spec §3): link each into the
@@ -4154,6 +4167,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- off the stdout handler — see fetch_commits).
                     ---@param commits Commit[]
                     on_batch = function(commits)
+                        local t_batch = util.open_now()
                         local new_items = {}
                         for _, item in ipairs(commits) do
                             local order_item = ctx:integrate_commit(item)
@@ -4180,14 +4194,22 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                             ctx.colstream = nil
                             reflow()
                         end
+                        ctx.open_nbatch = (ctx.open_nbatch or 0) + 1
+                        util.open_trace("batch", { i = ctx.open_nbatch, n = #new_items,
+                            rows = #repo.order, ms = util.open_ms(t_batch) })
                     end,
                 })
             end).next(function()
+                util.open_trace("stream", { rows = #repo.order, batches = ctx.open_nbatch or 0,
+                    ms = util.open_ms(ctx.open_tstream or ctx.open_t0 or 0) })
+                ctx.open_tsort = util.open_now()
                 -- Stream closed: apply the active sort mode (§3.1) to establish the
                 -- authoritative row order before anything is projected or anchored.
                 -- (The stream appended git's --topo-order arrival order.)
                 return ctx:apply_sort()
             end).next(function()
+                util.open_trace("sort", { mode = SORT_MODES[sort_mode_index]
+                    and SORT_MODES[sort_mode_index].name, ms = util.open_ms(ctx.open_tsort or ctx.open_t0 or 0) })
                 -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
                 -- model, read the dirty state and splice the staged/unstaged/
                 -- untracked nodes above HEAD before the projection. Gated by
@@ -4273,6 +4295,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 update_cone()
                 if lv and lv.controller then lv.controller.refresh() end
                 update_panes()
+                util.open_trace("done", { rows = #repo.display, ms = util.open_ms(ctx.open_t0 or 0) })
             end)
         end,
     }
@@ -5654,18 +5677,39 @@ end
 GRAPH_HELPERS.reflow_build = function(ctx, yield, on_signatures)
     local viewbuilder = require("gitloom.graph.view")
     local cm = ctx.opts.collapse_merged ~= false
+    local t = util.open_now()
     local owners = ctx:reflow_owners(cm)
+    if util.open_tracing() then
+        -- The shape the cost is a function of (§10.8): how many owners, and how
+        -- many of them are the anonymous per-merge-parent family (§10.2).
+        local merges = 0
+        for _, o in ipairs(owners) do
+            if tostring(o.id):sub(1, 6) == "merge:" then merges = merges + 1 end
+        end
+        util.open_trace("owners", { n = #owners, merges = merges, rows = #ctx.repo.order, ms = util.open_ms(t) })
+    end
     -- Reuse cached signatures unless the commit/owner set or focus changed.
+    t = util.open_now()
+    local cached = true
     if ctx.sig_cache.norder ~= #ctx.repo.order or ctx.sig_cache.nowners ~= #owners
         or ctx.sig_cache.cm ~= cm or not ctx.sig_cache.sig then
+        cached = false
         ctx.sig_cache.sig = viewbuilder.signatures(ctx.repo.order, owners, yield)
         ctx.sig_cache.norder, ctx.sig_cache.nowners, ctx.sig_cache.cm = #ctx.repo.order, #owners, cm
     end
+    util.open_trace("signatures", { cached = cached, ms = util.open_ms(t) })
     if on_signatures and on_signatures() then owners = ctx:reflow_owners(cm) end
+    t = util.open_now()
     local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig,
         ctx.filter and ctx.filter.keep, yield)
+    util.open_trace("project", { rows = #proj.items, ms = util.open_ms(t) })
+    t = util.open_now()
     refresh_columns(ctx.opts, proj.items, yield)
-    return (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
+    util.open_trace("layout", { ms = util.open_ms(t) })
+    t = util.open_now()
+    local display = (ctx.opts.pack_markers ~= false) and pack_markers(proj.items) or proj.items
+    util.open_trace("pack", { rows = #display, ms = util.open_ms(t) })
+    return display
 end
 
 -- The APPLY half: swap the computed display into the listview and re-derive
@@ -5674,6 +5718,7 @@ end
 ---@param ctx GraphCtx
 ---@param display table
 GRAPH_HELPERS.reflow_apply = function(ctx, display)
+    local t0_apply = util.open_now()
     -- The streamed sweep described `repo.order` in its arrival order; a reflow
     -- lays out the projection (and `apply_sort` may have reordered the rows
     -- underneath), so that session can no longer be continued.
@@ -5688,6 +5733,7 @@ GRAPH_HELPERS.reflow_apply = function(ctx, display)
     ctx:update_cone()
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
     ctx:update_panes()
+    util.open_trace("apply", { rows = #display, ms = util.open_ms(t0_apply) })
 end
 
 -- A full reflow (§10.5): project the raw commit order under the current branch

@@ -958,12 +958,20 @@ describe("view chunking hook (§10.5)", function()
         local n = 0
         local chunked = view.signatures(items, owners, function() n = n + 1 end)
         assert.is_true(n > 0, "the yield hook never fired")
-        for h, s in pairs(plain) do
-            local o = chunked[h]
+        -- Iterate the COMMITS, not the sig map: signatures are interned and
+        -- materialised per access (gitloom.graph.sigset), so `pairs` over the map
+        -- enumerates nothing and this comparison would pass vacuously.
+        local compared = 0
+        for _, it in ipairs(items) do
+            local h = it.commit.hash
+            local s, o = plain[h], chunked[h]
+            assert.is_not_nil(s)
             assert.is_not_nil(o)
             for k in pairs(s) do assert.is_true(o[k]) end
             for k in pairs(o) do assert.is_true(s[k]) end
+            compared = compared + 1
         end
+        assert.equals(#items, compared)
     end)
 
     it("project calls the hook on a large set and gives identical output", function()

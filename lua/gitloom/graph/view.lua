@@ -13,6 +13,8 @@
 --- normal owner ⇒ normal, all collapsed ⇒ collapsed, all hidden (and at least
 --- one owner) ⇒ hidden. Collapsing contracts a region to one head and keeps the
 --- junctions; hiding removes it.
+local sigset = require("gitloom.graph.sigset")
+
 local M = {}
 
 --- A `DisplayNode` — what `columns.layout` consumes as an `item.commit`. It
@@ -73,39 +75,59 @@ end
 --- from a child down only to that child's *first* parent, so it covers its
 --- tip's first-parent mainline and stops at every merge rather than descending
 --- the merged-in side. Ordinary owners flow to every parent (full reachability).
+---
+--- The sets are **interned persistent sets** (gitloom.graph.sigset), not one
+--- materialised table per commit: on a trunk of merges every merge above a commit
+--- contributes an owner to it, so materialising them costs Θ(commits × owners).
+--- Indexing the returned table by a commit hash still yields a plain
+--- `{ [owner id] = true }` table — see `sigset.view` for the two differences
+--- (built per access, and `pairs` over the *map* does not enumerate commits).
 ---@param items table[]  -- { type, commit }, newest-first, DAG-wired
 ---@param owners table[] -- { id, tip = Commit, mode?, fp_only? }
 ---@param yield (fun())?  -- chunking hook; called every YIELD_EVERY commits
 ---@return table<string, table<string, boolean>>  -- hash -> owner-id set
 function M.signatures(items, owners, yield)
-    local tips = {} -- hash -> { owner id, ... }
-    local fp = {}   -- owner id -> true if first-parent-only
+    local U = sigset.universe(owners)
+    local tips = {} -- hash -> the set of owners tipped there
+    -- `fp_only` is uniform in practice (§10.7 turns focus on for every owner at
+    -- once), so the two uniform cases are the fast paths and only a mixed owner
+    -- set pays the per-edge intersection against `nonfp`.
+    local any_fp, all_fp = false, #owners > 0
     for _, o in ipairs(owners) do
         local h = o.tip.hash
-        tips[h] = tips[h] or {}
-        tips[h][#tips[h] + 1] = o.id
-        if o.fp_only then fp[o.id] = true end
+        tips[h] = U:union(tips[h], U:singleton(o.id))
+        if o.fp_only then any_fp = true else all_fp = false end
     end
-    local sig = {}
+    local nonfp = nil
+    if any_fp and not all_fp then
+        for _, o in ipairs(owners) do
+            if not o.fp_only then nonfp = U:union(nonfp, U:singleton(o.id)) end
+        end
+    end
+    local handles = {}
     local tick = chunker(yield)
     for _, it in ipairs(items) do
         tick()
         local c = it.commit
-        local s = {}
-        for _, oid in ipairs(tips[c.hash] or {}) do s[oid] = true end
+        local s = tips[c.hash]
         for _, ch in ipairs(c.children or {}) do
-            local cs = sig[ch.hash]
+            local cs = handles[ch.hash]
             if cs then
                 -- c is on ch's first-parent edge iff it is ch.parents[1].
-                local first = ch.parents and ch.parents[1] == c
-                for oid in pairs(cs) do
-                    if first or not fp[oid] then s[oid] = true end
+                if (ch.parents and ch.parents[1] == c) or not any_fp then
+                    s = U:union(s, cs)
+                elseif not all_fp then
+                    s = U:union(s, U:intersect(cs, nonfp))
                 end
             end
         end
-        sig[c.hash] = s
+        handles[c.hash] = s or false
     end
-    return sig
+    -- No more sets will be built: release the hash-cons table and the operation
+    -- memos. The map is cached for the life of the window (§10.5), and that
+    -- scaffolding is an intern key per node plus a memo table per commit.
+    U:seal()
+    return sigset.view(U, handles)
 end
 
 --- Build the full owner set for a projection under the first-parent default
@@ -221,19 +243,58 @@ end
 function M.project(items, owners, sig, keep, yield)
     owners = owners or {}
     local tick = chunker(yield)
-    local owner_mode = {}
-    for _, o in ipairs(owners) do owner_mode[o.id] = o.mode or "normal" end
 
     local idx = {} -- hash -> position in items (newest-first; smaller = newer)
     for i, it in ipairs(items) do idx[it.commit.hash] = i end
 
     sig = sig or M.signatures(items, owners, yield)
 
+    -- The two things the projection asks a signature for: its display mode, and a
+    -- **region key** — a value equal for exactly the commits with the same owner
+    -- set. Over the interned representation both are O(1)-ish (the key IS the
+    -- set's one node, the join memoises per node); a caller that handed us a plain
+    -- table of sets gets the equivalent, slower answers.
+    local S = sigset.of(sig)
+    local mode_at, region_at
+    if S then
+        local U, handles = S.universe, S.handles
+        local flags = {} -- owner index -> 0 hidden, 1 collapsed, 3 normal
+        for i = 0, U.n - 1 do flags[i] = 3 end
+        for _, o in ipairs(owners) do
+            local i = U.idx[o.id]
+            if i then
+                local m = o.mode or "normal"
+                flags[i] = (m == "hidden") and 0 or ((m == "normal") and 3 or 1)
+            end
+        end
+        local memo = {}
+        mode_at = function(h)
+            local nd = handles[h]
+            if not nd then return "normal" end -- uncovered ⇒ visible
+            local s = U:summary(nd, flags, memo)
+            if s == 0 then return "hidden" end
+            return (s >= 2) and "normal" or "collapsed"
+        end
+        region_at = function(h) return handles[h] end
+    else
+        local owner_mode = {}
+        for _, o in ipairs(owners) do owner_mode[o.id] = o.mode or "normal" end
+        local keys = {}
+        mode_at = function(h) return mode_of(sig[h] or {}, owner_mode) end
+        region_at = function(h)
+            local k = keys[h]
+            if k == nil then
+                k = sig_key(sig[h] or {})
+                keys[h] = k
+            end
+            return k
+        end
+    end
+
     local mode = {}
     for _, it in ipairs(items) do
         tick()
-        local h = it.commit.hash
-        mode[h] = mode_of(sig[h], owner_mode)
+        mode[it.commit.hash] = mode_at(it.commit.hash)
     end
 
     -- A collapsed fork/merge is a **kept junction** — it stays its own visible,
@@ -285,9 +346,9 @@ function M.project(items, owners, sig, keep, yield)
         tick()
         local c = it.commit
         if is_head_member(c) then
-            local sk = sig_key(sig[c.hash])
+            local sk = region_at(c.hash)
             for _, p in ipairs(c.parents or {}) do
-                if is_head_member(p) and sig_key(sig[p.hash]) == sk then
+                if is_head_member(p) and region_at(p.hash) == sk then
                     local ra, rb = find(c.hash), find(p.hash)
                     if ra ~= rb then uf[ra] = rb end
                 end

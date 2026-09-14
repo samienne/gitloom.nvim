@@ -183,6 +183,28 @@ Coverage:
   (§10.5, the async reflow): `signatures` / `project` fire an optional `yield` on a
   large set and give byte-identical output, including driven from inside a real
   coroutine that suspends and resumes (the driver's shape)
+- `tests/view_sigset_spec.lua` — the **interned** signature sets
+  (`gitloom.graph.sigset`, §10.2): the set algebra (singleton / union / intersect /
+  members agreeing with plain sets, the memoised `summary`) and — the point —
+  **one representation per set whatever order it was built in**, so region identity
+  is pointer identity. Then parity against `h.reference_signatures`, the §10.2
+  definition transcribed with no sharing and no memoisation (which is what shipped
+  before): the same set for every commit, the same projection, and the same layout
+  **cell for cell** over every merge style × every layout policy. `view.project`
+  takes its pre-interning path for a plain table of sets, so this compares two real
+  implementations rather than one with itself — and the corpus is sized to cross the
+  trie's level boundaries (6 / 40 / 90 merges), so dropping a node's position from
+  its intern key fails four of the five blocks. Plus the **sharing** claim, without
+  which any correct representation passes: on a merge trunk the materialised form
+  holds > N²/4 entries while the interned one must stay under 8N nodes, and indexing
+  the map must NOT cache what it materialises (the cursor walking a merge-heavy
+  trunk would re-accumulate exactly the footprint this removes)
+- `tests/open_trace_spec.lua` — the open-path phase trace
+  (`vim.g.gitloom_open_trace`, §10.8): inert unset and inert for a non-string,
+  one `NNNN +Mms event k=v …` record per call with the fields in sorted key order,
+  every phase name the open path emits, the `open` record restarting the clock and
+  the sequence, and — the regression the shared writer risks — that the pane trace
+  keeps its own counter across an open trace's reset
 - `tests/selection_spec.lua` — `move_selection`, `decoration_texts`,
   `ref_byte_col` (h/l ref selection + cursor parking), `pack_right`
   (the right-pinned ref width budget), `window_right` (the selection-windowed
@@ -666,6 +688,10 @@ lines are all empty.
 `require("gitloom.graph.columns")`; the view builder `view.project` (which takes
 the §16.3 `keep` set) / `view.signatures` / `view.owners` via
 `require("gitloom.graph.view")` (§10).
+`tests/graph_helpers.lua` additionally exposes `reference_signatures` (the §10.2
+definition transcribed with no sharing — the oracle the interned representation is
+compared against) and `line_sig` / `row_sig` (a rendered Line's / row's full cell
+content as a comparable string, the cell-for-cell parity dump).
 `listview._internal` exposes `pack_right` (the right-pin budget packer),
 `window_right` (the selection-windowed overflow packer — window + left/right `+N`
 counts; §6), `refresh_columns` (the column-width packer), and
@@ -958,6 +984,32 @@ Details not covered by the spec or architecture:
   mode overrides, `view_state.effective` the resolved mode per owner (drives the
   `<CR>` cycle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
+- **Signatures are interned, not materialised** (`graph/sigset.lua`, §10.2): the
+  cost of the projection tracks a repository's **merge density**, not its size. An
+  `fp_only` owner flows down its tip's first-parent chain, and a merged-in branch's
+  first-parent chain **rejoins the trunk** at its fork point — so on a trunk of
+  merges every merge above a commit contributes an owner to it and one materialised
+  `table<string,boolean>` per commit costs Θ(commits × owners). Measured on a
+  12,999-commit / 6,499-merge repository (6,800 owners): **22.1M entries, 813 MB,
+  847 ms** for `signatures` alone, against 13,000 entries for a linear history of
+  the same length. `sigset` is a **hash-consed 32-way bitwise trie** over dense
+  owner indices — adding an owner allocates O(depth) nodes and shares the rest —
+  giving 40,579 nodes, 98 ms, and the whole completion pass 1219 → 374 ms
+  (814 → 97 MB). Two consequences the projection consumes directly: a set has ONE
+  representation (interned on level+base+contents), so "same region" is `a == b`
+  instead of a sorted-and-concatenated `sig_key` per commit; and the mode join
+  memoises **per node** (`summary`) instead of per commit. The pass ends by
+  **sealing** the universe (releasing the hash-cons table + the memos — nothing
+  builds sets after it), halving what the §10.5 cache retains, 18.3 → 9.7 MB; a
+  sealed universe raises rather than minting a second node for an existing set.
+  `view.signatures` still
+  returns a `hash -> { [owner id] = true }` table — indexing it materialises that
+  one commit's set — so `collapse_owners`, a head's stored `signature` and the
+  §11.7.6 reveal are unchanged; it is deliberately NOT cached per hash (caching
+  would let the cursor re-accumulate the footprint) and `pairs()` over the MAP
+  enumerates nothing, so any test that iterated it must iterate the items instead
+  or it passes vacuously. `view.project` still accepts a plain table of sets and
+  takes an equivalent slower path — which is what the parity tests compare against.
 - **Total owner coverage** (spec §3.2/§10.2): §3.1 streams `git log --all`, which
   in a repo with **linked worktrees** walks *every worktree's HEAD* — while §3.2's
   ref query reads only `refs/heads`/`refs/remotes`/`refs/tags`. The commit set was
@@ -1086,7 +1138,8 @@ Details not covered by the spec or architecture:
   (DiffRange), `order` (`order_commits`, §3.1), `date`, and `fetch` (the async
   `jobstart` I/O — its only Neovim coupling), behind a `git/init.lua` aggregator.
   **gitloom.graph** (`graph/`): `view` (the pre-Phase-1 projection §10),
-  `columns` (Phase 1 lane layout), `render` (Phase 2 glyphs/colour/dimming +
+  `sigset` (the interned persistent owner sets the §10.2 signatures are computed
+  in), `columns` (Phase 1 lane layout), `render` (Phase 2 glyphs/colour/dimming +
   `display_item`), `reach` (§12 reachability), `select` (selection/branch-mode
   helpers §2/§10/§13), `pane` (context-pane core), `color`; `graph/init.lua` is
   the engine entry (data-model types + the layout glue `build_graph`/
@@ -1209,6 +1262,14 @@ Details not covered by the spec or architecture:
   chunked build) before `may_trigger_win_scrolled_resized` runs, measured identically
   on 0.11.6 and 0.12.5 — but the invariant is unconditional, so the gate enforces it
   rather than relying on that ordering.
+  **`vim.g.gitloom_open_trace`** (README → Diagnostics, §10.8) is the armable
+  diagnostic for the OPEN path: one line per phase — open / refs / batch (per
+  streamed batch; the first is the first paint) / stream / sort / owners (with the
+  merge-owner count) / signatures (and whether the cache was reused) / project (its
+  row count, so the rows the collapse removed are read off against the owners line)
+  / layout / pack / apply / done. `util.open_trace` shares one `append` writer with
+  the pane trace, each keeping its own sequence counter; `open` restarts the clock,
+  so several opens read as separate timelines. Inert unset.
   **`vim.g.gitloom_pane_trace`** (README → Diagnostics) is the armable diagnostic for
   the whole lifecycle: one appended line per `maybe` (key, built key,
   rebuild-vs-repaint, each overlay up/down), `update` (target key + call site),
