@@ -832,11 +832,17 @@ the filesystem reads and the async picker orchestration are I/O and window glue
   hunk (the nearest `diff --git` / `@@` at or above it) with the patch-line
   index where each begins, so the context-header glue can tell when a header has
   scrolled off (specification.md §11.6). Renames show as `old => new`. Pure.
-- `commit_range(commit)` — builds the `DiffRange` for a single commit's own
+- `commit_range(commit, root)` — builds the `DiffRange` for a single commit's own
   changes: `{ rev = "<hash>^!"` (or `<empty-tree>..<hash>` for a root, no
-  parents)`, from = parents[1], to = commit }`. A range constructor for the
-  external-diff provider (specification.md §11.5). Pure.
-- `range_endpoints(newer, older)` — the `DiffRange` for a **commit selection**
+  parents)`, from = parents[1], to = commit, root = root }`. A range constructor
+  for the external-diff provider (specification.md §11.5). `root` is the graph's
+  repository root (§2.1), stamped on the range so the provider resolves `rev`
+  there rather than in Neovim's cwd; both builders stamp it in a thin wrapper
+  over the shape-only half, so no branch can forget it. Pure.
+- `diffview_args(range)` — the default provider's argv for `diffview.open`:
+  `-C<root>` then `rev`'s words (`--cached <base>` → two). A list, not an Ex
+  command line, so a root with spaces / `%` / `#` needs no escaping. Pure.
+- `range_endpoints(newer, older, root)` — the `DiffRange` for a **commit selection**
   span (specification.md §13.5): `<older>^..<newer>` (empty-tree base for a root,
   and exactly `commit_range` when the ends coincide). The graph range-selection
   constructor that feeds the same provider and the commit view's range mode.
@@ -1998,14 +2004,22 @@ graph.lua glue (gated, async — never fetches; §11.7.1/§11.7.4):
 
 gitloom delegates rich diffs to an external plugin via a pluggable provider
 (specification.md §11.5), so it carries no diff renderer of its own.
-`open_diff(opts, commit)` builds a `DiffRange` with the pure `commit_range`
-constructor and calls `opts.diff.open(range)`. The default `open`
-`require`s diffview first (so a lazy-loaded diffview registers its command),
-then runs `:DiffviewOpen <range.rev>` guarded by `vim.fn.exists(":DiffviewOpen")`
-(it notifies when diffview is absent rather than erroring), so diffview is optional;
-overriding `diff.open`/`diff.label` swaps in another plugin. Two call sites use
-it: the graph's `D` key (commit under the cursor) and the commit view's action
-label. Because the provider takes a *range*, future graph-side multi-commit
+`open_diff(opts, commit, root)` builds a `DiffRange` with the pure `commit_range`
+constructor — stamped with the graph's repository root (`repo.root`, or the commit
+view's `root`) — and calls `opts.diff.open(range)`. The default `open`
+(`open_diffview`) `require`s diffview (which also loads a lazy-loaded diffview)
+and calls its Lua `open(args)` — the function `:DiffviewOpen` itself calls — with
+`diffview_args(range)`, i.e. `-C<root>` plus the rev. It notifies when diffview is
+absent rather than erroring, so diffview is optional; overriding
+`diff.open`/`diff.label` swaps in another plugin. The `-C` is not optional:
+diffview otherwise resolves its repository from the current buffer / cwd, which is
+not the graph's repository whenever the graph targets a submodule, a picked
+repository, an explicit path, or a drilled-in frame (specification.md §2.1) — the
+rev then fails to parse there, or a working-tree range opens the wrong working
+tree. Passing an argv list rather than building an Ex command line is what keeps a
+root with spaces intact. Call sites: the graph's `D` key (commit under the cursor,
+or the selection), the `<CR>` action menu, and the commit view's action label; the
+selection's range comes from `selection_range` → `range_endpoints(…, repo.root)`. Because the provider takes a *range*, future graph-side multi-commit
 selection adds new range constructors (e.g. `range_between(a, b)`) without
 touching the provider or the call sites.
 

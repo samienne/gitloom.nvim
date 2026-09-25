@@ -439,7 +439,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     diff = {
         -- External diff provider, operating on a git range (§11.5). Default opens
         -- diffview; override to use another plugin, or set open = nil to disable.
-        -- open = function(range) vim.cmd("DiffviewOpen " .. range.rev) end,
+        -- Run it in range.root (the graph's repository), not the cwd:
+        -- open = function(range)
+        --     require("diffview").open(require("gitloom.git.range").diffview_args(range))
+        -- end,
         label = "▶ Open diff (diffview)",  -- commit-view action label text
     },
 }
@@ -512,9 +515,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   `"dual"` (on a separate line above the commit's message). Cycle live with `B`.
   See [specification.md](specification.md) §6.1.
 - **`diff`** — the external diff provider (`D` and the commit view's action
-  label). `open` is called with a `DiffRange` (`{ rev, from, to }` — `rev` is a
-  git rev-range like `<hash>^!`; an endpoint may also be the tree state `"index"`
-  or `"worktree"` for a working-tree node) and defaults to opening diffview;
+  label). `open` is called with a `DiffRange` (`{ rev, from, to, root }` — `rev`
+  is a git rev-range like `<hash>^!`; an endpoint may also be the tree state
+  `"index"` or `"worktree"` for a working-tree node; `root` is the graph's
+  repository, which need not be Neovim's cwd — a submodule or a repository opened
+  from the picker — so a custom `open` must resolve `rev` there, e.g. diffview's
+  `-C<root>`) and defaults to opening diffview in `root`;
   `label` is the action-label text. Override `open` to use a different diff
   plugin, or set it to `nil` to disable the integration. See
   [specification.md](specification.md) §11.5.

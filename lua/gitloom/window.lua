@@ -595,31 +595,35 @@ local parse_status = git.parse_status
 local commit_range = git.commit_range
 local range_endpoints = git.range_endpoints
 
---- Default diff provider: open diffview for the range (specification.md §11.5).
---- Guarded — reports rather than errors when diffview is not installed. Override
---- opts.diff.open to use another plugin.
+--- Default diff provider: open diffview for the range (specification.md §11.5),
+--- in the range's repository (`range.root`, §2.1) — NOT Neovim's cwd, which
+--- diffview would otherwise resolve against. Guarded — reports rather than errors
+--- when diffview is not installed. Override opts.diff.open to use another plugin.
 ---@param range DiffRange
 local function open_diffview(range)
-    -- diffview is usually lazy-loaded, so `:DiffviewOpen` does not exist until
-    -- the plugin is loaded; require it first (a no-op if already loaded) to
-    -- trigger the load, then run the command.
-    pcall(require, "diffview")
-    if vim.fn.exists(":DiffviewOpen") == 0 then
+    -- diffview is usually lazy-loaded; requiring it triggers the load (a no-op
+    -- if already loaded). Its Lua `open(args)` is what `:DiffviewOpen` calls,
+    -- and taking an argv LIST means the root needs no Ex-command-line escaping
+    -- (spaces, `%`, `#`, `|` in a path would otherwise be split or expanded).
+    local ok, dv = pcall(require, "diffview")
+    if not (ok and type(dv) == "table" and type(dv.open) == "function") then
         vim.notify("diffview.nvim not found; set diff.open to use another diff plugin",
             vim.log.levels.ERROR)
         return
     end
-    vim.cmd("DiffviewOpen " .. range.rev)
+    dv.open(git.diffview_args(range))
 end
 
---- Open the configured external diff (§11.5) for a commit: build its DiffRange
---- and hand it to the provider. No-op when no provider is configured.
+--- Open the configured external diff (§11.5) for a commit of the repository at
+--- `root`: build its DiffRange and hand it to the provider. No-op when no
+--- provider is configured.
 ---@param opts GraphOptions
 ---@param commit Commit
-local function open_diff(opts, commit)
+---@param root? string  the graph's repository root (§2.1), stamped on the range
+local function open_diff(opts, commit, root)
     local open = opts.diff and opts.diff.open
     if open then
-        open(commit_range(commit))
+        open(commit_range(commit, root))
     end
 end
 
@@ -1019,7 +1023,7 @@ local function open_commit_view(opts, commit, range, root)
                 if opts.diff and opts.diff.open then opts.diff.open(range.range) end
             else
                 ---@cast commit Commit
-                open_diff(opts, commit)
+                open_diff(opts, commit, root)
             end
             return
         end
@@ -1830,7 +1834,7 @@ local function selection_range(ctx)
     if not (p and #p > 0) then return nil end
     local newer, older = real_newest(p[1]), real_oldest(ctx, p[#p])
     if not (newer and older) then return nil end
-    return range_endpoints(newer, older)
+    return range_endpoints(newer, older, ctx.repo.root)
 end
 GRAPH_HELPERS.selection_range = selection_range
 
@@ -2327,7 +2331,7 @@ local function h_cr(ctx)
                 add(b.state == "collapsed" and "Examine tip commit" or "Examine commit",
                     function() open_commit_view(opts, b.commit, nil, repo.root) end)
                 if opts.diff and opts.diff.open then
-                    add("Open diff", function() open_diff(opts, b.commit) end)
+                    add("Open diff", function() open_diff(opts, b.commit, repo.root) end)
                 end
             end
         end
@@ -2349,7 +2353,7 @@ local function h_diff(ctx)
     local line = vim.api.nvim_win_get_cursor(w)[1]
     local item = ctx:order_at(line)
     if not item or not item.commit or item.commit.collapsed then return end
-    open_diff(ctx.opts, item.commit)
+    open_diff(ctx.opts, item.commit, ctx.repo.root)
 end
 
 -- K: float with the lane breakdown for the commit under the cursor.
@@ -6249,6 +6253,7 @@ M._internal = {
     apply_worktree = apply_worktree,
     integrate_commit = integrate_commit,
     build_display_index = build_display_index,
+    open_diffview = open_diffview, -- the default diff provider (§11.5); diff_provider_spec
 }
 
 return M

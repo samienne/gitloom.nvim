@@ -350,6 +350,20 @@ Coverage:
   states; §13.5), and `format_git_error` (the one line the range view
   shows in place of the diff when `git diff` fails: label + exit code, git's stderr
   appended but only its first line, CR-trimmed, `exit -1` for an unspawnable job)
+- `tests/diff_provider_spec.lua` — the external diff provider targets the graph's
+  **repository root**, not Neovim's cwd (§2.1/§11.5): `commit_range` /
+  `range_endpoints` stamp `root` on every range shape (real, root commit, span,
+  empty-tree span, each working-tree form) and leave the range otherwise
+  unchanged; `diffview_args` (`-C<root>` first, a root with spaces as ONE
+  argument, `--cached <base>` split into flag + rev, an empty rev contributing
+  nothing, no `-C` without a root). Plus **end to end against the real diffview**
+  (loaded from the lazy install dir; `pending` when absent): cwd in one scratch
+  repository, the graph in another whose path has a space, and the default
+  provider (`window._internal.open_diffview`) must open a view whose adapter
+  toplevel is the graph's repository with no error — for a single-commit range
+  (the reported `Failed to parse rev '<hash>^!'`) AND a working-tree range (which
+  without `-C` "succeeds" silently in the cwd repository). Views are closed only
+  in the final cleanup: closing one between tests races diffview's async load
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
   the three nodes staged / unstaged / untracked (spec §3.3/§4.2/§11.8):
   `parse_status` (the `git status --porcelain` staged/unstaged/untracked counter —
@@ -1438,9 +1452,16 @@ Details not covered by the spec or architecture:
   single-commit range (`<hash>^!`, empty-tree for roots); `range_endpoints(newer,
   older)` builds a commit-selection span (`<older>^..<newer>`; §13.5) — or a
   **single-rev** working-tree range when the newer end is a §4.2 node (see below).
-  The default `open` runs diffview guarded; diffview is the only optional
-  dependency beyond snacks. Provider/label/`D` are window glue (not unit-tested);
-  `commit_range` is.
+  Both take a trailing `root` and stamp it on the range: the graph's repository
+  (`repo.root` / the commit view's `root`), which is NOT Neovim's cwd for a
+  submodule, a picked repository or a drilled-in frame. The default `open`
+  (`open_diffview`) calls `require("diffview").open(range.diffview_args(range))`
+  — `-C<root>` + the rev as an argv list, never `vim.cmd("DiffviewOpen " ..)`,
+  which both lost the root (diffview resolves from the current buffer / cwd:
+  `Failed to parse rev '<hash>^!'`, or a working-tree range silently opening the
+  cwd repo) and would need Ex escaping for a path with spaces. diffview is the
+  only optional dependency beyond snacks. `open_diffview` is exposed as
+  `window._internal.open_diffview` for `diff_provider_spec`'s real-diffview test.
 - **Commit selection (range)** (specification.md §13; toggled by `V`): a modal
   selection that is a **path along one branch** over the visible projection
   (`repo.display`), not a contiguous row block. State lives in `sel` (in `M.open`):

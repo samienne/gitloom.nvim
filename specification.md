@@ -1636,7 +1636,7 @@ GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
-DiffRange    = { rev: string, from: Endpoint?, to: Endpoint }
+DiffRange    = { rev: string, from: Endpoint?, to: Endpoint, root: string? }
 Endpoint     = Commit | "index" | "worktree"
 ```
 
@@ -1696,7 +1696,8 @@ Endpoint     = Commit | "index" | "worktree"
 - `label_mode` — where ref decorations are placed: `"right"` (default), `"inline"`,
   or `"dual"` (§6.1). Cycle live with `B`.
 - `diff` — the external diff provider (§11.5): `open` is a function called with a
-  `DiffRange` to open the diff (default opens diffview), and `label` is the
+  `DiffRange` to open the diff (default opens diffview in the range's `root`, the
+  graph's repository — a custom `open` must honour `root` too), and `label` is the
   commit view's action-label text (default `▶ Open diff (diffview)`). Override
   `open`/`label` to use a different diff plugin; set `open` to `nil`/`false` to
   disable the integration (no action label, `D` is a no-op).
@@ -2333,7 +2334,7 @@ richer commit selections on the graph can reuse it later (commit-vs-commit,
 commit-vs-working-tree, a tag range, …); a single commit is just one way to
 construct a range.
 
-A `DiffRange` is `{ rev, from?, to }`: `rev` is a git rev-range the diff tool
+A `DiffRange` is `{ rev, from?, to, root? }`: `rev` is a git rev-range the diff tool
 understands (e.g. `<hash>^!` for a commit's own changes, `<a>..<b>` for a span,
 or an empty-tree range for a root commit), and `from`/`to` are the structured
 endpoints. An endpoint is normally a `Commit` (`from` is `nil` for a root), but
@@ -2342,6 +2343,18 @@ for the working-tree virtual commits (§4.2) it may instead name a **tree state*
 rather than to a commit (the staged node is `from = HEAD, to = "index"` with
 `rev = "--cached"`; the unstaged node is `to = "worktree"` with `rev = "HEAD"`; the
 untracked node reuses the unstaged node's range, having no range of its own).
+
+A range also names the **repository** it belongs to: `root` is the graph's
+repository root (§2.1). Every range gitloom hands the provider carries it — the
+graph's `D`, the action menu, the commit view's action label, and the commit
+selection (§13.5) alike — because that root need not be the repository at
+Neovim's cwd: the graph may have been opened on a submodule, through the
+repository picker, on an explicit path, or as a drilled-in submodule frame
+(§11.7.6). A provider **must resolve `rev` in `root`**, not in the cwd; resolved
+in the cwd, a commit is looked up in the wrong repository (it fails to parse, or —
+for a working-tree range — silently diffs the cwd repository's working tree).
+`root` is absent only for a range built outside a graph, where the cwd is the
+only repository there is.
 
 A `rev` naming **one** rev rather than an `<a>..<b>` span is the **working-tree**
 form: the provider diffs that rev against the working tree (or, with `--cached`,
@@ -2355,8 +2368,9 @@ that proves it — its head is the **index**, which likewise has no on-disk path
 LSP does not attach there either; that is inherent to the index, not a defect.
 
 The provider's `open(range)` is
-called to display it; the default opener runs diffview on `range.rev` and, when
-diffview is not installed, reports that instead of erroring. Overriding `open`
+called to display it; the default opener runs diffview on `range.rev` **in
+`range.root`** (diffview's `-C<root>`) and, when diffview is not installed,
+reports that instead of erroring. Overriding `open`
 (and `label`) switches to another diff plugin — diffview is therefore an
 **optional dependency**, not required.
 
@@ -2793,8 +2807,8 @@ the older end is a root), and `rev` is `<older>^..<newer>` (an empty-tree range
 when rooted). This is the **literal** range — the combined patch between the two
 ends, **including any side merged in** along the path when it crosses a merge
 (restricting it to the followed branch's own first-parent changes is an open
-refinement, §13.6). `range_endpoints(newer, older)` constructs it beside the
-single-commit `commit_range` (§11.5).
+refinement, §13.6). `range_endpoints(newer, older, root)` constructs it beside the
+single-commit `commit_range` (§11.5), carrying the graph's repository `root`.
 
 **A range ending at the working tree.** When the **newer** end is a working-tree
 virtual commit (§4.2 — the only end it can be, §13.2) the range does not name two

@@ -7,6 +7,10 @@ local M = {}
 -- git's well-known empty-tree hash, used as the base for a root commit's diff.
 M.EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+-- The range builders' shape halves (everything but the `root` stamp), defined
+-- below the public wrappers.
+local commit_shape, span_shape
+
 --- The DiffRange for a single commit's own changes (specification.md §11.5).
 --- `rev` is `<hash>^!` (the commit vs its first parent), or an empty-tree range
 --- for a root commit (no parents) so it still diffs. `from`/`to` are the
@@ -21,9 +25,23 @@ M.EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 ---                           lists untracked files, so the in-graph patch appends the
 ---                           §3.3 synthesized additions. The provider ignores it — a
 ---                           working-tree view lists untracked files itself (§13.5).
+---@field root? string   the repository the range belongs to — the graph's repository
+---                       root (§2.1), which need not be Neovim's cwd (a submodule, a
+---                       picked repository, a drilled-in frame). A provider must
+---                       resolve `rev` THERE; the default passes it as diffview's `-C`.
+---@param commit Commit
+---@param root? string   stamped on the range as `root` (§2.1/§11.5)
+---@return DiffRange
+function M.commit_range(commit, root)
+    local r = commit_shape(commit)
+    r.root = root
+    return r
+end
+
+--- `commit_range` without the root stamp: the range's shape alone.
 ---@param commit Commit
 ---@return DiffRange
-function M.commit_range(commit)
+function commit_shape(commit)
     -- Working-tree virtual commits (§4.2): the endpoint is a tree state, not a
     -- commit (§11.5). Staged is the index vs HEAD; unstaged the working tree vs
     -- HEAD. The untracked node has no git-tracked counterpart, so it reuses the
@@ -90,10 +108,21 @@ end
 --- hash is never read, here or downstream.
 ---@param newer Commit
 ---@param older Commit
+---@param root? string   stamped on the range as `root` (§2.1/§11.5)
 ---@return DiffRange
-function M.range_endpoints(newer, older)
+function M.range_endpoints(newer, older, root)
+    local r = span_shape(newer, older)
+    r.root = root
+    return r
+end
+
+--- `range_endpoints` without the root stamp: the range's shape alone.
+---@param newer Commit
+---@param older Commit
+---@return DiffRange
+function span_shape(newer, older)
     if newer == older or newer.hash == older.hash then
-        return M.commit_range(newer)
+        return commit_shape(newer)
     end
     local head = tree_state(newer)
     local base = span_base(older)
@@ -116,6 +145,32 @@ function M.range_endpoints(newer, older)
         return { rev = M.EMPTY_TREE .. ".." .. newer.hash, from = nil, to = newer }
     end
     return { rev = base.hash .. ".." .. newer.hash, from = base, to = newer }
+end
+
+--- The argument list the default provider hands diffview (`diffview.open(args)`,
+--- the Lua entry `:DiffviewOpen` itself calls) for a range (§11.5): `-C<root>`
+--- first, so diffview resolves the rev in the graph's repository rather than the
+--- one at Neovim's cwd (§2.1). Without it a commit of a submodule / picked
+--- repository is looked up in the wrong repository (`Failed to parse rev
+--- '<hash>^!'`), and a working-tree range silently opens the cwd repository's
+--- working tree. Then `rev`'s whitespace-separated words (`--cached <base>` is a
+--- flag plus a rev; an empty `rev` contributes nothing — diffview's own
+--- working-tree-vs-index default). It is a LIST, never an Ex command line, so a
+--- root containing spaces, `%`, `#`, `|` or quotes stays one argument verbatim.
+--- (diffview itself runs the `-C` value through `expand()`, so a directory whose
+--- name embeds a *set* `$VAR` would still be rewritten — its behaviour, not
+--- reachable from here.) No `-C` without a root: diffview's cwd default. Pure.
+---@param range DiffRange
+---@return string[]
+function M.diffview_args(range)
+    local args = {}
+    if range.root and range.root ~= "" then
+        args[1] = "-C" .. range.root
+    end
+    for word in (range.rev or ""):gmatch("%S+") do
+        args[#args + 1] = word
+    end
+    return args
 end
 
 return M
