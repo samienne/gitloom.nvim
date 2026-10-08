@@ -227,6 +227,32 @@ local function js(cmd, o)
     return id
 end
 
+-- `js` for a **streamed** command: `vim.system` (luv pipes) instead of
+-- `jobstart`, same cwd pinning and the same `vim.g.gitloom_git_debug` record.
+-- A `jobstart` stream LOSES its unread tail when the process exits while the
+-- main loop is behind on draining it: Neovim stops reading the pipe under
+-- backpressure, git still writes everything and exits 0, and `on_exit` arrives
+-- without the rest (measured on 0.12.5 / Windows: a 20 ms batch handler dropped
+-- over half of a 496-commit log, the last record cut mid-line -- see
+-- tests/stream_complete_spec.lua). `vim.system` reads in luv callbacks, which
+-- never stop reading, and calls `on_exit` only after stdout has hit EOF.
+-- Both callbacks run in a FAST context.
+---@param cmd string[]
+---@param o vim.SystemOpts
+---@param on_exit fun(out: vim.SystemCompleted)
+---@return vim.SystemObj
+local function js_stream(cmd, o, on_exit)
+    o.cwd = o.cwd or active_cwd
+    if type(vim.g.gitloom_git_debug) ~= "string" then
+        return vim.system(cmd, o, on_exit)
+    end
+    local site = call_site()
+    local ok, obj = pcall(vim.system, cmd, o, on_exit)
+    debug_log(cmd, o.cwd, ok, ok and obj.pid or obj, site)
+    if not ok then error(obj, 0) end
+    return obj
+end
+
 -- Test seam for the spawn diagnostics (not the public API; see CLAUDE.md).
 M._internal = {
     WIN_CMDLINE_MAX = WIN_CMDLINE_MAX,
@@ -570,16 +596,23 @@ function M.fetch_commits(opts)
         end
     end
 
-    js(
+    -- Streamed through `js_stream` (vim.system), not `jobstart`: see there for
+    -- the truncated-stream regression. Both callbacks are FAST-context; they
+    -- only stitch + enqueue (next_tick is a uv timer, safe here), and the
+    -- completion hops onto the main loop before resolving the future.
+    js_stream(
         command,
         {
-            on_stdout = function(_, data)
-                enqueue(linebuf.feed(data))
+            stdout = function(_, data)
+                if not data then return end -- EOF; on_exit follows
+                enqueue(linebuf.feed(vim.split(data, "\n", { plain = true })))
                 if qhead <= qtail then
                     schedule_drain()
                 end
             end,
-            on_exit = function()
+        },
+        function()
+            vim.schedule(function()
                 local last = linebuf.flush()
                 if last ~= "" then
                     enqueue({ last })
@@ -588,12 +621,12 @@ function M.fetch_commits(opts)
                 if qhead > qtail then
                     -- Nothing left to process — resolve now; otherwise the
                     -- worker resolves once it drains.
-                    promise.resolve()
+                    if not scheduled then promise.resolve() end
                 else
                     schedule_drain()
                 end
-            end,
-        })
+            end)
+        end)
 
     return future
 end

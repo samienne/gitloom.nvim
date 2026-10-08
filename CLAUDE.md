@@ -254,6 +254,11 @@ Coverage:
   `columns.session` reports as `lookahead`). Deleting the lookahead guard fails
   the fuzz + `large_topo` blocks on `gutter`: the prefix property genuinely does
   not hold there
+- `tests/stream_complete_spec.lua` — the commit stream delivers the WHOLE log
+  under a deliberately slow (20 ms) batch handler: every commit of a 1500-commit
+  scratch repository arrives, none cut mid-record. Guards the `jobstart`
+  truncated-tail regression (the subject-less 1970 "root" row at the bottom),
+  fixed by streaming through `vim.system` (`fetch.lua`'s `js_stream`)
 - `tests/stream_tick_spec.lua` — the stream worker's hand-off (§3.1's "paints
   progressively"): `fetch._internal.next_tick` defers rather than running inline,
   a `next_tick` self-chain lets the **event loop iterate** between slices, and a
