@@ -662,7 +662,14 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   (epoch) + `%ai` (offset) feed the parsed author timestamp; `%ct` (committer
   epoch) seeds `order_commits` (§3.1). No `--decorate`; refs are a separate query
   (specification.md §3). **Streamed unbuffered** so the view fills progressively
-  (spec §3, §10.5): the `on_stdout` handler is kept light — `make_line_buffer`
+  (spec §3, §10.5) through `vim.system` (`js_stream`), **not** `jobstart`: a
+  `jobstart` stream drops its unread tail when git exits while the main loop is
+  behind on draining the pipe (Neovim stops reading under backpressure and
+  `on_exit` arrives without the rest — the last record cut mid-line, parsed as a
+  subject-less 1970 "root" row, every commit below it missing). `vim.system`
+  reads in luv callbacks that never stop and calls its exit callback only after
+  stdout's EOF; `tests/stream_complete_spec.lua` pins it with a deliberately slow
+  batch handler. The fast-context stdout callback is kept light — `make_line_buffer`
   stitches the partial line at each chunk seam, the complete lines are enqueued,
   and the heavy per-commit work (`parse_commit_line` + `on_batch`) runs in a
   worker that drains `COMMIT_BATCH` lines per turn and reschedules itself until
@@ -707,7 +714,8 @@ one-line swap with no real gain today. gitloom owns row ordering (`order_commits
 paint (it equals the `topo` sort mode's own output), and the active sort mode
 produces the authoritative order at completion.
 
-All run via `vim.fn.jobstart` and resolve a `Future` on `on_exit`. The
+All but the commit stream (above) run via `vim.fn.jobstart` and resolve a
+`Future` on `on_exit`. The
 controller chains them refs → head → commits.
 
 **Repository root (spec §2.1).** The git layer runs every query in an
