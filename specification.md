@@ -26,8 +26,9 @@ gitloom controls ordering and layout rather than delegating them to git.
 
 gitloom never stages, commits or rewrites history by itself. The exceptions to
 an otherwise read-only view are actions the user explicitly picks: **checkout**
-(§10.4.1), which only moves HEAD and the working tree, and **fetch** / **pull**
-from the command palette (§17).
+(§10.4.1), which only moves HEAD and the working tree; **checkout & examine**
+(§10.4.2), which may also **stash** the uncommitted changes (after asking) and
+re-apply them on Return; and **fetch** / **pull** from the command palette (§17).
 The view-transformation features in §10 are the direction this is built
 toward; the current non-graph surface (window, streaming fetch, rendering)
 exists primarily to exercise and validate the graph algorithm.
@@ -50,12 +51,12 @@ exists primarily to exercise and validate the graph algorithm.
   expand toggle** for the branch under the cursor (§10.4): it collapses an
   expanded branch or expands a marker, in place, and the cursor follows so
   repeated `<Space>` flips it open/closed. (`<Tab>` is `<C-i>`, the navigation
-  *forward* key — §14.3.) `<CR>` opens an **action menu** (§10.4). On a
-  plain commit row (cursor on the message, no ref selected) it lists **examine
-  commit** first — so `<CR><CR>` opens the **commit view** (§11) — then open
-  diff and **checkout** (§10.4.1). When a ref is selected with `h`/`l`, or on a
-  collapsed head or a packed-marker line, it lists collapse / expand / hide the
-  selected branch, examine, open its diff, and checkout last.
+  *forward* key — §14.3.) `<CR>` **examines**: it opens the **commit view**
+  (§11) of the row's commit directly — never a menu (a collapsed head or a
+  packed marker stands for its tip; §11). Every other action on the row — collapse
+  / expand / hide the branch, open diff, **checkout** (§10.4.1), **checkout &
+  examine** (§10.4.2) — is in the `<C-Space>` **command palette** (§17), listed
+  ahead of its global commands.
   `D` opens that commit's diff in an external diff viewer via the configured
   provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
@@ -69,8 +70,11 @@ the repository (§3.4) — re-reads refs, pulls newly-reachable commits, prunes
 unreachable ones, re-sorts, and rebuilds the working-tree virtual commits (§4.2),
 preserving cursor/scroll/selection. `<C-Space>` (also `<C-@>`, which many
 terminals send for it) opens the **command palette** (§17) — a picker of the
-graph-wide commands: refresh (the `R` resync), fetch (all remotes, or one)
-and pull. `S` cycles the **row sort mode** (§3.1) —
+graph's actions: first the cursor row's (collapse / expand / hide, open diff,
+checkout, checkout & examine; §10.4) — or, while a `V` selection is active, the
+selection's — then the graph-wide commands: refresh (the `R` resync), fetch (all
+remotes, or one), pull, and **Return** while a checkout & examine (§10.4.2) is
+active. `S` cycles the **row sort mode** (§3.1) —
 gitloom's own topological order (reproducing git's `--topo-order`), or git's date
 / author-date order — reordering in place and keeping the cursor on its commit.
 `L` opens the **pinned-branches dialog** (§10.6.1) — the pinned branches in
@@ -92,7 +96,7 @@ persistent view.
   its visible row, so a collapsed branch lands on its collapsed head (§10.3); a
   ref whose commit is currently hidden (§10.1) is a no-op with a notice. Landing
   also **pre-selects that ref's label** on the row (as if `h`/`l` had moved onto
-  it; §6), so `<CR>` / the action menu act on that branch with no further
+  it; §6), so `<CR>` / the palette's row actions act on that branch with no further
   navigation. Picking HEAD — which has no own label — just centers, cursor at the
   message.
   `?` opens a float listing all keybindings. The window **title** identifies the
@@ -285,8 +289,11 @@ three **virtual commits** (§4.2) stacked on top of HEAD — the live state the 
 is building. gitloom **displays** the index and working tree; it never stages,
 unstages, or commits by itself (§9). The operations that change them are the
 ones the user explicitly picks: **checkout** (§10.4.1), which only moves HEAD and
-the working tree, and **pull** from the command palette (§17), which only
-fast-forwards the current branch to its upstream (it never creates a commit).
+the working tree; **checkout & examine** (§10.4.2), which on a dirty tree stashes
+the changes (`git stash push -u`, after a prompt) and re-applies them on Return;
+and **pull** from the command palette (§17), which only fast-forwards the current
+branch to its upstream (it never creates a commit). The stash is git's own and
+the only one gitloom creates; it never stages or commits.
 
 The state is read with porcelain queries that run **after** the commit stream
 (§3.1) has its HEAD anchor:
@@ -1750,8 +1757,10 @@ plugin load so `<leader>` resolves against the user's `mapleader`. Set
 
 gitloom is a **viewer**: it never stages, commits or rewrites history by itself.
 The exceptions are actions the user explicitly picks — **checkout** (§10.4.1),
-which only moves HEAD and the working tree, and **fetch** / **pull** from the
-command palette (§17). What is
+which only moves HEAD and the working tree; **checkout & examine** (§10.4.2),
+which additionally stashes uncommitted changes when the user confirms the prompt
+and re-applies them on Return; and **fetch** / **pull** from the command palette
+(§17). What is
 permanently out of scope is **implicit index or history mutation as a side
 effect of viewing** — gitloom never stages, unstages, commits, resets, or
 rewrites history silently while you browse.
@@ -1967,21 +1976,24 @@ commit the trunk reaches (the mainline) is not collapsible.
   reflow the cursor is repositioned onto the resulting node (the new marker, or
   the expanded region's tip), so repeated `<Space>` flips it open/closed in place.
   (`<Tab>` / `<C-i>` is reserved for forward navigation, §14.3.)
-- `<CR>` — opens an **action menu** for the row (`vim.ui.select`). On a
+- `<C-Space>` — the **command palette** (§17), gitloom's single action menu
+  (`vim.ui.select`): the row's actions come first, then the global commands. On a
   **plain commit row** (cursor on a normal commit's message, no ref selected) the
-  entries are **examine commit**, **open diff**, **checkout commit** — examine
-  first, so `<CR><CR>` still opens the commit view (§11). When a ref is selected
-  with `h`/`l`, or the row is a **collapsed head** or a **packed-marker line**,
-  the menu lists every applicable action, most-relevant first (collapse, expand,
-  **hide**, examine commit, open diff), then **checkout** last (§10.4.1). The
-  menu is where hidden and full mode control live, and it is the overflow-proof
-  way to reach any marker on a packed line even when not all labels fit.
-  (Collapse/expand are also on `<Space>`; diff is also on `D`.) A §4.2
-  working-tree virtual commit gets no checkout entry; open diff appears only when
-  a diff provider is configured (§11.5).
+  row entries are **open diff**, **checkout commit**, **checkout & examine**. When
+  a ref is selected with `h`/`l`, or the row is a **collapsed head** or a
+  **packed-marker line**, they are every applicable action, most-relevant first
+  (collapse, expand, **hide**, open diff), then **checkout** (§10.4.1) and
+  **checkout & examine** (§10.4.2) last; a packed line lists expand / hide per
+  marker, then checkout of the selected marker's tip. The palette is where hidden
+  and full mode control live, and it is the overflow-proof way to reach any marker
+  on a packed line even when not all labels fit. (Collapse/expand are also on
+  `<Space>`; diff is also on `D`.) A §4.2 working-tree virtual commit gets no
+  checkout entry; open diff and checkout & examine appear only when a diff
+  provider is configured (§11.5). There is no examine entry: that is `<CR>`.
+- `<CR>` — **examine**: the commit view (§11) of the row's commit, directly (§11).
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
-which labels fit); `<Space>` and the menu act on the selected marker. Reachability
+which labels fit); `<Space>`, `<CR>` and the palette act on the selected marker. Reachability
 emphasis (§12) **follows the selection**: the selected head's branch — its `◍`
 node, label, and lane — stays its normal colour while the sibling heads/branches
 sharing the row dim, exactly as moving onto a normal head dims everything outside
@@ -1989,9 +2001,9 @@ its cone. With no marker selected the line is neutral (all lit).
 
 #### 10.4.1 Checkout
 
-The menu's **checkout** entry is the menu's one action that changes the
-repository (the others are the palette's fetch and pull, §17): it moves HEAD and
-the working tree, nothing else. What it runs depends on what the
+The palette's **checkout** entry changes the repository (as do checkout & examine,
+§10.4.2, and the palette's fetch and pull, §17): it moves HEAD and the working
+tree, nothing else. What it runs depends on what the
 row selects, and the entry's label says which:
 
 | Selection | Command | Label |
@@ -2007,13 +2019,88 @@ label (§6), so a row whose only ref is HEAD is a bare commit. A §4.2 working-t
 virtual commit has no checkout entry, and neither does a packed-marker line with
 no marker selected.
 
-Checkout **never forces**. The menu choice is the confirmation — there is no extra
+Checkout **never forces**. The palette choice is the confirmation — there is no extra
 prompt. git runs in the graph's repository root (§2.1), which may be a submodule,
 not Neovim's cwd. If git exits non-zero (a dirty file the checkout would
 overwrite, a branch checked out in another worktree, an ambiguous remote name…),
 gitloom shows git's error as one line at ERROR level and changes nothing. On
 success it runs the in-place resync (§3.4, the `R` key), so HEAD's marker and the
 working-tree rows (§3.3) move to their new place.
+
+#### 10.4.2 Checkout & examine
+
+**Checkout & examine** checks a commit out (detached) and opens its changes in
+the external diff provider (§11.5) **against the working tree**, so the
+provider's right-hand side is the real files on disk and LSP clients and
+diagnostics attach to them. This is the whole reason it exists: an ordinary
+commit diff (`<hash>^!`) or a range diff (`<a>..<b>`, §13.5) makes the provider
+build both sides from git blobs — read-only buffers with no path. Given a
+**single** rev, diffview compares that rev to the working tree and the right side
+is `RevType.LOCAL`, the file on disk. Checking the examined commit out first is
+what makes "the working tree" equal "that commit".
+
+**What it examines.** One commit, or a §13 range selection:
+
+- `newer` — the selection's newest commit (for one commit, the commit itself);
+  gitloom runs `git checkout --detach <newer>`;
+- the diff is then opened as a `DiffRange` of **one** rev — `<older>`'s first
+  parent, or the empty tree when `<older>` is a root commit — stamped with the
+  graph's repository root (§2.1), so the provider runs `-C<root> <base>`. The
+  base is the same one the range view uses (§13.5), so the diff shows the same
+  combined changes, merged-in commits included.
+- If the selection's newer end is a §4.2 **working-tree node**, there is nothing
+  to check out — the working tree already is the newer end. gitloom opens that
+  selection's existing working-tree range (§13.5, already single-rev) and changes
+  nothing else.
+
+**A dirty tree.** Before checking out, gitloom reads `git status --porcelain`.
+If there are staged, unstaged or untracked changes it asks (`vim.ui.select`):
+**Stash N changes and continue** / **Cancel**. Continue runs
+`git stash push -u -m "gitloom: examine <short> (from <branch or short hash>)"`
+and records the new stash's SHA (`git rev-parse stash@{0}`). If the push fails,
+git's error is shown and nothing is checked out. If the checkout then fails,
+gitloom immediately re-applies the stash by SHA (`git stash apply <sha>`), drops
+it only when that apply was clean, and shows the checkout error. A clean tree
+needs no prompt.
+
+**The examine state.** A successful examine records, per repository: `orig` —
+the branch HEAD was on, or HEAD's hash when it was detached; the stash's SHA (or
+none — a clean tree records state too, so Return knows where to go back to); and
+the examined commit. It lives in the per-repository session state (like the
+remembered cursor position, §2), so it **survives closing and reopening the
+graph** within the Neovim session; it is not written to disk.
+
+**No stash chains.** A second Checkout & examine while one is active is allowed:
+`orig` and the stash are kept, only the examined commit moves. But if the tree is
+dirty then (edits made since), gitloom refuses with a notice to Return first
+rather than stashing a second time — there is never more than one gitloom stash
+per examine.
+
+**Return.** While an examine is active, the command palette (§17) lists
+**Return to `<orig>`**. It runs `git switch <branch>` (or
+`git checkout --detach <hash>` when `orig` was detached), then, if a stash was
+recorded, `git stash apply <sha>`. A clean apply drops that stash (found by SHA
+in `git stash list`, never by position). The rules on failure:
+
+- the switch back fails (new local edits it would overwrite…): git's error is
+  shown at ERROR level and the state is **kept**, so Return can be retried;
+- the apply conflicts or fails: the stash is **kept**, git's error is shown at
+  ERROR level together with the kept stash's message, and the state is cleared
+  (HEAD is back; the stash is the user's to resolve).
+
+The state is cleared only after a successful switch plus a successful apply (or
+none needed). Every outcome that changed HEAD or the working tree is followed by
+the in-place resync (§3.4). Like checkout, nothing here forces, everything runs
+asynchronously in the graph's repository root, and one examine / Return runs at a
+time per graph session (shared with the palette's fetch / pull, §17.3).
+
+**Entry points.** Both are in the command palette (`<C-Space>`, §17). Among the
+row entries (§10.4) **Checkout & examine** follows the checkout entry — on a
+plain commit row and, examining the ref's commit (a collapsed head's tip), with a
+ref selected or on a collapsed head; never on a §4.2 working-tree row or a
+packed-marker line. While a §13 selection is active the selection's entries
+replace the row's and lead with **Checkout & examine selection** (§17.1). Both
+appear only when a diff provider is configured (§11.5).
 
 ### 10.5 Reflow
 
@@ -2275,8 +2362,9 @@ all-normal.
   resync; triggering it automatically when the repository changes underneath
   (watching `.git` refs / `HEAD` via an fs-event or autocmd, debounced) is a
   follow-up. Today a history change is mirrored only on `R` or reopen.
-- **Toggle UX** — `<CR>` on a selected ref cycles its mode and `<CR>` on a head
-  expands it (implemented); a picker for setting many at once is still future.
+- **Toggle UX** — `<Space>` toggles collapse ⇄ expand and the `<C-Space>`
+  palette's row entries set any mode (implemented); a picker for setting many at
+  once is still future.
 - **Context panes** — header/footer windows showing off-screen topology folded
   onto the pinned anchors (§10.6), with lanes continuous across the viewport
   boundary. To be specified in §6. Pane recomputation must be **asynchronous /
@@ -2288,13 +2376,16 @@ all-normal.
 
 ## 11. Commit view
 
-Choosing **examine commit** from a commit row's `<CR>` menu (§10.4) — the first
-entry on a plain row (cursor on the message, no ref selected), so `<CR><CR>` —
-opens the **commit view**: a read-only view pushed onto the host
-window's navigation stack (§14), showing the full details of that one commit.
+`<CR>` on a commit row opens the **commit view** directly — no menu: a read-only
+view pushed onto the host window's navigation stack (§14), showing the full
+details of that one commit. The commit is the row's own (a §4.2 working-tree
+row included, §11.8), the commit holding the ref selected with `h`/`l`, a
+collapsed head's **tip** (the head's own hash is a synthetic id), or on a packed
+line the selected marker's tip — the **first** marker's when none is selected.
+While a §13 selection is active `<CR>` opens the range view instead (§13.5).
 `<C-o>` returns to the graph; `q` hides the host window (§14.1). Like the
 graph, it is a viewer — it never mutates the repository (§9; checkout, §10.4.1,
-lives in the graph's menu, not here).
+lives in the graph's command palette, not here).
 
 ### 11.1 Data source
 
@@ -2394,7 +2485,7 @@ untracked node reuses the unstaged node's range, having no range of its own).
 
 A range also names the **repository** it belongs to: `root` is the graph's
 repository root (§2.1). Every range gitloom hands the provider carries it — the
-graph's `D`, the action menu, the commit view's action label, and the commit
+graph's `D`, the command palette, the commit view's action label, and the commit
 selection (§13.5) alike — because that root need not be the repository at
 Neovim's cwd: the graph may have been opened on a submodule, through the
 repository picker, on an explicit path, or as a drilled-in submodule frame
@@ -2414,6 +2505,8 @@ selection (§13.5) relies on this: a range whose newer end is a working-tree nod
 emits a single rev for exactly this reason. The `--cached` form is the exception
 that proves it — its head is the **index**, which likewise has no on-disk path, so
 LSP does not attach there either; that is inherent to the index, not a defect.
+**Checkout & examine** (§10.4.2) extends the same trick to any commit or range:
+it checks the newer end out first, then opens a single-rev range on its base.
 
 The provider's `open(range)` is
 called to display it; the default opener runs diffview on `range.rev` **in
@@ -3308,26 +3401,40 @@ beyond merely being the only normal commits among the `◍` heads.
 ## 17. Command palette
 
 `<C-Space>` in the graph buffer opens the **command palette**: a
-`vim.ui.select` picker (the mechanism the `<CR>` action menu uses, §10.4) of the
-commands gitloom can run on the graph as a whole. Many terminals send
-`<C-Space>` as `<C-@>` (the same key as `<Nul>`), so that is mapped too.
+`vim.ui.select` picker that is gitloom's **single action menu**. It lists, in one
+ordered list, the **context** entries first — the actions on the cursor row
+(§10.4: collapse / expand / hide, open diff, checkout, checkout & examine), or,
+while a §13 selection is active, the selection's entries instead — and then the
+**global** commands gitloom can run on the graph as a whole. There is no examine
+entry: `<CR>` examines directly (§11). Many terminals send `<C-Space>` as `<C-@>`
+(the same key as `<Nul>`), so that is mapped too.
 
 ### 17.1 The registry
 
-The palette lists commands from **one registry**. Each entry has:
+The context entries for the cursor row are derived from the row (§10.4) — what
+it is (a plain commit, a selected ref or collapsed head, a packed-marker line),
+its branch state, and whether a diff provider is configured — in the order §10.4
+gives. Everything else comes from **one registry**. Each registry entry has:
 
 - `id` — a stable name (`refresh`, `fetch`, `pull`); a per-remote command's
   entries are `<id>:<remote>` (`fetch:origin`);
 - `label` — what the picker shows;
 - `key` — optional, the direct key that runs the same command; when present the
   picker shows it after the label, e.g. `Refresh  (R)`;
-- `scope` — what the command acts on: `global` (the repository as a whole), or
-  the reserved `commit` / `ref` (a command about the row or the selected ref);
+- `scope` — what the command acts on: `global` (the repository as a whole) or
+  `selection` (the active §13 commit selection);
 - optionally **per-remote** — the entry expands to one entry per remote;
+- optionally a **condition** on the session state the palette is built from
+  (an active examine, a configured diff provider) — the entry is listed only
+  when it holds, and its label may be derived from that state;
 - an **action** run on the graph session.
 
-The palette lists the `global` entries, in registry order. `commit` and `ref`
-are reserved for later; a non-global entry never appears in the global palette.
+The palette lists the context entries — the row's, or while a §13 selection
+is active the `selection` entries in registry order **instead** — then the
+`global` entries, in registry order. The `selection` entries are **Open diff**
+(`D`, the range in the diff provider, §13.5) and **Checkout & examine selection**
+(§10.4.2), both only with a diff provider. Among the globals **Return** (§10.4.2)
+comes first while an examine is active, since it is then the likeliest choice.
 
 **The remote list.** When the graph opens, gitloom runs `git remote` (local, no
 network) asynchronously in the graph's repository root and caches the names, in
@@ -3340,10 +3447,18 @@ first read lands the per-remote entries are simply absent.
 
 | Command | Key | Runs |
 |---|---|---|
+| **Return to `<orig>`** — only while a Checkout & examine (§10.4.2) is active | — | `git switch <orig>` (or `git checkout --detach <hash>`), then `git stash apply <sha>` of the examine's stash if any |
 | **Refresh** | `R` | the in-place resync (§3.4) — exactly the `R` key |
 | **Fetch** | — | `git fetch --all` |
 | **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch <remote>` |
 | **Pull** | — | `git pull --ff-only` |
+
+The `selection` entries (while selecting, with a diff provider):
+
+| Command | Key | Runs |
+|---|---|---|
+| **Open diff** | `D` | the selection's range in the diff provider (§13.5) — exactly `D` |
+| **Checkout & examine selection** | — | Checkout & examine (§10.4.2) of the selection |
 
 There is no per-remote pull: a pull follows the current branch's upstream.
 

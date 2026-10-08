@@ -147,6 +147,26 @@ function span_shape(newer, older)
     return { rev = base.hash .. ".." .. newer.hash, from = base, to = newer }
 end
 
+--- The `DiffRange` Checkout & examine (§10.4.2) opens once `newer` is checked
+--- out: a **single** rev — the base `range_endpoints` would use (the older end's
+--- first parent, the empty tree for a root) — against the **working tree**, so
+--- the provider's right-hand side is the real files on disk and LSP attaches.
+--- The working tree then *is* `newer`, so the patch is the same combined change
+--- as the range view's (merged-in commits included). When `newer` is a §4.2
+--- working-tree node nothing is checked out and the selection's own range is
+--- already single-rev, so this is exactly `range_endpoints`. Pure.
+---@param newer Commit
+---@param older Commit
+---@param root? string   stamped on the range as `root` (§2.1/§11.5)
+---@return DiffRange
+function M.examine_range(newer, older, root)
+    if newer.virtual then return M.range_endpoints(newer, older, root) end
+    local p = (older.parents or {})[1]
+    -- `parents` may still hold a raw hash string before resolution.
+    local rev = (type(p) == "table" and p.hash) or (type(p) == "string" and p) or M.EMPTY_TREE
+    return { rev = rev, from = type(p) == "table" and p or nil, to = "worktree", root = root }
+end
+
 --- The argument list the default provider hands diffview (`diffview.open(args)`,
 --- the Lua entry `:DiffviewOpen` itself calls) for a range (§11.5): `-C<root>`
 --- first, so diffview resolves the rev in the graph's repository rather than the

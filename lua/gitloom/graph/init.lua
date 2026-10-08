@@ -371,7 +371,6 @@ M._internal = {
     collapse_owners = selectm.collapse_owners,
     selected_ref = selectm.selected_ref,
     checkout_spec = selectm.checkout_spec,
-    cr_menu = selectm.cr_menu,
     pin_resolve = selectm.pin_resolve,
     pin_move = selectm.pin_move,
     pin_toggle_reserved = selectm.pin_toggle_reserved,

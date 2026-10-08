@@ -16,9 +16,10 @@ Do NOT duplicate content from these files here. Refer to them instead.
 ## What this is
 
 A read-only git commit-graph viewer for Neovim — it never stages, commits or
-rewrites history by itself; the exceptions are actions the user explicitly picks:
-checkout from the `<CR>` menu (spec §10.4.1) and fetch / pull from the
-`<C-Space>` command palette (§17). `:GitloomGraph` opens a
+rewrites history by itself; the exceptions are actions the user explicitly picks
+from the `<C-Space>` command palette: checkout (spec §10.4.1), checkout & examine
+(§10.4.2 — which may also `git stash push -u` the uncommitted changes, after a
+prompt, and re-apply them on Return) and fetch / pull (§17). `:GitloomGraph` opens a
 floating window showing the commit DAG as a colored, lane-based graph for the
 repo at Neovim's cwd. Part of the loomworks suite, but **standalone** — its
 only third-party dependency is snacks.nvim.
@@ -367,12 +368,14 @@ Coverage:
   (the reported `Failed to parse rev '<hash>^!'`) AND a working-tree range (which
   without `-C` "succeeds" silently in the cwd repository). Views are closed only
   in the final cleanup: closing one between tests races diffview's async load
-- `tests/checkout_spec.lua` — the `<CR>` action menu + checkout (§10.4/§10.4.1):
-  `cr_menu` entry order per row kind (plain → examine, diff, checkout — examine
-  first so `<CR><CR>` is the commit view; a selected branch / collapsed head →
-  collapse|expand, hide, examine, diff, checkout LAST; packed markers → per-marker
-  expand/hide, checkout only with a marker selected; diff only with a provider; no
-  checkout on a §4.2 virtual commit), `selected_ref` (decoration index → local /
+- `tests/checkout_spec.lua` — the palette's row entries + checkout
+  (§10.4/§10.4.1): `palette.row_entries` order per row kind (plain → diff,
+  checkout, checkout & examine — **no examine**, `<CR>` is examine now; a selected
+  branch / collapsed head → collapse|expand, hide, diff, then checkout and
+  checkout & examine of the tip LAST; packed markers → per-marker expand/hide
+  (`expand:<i>`/`hide:<i>`), checkout only with a marker selected, never checkout &
+  examine; diff and checkout & examine only with a provider; no checkout of either
+  kind on a §4.2 virtual commit; no row → nothing), `selected_ref` (decoration index → local /
   remote-only / tag / worktree ref, a branch group preferring its local branch),
   `checkout_spec` (the argv per ref kind — `git switch <name>`, `git switch
   <short>` for a remote, `git checkout --detach <hash>` otherwise, a collapsed
@@ -381,10 +384,14 @@ Coverage:
   a detach land, and a switch over a conflicting dirty file is refused with a
   non-zero code + stderr, HEAD and the file untouched
 - `tests/palette_spec.lua` — the command palette (§17): `palette.palette_entries`
-  (Refresh / Fetch / per-remote Fetch / Pull order, the `  (R)` key suffix, scope
-  filtering — non-global entries never in the global palette — remotes nil / {} /
-  a list giving no / no / one `fetch:<remote>` entry each, actions bound to ctx +
-  remote), `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
+  as ONE ordered list — the context first (the row's entries, or the `selection`
+  entries **instead** while selecting: Open diff `(D)` + Checkout & examine
+  selection, only with a provider), then the globals (Return first, only while an
+  examine is active; Refresh / Fetch / per-remote Fetch / Pull, the `  (R)` key
+  suffix, remotes nil / {} / a list giving no / no / one `fetch:<remote>` entry
+  each); no examine entry; a row entry carries an `op`, a registry entry an
+  `action` (bound to ctx + remote); scope + `when` filtering and function labels
+  on a custom registry; `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
   `git pull --ff-only`, `GIT_TERMINAL_PROMPT=0` in a fresh env table, pull's
   resync-on-failure, never forcing), `remote.parse_remotes` (blank lines, CR), `remote.failure_text`
   (the `fatal:`/`error:` line first, stderr as is, stdout fallback), and
@@ -394,6 +401,28 @@ Coverage:
   branch, a diverged pull refused with HEAD unmoved, pull with
   no upstream failing with a code + stderr (HEAD unmoved), and the env reaching
   the job (a `!echo` alias prints `$GIT_TERMINAL_PROMPT`)
+- `tests/examine_spec.lua` — Checkout & examine (§10.4.2). Pure:
+  `range.examine_range` (ONE rev — the older end's first parent — `to =
+  "worktree"`, `-C<root> <base>` as diffview args; a root older end → the empty
+  tree; a raw-hash parent; a working-tree newer end → exactly `range_endpoints`),
+  `examine_stash_message` (branch vs detached origin), `examine_plan` over clean /
+  dirty × single / range × a working-tree newer end (`open`, no checkout, no
+  stash) × an examine already active (clean: `orig` + stash kept, only `examined`
+  moves, the active state not mutated; dirty: `refuse` "Return to … first" — no
+  stash chain), unknown HEAD refused, never forcing; `return_plan` (branch → `git
+  switch`, detached → `git checkout --detach`, apply by SHA only with a stash, the
+  label); `stash_index` (by SHA, CRLF-safe, nil when absent); the palette entries
+  that reach it. Then the git side against REAL scratch repositories
+  (`fetch.examine_probe` / `examine_run` / `examine_return`): the probe's branch /
+  detached / counts; dirty → stash (`stash@{0}`, the message) → detached checkout
+  → clean tree, then Return → branch, edits AND untracked files restored, stash
+  dropped; clean → no stash, Return switches back; a second examine keeps orig +
+  stash and a dirty one is refused; a conflicting apply KEEPS the stash (HEAD back
+  on the branch); a failed switch stops before the apply; a checkout failing after
+  the stash re-applies it (clean → dropped); and drop-by-SHA leaves another
+  session's stashes — one below AND one pushed on top meanwhile — alone. Plus,
+  with diffview in the lazy dir (`pending` otherwise), the single-rev open's right
+  side is `RevType.LOCAL` and the left `COMMIT`
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
   the three nodes staged / unstaged / untracked (spec §3.3/§4.2/§11.8):
   `parse_status` (the `git status --porcelain` staged/unstaged/untracked counter —
@@ -722,7 +751,8 @@ owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
 `pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
 `reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), `smartcase_match` /
 `filter_keep` (the filter-search matcher + keep-set; §16.2), and `selected_ref` /
-`checkout_spec` / `cr_menu` (the `<CR>` menu + checkout; §10.4/§10.4.1).
+`checkout_spec` (checkout; §10.4/§10.4.1 — the row entries themselves are
+`require("gitloom.graph.palette").row_entries`).
 `window._internal` additionally exposes `effective_pins` / `effective_pinned`,
 `pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live
 graph session, recorded by `open_graph`. The headless smoke test reads the
@@ -1012,8 +1042,8 @@ Details not covered by the spec or architecture:
   (the projection) as what the listview renders and `order_at`/`mark_reachable`
   index; `reflow()` rebuilds it and swaps via `controller.set_items`. With
   all-normal modes the projection is the identity, so `repo.display == repo.order`
-  and streaming keeps its fast incremental path. `<CR>` cycles a selected ref's
-  mode / expands a head; signatures are cached across mode toggles (§10.5).
+  and streaming keeps its fast incremental path. `<Space>` and the palette's row
+  entries set a branch's mode; signatures are cached across mode toggles (§10.5).
 - **First-parent focus** (`opts.collapse_merged`, default on; spec §10.7, toggled
   by `c`): `view.owners(items, ref_owners, pinned, modes, cm)` builds the owner
   set so **every** owner is **first-parent-only** (`fp_only`) — each covers only
@@ -1027,7 +1057,7 @@ Details not covered by the spec or architecture:
   drag in the earlier branches its history merged through (spec §10.2). It is a
   recomputed default, not a seed: `view_state.modes` holds only explicit user
   mode overrides, `view_state.effective` the resolved mode per owner (drives the
-  `<CR>` cycle's starting point and the footer `focus` indicator). The
+  `<Space>` toggle's starting point and the footer `focus` indicator). The
   stream-completion handler calls `reflow()` so the default applies on open.
 - **Signatures are interned, not materialised** (`graph/sigset.lua`, §10.2): the
   cost of the projection tracks a repository's **merge density**, not its size. An
@@ -1138,43 +1168,76 @@ Details not covered by the spec or architecture:
   the commit's signature (`collapse_owners`) into `{state, owners, follow,
   commit}`. `<Tab>` is the 2-state collapse⇄expand toggle (`set_branch` flips the
   owners, reflows, then `goto_hash` repositions the cursor on the result so it is
-  repeatable). `<CR>` always opens the action menu (`vim.ui.select`), whose
-  entries come from the pure `select.cr_menu(row)` — `h_cr` only classifies the
-  row and maps each entry's `action` to its glue. A normal commit row with **no
-  ref selected** (cursor on the message) is the `plain` kind: examine (first, so
-  `<CR><CR>` is the old direct commit view, §11.1), diff, checkout. A ref
-  selected with `h`/`l` or a **collapsed head** is `branch` (collapse / expand /
-  hide, examine, diff, checkout last); a **packed-marker row** is `markers`
-  (expand/hide per marker by name, then checkout of the selected marker's tip).
-  The plain-vs-branch split keys off `selection_state.index` (the h/l ref
-  selection). **Checkout** (§10.4.1, the one repository-mutating action) is
+  repeatable). `<CR>` is **examine, never a menu** (`h_cr`): the commit view of
+  the row's commit — `select.menu_target` maps a collapsed head to its `tip`, a
+  packed-marker line uses the selected marker's tip (the **first** marker's when
+  none is selected), and while a §13 selection is active it is the range view.
+  Every other row action moved to the `<C-Space>` palette (below), which is now the
+  single action menu: `ctx:palette()` classifies the row as `<CR>` used to — a
+  normal commit row with **no ref selected** (cursor on the message) is `plain`
+  (diff, checkout, checkout & examine); a ref selected with `h`/`l` or a
+  **collapsed head** is `branch` (collapse / expand / hide, diff, checkout,
+  checkout & examine last); a **packed-marker row** is `markers` (expand/hide per
+  marker by name, then checkout of the selected marker's tip) — keyed off
+  `selection_state.index` (the h/l ref selection), and the pure
+  `palette.row_entries(row, has_diff)` returns those entries, each with an `op`
+  the palette helper maps to its glue. **Checkout** (§10.4.1) is
   `select.checkout_spec(commit, select.selected_ref(commit, index))` → `git switch
   <local>` / `git switch <short>` for a remote (git's DWIM) / `git checkout
   --detach <hash>`; never forced, none for a §4.2 virtual commit, and a collapsed
-  head resolves to its `tip` (its own hash is a synthetic `collapsed:` id — the
-  menu's examine/diff now resolve it the same way). It runs through
+  head resolves to its `tip` (its own hash is a synthetic `collapsed:` id —
+  `<CR>` and the diff entry resolve it the same way). It runs through  menu's examine/diff now resolve it the same way). It runs through
   `git.run_checkout(argv, repo.root)` (`git_code` with an explicit cwd, so a
   submodule graph checks out in the submodule); a non-zero exit is one
   `format_git_error` line at ERROR, success runs `ctx:resync(false)` (the `R`
   path).
-- **Command palette** (spec §17, `<C-Space>` + `<C-@>`, which many terminals send
-  for it — `<C-@>` and `<Nul>` are one key code): `graph/palette.lua` is the one
-  registry (`COMMANDS`: `{ id, label, key?, scope, per_remote?, action(ctx,
-  remote?) }`) and `palette_entries(scope, remotes)` the pure builder (scope
-  filter, `  (key)` suffix, a `per_remote` entry expanded per cached remote as
-  `fetch:<remote>`). Only `global` is used; `commit`/`ref` are reserved. The glue
-  is two `GRAPH_HELPERS` fields (window.lua's local ceiling): `palette` (a
-  `vim.ui.select` built from `ctx.remotes` only — never waits) and `run_remote`
-  (`git.remote_command` → `git.run_remote(argv, repo.root, env)`, the
-  `run_checkout` shape with an env: `GIT_TERMINAL_PROMPT=0`; `ctx.remote_busy`
-  refuses a second run; success → INFO + resync, failure → `format_git_error`
-  over `remote.failure_text` (git's `fatal:`/`error:` line first, stdout when
-  stderr is empty) + resync for a pull only).
+- **Command palette = the action menu** (spec §17, `<C-Space>` + `<C-@>`, which
+  many terminals send for it — `<C-@>` and `<Nul>` are one key code):
+  `palette_entries(info)` is the pure builder over ONE snapshot (`row`,
+  `selection`, `remotes`, `examine`, `has_diff`; `commands` a test seam) and
+  returns one ordered list — the **context** first (`row_entries(row)`, or the
+  registry's `selection` entries instead while a §13 selection is active), then the
+  registry's `global` entries. The registry (`COMMANDS`: `{ id, label (string or
+  fun(state)), key?, scope, per_remote?, when?(state), action(ctx, remote?) }`) is
+  filtered by scope and `when`, gets the `  (key)` suffix, and expands a
+  `per_remote` entry per cached remote as `fetch:<remote>`. Registry entries carry
+  an `action`; row entries an `op` the window runs against the row it resolved.
+  The glue is `GRAPH_HELPERS` fields (window.lua's local ceiling): `palette` (row
+  classification + a `vim.ui.select` built from cached state only — never waits)
+  and `run_remote` (`git.remote_command` → `git.run_remote(argv, repo.root, env)`,
+  the `run_checkout` shape with an env: `GIT_TERMINAL_PROMPT=0`;
+  `ctx.remote_busy` refuses a second run; success → INFO + resync, failure →
+  `format_git_error` over `remote.failure_text` (git's `fatal:`/`error:` line
+  first, stdout when stderr is empty) + resync for a pull only).
   `ctx.remotes` comes from `load_remotes` (`git remote`, async) at session
   assembly and at the top of every `resync`. Pull's argv is exactly `git pull
   --ff-only`, which overrides any `pull.rebase` / `pull.ff` config, so it never
   merges or rebases; a failed pull still resyncs (its fetch half may have moved
   remote-tracking refs).
+- **Checkout & examine** (spec §10.4.2): check a commit (or a §13 selection's
+  newest end) out detached and open diffview on ONE rev — the older end's first
+  parent, the empty tree for a root (`range.examine_range`) — so the right side is
+  `RevType.LOCAL`, the files on disk, and LSP attaches; a working-tree newer end
+  checks nothing out and opens its existing single-rev range. Three layers: the
+  pure plans in `git/examine.lua` (`examine_plan` → `open` / `refuse` /
+  `checkout`; `examine_stash_message`; `return_plan`; `stash_index`), the git side
+  in `fetch.lua` (`examine_probe`, `examine_run`, `examine_return`, `drop_stash` —
+  all `git_code` in `repo.root`), and the window glue `GRAPH_HELPERS.examine` /
+  `examine_selection` / `examine_return` (dirty prompt, notices, provider, resync;
+  `ctx.remote_busy` shared with fetch / pull). **The state lives in
+  `nav.examine[root]`**, the module-level table already holding the host
+  registry, so it survives closing and reopening the graph — a field rather than
+  a new local because window.lua is at the 200-local ceiling. **The stash is
+  shared with every worktree and session**, so it is never addressed by position:
+  `examine_run` reads `stash@{0}` before AND after the push (unchanged ⇒ nothing
+  was stashed, e.g. only a dirty submodule, rather than adopting someone else's
+  stash), Return applies by SHA, and `drop_stash` re-derives `stash@{n}` from
+  `git stash list --format=%H` right before dropping. No stash chain: a second
+  examine while one is active keeps `orig` + the stash and only moves `examined`,
+  and on a dirty tree is refused ("Return first"). Return clears the state only
+  after a successful switch + apply; a failed switch keeps it (retry), a failed
+  apply clears it but keeps the stash and names it. The stash is applied without
+  `--index`, so staged changes come back unstaged.
 - **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
   recompute from the visible range each scroll, so a varying column bounces. A
   column can *only grow* (never shrink): `col_max` (a per-column cap, implies

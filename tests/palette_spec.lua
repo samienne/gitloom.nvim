@@ -1,6 +1,9 @@
---- Tests for the command palette (spec §17): the pure registry → entries builder
---- (`palette.palette_entries` — order, key-suffixed labels, scope filtering, the
---- per-remote Fetch expansion for remotes = nil / {} / a list), the remote argv +
+--- Tests for the command palette (spec §17): the pure entries builder
+--- (`palette.palette_entries` — ONE ordered list, the context first (the row's
+--- entries, or the §13 selection's instead while selecting) then the global
+--- commands, key-suffixed labels, no examine entry, Return only while an examine
+--- is active, the per-remote Fetch expansion for remotes = nil / {} / a list,
+--- registry conditions), the remote argv +
 --- env builder (`remote.remote_command` — fetch --all, fetch <remote>, pull
 --- --ff-only, GIT_TERMINAL_PROMPT=0, never forcing), the `git remote` parse
 --- (`remote.parse_remotes`), the failure text (`remote.failure_text`), and
@@ -39,25 +42,48 @@ local function labels(entries)
 end
 
 describe("palette_entries (§17.1)", function()
+    local H = ("a"):rep(40)
+    local plain = { kind = "plain", commit = { hash = H, refs = {} } }
+
     it("lists Refresh, Fetch, Pull in order, the key shown after the label", function()
-        local e = palette.palette_entries("global")
+        local e = palette.palette_entries({})
         assert.same({ "refresh", "fetch", "pull" }, ids(e))
         assert.same({ "Refresh  (R)", "Fetch", "Pull" }, labels(e))
-    end)
-
-    it("defaults to the global scope", function()
-        assert.same(ids(palette.palette_entries("global")), ids(palette.palette_entries()))
+        assert.same(ids(e), ids(palette.palette_entries()))
     end)
 
     it("has no per-remote entries while the remote list is unknown or empty", function()
-        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries("global", nil)))
-        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries("global", {})))
+        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries({ remotes = nil })))
+        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries({ remotes = {} })))
     end)
 
     it("expands Fetch <remote> per remote, in git remote order, before Pull", function()
-        local e = palette.palette_entries("global", { "origin", "upstream" })
+        local e = palette.palette_entries({ remotes = { "origin", "upstream" } })
         assert.same({ "refresh", "fetch", "fetch:origin", "fetch:upstream", "pull" }, ids(e))
         assert.same({ "Refresh  (R)", "Fetch", "Fetch origin", "Fetch upstream", "Pull" }, labels(e))
+    end)
+
+    it("puts the row's entries FIRST, then the global commands; no examine entry", function()
+        local e = palette.palette_entries({ row = plain, has_diff = true, remotes = { "origin" } })
+        assert.same({ "diff", "checkout", "checkout_examine",
+            "refresh", "fetch", "fetch:origin", "pull" }, ids(e))
+        for _, x in ipairs(e) do assert.is_true(x.id ~= "examine") end
+    end)
+
+    it("while selecting, the selection's entries replace the row's", function()
+        local e = palette.palette_entries({ row = plain, selection = true, has_diff = true })
+        assert.same({ "selection_diff", "examine_selection", "refresh", "fetch", "pull" }, ids(e))
+        assert.same({ "Open diff  (D)", "Checkout & examine selection" }, { e[1].label, e[2].label })
+        -- Without a diff provider the selection has no entries of its own.
+        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries({ row = plain, selection = true })))
+    end)
+
+    it("lists Return first among the globals, only while an examine is active", function()
+        local st = { orig = "main", detached = false, examined = H }
+        local e = palette.palette_entries({ row = plain, examine = st })
+        assert.same({ "checkout", "return", "refresh", "fetch", "pull" }, ids(e))
+        assert.equals("Return to main", e[2].label)
+        assert.same({ "checkout", "refresh", "fetch", "pull" }, ids(palette.palette_entries({ row = plain })))
     end)
 
     it("binds each action to the session (and a per-remote one to its remote)", function()
@@ -66,21 +92,32 @@ describe("palette_entries (§17.1)", function()
             resync = function(_, silent) calls[#calls + 1] = { "resync", silent } end,
             run_remote = function(_, kind, r) calls[#calls + 1] = { kind, r } end,
         }
-        for _, e in ipairs(palette.palette_entries("global", { "origin" })) do e.action(ctx) end
+        for _, e in ipairs(palette.palette_entries({ remotes = { "origin" } })) do e.action(ctx) end
         assert.same({ { "resync", false }, { "fetch" }, { "fetch", "origin" }, { "pull" } }, calls)
     end)
 
-    it("excludes non-global entries from the global palette", function()
+    it("row entries carry an op (run by the window), registry entries an action", function()
+        for _, e in ipairs(palette.palette_entries({ row = plain, has_diff = true })) do
+            assert.is_true((e.op ~= nil) ~= (e.action ~= nil))
+        end
+    end)
+
+    it("filters the registry by scope and condition", function()
         local noop = function() end
         local cmds = {
             { id = "a", label = "A", scope = "global", action = noop },
-            { id = "b", label = "B", key = "x", scope = "commit", action = noop },
-            { id = "c", label = "C", scope = "ref", action = noop },
-            { id = "d", label = "D %s", scope = "ref", per_remote = true, action = noop },
+            { id = "b", label = "B", key = "x", scope = "selection", action = noop },
+            { id = "c", label = function(st) return "C " .. st.examine.orig end, scope = "global",
+                when = function(st) return st.examine ~= nil end, action = noop },
+            { id = "d", label = "D %s", scope = "selection", per_remote = true, action = noop },
         }
-        assert.same({ "a" }, ids(palette.palette_entries("global", { "o" }, cmds)))
-        assert.same({ "B  (x)" }, labels(palette.palette_entries("commit", { "o" }, cmds)))
-        assert.same({ "c", "d:o" }, ids(palette.palette_entries("ref", { "o" }, cmds)))
+        assert.same({ "a" }, ids(palette.palette_entries({ remotes = { "o" }, commands = cmds })))
+        assert.same({ "b", "d:o", "a" },
+            ids(palette.palette_entries({ selection = true, remotes = { "o" }, commands = cmds })))
+        assert.same({ "B  (x)", "D o", "A" },
+            labels(palette.palette_entries({ selection = true, remotes = { "o" }, commands = cmds })))
+        assert.same({ "A", "C x" },
+            labels(palette.palette_entries({ examine = { orig = "x", detached = false, examined = "h" }, commands = cmds })))
     end)
 end)
 

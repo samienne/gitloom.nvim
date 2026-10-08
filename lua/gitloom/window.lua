@@ -98,7 +98,12 @@ local recent_refs = {}
 -- already in the registry re-shows its window rather than stacking a new one.
 -- A single module-level table so `M.open` references just one upvalue (it sits at
 -- LuaJIT's 60-upvalue ceiling — see open_graph).
-local nav = { sessions = {}, mru = {} }
+-- `examine[root]` is the repository's active Checkout & examine (§10.4.2, an
+-- `ExamineState`): where Return goes back to and the stash it re-applies. Kept
+-- here, not on a ctx, so it survives closing and reopening the graph (like
+-- saved_positions; in-memory for the Neovim session). Also here rather than as its
+-- own local: this chunk is at LuaJIT's 200-local limit.
+local nav = { sessions = {}, mru = {}, examine = {} }
 
 function nav.valid(sess)
     return sess ~= nil and sess.host ~= nil and sess.host.buf ~= nil
@@ -372,7 +377,7 @@ local KEYBINDS = {
     { "M", "Toggle mirroring (lane 1 on the right)" },
     { "B", "Cycle ref label placement (right / inline / own line)" },
     { "<Space>", "Collapse / expand the branch under the cursor (toggle)" },
-    { "<CR>", "Open the commit view (on the message); action menu when a ref is selected / on a head" },
+    { "<CR>", "Open the commit view (a head / packed marker: its tip; selecting: the range)" },
     { "D", "Open the commit's diff (external viewer)" },
     { "d", "Toggle absolute / relative dates" },
     { "h/l", "Select previous / next ref (switch branch while selecting)" },
@@ -383,7 +388,7 @@ local KEYBINDS = {
     { "L", "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "R", "Resync with the repository (refs + new commits + working tree)" },
-    { "<C-Space>", "Command palette: refresh / fetch / pull (also <C-@>)" },
+    { "<C-Space>", "Command palette: row / selection actions, then refresh / fetch / pull / return (also <C-@>)" },
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "<leader>gl", "Search commits by subject / author (picker; :GitloomSearch)" },
@@ -2014,6 +2019,7 @@ local function open_selection_diff(ctx)
     local r = ctx:selection_range()
     if r then open(r) end
 end
+GRAPH_HELPERS.open_selection_diff = open_selection_diff
 
 -- <CR> while selecting (§13.5): open the commit view in range mode — the selected
 -- commit list + the combined range diff/diffstat.
@@ -2296,80 +2302,26 @@ local function h_space(ctx)
     end
 end
 
--- <CR>: the row's action menu (§10.4). On a plain commit row: examine (first, so
--- <CR><CR> opens the commit view, §11.1), diff, checkout; with a ref selected, on
--- a collapsed head or a packed-marker line: collapse/expand/hide, examine, diff,
--- checkout last (§10.4.1). The entries come from the pure `selectm.cr_menu`.
+-- <CR>: examine — the commit view (§11.1) of the row's commit, never a menu: a
+-- plain row's commit (a §4.2 working-tree row included), the commit holding the
+-- ref selected with h/l, a collapsed head's tip, a packed line's selected marker's
+-- tip (the first marker when none is selected). While selecting, the range commit
+-- view (§13.5). Every other row action is in the <C-Space> palette (§17).
 local function h_cr(ctx)
     if ctx.sel.active then open_selection_view(ctx); return end
-    local line = vim.api.nvim_win_get_cursor(ctx:win() --[[@as integer]])[1]
-    local item = ctx:order_at(line)
+    local w = ctx:win()
+    if not w then return end
+    local item = ctx:order_at(vim.api.nvim_win_get_cursor(w)[1])
     if not item then return end
-    local selection_state, opts, repo = ctx.selection_state, ctx.opts, ctx.repo
-    local has_diff = (opts.diff and opts.diff.open) and true or false
-    local ref_selected = selection_state.commit == item.commit and selection_state.index ~= nil
-    local row, b, units
+    local c
     if item.type == "markers" then
-        units = marker_units(item)
-        local texts = {}
-        for i, u in ipairs(units) do texts[i] = u.text end
-        b = ctx:branch_under_cursor(line)
-        row = { kind = "markers", markers = texts, commit = b and b.commit }
-    elseif item.commit and not item.commit.collapsed and not ref_selected then
-        row = { kind = "plain", commit = item.commit, has_diff = has_diff }
+        local units, st = marker_units(item), ctx.selection_state
+        local u = (st.commit == item and st.index and units[st.index]) or units[1]
+        c = u and u.marker.tip
     else
-        b = ctx:branch_under_cursor(line)
-        if not b then return end
-        row = { kind = "branch", state = b.state, commit = b.commit, has_diff = has_diff,
-            ref = ref_selected and selectm.selected_ref(item.commit, selection_state.index) or nil }
+        c = selectm.menu_target(item.commit)
     end
-    local function owners_of(u)
-        local owners = {}
-        for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
-        return owners
-    end
-    local function checkout(spec)
-        git.run_checkout(spec.argv, repo.root).next(function(res)
-            vim.schedule(function()
-                if res.code ~= 0 then
-                    vim.notify(git.format_git_error(table.concat(spec.argv, " ", 1, 2), res),
-                        vim.log.levels.ERROR)
-                    return
-                end
-                ctx:resync(false)
-            end)
-        end)
-    end
-    local function run(e)
-        if e.action == "examine" then
-            open_commit_view(opts, e.commit, nil, repo.root)
-        elseif e.action == "diff" then
-            open_diff(opts, e.commit, repo.root)
-        elseif e.action == "checkout" then
-            checkout(e.checkout)
-        elseif e.marker then
-            local u = units[e.marker]
-            if e.action == "expand" then
-                ctx:set_branch({ owners = owners_of(u) }, "normal", u.marker.tip and u.marker.tip.hash)
-            else
-                ctx:set_branch({ owners = owners_of(u) }, "hidden", nil)
-            end
-        elseif e.action == "collapse" then
-            ctx:set_branch(b, "collapsed", b.follow)
-        elseif e.action == "expand" then
-            ctx:set_branch(b, "normal", b.follow)
-        elseif e.action == "hide" then
-            ctx:set_branch(b, "hidden", nil)
-        end
-    end
-    local actions = selectm.cr_menu(row)
-    if #actions == 0 then return end
-    vim.ui.select(actions, {
-        prompt = "gitloom",
-        format_item = function(a) return a.label end,
-    }, function(choice)
-        if choice then run(choice) end
-    end)
+    if c then open_commit_view(ctx.opts, c, nil, ctx.repo.root) end
 end
 
 -- D: external diff of the commit, or (selecting) the range (§11.5/§13.5).
@@ -2416,20 +2368,93 @@ end
 -- R: resync with the repository (§3.4).
 local function h_resync(ctx) ctx:resync(false) end
 
--- <C-Space> / <C-@>: the command palette (§17) — the global entries of the pure
--- registry (`gitloom.graph.palette`) in a `vim.ui.select`, like the <CR> menu.
+-- <C-Space> / <C-@>: the command palette (§17) — gitloom's single action menu.
+-- Classifies the cursor row (plain / branch / markers, as `<CR>`'s old menu did)
+-- and hands it, with the §13 selection flag, the cached remotes and the examine
+-- state, to the pure `palette.palette_entries`: the context entries first, then
+-- the global commands, in a `vim.ui.select`. A registry entry runs its own
+-- `action`; a row entry's `op` is run here against the row resolved now.
 -- A GRAPH_HELPERS field, not a module local: this chunk is at LuaJIT's 200-local
 -- limit (see CLAUDE.md), and the palette module is required here for the same reason.
 GRAPH_HELPERS.palette = function(ctx)
-    -- Built from the cached remote list only (nil until `load_remotes` lands, so
-    -- no per-remote entries yet) — the palette never waits on git.
-    local entries = require("gitloom.graph.palette").palette_entries("global", ctx.remotes)
+    local opts, repo = ctx.opts, ctx.repo
+    local has_diff = (opts.diff and opts.diff.open) and true or false
+    local row, b, units
+    local w = ctx:win()
+    if w and not ctx.sel.active then
+        local line = vim.api.nvim_win_get_cursor(w)[1]
+        local item = ctx:order_at(line)
+        local st = ctx.selection_state
+        local ref_selected = item and st.commit == item.commit and st.index ~= nil
+        if item and item.type == "markers" then
+            units = marker_units(item)
+            local texts = {}
+            for i, u in ipairs(units) do texts[i] = u.text end
+            b = ctx:branch_under_cursor(line)
+            row = { kind = "markers", markers = texts, commit = b and b.commit }
+        elseif item and item.commit and not item.commit.collapsed and not ref_selected then
+            row = { kind = "plain", commit = item.commit }
+        elseif item then
+            b = ctx:branch_under_cursor(line)
+            if b then
+                row = { kind = "branch", state = b.state, commit = b.commit,
+                    ref = ref_selected and selectm.selected_ref(item.commit, st.index) or nil }
+            end
+        end
+    end
+    -- Built from cached state only (the remote list is nil until `load_remotes`
+    -- lands, so no per-remote entries yet) — the palette never waits on git.
+    local entries = require("gitloom.graph.palette").palette_entries({
+        row = row, selection = ctx.sel.active, remotes = ctx.remotes,
+        examine = nav.examine[repo.root], has_diff = has_diff,
+    })
     if #entries == 0 then return end
+    local function owners_of(u)
+        local owners = {}
+        for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
+        return owners
+    end
+    local function checkout(spec)
+        git.run_checkout(spec.argv, repo.root).next(function(res)
+            vim.schedule(function()
+                if res.code ~= 0 then
+                    vim.notify(git.format_git_error(table.concat(spec.argv, " ", 1, 2), res),
+                        vim.log.levels.ERROR)
+                    return
+                end
+                ctx:resync(false)
+            end)
+        end)
+    end
+    local function run(e)
+        if e.action then e.action(ctx); return end
+        local op = e.op
+        if op == "diff" then
+            open_diff(opts, e.commit, repo.root)
+        elseif op == "checkout" then
+            checkout(e.checkout)
+        elseif op == "checkout_examine" then
+            ctx:examine(e.commit, e.commit)
+        elseif e.marker then
+            local u = units[e.marker]
+            if op == "expand" then
+                ctx:set_branch({ owners = owners_of(u) }, "normal", u.marker.tip and u.marker.tip.hash)
+            else
+                ctx:set_branch({ owners = owners_of(u) }, "hidden", nil)
+            end
+        elseif op == "collapse" then
+            ctx:set_branch(b, "collapsed", b.follow)
+        elseif op == "expand" then
+            ctx:set_branch(b, "normal", b.follow)
+        elseif op == "hide" then
+            ctx:set_branch(b, "hidden", nil)
+        end
+    end
     vim.ui.select(entries, {
         prompt = "gitloom",
         format_item = function(e) return e.label end,
     }, function(choice)
-        if choice then choice.action(ctx) end
+        if choice then run(choice) end
     end)
 end
 
@@ -2470,6 +2495,146 @@ GRAPH_HELPERS.run_remote = function(ctx, kind, remote)
                     vim.log.levels.ERROR)
             end
             if ok or cmd.resync_on_failure then ctx:resync(false) end
+        end)
+    end)
+end
+
+-- ── Checkout & examine (§10.4.2) — window glue. The decisions are the pure
+-- `gitloom.git.examine` plans, the git side `fetch.examine_probe/_run/_return`;
+-- these prompt, notify, open the provider, keep `nav.examine[root]` and resync.
+-- One at a time per session, sharing `ctx.remote_busy` with fetch / pull (both
+-- move HEAD or the working tree). `resync` returns early once the graph window is
+-- gone (§14), so a job finishing after a close changes nothing on screen.
+
+-- A failed step as one line: git's fatal:/error: line first (§17.3's formatting).
+GRAPH_HELPERS.git_failure = function(_, label, res)
+    return git.format_git_error(label, { code = res.code, err = git.failure_text(res.out, res.err) })
+end
+
+-- Check `newer` out (detached) and open the single-rev range on `older`'s base
+-- (§10.4.2); a dirty tree asks before stashing. `newer == older` for one commit.
+GRAPH_HELPERS.examine = function(ctx, newer, older)
+    local open = ctx.opts.diff and ctx.opts.diff.open
+    if not open then
+        vim.notify("gitloom: no diff provider configured (set diff.open)", vim.log.levels.WARN)
+        return
+    end
+    local root = ctx.repo.root
+    if newer.virtual then
+        -- The working tree already is the newer end: nothing to check out.
+        local plan = git.examine_plan({ newer = newer, older = older, root = root })
+        if plan.range then open(plan.range) end
+        return
+    end
+    if ctx.remote_busy then
+        vim.notify(("gitloom: %s is still running"):format(ctx.remote_busy), vim.log.levels.WARN)
+        return
+    end
+    ctx.remote_busy = "checkout & examine"
+    local function done() ctx.remote_busy = nil end
+    git.examine_probe(root).next(function(probe)
+        vim.schedule(function()
+            if probe.err then
+                done()
+                vim.notify(ctx:git_failure("git status", probe.err), vim.log.levels.ERROR)
+                return
+            end
+            local plan = git.examine_plan({ newer = newer, older = older, status = probe.status,
+                head = probe.head, state = nav.examine[root], root = root })
+            if plan.kind ~= "checkout" then
+                done()
+                if plan.kind == "refuse" then
+                    vim.notify(plan.reason, vim.log.levels.WARN)
+                elseif plan.range then
+                    open(plan.range)
+                end
+                return
+            end
+            local short = newer.hash:sub(1, 7)
+            local function go()
+                git.examine_run(plan, root).next(function(r)
+                    vim.schedule(function()
+                        done()
+                        if r.ok then
+                            local st = plan.state --[[@as ExamineState]]
+                            if plan.stash then
+                                -- Nothing actually stashed (e.g. only a dirty submodule).
+                                st.stash = r.stash
+                                if not r.stash then st.stash_message = nil end
+                            end
+                            nav.examine[root] = st
+                            ctx:resync(false)
+                            open(plan.range)
+                            vim.notify(("gitloom: examining %s — %s from the palette (<C-Space>)")
+                                :format(short, git.return_plan(st).label), vim.log.levels.INFO)
+                            return
+                        end
+                        if r.stage == "stash" then
+                            vim.notify(ctx:git_failure("git stash push", r.res), vim.log.levels.ERROR)
+                            return
+                        end
+                        local msg = ctx:git_failure("git checkout", r.res)
+                        if r.stash then
+                            msg = msg .. (r.restored and " — your changes were restored"
+                                or (" — re-applying the stash failed; it was kept: %s")
+                                    :format(plan.stash.message))
+                            ctx:resync(false) -- the working tree went through the stash
+                        end
+                        vim.notify(msg, vim.log.levels.ERROR)
+                    end)
+                end)
+            end
+            if not plan.stash then go(); return end
+            local n = plan.stash.count
+            local choices = { ("Stash %d change%s and continue"):format(n, n == 1 and "" or "s"), "Cancel" }
+            vim.ui.select(choices, {
+                prompt = ("gitloom: the working tree is dirty — examine %s"):format(short),
+            }, function(_, idx)
+                if idx == 1 then go() else done() end
+            end)
+        end)
+    end)
+end
+
+-- Checkout & examine the active §13 selection (the palette's `selection` scope):
+-- its newest .. oldest real ends, as the range view and `D` use them (§13.5).
+GRAPH_HELPERS.examine_selection = function(ctx)
+    local p = ctx.sel.path
+    if not (p and #p > 0) then return end
+    local newer, older = real_newest(p[1]), real_oldest(ctx, p[#p])
+    if newer and older then ctx:examine(newer, older) end
+end
+
+-- Return (§10.4.2): switch back to `orig`, re-apply the examine's stash by SHA
+-- (dropped only after a clean apply). A failed switch keeps the state (retry); a
+-- failed apply keeps the stash, names it, and clears the state.
+GRAPH_HELPERS.examine_return = function(ctx)
+    local root = ctx.repo.root
+    local st = nav.examine[root]
+    if not st then return end
+    if ctx.remote_busy then
+        vim.notify(("gitloom: %s is still running"):format(ctx.remote_busy), vim.log.levels.WARN)
+        return
+    end
+    local rp = git.return_plan(st)
+    ctx.remote_busy = rp.label
+    git.examine_return(rp, root).next(function(r)
+        vim.schedule(function()
+            ctx.remote_busy = nil
+            if not r.ok and r.stage == "switch" then
+                vim.notify(ctx:git_failure(table.concat(rp.switch, " ", 1, 2), r.res), vim.log.levels.ERROR)
+                return -- HEAD did not move: keep the state so Return can be retried
+            end
+            nav.examine[root] = nil
+            if r.ok then
+                vim.notify("gitloom: back on " .. (st.detached and st.orig:sub(1, 7) or st.orig)
+                    .. (rp.apply and ", changes restored" or ""), vim.log.levels.INFO)
+            else
+                vim.notify(ctx:git_failure("git stash apply", r.res)
+                    .. (" — the stash was kept: %s"):format(rp.stash_message or rp.stash),
+                    vim.log.levels.ERROR)
+            end
+            ctx:resync(false)
         end)
     end)
 end
@@ -3848,7 +4013,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field filter? { query: string, keep: table<string,boolean>, current?: string }  in-graph filter-search (§16); nil = none
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
     ---@field remotes? string[]     `git remote` names for the palette (§17.1); nil until the first read lands
-    ---@field remote_busy? string   the palette fetch / pull running now (its `git fetch` label), nil when idle (§17.3)
+    ---@field remote_busy? string   the palette fetch / pull, examine or Return running now (its label), nil when idle (§17.3, §10.4.2)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     --- == debounce state (Phase B4) ==
     ---@field reflow_gen? integer  async-reflow generation (§10.5): a newer reflow
@@ -3898,6 +4063,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field resync fun(self:GraphCtx, silent:boolean?)
     ---@field palette fun(self:GraphCtx)  the command palette (§17)
     ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
+    ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
+    ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
+    ---@field examine_selection fun(self:GraphCtx)  Checkout & examine the §13 selection
+    ---@field open_selection_diff fun(self:GraphCtx)  the selection range in the diff provider (§13.5)
+    ---@field examine_return fun(self:GraphCtx)  Return from an examine (§10.4.2)
     ---@field load_remotes fun(self:GraphCtx)  refresh `remotes` from `git remote` (§17.1)
     ---@field refresh_worktree fun(self:GraphCtx, silent:boolean?)
     --- == debounce schedulers (Phase B4; attached from GRAPH_HELPERS) ==

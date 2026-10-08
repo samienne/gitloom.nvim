@@ -150,7 +150,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
-| `<CR>` | Action menu. On a commit's message: examine (first, so `<CR><CR>` opens the commit view) / diff / checkout commit. With a ref selected, on a collapsed head, or a packed marker line: collapse / expand / hide / examine / diff / checkout. Checkout switches to the selected branch (`git switch`), else detaches at the commit; it never forces, shows git's error on failure, and resyncs on success |
+| `<CR>` | Examine — open the **commit view** of the row's commit (a collapsed head or a packed marker: its tip — the selected marker's, else the first; while selecting: the range view). Every other row action is in the `<C-Space>` palette |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row — on a packed marker line, the previous / next collapsed head, with the reachability emphasis following it (switch the followed branch while selecting) |
@@ -161,7 +161,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `L` | **Pinned branches** — a dialog listing the pinned branches in priority order: `<C-j>`/`<C-k>` reorder, `<Space>` flags a branch for a dedicated graph lane, `D` unpins, `<CR>` jumps to a branch, the last row adds one via the ref picker, `q` closes |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
-| `<C-Space>` | **Command palette** (also `<C-@>`, what many terminals send) — refresh / fetch / pull; see below |
+| `<C-Space>` | **Command palette** (also `<C-@>`, what many terminals send) — the single action menu: the row's actions first (collapse / expand / hide / diff / checkout / checkout & examine; the selection's while `V` is active), then refresh / fetch / pull / return; see below |
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, linked-worktree HEADs (`wt:<dir>`) and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `<leader>gl` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
@@ -180,14 +180,15 @@ commit's history — no ref needed, so they work for ref-less regions too
 
 - `<Space>` toggles **collapse ⇄ expand** in place; the cursor follows the
   result, so holding `<Space>` flips a branch open and closed.
-- `<CR>` opens an **action menu** for the row. On the message it is examine
-  commit (first, so `<CR><CR>` opens the commit view), open diff, checkout; with a
-  ref selected, on a collapsed head, or a packed marker line it is collapse,
-  expand, **hide**, examine commit, open diff — most-relevant first — then
-  **checkout** last.
-  On a packed line it lists every marker by name, so any branch is reachable even
-  when labels overflow.
-- `h`/`l` selects a ref (or a marker on a packed line) for the toggle/menu to
+- `<C-Space>` opens the **command palette**, whose first entries are the row's
+  actions. On the message they are open diff, checkout, checkout & examine; with
+  a ref selected, on a collapsed head, or a packed marker line they are collapse,
+  expand, **hide**, open diff — most-relevant first — then **checkout** and
+  **checkout & examine** last. On a packed line it lists every marker by name, so
+  any branch is reachable even when labels overflow.
+- `<CR>` examines: it opens the commit view directly (a head's tip on a
+  collapsed head or packed marker).
+- `h`/`l` selects a ref (or a marker on a packed line) for the toggle/palette to
   act on.
 
 See the design in [specification.md §10](specification.md).
@@ -243,8 +244,15 @@ git's tracking config, not a shared name, so it stays correct across mirrored or
 many-remote setups. Colors are configurable via `palette.track`.
 
 **Command palette.** `<C-Space>` (or `<C-@>`, which many terminals send for it)
-opens a picker of the graph-wide commands, each showing its direct key when it has
+opens gitloom's single action menu. Its first entries are the **context**: the
+cursor row's actions (above — collapse / expand / hide, open diff, checkout,
+checkout & examine; never examine, which is `<CR>`), or while a `V` selection is
+active the selection's — **Open diff  (D)** and **Checkout & examine selection**
+— instead. Then the graph-wide commands, each showing its direct key when it has
 one:
+
+- **Return to `<orig>`** — first, and only while a checkout & examine is active
+  (below);
 
 - **Refresh  (R)** — the `R` resync;
 - **Fetch** — `git fetch --all`;
@@ -261,6 +269,23 @@ while one runs; a second one is refused until it finishes. On success the graph
 resyncs; on failure git's error is shown (a failed pull still resyncs, since its
 fetch half may have moved the remote-tracking branches). Nothing is ever forced
 (§17).
+
+**Checkout & examine.** From the `<C-Space>` palette — a row's entry (a commit,
+or a selected ref's commit) or, with a `V` selection active, the selection's: gitloom checks the newest
+commit out (`git checkout --detach`) and opens diffview on **one** rev — the
+oldest commit's first parent (the empty tree for a root) — against the working
+tree, so the right-hand side is the real files on disk and LSP / diagnostics
+work. The diff is the same combined change the range view shows. A dirty tree
+prompts **Stash N changes and continue** / **Cancel**; continuing runs
+`git stash push -u -m "gitloom: examine <short> (from <branch>)"`. The palette
+then offers **Return to `<orig>`**: it switches back (`git switch`, or a detached
+checkout when you started detached) and re-applies the stash by SHA, dropping it
+when the apply is clean. A failed switch keeps the state so Return can be
+retried; a conflicting apply keeps the stash and names it. The state survives
+closing and reopening the graph. A second examine while one is active just moves
+the examined commit — on a dirty tree it is refused ("Return first"), so there is
+never a chain of stashes. A selection ending at a working-tree row opens its
+working-tree range with no checkout. Requires a diff provider (§10.4.2).
 
 **Commit selection (range).** Press `V` to start a modal selection that picks a
 range of commits **along one branch**. It is not a contiguous block of rows — it
@@ -331,8 +356,7 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
-Pressing `<CR><CR>` on a commit's message (examine, the menu's first entry)
-opens the **commit view** — a read-only
+Pressing `<CR>` on a commit row opens the **commit view** — a read-only
 view of that commit's full details (hash, refs, author, committer when it
 differs, parents, the full message, a diffstat, and the diff), fetched on demand.
 It opens **in the host window** as a navigation step, not a separate float: `q`
