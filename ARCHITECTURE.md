@@ -1777,8 +1777,19 @@ disk.
 
 ### Commit view
 
-`<CR>` opens the commit view (specification.md §11) for the commit on the
-current row. `open_commit_view(opts, commit)` is the runtime glue: it opens a
+The `<CR>` action menu's **examine** entry (the first on a plain commit row, so
+`<CR><CR>`) opens the commit view (specification.md §11) for the commit on the
+current row. The menu itself is data: `h_cr` (window.lua) only classifies the row
+(`plain` / `branch` / `markers`) and hands it to the pure `select.cr_menu(row)`,
+which returns the ordered entries, each tagged with an `action` that `h_cr` maps to
+its glue. The one repository-mutating entry, **checkout** (specification.md
+§10.4.1), is built by the pure `select.checkout_spec(commit,
+select.selected_ref(commit, index))` (an argv that never forces; none for a §4.2
+virtual commit; a collapsed head resolves to its tip) and run by
+`git.run_checkout(argv, repo.root)` — `git_code` with an explicit `cwd`, so a
+submodule graph checks out in the submodule. A non-zero exit is reported via
+`format_git_error`; success runs the §3.4 resync (`ctx:resync(false)`).
+`open_commit_view(opts, commit)` is the runtime glue: it opens a
 `snacks.win` float (same geometry as the graph window), chains
 `fetch_commit_detail(commit.hash)` then `fetch_commit_diff(commit.hash)`, and on
 resolution renders the diff **action label** (when a provider is configured;

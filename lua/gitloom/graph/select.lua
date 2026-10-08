@@ -473,4 +473,120 @@ function M.filter_keep(commits, query)
     return keep
 end
 
+-- ── The `<CR>` action menu + checkout (spec §10.4, §10.4.1) ───────────────────
+
+---@class SelectedRef
+---@field kind "local"|"remote"|"tag"|"worktree"
+---@field name string    the ref's name (`foo`, `origin/foo`, `v1.0`, `wt:dir`)
+---@field short? string  a remote branch's name without its remote (`foo`)
+
+--- The ref a selected decoration (selection_state.index) names, for checkout
+--- (§10.4.1). A branch group stands for its **local** branch when it has one,
+--- else its first remote. Mirrors decoration_texts' order (branch groups, tags,
+--- worktrees), like `selected_owner_ids`. nil when nothing is selected. Pure.
+---@param commit { refs: Ref[] }?
+---@param index integer?
+---@return SelectedRef?
+function M.selected_ref(commit, index)
+    if not commit or not index then return nil end
+    local g = git.group_refs(commit.refs)
+    if index <= #g.branches then
+        local b = g.branches[index]
+        if b.has_local then return { kind = "local", name = b.name } end
+        if b.remotes[1] then
+            return { kind = "remote", name = b.remotes[1] .. "/" .. b.name, short = b.name }
+        end
+        return { kind = "local", name = b.name } -- malformed remote: the raw name
+    end
+    if index <= #g.branches + #g.tags then
+        local tag = g.tags[index - #g.branches]
+        return tag and { kind = "tag", name = tag } or nil
+    end
+    local wt = g.worktrees[index - #g.branches - #g.tags]
+    return wt and { kind = "worktree", name = wt } or nil
+end
+
+--- The real commit a menu row acts on: a collapsed head stands for its tip (its
+--- own `hash` is a synthetic `collapsed:` id, never a rev). Pure.
+---@param commit table?
+---@return table?
+local function menu_target(commit)
+    if commit and commit.collapsed then return commit.tip end
+    return commit
+end
+
+---@class CheckoutSpec
+---@field argv string[]   the git command (never forcing)
+---@field label string    the menu entry, saying what will happen
+
+--- What checking out `commit` with `ref` selected runs (§10.4.1): a local branch
+--- → `git switch <name>`; a remote branch → `git switch <short>` (git's DWIM
+--- creates or reuses the local tracking branch); a tag, a worktree label, or no
+--- ref → `git checkout --detach <hash>`. nil for a §4.2 working-tree virtual
+--- commit (or no commit) — there is nothing to check out. Never forces. Pure.
+---@param commit table?
+---@param ref SelectedRef?
+---@return CheckoutSpec?
+function M.checkout_spec(commit, ref)
+    local c = menu_target(commit)
+    if not c or c.virtual or not c.hash then return nil end
+    if ref and ref.kind == "local" then
+        return { argv = { "git", "switch", ref.name }, label = "Checkout branch " .. ref.name }
+    end
+    if ref and ref.kind == "remote" then
+        return { argv = { "git", "switch", ref.short },
+            label = ("Checkout branch %s (from %s)"):format(ref.short, ref.name) }
+    end
+    return { argv = { "git", "checkout", "--detach", c.hash },
+        label = ("Checkout commit %s (detached)"):format(c.hash:sub(1, 7)) }
+end
+
+---@class CrMenuEntry
+---@field action "examine"|"diff"|"checkout"|"collapse"|"expand"|"hide"
+---@field label string
+---@field commit? table          examine/diff: the commit to act on
+---@field checkout? CheckoutSpec checkout: what to run
+---@field marker? integer        expand/hide on a packed line: the marker index
+
+--- The ordered `<CR>` action menu for a row (§10.4). `row.kind`:
+---
+---  * `"plain"` — a commit's message, no ref selected: examine (first, so
+---    `<CR><CR>` opens the commit view), diff, checkout;
+---  * `"branch"` — a ref selected, or a collapsed head: collapse+hide (expanded)
+---    or expand+hide (collapsed), then examine, diff, and checkout LAST;
+---  * `"markers"` — a packed line: expand+hide per marker (`row.markers`, their
+---    label texts), then checkout of the selected marker's tip (`row.commit`).
+---
+--- `row.state` is `branch_under_cursor`'s state; `row.has_diff` whether a diff
+--- provider is configured (§11.5). A §4.2 virtual commit gets no checkout. Pure.
+---@param row { kind: string, commit?: table, ref?: SelectedRef, state?: string, has_diff?: boolean, markers?: string[] }
+---@return CrMenuEntry[]
+function M.cr_menu(row)
+    local out = {}
+    local function add(e) out[#out + 1] = e end
+    local c = menu_target(row.commit)
+    if row.kind == "markers" then
+        for i, text in ipairs(row.markers or {}) do
+            add({ action = "expand", label = "Expand " .. text, marker = i })
+            add({ action = "hide", label = "Hide " .. text, marker = i })
+        end
+    elseif row.kind == "branch" then
+        if row.state == "expanded" then
+            add({ action = "collapse", label = "Collapse branch" })
+            add({ action = "hide", label = "Hide branch" })
+        elseif row.state == "collapsed" then
+            add({ action = "expand", label = "Expand branch" })
+            add({ action = "hide", label = "Hide branch" })
+        end
+    end
+    if c and row.kind ~= "markers" then
+        local tip = row.kind == "branch" and row.state == "collapsed"
+        add({ action = "examine", label = tip and "Examine tip commit" or "Examine commit", commit = c })
+        if row.has_diff then add({ action = "diff", label = "Open diff", commit = c }) end
+    end
+    local spec = M.checkout_spec(row.commit, row.ref)
+    if spec then add({ action = "checkout", label = spec.label, checkout = spec }) end
+    return out
+end
+
 return M
