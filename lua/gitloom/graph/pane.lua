@@ -75,10 +75,10 @@ function M.condense(nodes, anchor_names, up, yield, keep)
     keep = keep or {}
     local step = chunker(yield)
     -- Refs on a node that count as markers (anchor refs, or all when unfiltered). The
-    -- HEAD marker (kind == "head") is ALWAYS kept: the pinned set is keyed by the BRANCH
-    -- name HEAD points at (repo.head), not "HEAD", so filtering by anchor_names alone
-    -- would drop HEAD and leave only the branch sharing its commit — the header must show
-    -- HEAD, not just that branch.
+    -- HEAD marker (kind == "head") is ALWAYS kept: on a branch the pinned set is keyed by
+    -- the BRANCH name HEAD points at (repo.head), not "HEAD", so filtering by anchor_names
+    -- alone would drop HEAD and leave only the branch sharing its commit — the header must
+    -- show HEAD, not just that branch. (A detached HEAD is pinned as "HEAD" itself, §10.6.)
     local function marker_refs(n)
         if not anchor_names then return n.refs or {} end
         local out = {}
@@ -1689,6 +1689,24 @@ function M.header(items, boundary, node_of, lane_of, col_of)
     end
 
     return { rows = pack_heads(rows) }
+end
+
+--- Why the context panes are hidden, or nil when they may be built (spec §6.2):
+--- `"off"` (the `panes` option is false), `"no HEAD"` (no HEAD commit at all — an
+--- empty repository), `"no display"` (nothing projected yet). HEAD is always an
+--- anchor (§10.6), so a **detached** HEAD is as good as a branch here — the panes
+--- fold toward it like any pinned anchor. The reason is what the pane trace logs.
+--- Pure.
+---@param panes_on boolean?  `opts.panes` (nil = on)
+---@param refs table<string, Ref>?  the repo's name → Ref registry
+---@param display table[]?  `repo.display`
+---@return string?
+function M.decline(panes_on, refs, display)
+    if panes_on == false then return "off" end
+    local h = refs and refs["HEAD"]
+    if not (h and h.commit) then return "no HEAD" end
+    if not display or #display == 0 then return "no display" end
+    return nil
 end
 
 --- The pane-rebuild **gate** (spec §6.2) — a tiny state machine, kept here so

@@ -173,8 +173,8 @@ function M.run()
     step("select-start", "V"); step("select-walk", "jj")
     step("select-swap", "o"); step("select-exit", "<Esc>")
 
-    -- Commit view: park on HEAD, <CR> opens the frame (or the action menu on a
-    -- head — <Esc> dismisses that). Then walk back to the graph.
+    -- Commit view: park on HEAD, <CR> opens the frame directly (§11.1; the
+    -- <Esc> is harmless). Then walk back to the graph.
     focus(); feed("gg")
     step("commit-view-open", "<CR>"); settle(500)
     feed("<Esc>")

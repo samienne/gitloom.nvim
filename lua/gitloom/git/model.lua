@@ -15,6 +15,7 @@ local M = {}
 ---@field kind "local"|"remote"|"tag"|"head"|"worktree"
 ---@field commit Commit   the commit this ref points at (a direct reference)
 ---@field upstream? Upstream   tracking info, only on a local branch that tracks one (§6.3)
+---@field branch? string  on the `head` ref only: the branch HEAD is on; nil when detached (§3.2/§6)
 ---@field hl? string      optional highlight override (a synthetic pointer mark, §11.7.6)
 
 --- A node in the commit DAG. `hash`/`parents`/`children`/`refs` exist from the
@@ -61,12 +62,13 @@ end
 
 --- Resolve a ref to its target Commit and link them (direct references).
 --- `upstream` (a local branch's tracking info, §6.3) is carried through when
---- present.
+--- present. Returns the new Ref (so a caller can annotate it, e.g. HEAD's branch).
 ---@param repo Repo
 ---@param name string
 ---@param kind string
 ---@param hash string
 ---@param upstream? Upstream
+---@return Ref
 function M.add_ref(repo, name, kind, hash, upstream)
     local commit = M.get_or_create_commit(repo, hash)
     ---@type Ref
@@ -74,6 +76,7 @@ function M.add_ref(repo, name, kind, hash, upstream)
     commit.refs = commit.refs or {}
     table.insert(commit.refs, ref)
     repo.refs[ref.kind == "head" and "HEAD" or name] = ref
+    return ref
 end
 
 return M

@@ -150,7 +150,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
-| `<CR>` | Action menu. On a commit's message: examine (first, so `<CR><CR>` opens the commit view) / diff / checkout commit. With a ref selected, on a collapsed head, or a packed marker line: collapse / expand / hide / examine / diff / checkout. Checkout switches to the selected branch (`git switch`), else detaches at the commit; it never forces, shows git's error on failure, and resyncs on success |
+| `<CR>` | Examine — open the **commit view** of the row's commit (a collapsed head or a packed marker: its tip — the selected marker's, else the first; while selecting: the range view). Every other row action is in the `<C-Space>` palette |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row — on a packed marker line, the previous / next collapsed head, with the reachability emphasis following it (switch the followed branch while selecting) |
@@ -161,7 +161,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `L` | **Pinned branches** — a dialog listing the pinned branches in priority order: `<C-j>`/`<C-k>` reorder, `<Space>` flags a branch for a dedicated graph lane, `D` unpins, `<CR>` jumps to a branch, the last row adds one via the ref picker, `q` closes |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
-| `<C-Space>` | **Command palette** (also `<C-@>`, what many terminals send) — refresh / fetch / pull; see below |
+| `<C-Space>` | **Command palette** (also `<C-@>`, what many terminals send) — the single action menu, scoped to what the cursor is on: the commit's or the branch's actions first (the selection's while `V` is active), then return / fetch / pull, then the keys that apply there with their key shown; see below |
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, linked-worktree HEADs (`wt:<dir>`) and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `<leader>gl` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
@@ -170,7 +170,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `K` | Float with the full lane breakdown for the commit under the cursor (debug) |
 | `i` | Toggle the per-lane id column before the message (debug; hidden by default) |
 | `<leader>wD` | Write a context-pane debug dump — seam, boundary, condensed graph and rendered overlay — to `stdpath('data')/gitloom_pane_dump.txt` (debug) |
-| `?` | Float listing all keybindings |
+| `?` | Float listing every key, grouped — generated from the same key registry the palette reads, so it always matches what is bound (each mapping also carries a `Gitloom: …` description for `:map` / which-key) |
 
 **Branch modes.** A branch can be **normal**, **collapsed** (contracted to a
 single `◍` marker row — a commit count and the ref), or **hidden**. The
@@ -180,14 +180,25 @@ commit's history — no ref needed, so they work for ref-less regions too
 
 - `<Space>` toggles **collapse ⇄ expand** in place; the cursor follows the
   result, so holding `<Space>` flips a branch open and closed.
-- `<CR>` opens an **action menu** for the row. On the message it is examine
-  commit (first, so `<CR><CR>` opens the commit view), open diff, checkout; with a
-  ref selected, on a collapsed head, or a packed marker line it is collapse,
-  expand, **hide**, examine commit, open diff — most-relevant first — then
-  **checkout** last.
-  On a packed line it lists every marker by name, so any branch is reachable even
-  when labels overflow.
-- `h`/`l` selects a ref (or a marker on a packed line) for the toggle/menu to
+- `<C-Space>` opens the **command palette**, whose first entries are the
+  actions on **what is selected** — a commit or a branch, never both. On the
+  message (the commit): open diff, checkout (detached), checkout & examine. With
+  a ref selected or on a collapsed head (the branch): checkout of that branch,
+  collapse / expand, **hide**. On a packed marker line with a marker selected:
+  that marker's checkout / expand / hide only; with none selected it lists expand
+  / hide for every marker by name, so any branch is reachable even when labels
+  overflow. After a checkout the cursor
+  lands on the commit now checked out and the notice says where HEAD is
+  (`HEAD → main (1a2b3c4)` or `HEAD detached at 1a2b3c4`); plain `R` keeps the
+  cursor where it was.
+- **HEAD always reads as `HEAD`** and its label comes first on its row, so the
+  `+N` overflow never hides it: `(HEAD → main …)` on a branch, a bare `HEAD` when
+  detached. The window title shows the branch, or `detached @<short>`. In the
+  graph itself HEAD's commit is drawn `●` in the HEAD colour (`icons.head`;
+  a `◍` head that folded HEAD in keeps `◍` but takes the colour).
+- `<CR>` examines: it opens the commit view directly (a head's tip on a
+  collapsed head or packed marker).
+- `h`/`l` selects a ref (or a marker on a packed line) for the toggle/palette to
   act on.
 
 See the design in [specification.md §10](specification.md).
@@ -200,14 +211,17 @@ are kept across the switch. Disable the default with `collapse_merged = false`
 (§10.7).
 
 **Anchors (pinning).** Focus folds everything toward the *anchors* — by default
-the current branch (HEAD) plus the common trunks `master` / `main` / `dev` when
-they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
+HEAD (the current branch, or the checked-out commit itself when HEAD is detached,
+so it is never folded into a `◍`) plus the common trunks `master` / `main` /
+`dev` when they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
 pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
 a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
 (§10.6). Pinning a local branch also pins its **tracked upstream** (so both lanes
 stay in full and a divergence is drawn rather than the remote collapsing);
-disable with `pin_upstream = false`.
+disable with `pin_upstream = false`. Every pinned branch's label carries a pin
+icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except HEAD's own label
+(`icons.pin`; `""` turns it off).
 
 Press `L` for the **pinned-branches dialog** — the anchors in priority order,
 where they are managed together:
@@ -243,16 +257,28 @@ git's tracking config, not a shared name, so it stays correct across mirrored or
 many-remote setups. Colors are configurable via `palette.track`.
 
 **Command palette.** `<C-Space>` (or `<C-@>`, which many terminals send for it)
-opens a picker of the graph-wide commands, each showing its direct key when it has
-one:
+opens gitloom's single action menu. Its first entries are the **context**: the
+commit's or the branch's actions (above; never examine, which is `<CR>`), or while
+a `V` selection is active the selection's — **Open diff  (D)** and **Checkout &
+examine selection** — instead. Then the graph-wide commands:
 
-- **Refresh  (R)** — the `R` resync;
+- **Return to `<orig>`** — first, and only while a checkout & examine is active
+  (below);
 - **Fetch** — `git fetch --all`;
 - **Fetch `<remote>`** — `git fetch <remote>`, one entry per remote in
   `git remote` order (the list is read when the graph opens and on every resync;
   the palette never waits for it, so the entries appear once it has arrived);
 - **Pull** — `git pull --ff-only` (fast-forward only: a branch that has diverged
   from its upstream is refused with git's error, never merged or rebased).
+
+Then the graph's **keys** that apply where the cursor is, grouped (branches /
+refs / search, then view toggles, then commit & selection, then other), each
+labelled with its key — e.g. `Jump to branch / ref…  (<leader>b)`,
+`Refresh: resync with the repository  (R)`. Branch-only keys (`P`, `<Space>`)
+appear only on a branch, `V` / `D` / `<CR>` on a commit or a selection; a key
+already shown on an earlier entry is not repeated. Motions and plumbing (`j`/`k`,
+`h`/`l`, `q`, `<Esc>`, …) are never listed. Picking a key entry does exactly what
+pressing the key does.
 
 Fetch and pull run in the background in the graph's repository (a submodule's
 graph fetches that submodule), with `GIT_TERMINAL_PROMPT=0` so a credential
@@ -261,6 +287,23 @@ while one runs; a second one is refused until it finishes. On success the graph
 resyncs; on failure git's error is shown (a failed pull still resyncs, since its
 fetch half may have moved the remote-tracking branches). Nothing is ever forced
 (§17).
+
+**Checkout & examine.** From the `<C-Space>` palette — a commit's entry (on its
+message) or, with a `V` selection active, the selection's: gitloom checks the newest
+commit out (`git checkout --detach`) and opens diffview on **one** rev — the
+oldest commit's first parent (the empty tree for a root) — against the working
+tree, so the right-hand side is the real files on disk and LSP / diagnostics
+work. The diff is the same combined change the range view shows. A dirty tree
+prompts **Stash N changes and continue** / **Cancel**; continuing runs
+`git stash push -u -m "gitloom: examine <short> (from <branch>)"`. The palette
+then offers **Return to `<orig>`**: it switches back (`git switch`, or a detached
+checkout when you started detached) and re-applies the stash by SHA, dropping it
+when the apply is clean. A failed switch keeps the state so Return can be
+retried; a conflicting apply keeps the stash and names it. The state survives
+closing and reopening the graph. A second examine while one is active just moves
+the examined commit — on a dirty tree it is refused ("Return first"), so there is
+never a chain of stashes. A selection ending at a working-tree row opens its
+working-tree range with no checkout. Requires a diff provider (§10.4.2).
 
 **Commit selection (range).** Press `V` to start a modal selection that picks a
 range of commits **along one branch**. It is not a contiguous block of rows — it
@@ -331,8 +374,7 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
-Pressing `<CR><CR>` on a commit's message (examine, the menu's first entry)
-opens the **commit view** — a read-only
+Pressing `<CR>` on a commit row opens the **commit view** — a read-only
 view of that commit's full details (hash, refs, author, committer when it
 differs, parents, the full message, a diffstat, and the diff), fetched on demand.
 It opens **in the host window** as a navigation step, not a separate float: `q`
@@ -384,8 +426,8 @@ its own yet).
 When the graph opens it focuses **HEAD** (the current branch's commit) and
 centers the view on it. After that it **remembers where you were per repository**
 for the rest of the Neovim session: close and reopen the graph and the cursor
-returns to the same commit (re-centered) instead of jumping back to HEAD. On a
-detached HEAD there is nothing to focus, so the view opens at the top.
+returns to the same commit (re-centered) instead of jumping back to HEAD. A
+detached HEAD is focused the same way — HEAD is always an anchor.
 
 The row under the cursor is the **pivot**: gitloom dims everything outside its
 reachability cone — its ancestors (following parents) and descendants
@@ -406,7 +448,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- (0–1) gives a proportional size; a number > 1 is absolute columns/rows.
         width = function() return math.max(vim.o.columns - 4, 1) end,
         height = function() return math.max(vim.o.lines - 4, 1) end,
-        -- title defaults to the repository name + current branch (§2.1); set
+        -- title defaults to the repository name + current branch, or
+        -- `detached @<short>` (§2.1); set
         -- win.title here to pin your own.
         footer = "(status + key hints)",
     },
@@ -415,7 +458,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         author = "Comment",
         branch = "WarningMsg",   -- local branch name in (name ↑remotes)
         remote = "Comment",      -- the ↑remotes suffix (and remote-only names)
-        head = "Special",        -- the current branch's label (a detached HEAD's marker)
+        head = "Special",        -- HEAD's label: (HEAD → branch), or a detached HEAD
         message = nil,
         tags = "Comment",
         worktree = "Comment",    -- a linked worktree's HEAD label, {wt:<dir>}
@@ -440,6 +483,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     },
     icons = {
         -- merge = "M",
+        head = "●",          -- HEAD's node marker (§5.3); "" = off
+        pin = "⚲",           -- pinned-anchor label icon (§6/§10.6); "" = off
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     layout_policy = "compact", -- lane placement (§5.6); cycle with C:

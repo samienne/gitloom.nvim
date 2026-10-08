@@ -1,6 +1,15 @@
---- Tests for the command palette (spec §17): the pure registry → entries builder
---- (`palette.palette_entries` — order, key-suffixed labels, scope filtering, the
---- per-remote Fetch expansion for remotes = nil / {} / a list), the remote argv +
+--- Tests for the command palette (spec §17): the pure entries builder
+--- (`palette.palette_entries` — ONE ordered list, the context first (the row's
+--- entries, or the §13 selection's instead while selecting) then the global
+--- commands, key-suffixed labels, no examine entry, Return only while an examine
+--- is active, the per-remote Fetch expansion for remotes = nil / {} / a list,
+--- registry conditions; no Refresh command — R is a key), the **key entries**
+--- (§17.1: the context classification, per-context sets for commit / branch /
+--- marker-selected / packed / selection, groups refs → view → select → other,
+--- hints from the registry key, a key already shown not repeated, ungrouped and
+--- handler-less keys never listed) and the generated `?` help (`help_lines`:
+--- grouped, aliases joined, a newly added fake key picked up) over a FAKE
+--- registry, plus the real `GRAPH_KEYS` checked for well-formedness, the remote argv +
 --- env builder (`remote.remote_command` — fetch --all, fetch <remote>, pull
 --- --ff-only, GIT_TERMINAL_PROMPT=0, never forcing), the `git remote` parse
 --- (`remote.parse_remotes`), the failure text (`remote.failure_text`), and
@@ -39,48 +48,327 @@ local function labels(entries)
 end
 
 describe("palette_entries (§17.1)", function()
-    it("lists Refresh, Fetch, Pull in order, the key shown after the label", function()
-        local e = palette.palette_entries("global")
-        assert.same({ "refresh", "fetch", "pull" }, ids(e))
-        assert.same({ "Refresh  (R)", "Fetch", "Pull" }, labels(e))
-    end)
+    local H = ("a"):rep(40)
+    local plain = { kind = "plain", commit = { hash = H, refs = {} } }
 
-    it("defaults to the global scope", function()
-        assert.same(ids(palette.palette_entries("global")), ids(palette.palette_entries()))
+    it("lists Fetch, Pull in order (the resync is the R key's entry, not a command)", function()
+        local e = palette.palette_entries({})
+        assert.same({ "fetch", "pull" }, ids(e))
+        assert.same({ "Fetch", "Pull" }, labels(e))
+        assert.same(ids(e), ids(palette.palette_entries()))
+        for _, c in ipairs(palette.COMMANDS) do assert.is_true(c.id ~= "refresh") end
     end)
 
     it("has no per-remote entries while the remote list is unknown or empty", function()
-        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries("global", nil)))
-        assert.same({ "refresh", "fetch", "pull" }, ids(palette.palette_entries("global", {})))
+        assert.same({ "fetch", "pull" }, ids(palette.palette_entries({ remotes = nil })))
+        assert.same({ "fetch", "pull" }, ids(palette.palette_entries({ remotes = {} })))
     end)
 
     it("expands Fetch <remote> per remote, in git remote order, before Pull", function()
-        local e = palette.palette_entries("global", { "origin", "upstream" })
-        assert.same({ "refresh", "fetch", "fetch:origin", "fetch:upstream", "pull" }, ids(e))
-        assert.same({ "Refresh  (R)", "Fetch", "Fetch origin", "Fetch upstream", "Pull" }, labels(e))
+        local e = palette.palette_entries({ remotes = { "origin", "upstream" } })
+        assert.same({ "fetch", "fetch:origin", "fetch:upstream", "pull" }, ids(e))
+        assert.same({ "Fetch", "Fetch origin", "Fetch upstream", "Pull" }, labels(e))
+    end)
+
+    it("puts the row's entries FIRST, then the global commands; no examine entry", function()
+        local e = palette.palette_entries({ row = plain, has_diff = true, remotes = { "origin" } })
+        assert.same({ "diff", "checkout", "checkout_examine", "fetch", "fetch:origin", "pull" }, ids(e))
+        assert.equals("Open diff  (D)", e[1].label)
+        for _, x in ipairs(e) do assert.is_true(x.id ~= "examine") end
+    end)
+
+    it("while selecting, the selection's entries replace the row's", function()
+        local e = palette.palette_entries({ row = plain, selection = true, has_diff = true })
+        assert.same({ "selection_diff", "examine_selection", "fetch", "pull" }, ids(e))
+        assert.same({ "Open diff  (D)", "Checkout & examine selection" }, { e[1].label, e[2].label })
+        -- Without a diff provider the selection has no entries of its own.
+        assert.same({ "fetch", "pull" }, ids(palette.palette_entries({ row = plain, selection = true })))
+    end)
+
+    it("lists Return first among the globals, only while an examine is active", function()
+        local st = { orig = "main", detached = false, examined = H }
+        local e = palette.palette_entries({ row = plain, examine = st })
+        assert.same({ "checkout", "return", "fetch", "pull" }, ids(e))
+        assert.equals("Return to main", e[2].label)
+        assert.same({ "checkout", "fetch", "pull" }, ids(palette.palette_entries({ row = plain })))
     end)
 
     it("binds each action to the session (and a per-remote one to its remote)", function()
         local calls = {}
         local ctx = {
-            resync = function(_, silent) calls[#calls + 1] = { "resync", silent } end,
             run_remote = function(_, kind, r) calls[#calls + 1] = { kind, r } end,
         }
-        for _, e in ipairs(palette.palette_entries("global", { "origin" })) do e.action(ctx) end
-        assert.same({ { "resync", false }, { "fetch" }, { "fetch", "origin" }, { "pull" } }, calls)
+        for _, e in ipairs(palette.palette_entries({ remotes = { "origin" } })) do e.action(ctx) end
+        assert.same({ { "fetch" }, { "fetch", "origin" }, { "pull" } }, calls)
     end)
 
-    it("excludes non-global entries from the global palette", function()
+    it("row entries carry an op (run by the window), registry entries an action", function()
+        for _, e in ipairs(palette.palette_entries({ row = plain, has_diff = true })) do
+            assert.is_true((e.op ~= nil) ~= (e.action ~= nil))
+        end
+    end)
+
+    it("filters the registry by scope and condition", function()
         local noop = function() end
         local cmds = {
             { id = "a", label = "A", scope = "global", action = noop },
-            { id = "b", label = "B", key = "x", scope = "commit", action = noop },
-            { id = "c", label = "C", scope = "ref", action = noop },
-            { id = "d", label = "D %s", scope = "ref", per_remote = true, action = noop },
+            { id = "b", label = "B", key = "x", scope = "selection", action = noop },
+            { id = "c", label = function(st) return "C " .. st.examine.orig end, scope = "global",
+                when = function(st) return st.examine ~= nil end, action = noop },
+            { id = "d", label = "D %s", scope = "selection", per_remote = true, action = noop },
         }
-        assert.same({ "a" }, ids(palette.palette_entries("global", { "o" }, cmds)))
-        assert.same({ "B  (x)" }, labels(palette.palette_entries("commit", { "o" }, cmds)))
-        assert.same({ "c", "d:o" }, ids(palette.palette_entries("ref", { "o" }, cmds)))
+        assert.same({ "a" }, ids(palette.palette_entries({ remotes = { "o" }, commands = cmds })))
+        assert.same({ "b", "d:o", "a" },
+            ids(palette.palette_entries({ selection = true, remotes = { "o" }, commands = cmds })))
+        assert.same({ "B  (x)", "D o", "A" },
+            labels(palette.palette_entries({ selection = true, remotes = { "o" }, commands = cmds })))
+        assert.same({ "A", "C x" },
+            labels(palette.palette_entries({ examine = { orig = "x", detached = false, examined = "h" }, commands = cmds })))
+    end)
+end)
+
+-- A fake key registry (the test seam: the real `GRAPH_KEYS` is never mutated).
+-- Out of group order on purpose, so the grouping is what orders the palette.
+local calls
+local function fake_keys()
+    calls = {}
+    local function run(name) return function() calls[#calls + 1] = name end end
+    return {
+        { key = "m", run = run("m"), group = "view", desc = "Cycle style" },
+        { key = "<leader>b", run = run("refpick"), group = "refs", desc = "Jump to branch / ref…" },
+        { key = "P", run = run("pin"), group = "refs", contexts = { "branch" }, desc = "Pin / unpin branch" },
+        { key = "<Space>", run = run("space"), group = "refs", contexts = { "branch" }, desc = "Collapse / expand" },
+        { key = "R", run = run("resync"), group = "other", desc = "Refresh: resync with the repository" },
+        { key = "D", run = run("diff"), group = "select", contexts = { "commit", "selection" },
+            when = function(st) return st.has_diff == true end, desc = "Open diff" },
+        { key = "V", run = run("select"), group = "select", contexts = { "commit", "selection" },
+            desc = "Start / exit commit selection" },
+        { key = "K", run = run("lane"), group = "other", contexts = { "commit", "branch" }, desc = "Lane breakdown" },
+        { key = { "<C-Space>", "<C-@>" }, run = run("palette"), desc = "Command palette" },
+        { key = "j", run = run("j"), desc = "Next row" },
+        { key = { "<C-o>", "<C-i>" }, desc = "Back / forward" },
+        { key = "x", group = "view", desc = "Unbound (no handler)" },
+    }
+end
+
+describe("palette key entries (§17.1)", function()
+    local H = ("a"):rep(40)
+    local function c() return { hash = H, refs = {} } end
+    local plain = { kind = "plain", commit = c() }
+    local branch = { kind = "branch", state = "expanded", commit = c(), ref = { kind = "local", name = "main" } }
+    local head = { kind = "branch", state = "collapsed",
+        commit = { collapsed = true, hash = "collapsed:x", refs = {}, tip = c() } }
+    local packed = { kind = "markers", markers = { "◍ a", "◍ b", "◍ c" } }
+    local packed_sel = { kind = "markers", markers = { "◍ a", "◍ b", "◍ c" }, selected = 2, commit = c() }
+
+    local function entries(info)
+        info.keys = fake_keys()
+        return palette.palette_entries(info)
+    end
+
+    it("classifies the context from the row", function()
+        assert.equals("commit", palette.row_context(plain))
+        assert.equals("branch", palette.row_context(branch))
+        assert.equals("branch", palette.row_context(head))
+        assert.equals("markers", palette.row_context(packed))
+        assert.equals("branch", palette.row_context(packed_sel))
+        assert.is_nil(palette.row_context(nil))
+    end)
+
+    it("commit: commit actions, globals, then grouped keys refs → view → select → other", function()
+        local e = entries({ row = plain, has_diff = true })
+        assert.same({ "diff", "checkout", "checkout_examine", "fetch", "pull",
+            "key:<leader>b", "key:m", "key:V", "key:R", "key:K" }, ids(e))
+        -- No branch actions; D is shown once, on Open diff.
+        for _, x in ipairs(e) do
+            assert.is_true(x.id ~= "key:P" and x.id ~= "key:<Space>" and x.id ~= "key:D")
+        end
+    end)
+
+    it("key hints come from the registry key", function()
+        local e = entries({ row = plain, has_diff = true })
+        local by = {}
+        for _, x in ipairs(e) do by[x.id] = x.label end
+        assert.equals("Jump to branch / ref…  (<leader>b)", by["key:<leader>b"])
+        assert.equals("Refresh: resync with the repository  (R)", by["key:R"])
+        assert.equals("Open diff  (D)", by["diff"])
+    end)
+
+    it("commit without a diff provider: D's condition fails, so no D at all", function()
+        local e = entries({ row = plain })
+        assert.same({ "checkout", "fetch", "pull", "key:<leader>b", "key:m", "key:V", "key:R", "key:K" }, ids(e))
+    end)
+
+    it("branch: the branch's actions + branch keys; no commit diff / examine", function()
+        local e = entries({ row = branch, has_diff = true })
+        assert.same({ "checkout", "collapse", "hide", "fetch", "pull",
+            "key:<leader>b", "key:P", "key:m", "key:R", "key:K" }, ids(e))
+        assert.equals("Checkout branch main", e[1].label)
+        assert.equals("Collapse branch  (<Space>)", e[2].label) -- <Space> not repeated as a key
+    end)
+
+    it("collapsed head: checkout of its tip, expand, hide", function()
+        local e = entries({ row = head, has_diff = true })
+        assert.same({ "checkout", "expand", "hide" }, { e[1].id, e[2].id, e[3].id })
+        assert.same({ "git", "checkout", "--detach", H }, e[1].checkout.argv)
+    end)
+
+    it("packed line, a marker selected: only THAT marker's actions + branch keys", function()
+        local e = entries({ row = packed_sel, has_diff = true })
+        assert.same({ "checkout", "expand:2", "hide:2", "fetch", "pull",
+            "key:<leader>b", "key:P", "key:<Space>", "key:m", "key:R", "key:K" }, ids(e))
+        assert.same({ "Expand ◍ b", "Hide ◍ b" }, { e[2].label, e[3].label })
+    end)
+
+    it("packed line, no marker selected: expand / hide per marker, global keys only", function()
+        local e = entries({ row = packed, has_diff = true })
+        assert.same({ "expand:1", "hide:1", "expand:2", "hide:2", "expand:3", "hide:3", "fetch", "pull",
+            "key:<leader>b", "key:m", "key:R" }, ids(e))
+    end)
+
+    it("selection: the selection's entries + selection keys (V exits), D once", function()
+        local e = entries({ row = plain, selection = true, has_diff = true })
+        assert.same({ "selection_diff", "examine_selection", "fetch", "pull",
+            "key:<leader>b", "key:m", "key:V", "key:R" }, ids(e))
+    end)
+
+    it("never lists an ungrouped or handler-less key; no duplicate R", function()
+        for _, info in ipairs({ { row = plain, has_diff = true }, { row = branch }, { row = packed },
+            { row = packed_sel }, { selection = true, has_diff = true }, {} }) do
+            local seen = {}
+            for _, x in ipairs(entries(info)) do
+                assert.is_true(x.id ~= "key:<C-Space>" and x.id ~= "key:j" and x.id ~= "key:<C-o>"
+                    and x.id ~= "key:x", x.id)
+                assert.is_nil(seen[x.label], x.label)
+                seen[x.label] = true
+                if x.key then assert.is_nil(seen["k:" .. x.key], x.key); seen["k:" .. x.key] = true end
+            end
+        end
+    end)
+
+    it("no keys without a registry (the default snapshot)", function()
+        assert.same({ "expand:1", "hide:1", "expand:2", "hide:2", "expand:3", "hide:3", "fetch", "pull" },
+            ids(palette.palette_entries({ row = packed })))
+    end)
+
+    it("a key entry runs its handler on the session", function()
+        local e = entries({ row = branch })
+        for _, x in ipairs(e) do
+            if x.id == "key:P" or x.id == "key:R" then x.action({}) end
+        end
+        assert.same({ "pin", "resync" }, calls)
+    end)
+end)
+
+describe("help_lines (§2, generated from the key registry)", function()
+    it("lists every key, grouped, the ungrouped ones last, aliases joined", function()
+        local lines = palette.help_lines(fake_keys())
+        assert.equals("gitloom keys", lines[1])
+        local text = table.concat(lines, "\n")
+        local order = { "Branches, refs & search", "<leader>b", "View", "  m ", "Commit & selection",
+            "Other", "  R ", "Motion & misc", "<C-Space> / <C-@>", "<C-o> / <C-i>" }
+        local pos = 0
+        for _, needle in ipairs(order) do
+            local at = text:find(needle, pos + 1, true)
+            assert.is_not_nil(at, needle)
+            pos = at --[[@as integer]]
+        end
+        -- a handler-less key is still listed (bound elsewhere); every key appears
+        for _, k in ipairs(fake_keys()) do
+            assert.is_not_nil(text:find(k.desc, 1, true), k.desc)
+        end
+    end)
+
+    it("picks up a newly added key, and prefers the longer help text", function()
+        local keys = fake_keys()
+        keys[#keys + 1] = { key = "Z", run = function() end, group = "view", desc = "Zoom",
+            help = "Zoom the graph (a fake key)" }
+        local text = table.concat(palette.help_lines(keys), "\n")
+        assert.is_not_nil(text:find("Z%s+Zoom the graph %(a fake key%)"))
+        assert.is_nil(text:find("  Zoom\n", 1, true))
+    end)
+
+    it("aligns the description column", function()
+        local lines = palette.help_lines(fake_keys())
+        local col
+        for _, l in ipairs(lines) do
+            if l:sub(1, 2) == "  " then
+                local lhs_end = l:find("  %S", 3) -- the gap before the description
+                local c = vim.fn.strdisplaywidth(l:sub(1, lhs_end))
+                col = col or c
+                assert.equals(col, c, l)
+            end
+        end
+    end)
+end)
+
+describe("the real key registry (window.lua GRAPH_KEYS, §17.1)", function()
+    local keys = require("gitloom.window")._internal.keys
+    local groups = { refs = true, view = true, select = true, other = true }
+    local contexts = { commit = true, branch = true, markers = true, selection = true }
+
+    it("is well-formed: a desc each, known groups / contexts, no lhs bound twice", function()
+        local seen = {}
+        for _, k in ipairs(keys) do
+            assert.is_true(type(k.desc) == "string" and k.desc ~= "", vim.inspect(k.key))
+            if k.group then assert.is_true(groups[k.group], k.group) end
+            for _, c in ipairs(k.contexts or {}) do assert.is_true(contexts[c], c) end
+            for _, lhs in ipairs(palette.lhs_of(k)) do
+                assert.is_nil(seen[lhs], lhs)
+                seen[lhs] = true
+            end
+        end
+        for _, lhs in ipairs({ "R", "?", "<C-Space>", "<C-@>", "V", "D", "P", "<leader>b", "j", "q" }) do
+            assert.is_true(seen[lhs], lhs)
+        end
+    end)
+
+    it("keeps motions and plumbing out of the palette, and lists R once", function()
+        for _, lhs in ipairs({ "j", "k", "h", "l", "<C-d>", "<C-u>", "n", "N", "o", "<Esc>", "q",
+            "<C-w>q", "<C-Space>", "<C-@>", "<leader>wD", "<C-o>" }) do
+            for _, k in ipairs(keys) do
+                if palette.lhs_of(k)[1] == lhs or vim.tbl_contains(palette.lhs_of(k), lhs) then
+                    assert.is_nil(k.group, lhs)
+                end
+            end
+        end
+        local n = 0
+        for _, e in ipairs(palette.palette_entries({ keys = keys })) do
+            if e.key == "R" then n = n + 1 end
+        end
+        assert.equals(1, n)
+    end)
+
+    it("offers <Space> on a branch row only where it toggles something", function()
+        local H = ("a"):rep(40)
+        local function spaces(state)
+            local n = 0
+            local row = { kind = "branch", state = state, commit = { hash = H, refs = {} } }
+            for _, e in ipairs(palette.palette_entries({ keys = keys, row = row })) do
+                if e.key == "<Space>" then n = n + 1 end
+            end
+            return n
+        end
+        -- mainline: pressing it does nothing, so it is not offered at all
+        assert.equals(0, spaces("mainline"))
+        -- expanded / collapsed: offered once, as the row's collapse / expand entry
+        assert.equals(1, spaces("expanded"))
+        assert.equals(1, spaces("collapsed"))
+        -- a packed line with a marker selected (no state) still toggles the marker
+        local packed = { kind = "markers", markers = { "a", "b" }, selected = 1,
+            commit = { hash = H, refs = {} } }
+        local n = 0
+        for _, e in ipairs(palette.palette_entries({ keys = keys, row = packed })) do
+            if e.key == "<Space>" then n = n + 1 end
+        end
+        assert.equals(1, n)
+    end)
+
+    it("the help lists every bound key", function()
+        local text = table.concat(palette.help_lines(keys), "\n")
+        for _, k in ipairs(keys) do
+            assert.is_not_nil(text:find(table.concat(palette.lhs_of(k), " / "), 1, true), k.desc)
+        end
     end)
 end)
 

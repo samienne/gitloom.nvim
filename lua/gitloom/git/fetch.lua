@@ -413,7 +413,8 @@ function M.fetch_head(repo)
             repo.head = name
             local localref = repo.refs[name]
             if localref then
-                add_ref(repo, "HEAD", "head", localref.commit.hash)
+                -- The head ref names its branch (§6: drawn `(HEAD → name)`).
+                add_ref(repo, "HEAD", "head", localref.commit.hash).branch = name
             end
         end
         if repo.head then return end
@@ -982,6 +983,127 @@ end
 ---@return table  -- future resolving { code: integer, out: string, err: string }
 function M.run_remote(argv, root, env)
     return git_code(argv, root, env)
+end
+
+-- ── Checkout & examine (§10.4.2) — the git side. The plans are the pure
+-- `gitloom.git.examine`; these run them in `root` (the graph's repo.root). ─────
+
+--- What an examine needs to decide (§10.4.2), read fresh in `root`: HEAD (its
+--- branch, nil when detached; `head` nil on an unborn branch) and the dirty
+--- counts (`git status --porcelain` → `parse_status`). Resolves
+--- `{ head: ExamineHead?, status, err? }` — `err` when the status read failed.
+---@param root string?
+---@return table  -- future resolving { head: ExamineHead?, status: table, err: string? }
+function M.examine_probe(root)
+    return git_code({ "git", "rev-parse", "HEAD" }, root).next(function(hr)
+        return git_code({ "git", "symbolic-ref", "-q", "--short", "HEAD" }, root).next(function(br)
+            return git_code({ "git", "status", "--porcelain" }, root).next(function(sr)
+                local head
+                if hr.code == 0 and trim_ws(hr.out) ~= "" then
+                    local branch = br.code == 0 and trim_ws(br.out) or ""
+                    head = { hash = trim_ws(hr.out), branch = branch ~= "" and branch or nil }
+                end
+                local lines = {}
+                for l in (sr.out or ""):gmatch("[^\n]+") do lines[#lines + 1] = (l:gsub("\r$", "")) end
+                return { head = head, status = parse_status(lines),
+                    err = sr.code ~= 0 and sr or nil }
+            end)
+        end)
+    end)
+end
+
+--- The commit `stash@{0}` names now, or nil when the stash is empty.
+---@param root string?
+---@return table  -- future resolving string?
+local function stash_top(root)
+    return git_code({ "git", "rev-parse", "-q", "--verify", "stash@{0}" }, root).next(function(r)
+        if r.code ~= 0 then return nil end
+        local sha = trim_ws(r.out)
+        return sha ~= "" and sha or nil
+    end)
+end
+
+--- Drop the stash whose commit is `sha` (§10.4.2): its `stash@{n}` is re-found
+--- from `git stash list --format=%H` right before the drop — the stash is shared
+--- with every worktree and session, so a remembered position can be stale.
+--- Resolves `git_code`'s result (non-zero with a message when it is gone).
+---@param sha string
+---@param root string?
+---@return table  -- future resolving { code: integer, out: string, err: string }
+function M.drop_stash(sha, root)
+    return git_code({ "git", "stash", "list", "--format=%H" }, root).next(function(lr)
+        local i = lr.code == 0 and require("gitloom.git.examine").stash_index(lr.out, sha) or nil
+        if not i then
+            return { code = 1, out = "", err = "error: stash " .. sha .. " not found" }
+        end
+        return git_code({ "git", "stash", "drop", ("stash@{%d}"):format(i) }, root)
+    end)
+end
+
+---@class ExamineRunResult
+---@field ok boolean
+---@field stage? "stash"|"checkout"   where it failed
+---@field res? table                  that step's `{ code, out, err }`
+---@field stash? string               the stash pushed (nil: none, or nothing to stash)
+---@field restored? boolean           checkout failed: the stash re-applied cleanly (and was dropped)
+---@field restore_res? table          that re-apply's result
+
+--- Run an `examine_plan` of kind `checkout` in `root` (§10.4.2): stash when the
+--- plan says so (the new stash's SHA is `stash@{0}` read right after the push —
+--- unchanged from before the push means nothing was stashed), then
+--- `git checkout --detach`. A failed push stops there; a failed checkout after a
+--- stash re-applies that stash by SHA at once and drops it only when the apply
+--- was clean. Never forces.
+---@param plan ExaminePlan
+---@param root string?
+---@return table  -- future resolving ExamineRunResult
+function M.examine_run(plan, root)
+    local function checkout(stash)
+        return git_code(plan.checkout, root).next(function(cr)
+            if cr.code == 0 then return { ok = true, stash = stash } end
+            if not stash then return { ok = false, stage = "checkout", res = cr } end
+            return git_code({ "git", "stash", "apply", stash }, root).next(function(ar)
+                local out = { ok = false, stage = "checkout", res = cr, stash = stash,
+                    restored = ar.code == 0, restore_res = ar }
+                if ar.code ~= 0 then return out end
+                return M.drop_stash(stash, root).next(function() return out end)
+            end)
+        end)
+    end
+    if not plan.stash then return checkout(nil) end
+    return stash_top(root).next(function(before)
+        return git_code(plan.stash.argv, root).next(function(pr)
+            if pr.code ~= 0 then return { ok = false, stage = "stash", res = pr } end
+            return stash_top(root).next(function(after)
+                return checkout(after ~= before and after or nil)
+            end)
+        end)
+    end)
+end
+
+---@class ExamineReturnResult
+---@field ok boolean
+---@field stage? "switch"|"apply"   where it failed
+---@field res? table                that step's `{ code, out, err }`
+---@field drop_res? table           the clean apply's drop
+
+--- Run a `return_plan` in `root` (§10.4.2): switch back, then apply the stash by
+--- SHA when one was recorded, dropping it only after a clean apply. A failed
+--- switch stops before the apply; a failed apply keeps the stash.
+---@param rp ReturnPlan
+---@param root string?
+---@return table  -- future resolving ExamineReturnResult
+function M.examine_return(rp, root)
+    return git_code(rp.switch, root).next(function(sr)
+        if sr.code ~= 0 then return { ok = false, stage = "switch", res = sr } end
+        if not rp.apply then return { ok = true } end
+        return git_code(rp.apply, root).next(function(ar)
+            if ar.code ~= 0 then return { ok = false, stage = "apply", res = ar } end
+            return M.drop_stash(rp.stash, root).next(function(dr)
+                return { ok = true, drop_res = dr }
+            end)
+        end)
+    end)
 end
 
 --- The repository's remote names, in `git remote` order (§17.1) — local and

@@ -122,6 +122,50 @@ describe("group_refs", function()
         })
         for _, b in ipairs(g.branches) do assert.is_nil(b.track) end
     end)
+
+    -- §6: HEAD's label goes first, so every consumer of this order agrees on it.
+    it("moves the branch HEAD is on to the front and flags it current", function()
+        local g = group_refs({
+            ref("local", "alpha"),
+            ref("remote", "origin/feat"),
+            ref("local", "feat"),
+            { kind = "head", name = "HEAD", branch = "feat" },
+            ref("tag", "v1"),
+        })
+        assert.equals("feat", g.branches[1].name)
+        assert.is_true(g.branches[1].current)
+        assert.equals(g.branches[1], g.current)
+        assert.same({ "origin" }, g.branches[1].remotes) -- its remotes ride along
+        assert.equals("alpha", g.branches[2].name)
+        assert.is_nil(g.branches[2].current)
+    end)
+
+    it("takes the current branch from the fallback when the head ref names none", function()
+        local g = group_refs({ ref("local", "alpha"), ref("local", "feat"), ref("head", "HEAD") }, "feat")
+        assert.equals("feat", g.current and g.current.name)
+        assert.equals("feat", g.branches[1].name)
+    end)
+
+    it("has no current group on a detached HEAD or a commit HEAD is not on", function()
+        assert.is_nil(group_refs({ ref("local", "main"), ref("head", "HEAD") }).current)
+        -- The fallback names a branch, but no HEAD marker is on this commit.
+        local g = group_refs({ ref("local", "alpha"), ref("local", "main") }, "main")
+        assert.is_nil(g.current)
+        assert.equals("alpha", g.branches[1].name) -- order untouched
+    end)
+end)
+
+describe("head_summary (§10.4.1)", function()
+    local head_summary = require("gitloom.git").head_summary
+    it("names the branch and the short hash when attached", function()
+        assert.equals("HEAD → main (0123456)", head_summary("main", "0123456789abcdef"))
+    end)
+    it("says detached with the short hash otherwise", function()
+        assert.equals("HEAD detached at 0123456", head_summary(nil, "0123456789abcdef"))
+    end)
+    it("is nil with no HEAD commit", function()
+        assert.is_nil(head_summary("main", nil))
+    end)
 end)
 
 describe("track_segments / track_label (§6.3)", function()
@@ -190,6 +234,22 @@ describe("decoration_texts upstream (§6.3)", function()
         local untracked = { refs = { { kind = "local", name = "main" } } }
         assert.same({ "(main)" }, decoration_texts(untracked))
     end)
+
+    it("lists the current branch FIRST as `(HEAD → name …)` (§6)", function()
+        local commit = { refs = {
+            { kind = "local", name = "alpha" },
+            { kind = "tag", name = "v1" },
+            { kind = "local", name = "main", upstream = { short = "origin/main", ahead = 1, behind = 0 } },
+            { kind = "remote", name = "origin/main" },
+            { kind = "head", name = "HEAD", branch = "main" },
+        } }
+        assert.same({ "(HEAD → main ↑origin ⇡1)", "(alpha)", "[v1]" }, decoration_texts(commit))
+    end)
+
+    it("does not list a detached HEAD (its bare `HEAD` is not selectable)", function()
+        local commit = { refs = { { kind = "local", name = "alpha" }, { kind = "head", name = "HEAD" } } }
+        assert.same({ "(alpha)" }, decoration_texts(commit))
+    end)
 end)
 
 describe("ref_picker_items upstream (§6.3)", function()
@@ -216,15 +276,25 @@ describe("pane_labels (header/footer §6.2)", function()
     local function texts(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.text end return t end
     local function kinds(segs) local t = {} for _, s in ipairs(segs) do t[#t + 1] = s.kind end return t end
 
-    it("draws the current branch by name in the HEAD colour (no separate marker)", function()
+    it("draws the current branch as one `HEAD → name` label in the HEAD colour", function()
         -- HEAD points at `feature/topic`, both on the same commit. The pane shows
-        -- the branch name, coloured as HEAD ("you are here") — not a bare HEAD marker.
+        -- one label naming both, coloured as HEAD ("you are here").
         local segs = pane_labels({ refs = {
             ref("local", "feature/topic"),
             ref("head", "HEAD"),
         } }, "feature/topic")
-        assert.same({ "(feature/topic)" }, texts(segs))
+        assert.same({ "(HEAD → feature/topic)" }, texts(segs))
         assert.same({ "head" }, kinds(segs)) -- coloured as HEAD
+    end)
+
+    it("reads the current branch off the head ref's `branch` with no fallback", function()
+        local segs = pane_labels({ refs = {
+            ref("local", "alpha"),
+            ref("local", "feat"),
+            { kind = "head", name = "HEAD", branch = "feat" }, ---@diagnostic disable-line: missing-fields
+        } })
+        assert.same({ "(HEAD → feat)", "(alpha)" }, texts(segs)) -- HEAD first
+        assert.same({ "head", "branch" }, kinds(segs))
     end)
 
     it("carries the current branch's remote-tracking ref into its head-coloured group", function()
@@ -233,7 +303,7 @@ describe("pane_labels (header/footer §6.2)", function()
             ref("remote", "origin/feat"),
             ref("head", "HEAD"),
         } }, "feat")
-        assert.same({ "(feat ↑origin)" }, texts(segs))
+        assert.same({ "(HEAD → feat ↑origin)" }, texts(segs))
         assert.same({ "head" }, kinds(segs))
     end)
 
@@ -241,11 +311,11 @@ describe("pane_labels (header/footer §6.2)", function()
         -- HEAD is on `feat`, but pinned `release` also lands here — show both; only
         -- `feat` takes the HEAD colour, `release` its own branch colour.
         local segs = pane_labels({ refs = {
-            ref("local", "feat"),
             ref("local", "release"),
+            ref("local", "feat"),
             ref("head", "HEAD"),
         } }, "feat")
-        assert.same({ "(feat)", "(release)" }, texts(segs))
+        assert.same({ "(HEAD → feat)", "(release)" }, texts(segs)) -- HEAD's label first
         assert.same({ "head", "branch" }, kinds(segs))
     end)
 
@@ -304,13 +374,27 @@ describe("owners_from_refs", function()
         assert.equals("normal", mode.main)
     end)
 
-    it("skips the HEAD marker (it is a symref onto a branch already present)", function()
-        local owners = owners_from_refs(refs({
+    it("skips an attached HEAD marker (it is a symref onto a branch already present)", function()
+        local r = refs({
             HEAD = { kind = "head", hash = "m" },
             main = { kind = "local", hash = "m" },
-        }), {})
+        })
+        r.HEAD.branch = "main"
+        local owners = owners_from_refs(r, {})
         assert.equals(1, #owners)
         assert.equals("main", owners[1].id)
+    end)
+
+    it("makes a detached HEAD an owner of its own, id `HEAD` (§10.6)", function()
+        local owners = owners_from_refs(refs({
+            HEAD = { kind = "head", hash = "d" },
+            main = { kind = "local", hash = "m" },
+        }), { HEAD = "collapsed" })
+        local by_id = {}
+        for _, o in ipairs(owners) do by_id[o.id] = o end
+        assert.equals(2, #owners)
+        assert.equals("d", by_id.HEAD.tip.hash)
+        assert.equals("collapsed", by_id.HEAD.mode) -- an override keyed `HEAD` applies
     end)
 end)
 
@@ -573,5 +657,62 @@ describe("pane_labels — worktree labels (§3.2/§6.2)", function()
         for _, s in ipairs(segs) do t[#t + 1] = s.text; k[#k + 1] = s.kind end
         assert.same({ "(main)", "[v1]", "{wt:scratch}" }, t)
         assert.same({ "branch", "tag", "worktree" }, k)
+    end)
+end)
+
+describe("pin icon on pinned labels (§6/§10.6)", function()
+    local pane_labels = internal.pane_labels
+    local marker_units = internal.marker_units
+    local function ref(kind, name, extra)
+        local r = { kind = kind, name = name }
+        for k, v in pairs(extra or {}) do r[k] = v end
+        return r
+    end
+    local PINS = { set = { dev = true, ["origin/rel"] = true, v1 = true, ["wt:rev"] = true, main = true },
+        icon = "⚲" }
+
+    it("prefixes a pinned ref's label inside its bracket; unpinned labels are untouched", function()
+        local commit = { refs = {
+            ref("local", "dev"), ref("remote", "origin/dev"),
+            ref("local", "feat"),
+            ref("tag", "v1"), ref("tag", "v2"),
+            ref("worktree", "wt:rev"),
+        } }
+        assert.same({ "(⚲dev ↑origin)", "(feat)", "[⚲v1]", "[v2]", "{⚲wt:rev}" },
+            decoration_texts(commit, nil, PINS))
+        -- No pin set → today's labels.
+        assert.same({ "(dev ↑origin)", "(feat)", "[v1]", "[v2]", "{wt:rev}" }, decoration_texts(commit))
+    end)
+
+    it("marks a group when only one of its remote refs is pinned (auto-pinned upstream)", function()
+        local commit = { refs = { ref("local", "rel"), ref("remote", "origin/rel") } }
+        assert.same({ "(⚲rel ↑origin)" }, decoration_texts(commit, nil, PINS))
+        -- A remote-only group is marked by its remote ref, never by a same-named local elsewhere.
+        assert.same({ "(⚲rel ↑origin)" }, decoration_texts({ refs = { ref("remote", "origin/rel") } }, nil, PINS))
+        assert.same({ "(dev ↑up)" }, decoration_texts({ refs = { ref("remote", "up/dev") } }, nil, PINS))
+    end)
+
+    it("never marks HEAD's label, attached or detached, though HEAD's branch is pinned", function()
+        local attached = { refs = { ref("local", "main"), ref("local", "dev"), ref("head", "HEAD", { branch = "main" }) } }
+        assert.same({ "(HEAD → main)", "(⚲dev)" }, decoration_texts(attached, nil, PINS))
+        local segs = pane_labels({ refs = { ref("local", "dev"), ref("head", "HEAD") } }, nil, PINS)
+        assert.same("HEAD", segs[1].text)
+        assert.same("(⚲dev)", segs[2].text)
+    end)
+
+    it("icon \"\" turns it off", function()
+        local commit = { refs = { ref("local", "dev") } }
+        assert.same({ "(dev)" }, decoration_texts(commit, nil, { set = PINS.set, icon = "" }))
+    end)
+
+    it("pane labels and packed marker units carry the same icon", function()
+        local segs = pane_labels({ refs = { ref("local", "dev"), ref("tag", "v2") } }, nil, PINS)
+        assert.same({ "(⚲dev)", "[v2]" }, { segs[1].text, segs[2].text })
+        local item = { type = "markers", markers = {
+            { hash = "x", collapsed = true, count = 2, refs = { ref("local", "dev") } },
+            { hash = "y", collapsed = true, count = 3, refs = { ref("local", "feat") } },
+        } }
+        local units = marker_units(item, PINS)
+        assert.same({ "(⚲dev)", "(feat)" }, { units[1].text, units[2].text })
     end)
 end)

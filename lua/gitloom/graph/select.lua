@@ -473,7 +473,7 @@ function M.filter_keep(commits, query)
     return keep
 end
 
--- ── The `<CR>` action menu + checkout (spec §10.4, §10.4.1) ───────────────────
+-- ── Row actions + checkout (spec §10.4, §10.4.1; listed by the palette, §17) ──
 
 ---@class SelectedRef
 ---@field kind "local"|"remote"|"tag"|"worktree"
@@ -506,11 +506,38 @@ function M.selected_ref(commit, index)
     return wt and { kind = "worktree", name = wt } or nil
 end
 
---- The real commit a menu row acts on: a collapsed head stands for its tip (its
---- own `hash` is a synthetic `collapsed:` id, never a rev). Pure.
+--- The commit HEAD points at (§2/§3.2): the current branch's commit, or the
+--- checked-out commit itself on a **detached** HEAD — HEAD is always an anchor
+--- (§10.6), so a detached HEAD is as much something to focus as a branch. nil only
+--- when there is no HEAD commit (an empty repository). The open focus, the return
+--- to the graph and the context panes (§6.2) all read HEAD through this. Pure.
+---@param refs table<string, Ref>?  the repo's name → Ref registry
+---@return string?
+function M.head_target(refs)
+    local h = refs and refs["HEAD"]
+    return h and h.commit and h.commit.hash or nil
+end
+
+--- Whether the pin dialog's "Pin new branch…" picker (§10.6.1) offers `item` (a
+--- `ref_picker_items` entry): anything not already on the list (`on`, the pinned
+--- id set), except an **attached** HEAD — its branch is the owner, so the `HEAD`
+--- ref would be an inert row (§10.6). A **detached** HEAD (`head_branch` nil) is
+--- an owner of its own, so after an unpin it can be pinned back here. Pure.
+---@param item { name: string, kind: string }
+---@param on table<string, boolean>
+---@param head_branch string?  the current branch (`repo.head`); nil when detached
+---@return boolean
+function M.pin_candidate(item, on, head_branch)
+    if on[item.name] then return false end
+    return item.kind ~= "head" or head_branch == nil
+end
+
+--- The real commit a row acts on (the palette's row entries, §17; `<CR>`'s commit
+--- view, §11.1): a collapsed head stands for its tip (its own `hash` is a
+--- synthetic `collapsed:` id, never a rev). Pure.
 ---@param commit table?
 ---@return table?
-local function menu_target(commit)
+function M.menu_target(commit)
     if commit and commit.collapsed then return commit.tip end
     return commit
 end
@@ -528,7 +555,7 @@ end
 ---@param ref SelectedRef?
 ---@return CheckoutSpec?
 function M.checkout_spec(commit, ref)
-    local c = menu_target(commit)
+    local c = M.menu_target(commit)
     if not c or c.virtual or not c.hash then return nil end
     if ref and ref.kind == "local" then
         return { argv = { "git", "switch", ref.name }, label = "Checkout branch " .. ref.name }
@@ -539,54 +566,6 @@ function M.checkout_spec(commit, ref)
     end
     return { argv = { "git", "checkout", "--detach", c.hash },
         label = ("Checkout commit %s (detached)"):format(c.hash:sub(1, 7)) }
-end
-
----@class CrMenuEntry
----@field action "examine"|"diff"|"checkout"|"collapse"|"expand"|"hide"
----@field label string
----@field commit? table          examine/diff: the commit to act on
----@field checkout? CheckoutSpec checkout: what to run
----@field marker? integer        expand/hide on a packed line: the marker index
-
---- The ordered `<CR>` action menu for a row (§10.4). `row.kind`:
----
----  * `"plain"` — a commit's message, no ref selected: examine (first, so
----    `<CR><CR>` opens the commit view), diff, checkout;
----  * `"branch"` — a ref selected, or a collapsed head: collapse+hide (expanded)
----    or expand+hide (collapsed), then examine, diff, and checkout LAST;
----  * `"markers"` — a packed line: expand+hide per marker (`row.markers`, their
----    label texts), then checkout of the selected marker's tip (`row.commit`).
----
---- `row.state` is `branch_under_cursor`'s state; `row.has_diff` whether a diff
---- provider is configured (§11.5). A §4.2 virtual commit gets no checkout. Pure.
----@param row { kind: string, commit?: table, ref?: SelectedRef, state?: string, has_diff?: boolean, markers?: string[] }
----@return CrMenuEntry[]
-function M.cr_menu(row)
-    local out = {}
-    local function add(e) out[#out + 1] = e end
-    local c = menu_target(row.commit)
-    if row.kind == "markers" then
-        for i, text in ipairs(row.markers or {}) do
-            add({ action = "expand", label = "Expand " .. text, marker = i })
-            add({ action = "hide", label = "Hide " .. text, marker = i })
-        end
-    elseif row.kind == "branch" then
-        if row.state == "expanded" then
-            add({ action = "collapse", label = "Collapse branch" })
-            add({ action = "hide", label = "Hide branch" })
-        elseif row.state == "collapsed" then
-            add({ action = "expand", label = "Expand branch" })
-            add({ action = "hide", label = "Hide branch" })
-        end
-    end
-    if c and row.kind ~= "markers" then
-        local tip = row.kind == "branch" and row.state == "collapsed"
-        add({ action = "examine", label = tip and "Examine tip commit" or "Examine commit", commit = c })
-        if row.has_diff then add({ action = "diff", label = "Open diff", commit = c }) end
-    end
-    local spec = M.checkout_spec(row.commit, row.ref)
-    if spec then add({ action = "checkout", label = spec.label, checkout = spec }) end
-    return out
 end
 
 return M

@@ -447,7 +447,8 @@ lua/gitloom/
     format.lua      Commit-detail / diff / diffstat / range / worktree formatters
     refs.lua        classify/group refs, worktree-HEAD refs (§3.2), ref-picker
                     model, resync ref-diff (§2/§3.4)
-    range.lua       DiffRange builders (§11.5/§13.5)
+    range.lua       DiffRange builders (§11.5/§13.5, the examine range §10.4.2)
+    examine.lua     Checkout & examine plans: examine / stash message / Return (§10.4.2)
     order.lua       order_commits — gitloom's owned topo-sort (§3.1)
     date.lua        Timestamp parse + date formatters (§4/§6)
     remote.lua      Palette fetch / pull argv + env, `git remote` parse, failure text (§17)
@@ -464,7 +465,7 @@ lua/gitloom/
     reach.lua       Reachability cone + the Lane-graph emphasis walk (§12)
     select.lua      Selection / branch-mode pure helpers (§2/§10/§13)
     pane.lua        Context-pane layout core (§6.2)
-    palette.lua     Command-palette registry + per-scope entry builder (§17)
+    palette.lua     Command palette = the action menu: row entries + registry + builder (§17)
     color.lua       OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua    Reusable virtualized list widget (snacks.win)
   submodule.lua   Submodule change classification + budget/truncate (§11.7)
@@ -478,8 +479,8 @@ lua/gitloom/
   Neovim-window-coupled layer; it drives the engine and the data library. A graph
   session is a **`GraphCtx`** (`ctx`) — `open_graph` assembles it and the helpers,
   keymap handlers, and autocmd bodies are *module-level* functions taking `ctx`
-  (gathered in `GRAPH_HELPERS` → `ctx:method()` and `GRAPH_KEYS` → buffer-local
-  binds), so the controller closure stays well under LuaJIT's 60-upvalue cap. The
+  (gathered in `GRAPH_HELPERS` → `ctx:method()` and the `GRAPH_KEYS` key
+  registry → buffer-local binds, the `?` help and the palette's key entries), so the controller closure stays well under LuaJIT's 60-upvalue cap. The
   pane machinery and one-time stream/`on_show` setup stay nested.
 - **gitloom.git** — the data library: the immutable commit model, the parsers
   and formatters that turn raw `git` output into structured data, the owned
@@ -1713,9 +1714,17 @@ real line, so the cursor sits physically on it) and on the message on the messag
 row. The `CursorMoved` handler pre-selects index `1` when it lands on a labelled
 commit's label row.
 
-`decoration_texts(commit)` is the single source for the decoration strings
-(branch groups then tags), so `display_item` (rendering + the `palette.selected`
-highlight) and the cursor target use byte-identical text. `place_cursor` parks
+`decoration_texts(commit, head_branch, pins)` is the single source for the
+decoration strings (branch groups then tags), so `display_item` (rendering + the
+`palette.selected` highlight) and the cursor target use byte-identical text.
+`pins` is a `PinMarks { set, icon }` — the effective anchor ids plus `icons.pin`
+— that the window resolves (`ctx:pin_marks()`, fresh per call) and hands to
+`display_item` / `pane_labels` / `marker_units` / `place_cursor`, so the pin icon
+(§6) is part of the label text everywhere a label is measured; the renderer never
+reads the session. HEAD's node marker (§5.3) needs no such argument:
+`get_column_chars` recognises HEAD's commit by the `head` ref in its `refs`
+(`render.has_head_ref`), which a collapsed head aggregates from its region and a
+resync re-binds. `place_cursor` parks
 the cursor: for a selected ref it finds the decoration in the rendered line via
 `ref_byte_col` (refs are pinned to the right edge, so their column is not
 fixed); otherwise it parks at the message via `controller.col_offset(line,
@@ -1794,8 +1803,10 @@ whether it landed), then centers on it with `center_view` (a window-local
 `normal! zz`, so it clamps at the graph edges) and re-parks with `place_cursor`.
 The cone is then recomputed for the new pivot/viewport. The target is the
 **remembered position** for the repo if there is one, else **HEAD**
-(`repo.refs["HEAD"]`, gated on `repo.head` so only a branch checkout focuses; a
-detached HEAD still carries a marker (§3.2) but falls back to the top).
+(`select.head_target(repo.refs)` — HEAD's commit whether on a branch or detached,
+since HEAD is always an anchor (§10.6); only an empty repository falls back to
+the top). The context panes decline through the same notion (`pane.decline`: off /
+no HEAD commit / no display), so a detached HEAD keeps them.
 The remembered position is a module-level `saved_positions` table keyed by
 the repository root (`repo.root`, §2.1); the `CursorMoved` handler records the hash
 under the cursor (`cursor_hash`) on every row change, so it is always current
@@ -1804,18 +1815,39 @@ disk.
 
 ### Commit view
 
-The `<CR>` action menu's **examine** entry (the first on a plain commit row, so
-`<CR><CR>`) opens the commit view (specification.md §11) for the commit on the
-current row. The menu itself is data: `h_cr` (window.lua) only classifies the row
-(`plain` / `branch` / `markers`) and hands it to the pure `select.cr_menu(row)`,
-which returns the ordered entries, each tagged with an `action` that `h_cr` maps to
-its glue. The one repository-mutating entry, **checkout** (specification.md
-§10.4.1), is built by the pure `select.checkout_spec(commit,
+`<CR>` (`h_cr`) opens the commit view (specification.md §11) for the row's
+commit directly — no menu: `select.menu_target` maps a collapsed head to its tip,
+and a packed line uses the selected marker's tip (the first marker's when none
+is selected). The row's other actions are the command palette's **row entries**
+(below): `ctx:palette()` classifies the row (`plain` / `branch` / `markers`, with
+the selected marker) and the pure `palette.row_entries(row, has_diff)` returns
+them in order — scoped to the commit or the branch, never both — each tagged
+with an `op` that the palette helper maps to its glue. The repository-mutating
+**checkout** entry (specification.md §10.4.1) is built by the pure
+`select.checkout_spec(commit,
 select.selected_ref(commit, index))` (an argv that never forces; none for a §4.2
 virtual commit; a collapsed head resolves to its tip) and run by
 `git.run_checkout(argv, repo.root)` — `git_code` with an explicit `cwd`, so a
 submodule graph checks out in the submodule. A non-zero exit is reported via
-`format_git_error`; success runs the §3.4 resync (`ctx:resync(false)`).
+`format_git_error`; success runs the §3.4 resync in its **follow-HEAD** form
+(`ctx:resync(false, {})`, also used by checkout & examine and Return with a
+`note`): the cursor lands on HEAD's row instead of the remembered one, and the
+notice is `git.head_summary` — `HEAD → <branch> (<short>)` / `HEAD detached at
+<short>`. Every resync also drops the signature cache (`sig_cache.sig = nil`):
+its key is the order and owner *counts*, which a moved ref tip — a detached HEAD
+moving, a force-pushed ref — leaves unchanged.
+
+**HEAD is always an anchor and always labelled first** (specification.md §6,
+§10.6). The `head` Ref carries `branch` (the branch HEAD is on; set by
+`fetch_head` and `reconcile_refs`, nil when detached). `owners_from_refs` skips an
+attached HEAD (its branch is the owner) but makes a **detached** one an owner with
+id `HEAD`, which `effective_pins` pins by default — `HEAD` rather than a
+hash-named id because it is re-bound, not renamed, by every resync, so a pin,
+unpin or mode override on it follows the checkout. `git.group_refs` moves the
+group `branch` names to the front and flags it `current`; since every label
+consumer (`decoration_texts`, `display_item`, `pane_labels`, `selected_ref`,
+`selected_owner_ids`, `ref_decoration_index`) walks that one order, the leading
+`(HEAD → name)` label, the `h`/`l` index and the checkout target cannot disagree.
 `open_commit_view(opts, commit)` is the runtime glue: it opens a
 `snacks.win` float (same geometry as the graph window), chains
 `fetch_commit_detail(commit.hash)` then `fetch_commit_diff(commit.hash)`, and on
@@ -1934,13 +1966,43 @@ preview) share the commit-view renderer.
 
 ### Command palette
 
-`<C-Space>` / `<C-@>` (specification.md §17) open `ctx:palette()`, a
-`vim.ui.select` over `palette.palette_entries("global", ctx.remotes)`. The pure
-registry (`graph/palette.lua`, `COMMANDS`) is one ordered list of `{ id, label,
-key?, scope, per_remote?, action(ctx, remote?) }`; the builder filters by scope,
-appends `  (<key>)` to the label, and expands a `per_remote` entry once per
-cached remote name (`fetch:<remote>`). Actions only call ctx methods
-(`resync`, `run_remote`), so the module is window-free and unit-tested.
+`<C-Space>` / `<C-@>` (specification.md §17) open `ctx:palette()`, gitloom's
+single action menu: a `vim.ui.select` over `palette.palette_entries(info)`, where
+`info` is a snapshot — the classified cursor row, whether a §13 selection is
+active, `ctx.remotes`, the repository's examine state (`nav.examine[root]`) and
+whether a diff provider is configured, and the key registry. The pure builder
+returns ONE ordered list: the **context** first — `row_entries(row)` (a commit's
+diff / checkout / checkout & examine, a branch's checkout / collapse / expand /
+hide, a selected marker's actions only; `row_context(row)` names it `commit` /
+`branch` / `markers`), or the registry's `selection` entries instead while
+selecting — then the registry's `global` entries, then `key_entries` (below). The
+command registry (`graph/palette.lua`, `COMMANDS`) is a list of `{ id, label
+(string or fun(state)), key?, scope, per_remote?, when?(state), action(ctx,
+remote?) }`; the builder filters by scope and `when`, appends `  (<key>)` to the
+label, and expands a `per_remote` entry once per cached remote name
+(`fetch:<remote>`). A registry entry carries an `action` that only calls ctx
+methods (`run_remote`, `open_selection_diff`, `examine_selection`,
+`examine_return`); a row entry carries an `op` + its data instead, which the
+palette helper runs against the row (and branch / marker units) it resolved. So
+the module is window-free and unit-tested.
+
+**The key registry** (specification.md §17.1) is window.lua's `GRAPH_KEYS`, an
+ordered list of `GraphKey` = `{ key (lhs, or an alias list), run?(ctx), desc,
+help?, group?, contexts?, when?(state) }` — the handlers are window locals, so the
+table lives there while everything that reads it is pure in `graph/palette.lua`.
+`open_graph` binds each lhs buffer-local with `desc = "Gitloom: " .. desc` (an
+entry without `run` — `<C-o>`/`<C-i>`, bound by `nav.install_nav_keys` — is
+listed only); `h_help` renders `palette.help_lines(keys)` (grouped by
+`KEY_GROUPS`, ungrouped keys last as "Motion & misc"); and `palette_entries`
+appends `palette.key_entries(keys, context, state, taken)` — keys with a `group`,
+offered in the context (`contexts` nil = everywhere), `when` holding, groups in
+`refs → view → select → other` order, labelled `<desc>  (<key>)`, skipping any key
+an earlier entry already carries (`D` on Open diff, `<Space>` on collapse /
+expand). A key entry's action runs the handler (scheduled, so a picker it opens
+follows the select's close). The resync is the `R` key's entry, not a command.
+Because window.lua is at the 200-local ceiling, the registry is reached from the
+helpers defined above it through `ctx:key_registry()` (a `GRAPH_HELPERS` field),
+and exposed to tests as `window._internal.keys`.
 
 `ctx.remotes` is filled by `ctx:load_remotes()` — `git.fetch_remotes(repo.root)`
 (`git remote` → the pure `remote.parse_remotes`) — once when the session is
@@ -1957,6 +2019,34 @@ and the env merged over Neovim's (`vim.system`'s `env`), the same shape as
 and resyncs on success, or always for a pull. `resync` returns early when the
 graph window has gone. Both helpers are `GRAPH_HELPERS` fields — window.lua is at
 the 200-local ceiling.
+
+### Checkout & examine
+
+Checkout & examine (specification.md §10.4.2) splits three ways. The pure
+decisions are `git/examine.lua`: `examine_plan({ newer, older, status, head,
+state, root })` → `open` (a §4.2 working-tree newer end: just the existing range)
+/ `refuse` (an examine is active and the tree is dirty — never a second stash) /
+`checkout` (`git checkout --detach <newer>`, an optional `git stash push -u -m`
+step, the state to record, and the range); `examine_stash_message`;
+`return_plan(state)` (`git switch` or a detached checkout, then `git stash apply
+<sha>`); `stash_index` (a stash's current position from its SHA). The range is
+`range.examine_range(newer, older, root)` — ONE rev, the base `range_endpoints`
+uses, against the working tree, so diffview's right side is `RevType.LOCAL`.
+
+The git side is `fetch.lua`: `examine_probe(root)` (HEAD, its branch, `git status
+--porcelain` → `parse_status`), `examine_run(plan, root)` (reads `stash@{0}`
+before and after the push, so "nothing stashed" is detected rather than mistaking
+an older stash for ours; a failed checkout re-applies the stash at once and drops
+it only after a clean apply), `examine_return(rp, root)` and `drop_stash(sha,
+root)` — which re-derives `stash@{n}` from `git stash list --format=%H` right
+before dropping, since the stash is shared with every worktree and session. All
+are `git_code` in an explicit cwd.
+
+The window glue (`GRAPH_HELPERS.examine` / `examine_selection` /
+`examine_return`) prompts on a dirty tree, notifies, opens the provider, keeps the
+state in `nav.examine[root]` — module-level, keyed by repository root, so it
+survives closing and reopening the graph — and resyncs. It shares
+`ctx.remote_busy` with fetch / pull: both move HEAD or the working tree.
 
 ### Filter search (in-graph)
 
@@ -2082,7 +2172,8 @@ repository, an explicit path, or a drilled-in frame (specification.md §2.1) —
 rev then fails to parse there, or a working-tree range opens the wrong working
 tree. Passing an argv list rather than building an Ex command line is what keeps a
 root with spaces intact. Call sites: the graph's `D` key (commit under the cursor,
-or the selection), the `<CR>` action menu, and the commit view's action label; the
+or the selection), the command palette's open-diff entries, and the commit view's
+action label (Checkout & examine opens its own single-rev range); the
 selection's range comes from `selection_range` → `range_endpoints(…, repo.root)`. Because the provider takes a *range*, future graph-side multi-commit
 selection adds new range constructors (e.g. `range_between(a, b)`) without
 touching the provider or the call sites.
@@ -2236,7 +2327,7 @@ gitloom.nvim/
 │   ├── git/               The git data library (gitloom.git)
 │   │   ├── init.lua       Aggregator
 │   │   ├── model.lua / parse.lua / format.lua / refs.lua
-│   │   ├── range.lua / order.lua / date.lua / remote.lua
+│   │   ├── range.lua / order.lua / date.lua / remote.lua / examine.lua
 │   │   └── fetch.lua      Async git I/O (vim.system) — the only Neovim coupling
 │   ├── graph/             The graph engine (gitloom.graph)
 │   │   ├── init.lua       Engine entry: types + layout glue + _internal seam
@@ -2247,7 +2338,7 @@ gitloom.nvim/
 │   │   ├── reach.lua      Reachability cone + emphasis walk (§12)
 │   │   ├── select.lua     Selection/branch-mode pure helpers (§2/§10/§13)
 │   │   ├── pane.lua       Context-pane layout core (§6.2)
-│   │   ├── palette.lua    Command-palette registry (§17)
+│   │   ├── palette.lua    Command palette: row entries + registry (§17)
 │   │   └── color.lua      OKLCH colour generation (§5.5)
 │   ├── submodule.lua      Submodule change view: pure core (§11.7)
 │   └── listview.lua
