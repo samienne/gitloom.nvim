@@ -15,8 +15,10 @@ Do NOT duplicate content from these files here. Refer to them instead.
 
 ## What this is
 
-A read-only git commit-graph viewer for Neovim (checkout from the `<CR>` menu
-is the single mutating exception, spec §10.4.1). `:GitloomGraph` opens a
+A read-only git commit-graph viewer for Neovim — it never stages, commits or
+rewrites history by itself; the exceptions are actions the user explicitly picks:
+checkout from the `<CR>` menu (spec §10.4.1) and fetch / pull from the
+`<C-Space>` command palette (§17). `:GitloomGraph` opens a
 floating window showing the commit DAG as a colored, lane-based graph for the
 repo at Neovim's cwd. Part of the loomworks suite, but **standalone** — its
 only third-party dependency is snacks.nvim.
@@ -378,6 +380,20 @@ Coverage:
   a REAL scratch repository passed as the root (not the cwd): a branch switch and
   a detach land, and a switch over a conflicting dirty file is refused with a
   non-zero code + stderr, HEAD and the file untouched
+- `tests/palette_spec.lua` — the command palette (§17): `palette.palette_entries`
+  (Refresh / Fetch / per-remote Fetch / Pull order, the `  (R)` key suffix, scope
+  filtering — non-global entries never in the global palette — remotes nil / {} /
+  a list giving no / no / one `fetch:<remote>` entry each, actions bound to ctx +
+  remote), `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
+  `git pull --ff-only`, `GIT_TERMINAL_PROMPT=0` in a fresh env table, pull's
+  resync-on-failure, never forcing), `remote.parse_remotes` (blank lines, CR), `remote.failure_text`
+  (the `fatal:`/`error:` line first, stderr as is, stdout fallback), and
+  against REAL scratch repositories (a bare remote + two clones + a second bare
+  remote): `fetch_remotes` order, fetch --all moving `origin/main`, a per-remote
+  fetch moving only that remote's ref, pull fast-forwarding a strictly-behind
+  branch, a diverged pull refused with HEAD unmoved, pull with
+  no upstream failing with a code + stderr (HEAD unmoved), and the env reaching
+  the job (a `!echo` alias prints `$GIT_TERMINAL_PROMPT`)
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
   the three nodes staged / unstaged / untracked (spec §3.3/§4.2/§11.8):
   `parse_status` (the `git status --porcelain` staged/unstaged/untracked counter —
@@ -1141,6 +1157,24 @@ Details not covered by the spec or architecture:
   submodule graph checks out in the submodule); a non-zero exit is one
   `format_git_error` line at ERROR, success runs `ctx:resync(false)` (the `R`
   path).
+- **Command palette** (spec §17, `<C-Space>` + `<C-@>`, which many terminals send
+  for it — `<C-@>` and `<Nul>` are one key code): `graph/palette.lua` is the one
+  registry (`COMMANDS`: `{ id, label, key?, scope, per_remote?, action(ctx,
+  remote?) }`) and `palette_entries(scope, remotes)` the pure builder (scope
+  filter, `  (key)` suffix, a `per_remote` entry expanded per cached remote as
+  `fetch:<remote>`). Only `global` is used; `commit`/`ref` are reserved. The glue
+  is two `GRAPH_HELPERS` fields (window.lua's local ceiling): `palette` (a
+  `vim.ui.select` built from `ctx.remotes` only — never waits) and `run_remote`
+  (`git.remote_command` → `git.run_remote(argv, repo.root, env)`, the
+  `run_checkout` shape with an env: `GIT_TERMINAL_PROMPT=0`; `ctx.remote_busy`
+  refuses a second run; success → INFO + resync, failure → `format_git_error`
+  over `remote.failure_text` (git's `fatal:`/`error:` line first, stdout when
+  stderr is empty) + resync for a pull only).
+  `ctx.remotes` comes from `load_remotes` (`git remote`, async) at session
+  assembly and at the top of every `resync`. Pull's argv is exactly `git pull
+  --ff-only`, which overrides any `pull.rebase` / `pull.ff` config, so it never
+  merges or rebases; a failed pull still resyncs (its fetch half may have moved
+  remote-tracking refs).
 - **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
   recompute from the visible range each scroll, so a varying column bounces. A
   column can *only grow* (never shrink): `col_max` (a per-column cap, implies

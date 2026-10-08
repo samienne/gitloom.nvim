@@ -161,6 +161,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `L` | **Pinned branches** — a dialog listing the pinned branches in priority order: `<C-j>`/`<C-k>` reorder, `<Space>` flags a branch for a dedicated graph lane, `D` unpins, `<CR>` jumps to a branch, the last row adds one via the ref picker, `q` closes |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
+| `<C-Space>` | **Command palette** (also `<C-@>`, what many terminals send) — refresh / fetch / pull; see below |
 | `S` | Cycle the row **sort mode** — gitloom's own topological order (reproduces git's `--topo-order`), or git's date / author-date order; reorders in place |
 | `<leader>b` | Jump to a branch / ref — open a picker of all branches, remotes, tags, linked-worktree HEADs (`wt:<dir>`) and HEAD; selecting one centers the view on its commit (recently jumped refs first) |
 | `<leader>gl` | Search commits — fuzzy picker over commit subjects and authors; the preview shows the commit (like the commit view) under a snippet of the graph locating it; selecting one jumps + centers the graph (also `:GitloomSearch`) |
@@ -236,9 +237,30 @@ divergence indicator after its name: `⇡N` ahead, `⇣N` behind, `⇡N⇣M` div
 means two commits ahead and three behind `origin/master`. The current branch's
 status also shows in the footer, and `⇡⇣` appears in the `<leader>b` ref picker.
 Counts are git's own, computed against the **last-fetched** remote state (gitloom
-never fetches; `git fetch` then `R` refreshes them). The upstream is read from
+never fetches on its own; **Fetch** from the `<C-Space>` palette, or `git fetch`
+then `R`, refreshes them). The upstream is read from
 git's tracking config, not a shared name, so it stays correct across mirrored or
 many-remote setups. Colors are configurable via `palette.track`.
+
+**Command palette.** `<C-Space>` (or `<C-@>`, which many terminals send for it)
+opens a picker of the graph-wide commands, each showing its direct key when it has
+one:
+
+- **Refresh  (R)** — the `R` resync;
+- **Fetch** — `git fetch --all`;
+- **Fetch `<remote>`** — `git fetch <remote>`, one entry per remote in
+  `git remote` order (the list is read when the graph opens and on every resync;
+  the palette never waits for it, so the entries appear once it has arrived);
+- **Pull** — `git pull --ff-only` (fast-forward only: a branch that has diverged
+  from its upstream is refused with git's error, never merged or rebased).
+
+Fetch and pull run in the background in the graph's repository (a submodule's
+graph fetches that submodule), with `GIT_TERMINAL_PROMPT=0` so a credential
+prompt fails instead of hanging — credential helpers still work. A notice shows
+while one runs; a second one is refused until it finishes. On success the graph
+resyncs; on failure git's error is shown (a failed pull still resyncs, since its
+fetch half may have moved the remote-tracking branches). Nothing is ever forced
+(§17).
 
 **Commit selection (range).** Press `V` to start a modal selection that picks a
 range of commits **along one branch**. It is not a contiguous block of rows — it

@@ -1003,15 +1003,18 @@ end
 --- exit) instead of throwing on an invalid working directory. Resolves
 --- `{ code = -1 }` if the job cannot be spawned.
 --- `cwd` overrides the active root for this one command (checkout, §10.4.1,
---- runs in the graph's own `repo.root`).
+--- runs in the graph's own `repo.root`). `env` adds variables to the job's
+--- environment (merged over Neovim's; the palette's fetch / pull, §17.3).
 ---@param args string[]
 ---@param cwd string?
+---@param env table<string, string>?
 ---@return table  -- future resolving { code: integer, out: string, err: string }
-local function git_code(args, cwd)
+local function git_code(args, cwd, env)
     local future, promise = make_future()
     local out, err = {}, {}
     local ok, jid = pcall(js, args, {
         cwd = cwd,
+        env = env,
         stdout_buffered = true,
         stderr_buffered = true,
         on_stdout = function(_, lines)
@@ -1045,6 +1048,30 @@ end
 ---@return table  -- future resolving { code: integer, out: string, err: string }
 function M.run_checkout(argv, root)
     return git_code(argv, root)
+end
+
+--- Run a palette remote command (`remote_command`'s argv + env, §17.3) in the
+--- repository `root` — the graph's `repo.root`, never implicitly Neovim's cwd —
+--- with `env` (`GIT_TERMINAL_PROMPT=0`) added to the job's environment. Resolves
+--- `{ code, out, err }`. The argv never forces.
+---@param argv string[]
+---@param root string?
+---@param env table<string, string>?
+---@return table  -- future resolving { code: integer, out: string, err: string }
+function M.run_remote(argv, root, env)
+    return git_code(argv, root, env)
+end
+
+--- The repository's remote names, in `git remote` order (§17.1) — local and
+--- fast, no network. Runs in `root` (the graph's `repo.root`). Resolves the
+--- `parse_remotes` list, or nil when git fails (the caller keeps what it had).
+---@param root string?
+---@return table  -- future resolving string[]?
+function M.fetch_remotes(root)
+    return git_code({ "git", "remote" }, root).next(function(res)
+        if res.code ~= 0 then return nil end
+        return require("gitloom.git.remote").parse_remotes(res.out)
+    end)
 end
 
 --- Fetch the **combined** patch for a `DiffRange` (spec §13.5): `git diff
