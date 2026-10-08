@@ -3382,7 +3382,8 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
     end
 
     -- "Pin new branch…": the §2 ref picker, minus the refs already on the list and
-    -- the HEAD entry (which is not a ref owner id — the current branch is).
+    -- an attached HEAD (its branch is the owner); a detached HEAD is an owner of its
+    -- own, so after an unpin it can be pinned back (`pin_candidate`).
     local function h_add()
         local picker_ok, picker = pcall(require, "snacks.picker")
         if not picker_ok then
@@ -3392,7 +3393,7 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
         local on = selectm.pin_ids(ctx:effective_pins())
         local items = {}
         for _, it in ipairs(ref_picker_items(ctx.repo.refs, recent_refs[ctx.repo_key])) do
-            if it.kind ~= "head" and not on[it.name] then items[#items + 1] = it end
+            if selectm.pin_candidate(it, on, ctx.repo.head) then items[#items + 1] = it end
         end
         if #items == 0 then
             vim.notify("gitloom: every ref is already pinned", vim.log.levels.INFO)
@@ -3503,6 +3504,8 @@ local GRAPH_KEYS = {
     { key = "P", run = h_pin, group = "refs", contexts = { "branch" }, desc = "Pin / unpin branch",
         help = "Pin / unpin the branch under the cursor as an anchor" },
     { key = "<Space>", run = h_space, group = "refs", contexts = { "branch" },
+        -- On a mainline row (an anchor's own line) there is nothing to toggle (§10.4).
+        when = function(st) return not (st.row and st.row.state == "mainline") end,
         desc = "Collapse / expand branch",
         help = "Collapse / expand the branch under the cursor (selecting: fold / unfold the head)" },
     { key = "L", run = function(ctx) ctx:pin_dialog() end, group = "refs", desc = "Pinned branches…",
@@ -3781,8 +3784,7 @@ local function resync(ctx, silent, follow)
         -- (goto_hash only scrolls if its new row is off-screen) — or, following a
         -- checkout, on HEAD's row (always visible: HEAD is an anchor, §10.6).
         if view then pcall(vim.fn.winrestview, view) end
-        local headref = repo.refs["HEAD"]
-        local head_hash = headref and headref.commit and headref.commit.hash
+        local head_hash = selectm.head_target(repo.refs)
         if not (follow and head_hash and ctx:goto_hash(head_hash))
             and not (focus and ctx:goto_hash(focus)) then
             -- The focused commit is gone (rewound away) — fall back to HEAD.
@@ -4589,13 +4591,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 -- else the remembered position for this repo, else HEAD; center the
                 -- view on it (§2). goto_hash resolves a folded commit to its
                 -- collapsed head; if the target is gone it leaves the cursor at the
-                -- top. Only focus HEAD when on a branch: a detached HEAD now carries
-                -- a marker (§3.2) but there is nothing to focus, so that case keeps
-                -- the top of the graph.
+                -- top. HEAD is HEAD's commit on a branch or detached alike: HEAD is
+                -- always an anchor (§10.6), so a detached HEAD is focused too.
                 local target = focus_hash or saved_positions[repo_key]
                 if not (target and goto_hash(target)) then
-                    local headref = repo.head and repo.refs["HEAD"]
-                    if headref and headref.commit then goto_hash(headref.commit.hash) end
+                    local head_hash = selectm.head_target(repo.refs)
+                    if head_hash then goto_hash(head_hash) end
                 end
                 center_view()
                 place_cursor()
@@ -5208,9 +5209,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         local function build_panes()
             if opts.panes == false then return hide_all("off") end
             if not vim.api.nvim_win_is_valid(win) then return end
-            -- Panes are a focus feature: need HEAD and a graph.
-            if not (repo.head and repo.refs[repo.head]) then return hide_all("no HEAD") end
-            if not repo.display or #repo.display == 0 then return hide_all("no display") end
+            -- Panes are a focus feature: need a HEAD commit (on a branch OR detached —
+            -- HEAD is always an anchor, §10.6) and a graph.
+            local declined = pane.decline(opts.panes, repo.refs, repo.display)
+            if declined then return hide_all(declined) end
 
             -- `py` yields to the driver every YIELD_EVERY units so build_panes' own
             -- O(N) index passes don't block; pane.continue/continue_up self-chunk via
@@ -5931,8 +5933,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end
         local target = saved_positions[repo_key]
         if not (target and goto_hash(target)) then
-            local headref = repo.head and repo.refs["HEAD"]
-            if headref and headref.commit then goto_hash(headref.commit.hash) end
+            local head_hash = selectm.head_target(repo.refs) -- attached or detached (§2)
+            if head_hash then goto_hash(head_hash) end
         end
         center_view()
         place_cursor()

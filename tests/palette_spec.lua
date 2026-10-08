@@ -339,6 +339,31 @@ describe("the real key registry (window.lua GRAPH_KEYS, §17.1)", function()
         assert.equals(1, n)
     end)
 
+    it("offers <Space> on a branch row only where it toggles something", function()
+        local H = ("a"):rep(40)
+        local function spaces(state)
+            local n = 0
+            local row = { kind = "branch", state = state, commit = { hash = H, refs = {} } }
+            for _, e in ipairs(palette.palette_entries({ keys = keys, row = row })) do
+                if e.key == "<Space>" then n = n + 1 end
+            end
+            return n
+        end
+        -- mainline: pressing it does nothing, so it is not offered at all
+        assert.equals(0, spaces("mainline"))
+        -- expanded / collapsed: offered once, as the row's collapse / expand entry
+        assert.equals(1, spaces("expanded"))
+        assert.equals(1, spaces("collapsed"))
+        -- a packed line with a marker selected (no state) still toggles the marker
+        local packed = { kind = "markers", markers = { "a", "b" }, selected = 1,
+            commit = { hash = H, refs = {} } }
+        local n = 0
+        for _, e in ipairs(palette.palette_entries({ keys = keys, row = packed })) do
+            if e.key == "<Space>" then n = n + 1 end
+        end
+        assert.equals(1, n)
+    end)
+
     it("the help lists every bound key", function()
         local text = table.concat(palette.help_lines(keys), "\n")
         for _, k in ipairs(keys) do

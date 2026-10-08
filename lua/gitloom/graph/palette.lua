@@ -35,6 +35,7 @@ local M = {}
 ---@class PaletteState  the session snapshot the registry's conditions read (§17.1)
 ---@field examine? ExamineState  the repository's active Checkout & examine (§10.4.2)
 ---@field has_diff? boolean      a diff provider is configured (§11.5)
+---@field row? PaletteRow        the cursor row (nil while selecting or with no row)
 
 ---@class PaletteCommand
 ---@field id string              stable name (`fetch`, `pull`, `return`); a
@@ -299,7 +300,8 @@ end
 function M.palette_entries(info)
     info = info or {}
     local commands = info.commands or M.COMMANDS
-    local state = { examine = info.examine, has_diff = info.has_diff }
+    local state = { examine = info.examine, has_diff = info.has_diff,
+        row = not info.selection and info.row or nil }
     local out = info.selection and scoped(commands, "selection", info.remotes, state)
         or M.row_entries(info.row, info.has_diff)
     for _, e in ipairs(scoped(commands, "global", info.remotes, state)) do out[#out + 1] = e end

@@ -422,8 +422,8 @@ its own yet).
 When the graph opens it focuses **HEAD** (the current branch's commit) and
 centers the view on it. After that it **remembers where you were per repository**
 for the rest of the Neovim session: close and reopen the graph and the cursor
-returns to the same commit (re-centered) instead of jumping back to HEAD. On a
-detached HEAD there is nothing to focus, so the view opens at the top.
+returns to the same commit (re-centered) instead of jumping back to HEAD. A
+detached HEAD is focused the same way — HEAD is always an anchor.
 
 The row under the cursor is the **pivot**: gitloom dims everything outside its
 reachability cone — its ancestors (following parents) and descendants

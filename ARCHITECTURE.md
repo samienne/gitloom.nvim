@@ -1770,9 +1770,10 @@ whether it landed), then centers on it with `center_view` (a window-local
 `normal! zz`, so it clamps at the graph edges) and re-parks with `place_cursor`.
 The cone is then recomputed for the new pivot/viewport. The target is the
 **remembered position** for the repo if there is one, else **HEAD**
-(`repo.refs["HEAD"]`, gated on `repo.head` so only a branch checkout focuses; a
-detached HEAD still carries a marker (§3.2) — and is an anchor row (§10.6) — but
-falls back to the top).
+(`select.head_target(repo.refs)` — HEAD's commit whether on a branch or detached,
+since HEAD is always an anchor (§10.6); only an empty repository falls back to
+the top). The context panes decline through the same notion (`pane.decline`: off /
+no HEAD commit / no display), so a detached HEAD keeps them.
 The remembered position is a module-level `saved_positions` table keyed by
 the repository root (`repo.root`, §2.1); the `CursorMoved` handler records the hash
 under the cursor (`cursor_hash`) on every row change, so it is always current

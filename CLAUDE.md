@@ -414,7 +414,9 @@ Coverage:
   ungrouped last, aliases joined, aligned, a newly added fake key picked up with
   its `help` text); and the REAL `GRAPH_KEYS` (`window._internal.keys`):
   well-formed (a desc each, known groups / contexts, no lhs bound twice), motions
-  and plumbing ungrouped, `R` once, every key in the help; `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
+  and plumbing ungrouped, `R` once, every key in the help, `<Space>` offered on a
+  branch row only where it toggles (not on a `mainline` row; once on expanded /
+  collapsed, as the row entry; on a selected packed marker); `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
   `git pull --ff-only`, `GIT_TERMINAL_PROMPT=0` in a fresh env table, pull's
   resync-on-failure, never forcing), `remote.parse_remotes` (blank lines, CR), `remote.failure_text`
   (the `fatal:`/`error:` line first, stderr as is, stdout fallback), and
@@ -498,6 +500,13 @@ Coverage:
   **boundary seed** (spec §6.2): a seeded lane enters from above in its column
   and stays continuous (the seam row runs no compaction), and the seed colour is
   reserved so a pane-born lane never reuses it
+- `tests/detached_head_spec.lua` — a detached HEAD is an anchor everywhere a pinned
+  ref matters (§2/§6.2/§10.6.1): `select.head_target` (the open / return focus —
+  HEAD's commit attached or detached, nil only without a HEAD commit),
+  `pane.decline` (the panes' hide reason — off / no HEAD commit / no display, never
+  for a detached HEAD) and `select.pin_candidate` (the dialog's "Pin new branch…"
+  list — a detached `HEAD` offered, an attached one never, pinned refs skipped).
+  The callers are window glue, not unit-tested
 - `tests/pane_spec.lua` — the context-pane layout core (`gitloom.pane`, spec
   §6.2), **plus the multiple-above-rows contract** (§5 Line): a REAL `gutter` layout
   with two (and three) virtual lines above one commit, driven through

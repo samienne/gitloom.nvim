@@ -506,6 +506,32 @@ function M.selected_ref(commit, index)
     return wt and { kind = "worktree", name = wt } or nil
 end
 
+--- The commit HEAD points at (§2/§3.2): the current branch's commit, or the
+--- checked-out commit itself on a **detached** HEAD — HEAD is always an anchor
+--- (§10.6), so a detached HEAD is as much something to focus as a branch. nil only
+--- when there is no HEAD commit (an empty repository). The open focus, the return
+--- to the graph and the context panes (§6.2) all read HEAD through this. Pure.
+---@param refs table<string, Ref>?  the repo's name → Ref registry
+---@return string?
+function M.head_target(refs)
+    local h = refs and refs["HEAD"]
+    return h and h.commit and h.commit.hash or nil
+end
+
+--- Whether the pin dialog's "Pin new branch…" picker (§10.6.1) offers `item` (a
+--- `ref_picker_items` entry): anything not already on the list (`on`, the pinned
+--- id set), except an **attached** HEAD — its branch is the owner, so the `HEAD`
+--- ref would be an inert row (§10.6). A **detached** HEAD (`head_branch` nil) is
+--- an owner of its own, so after an unpin it can be pinned back here. Pure.
+---@param item { name: string, kind: string }
+---@param on table<string, boolean>
+---@param head_branch string?  the current branch (`repo.head`); nil when detached
+---@return boolean
+function M.pin_candidate(item, on, head_branch)
+    if on[item.name] then return false end
+    return item.kind ~= "head" or head_branch == nil
+end
+
 --- The real commit a row acts on (the palette's row entries, §17; `<CR>`'s commit
 --- view, §11.1): a collapsed head stands for its tip (its own `hash` is a
 --- synthetic `collapsed:` id, never a rev). Pure.

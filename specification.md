@@ -134,10 +134,11 @@ persistent view.
 - The view opens immediately and is populated asynchronously as git output
   arrives; the window must not block on git completing.
 - **Initial focus and position retention.** When the graph finishes loading it
-  moves the cursor to **HEAD** (the current branch's commit, §3.2) and **centers**
-  the view on that row when possible — clamped at the top/bottom of the graph
-  (like `zz`). On a detached HEAD (no current branch) there is nothing to focus,
-  so the cursor stays at the top. The cursor's row is then **remembered per
+  moves the cursor to **HEAD** (the current branch's commit, or the checked-out
+  commit itself on a detached HEAD, §3.2) and **centers** the view on that row
+  when possible — clamped at the top/bottom of the graph (like `zz`). HEAD is
+  always an anchor (§10.6), so attached and detached focus alike; only a
+  repository with no HEAD commit (empty) leaves the cursor at the top. The cursor's row is then **remembered per
   repository** (keyed by repository root, §2.1) for the duration of the
   Neovim session: closing and reopening the graph restores the cursor to the same
   commit (re-centered) instead of re-focusing HEAD. The remembered target is the
@@ -1436,7 +1437,10 @@ row.
 A pane has **height 0** (is hidden) whenever there is no off-screen topology in
 its direction: the header vanishes when scrolled to the top of the graph, the
 footer when scrolled to the bottom (the roots are then already on-screen). This
-falls out of the sizing rule below (`G = 0` at the extreme).
+falls out of the sizing rule below (`G = 0` at the extreme). Both are also hidden
+when the repository has **no HEAD commit** (empty) — but a **detached** HEAD is an
+anchor like any pinned branch (§10.6), so the panes show on it exactly as on a
+branch, folding toward the checked-out commit.
 
 **What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
 labels only — no date, author, or message. The labels read as in the main view
@@ -2275,7 +2279,9 @@ Pinned branches                    ◆ = dedicated lane
 - `D` unpins the entry — it leaves the list, taking its reserve flag with it.
 - The last row, **`+ Pin new branch…`**, opens the existing ref picker (§2,
   `<leader>b`); the chosen ref is appended to the list, pinned and **not**
-  reserved. Refs already on the list are omitted from that picker.
+  reserved. Refs already on the list are omitted from that picker, and so is
+  `HEAD` while it is on a branch (its branch is the owner); a **detached** `HEAD`
+  is offered, so it can be pinned back after an unpin.
 - `<CR>` on an entry closes the dialog and **jumps the graph to that branch**,
   exactly as picking it in the ref picker does (§2) — centered, with the ref's
   label pre-selected.
@@ -3518,7 +3524,8 @@ from (§2) and the palette's third section is drawn from. Each entry has:
   `branch` context; `D`, `<CR>` and `V` in `commit` and `selection`; `K` in
   `commit` and `branch`;
 - optionally a **condition** on the same session state (`D` needs a diff
-  provider).
+  provider; `<Space>` is not offered on a mainline row, where there is nothing to
+  collapse or expand).
 
 The palette lists the grouped keys of the current context, groups in the order
 `refs` → `view` → `select` → `other`, each group in registry order, labelled
