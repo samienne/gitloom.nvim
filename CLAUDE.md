@@ -564,6 +564,14 @@ Coverage:
   `winline`/height are window-relative (border-robust), `win_screenpos` is the frame top,
   `line('w$')`/`line('w0')` are the last/first visible-**columns** line (a split at the top
   belongs to `w0`'s own fan above its columns)
+- `tests/footer_bottom_spec.lua` — the footer **hides at the bottom** (§6.2), in a REAL
+  nvim window with `virt_lines`: through the production `footer_bottom` → `footer_seam`
+  path, no seam (`"at bottom"`) when the whole graph fits in the window (filler rows
+  below) or after `G` (the last row at the window bottom), while one `<C-y>` up still
+  builds a seam at the true bottom; plus the pure `footer_bottom` boundary (declines
+  exactly when the unclamped bottom reaches the last row) and its agreement with
+  `footer_bs` whenever it does not decline. Guards the clamped-`bs` regression
+  (48fad8c) that drew a footer over the graph's own last commits
 - `tests/footer_window_spec.lua` (+ `tests/large_topo.lua`) — the **count-based** screen model
   (§6.2): `pane.screen_lines` is exercised for the default single split/merge AND for
   **MULTIPLE** virtual rows above/below + dual-mode 2-row columns (count-based, signed `virt`
@@ -1294,7 +1302,9 @@ Details not covered by the spec or architecture:
   a commit is never split across the seam — exact mirrors, both in **screen-row space** on
   the shared `pane.screen_lines(display)` model (the flat real-columns + virtual split/merge
   screen sequence). The footer derives `bs` = the bottom visible **screen row** (cursor-
-  anchored via `pane.footer_bs`), then `pane.footer_seam(sm, bs, cover)` walks up to the
+  anchored via `pane.footer_bs`, reached through `pane.footer_bottom`, which declines
+  `"at bottom"` when the unclamped window bottom reaches the model's last row — nothing
+  below the window, the mirror of the header's `"at top"`), then `pane.footer_seam(sm, bs, cover)` walks up to the
   first block boundary, reading the seam item's **bottom** edge (its merge fan when present).
   The header derives `ts` = the top visible **screen row** (cursor-anchored via
   `pane.header_ts` = `cols[cursor] − (winline() − 1)`), then `pane.header_seam(sm, ts, cover)`
@@ -1310,7 +1320,7 @@ Details not covered by the spec or architecture:
   `lane_of` the main-view colour so the header matches the graph) and lays it out
   seam-up with distinct colours and packed unpinned heads — `converge_header`
   min-fit-sizes from the `(#pinned tips above)+1` guess up to `HEADER_MAX` (8),
-  capping over-tall headers with `+N above`, and **hides the header at the top**
+  capping over-tall headers with `+N above`, and **hides the header at the top** (and `build_footer` hides the footer at the bottom, `"at bottom"`)
   (`w0` display index ≤ 1). HEAD plus `master`/`main`/`dev` are pinned by default
   (`effective_pinned`, so they get their own labelled lines); `P` toggles others.
   The rebuild is **async and cancellable**: `update_panes` runs `build_panes` as a

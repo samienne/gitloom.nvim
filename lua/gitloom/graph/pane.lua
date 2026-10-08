@@ -581,6 +581,28 @@ function M.footer_bs(sm, anchor_disp, anchor_screen, win_bottom)
     return math.max(1, math.min(base + win_bottom - anchor_screen, #sm.lines))
 end
 
+--- The footer's bottom visible screen row, or nil + `"at bottom"` when **nothing is
+--- below the window** (spec §6.2: the footer vanishes when scrolled to the bottom — the
+--- downward mirror of the header's `"at top"`). Same arithmetic as `M.footer_bs`, but the
+--- raw window bottom is compared against the model BEFORE clamping: when it reaches or
+--- passes the last screen row (the last commit at the window bottom after `G`, or a
+--- graph shorter than the window with filler rows below it) there is no off-screen
+--- topology to show. Clamping that case to the last row is what built a footer over the
+--- graph's own last commits — or, with filler, an overlay floating over the empty rows
+--- with its seam butting nothing.
+---@param sm { lines: table[], cols: integer[] }
+---@param anchor_disp integer
+---@param anchor_screen integer
+---@param win_bottom integer
+---@return integer? bs
+---@return string? why  -- `"at bottom"` when nil
+function M.footer_bottom(sm, anchor_disp, anchor_screen, win_bottom)
+    local base = sm.cols[anchor_disp]
+    if not base then return nil, "no anchor" end
+    if base + win_bottom - anchor_screen >= #sm.lines then return nil, "at bottom" end
+    return M.footer_bs(sm, anchor_disp, anchor_screen, win_bottom)
+end
+
 --- Every lane crossing one edge of a single rendered line (a commit's columns
 --- line, or a split/merge fan line), as `col → Lane`. This is the seam primitive:
 --- a pane seeds with the lanes of whichever rendered line sits at the cutoff —

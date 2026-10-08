@@ -5103,10 +5103,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 return vim.api.nvim_win_call(win, function()
                     local cur = vim.fn.line(".")
                     local _, cdisp, sub = ctx:order_at(cur)
-                    if not cdisp or not pane_sm.cols[cdisp] then return nil end
+                    if not cdisp or not pane_sm.cols[cdisp] then return nil, "no bs" end
                     local anchor_screen = vim.fn.winline() - (sub or 0)
                     local wh = vim.api.nvim_win_get_height(win)
-                    return pane.footer_bs(pane_sm, cdisp, anchor_screen, wh)
+                    -- nil, "at bottom" when nothing is below the window (§6.2).
+                    return pane.footer_bottom(pane_sm, cdisp, anchor_screen, wh)
                 end)
             end
 
@@ -5115,8 +5116,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- commit block; the seam item's bottom line (its merge fan, else columns) seeds
             -- the footer.
             local function build_footer(cover)
-                local bs = footer_bottom_screen()
-                if not bs then return nil, "no bs" end
+                local bs, why = footer_bottom_screen()
+                if not bs then return nil, why or "no bs" end
                 local seam = pane.footer_seam(pane_sm, bs, cover)
                 if not seam then return nil, "past top@" .. cover end
                 local line = pane.seam_line(seam)

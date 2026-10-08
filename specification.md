@@ -1418,8 +1418,12 @@ row.
 
 A pane has **height 0** (is hidden) whenever there is no off-screen topology in
 its direction: the header vanishes when scrolled to the top of the graph, the
-footer when scrolled to the bottom (the roots are then already on-screen). This
-falls out of the sizing rule below (`G = 0` at the extreme).
+footer when scrolled to the bottom (the roots are then already on-screen). "At
+the bottom" is measured in **screen rows**, virtual split/merge lines included:
+the footer is hidden whenever the graph's last rendered row is visible — the last
+commit at the window's bottom row (after `G`), or a graph shorter than the window
+with empty filler rows below it. This falls out of the sizing rule below (`G = 0`
+at the extreme).
 
 **What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
 labels only — no date, author, or message. Off-screen topology is folded onto

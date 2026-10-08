@@ -620,7 +620,7 @@ missing, stale, or do not follow scrolling. It records, in order:
 | `update` | a rebuild started, with the scroll key it targets and the call site |
 | `geom` | the viewport the build measured its seams from — cursor line, display index, `winline`, window height, `topline`, `topfill`, `w0` |
 | `yield` / `abandon` | the build spilled onto another tick / was dropped (a scroll landed mid-build, or a newer build superseded it) |
-| `built` | the build finished, with the **decline reason** for each pane (`ok`, `at top`, `no rows`, `past top@N`, `off`, `no HEAD`) |
+| `built` | the build finished, with the **decline reason** for each pane (`ok`, `at top`, `at bottom`, `no rows`, `past top@N`, `off`, `no HEAD`) |
 | `hide_all` / `close` | both panes were hidden, with the reason or a stack trace |
 
 The distinction that splits the search space fastest: a pane that is missing with
