@@ -70,6 +70,44 @@ describe("fetch_commits stream completeness (§3)", function()
         assert.equals(N, got)
     end)
 
+    -- The BUFFERED queries go through the same spawner (`run`, over vim.system),
+    -- so they too must deliver everything while the loop is held. A hog chains
+    -- 20 ms busy slices on the main loop for as long as the query is in flight,
+    -- the shape of the graph's own layout work running beside a query.
+    local function while_busy(start)
+        local done = false
+        local value ---@type any
+        local function hog()
+            if done then return end
+            local t0 = vim.uv.hrtime()
+            while vim.uv.hrtime() - t0 < 20e6 do end
+            fetch._internal.next_tick(hog)
+        end
+        hog()
+        start().next(function(v) value, done = v, true end)
+        vim.wait(60000, function() return done end, 10)
+        assert.is_true(done)
+        return value
+    end
+
+    it("returns a buffered query's whole output under a busy loop", function()
+        local hashes = while_busy(function()
+            return fetch.fetch_rev_order({ "--all" }, "--topo-order")
+        end)
+        assert.equals(N, #hashes)
+    end)
+
+    it("returns git_code's whole output under a busy loop", function()
+        -- run_checkout is git_code with an explicit cwd; any argv will do.
+        local res = while_busy(function()
+            return fetch.run_checkout({ "git", "log", "--all", "--format=%H %s" }, repo)
+        end)
+        assert.equals(0, res.code, res.err)
+        local lines = vim.split(res.out, "\n", { plain = true, trimempty = true })
+        assert.equals(N, #lines)
+        assert.truthy(lines[N]:find("commit 1 ", 1, true), lines[N])
+    end)
+
     it("releases the scratch repository", function()
         fetch.set_cwd(nil)
         vim.fn.delete(repo, "rf")

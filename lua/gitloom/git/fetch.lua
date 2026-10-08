@@ -1,7 +1,7 @@
 --- git I/O — the async commands that read the repository: refs, the commit
 --- stream, the resync's bounded fetch, the rev-list sort orders, the working-tree
 --- state/diffs, the on-demand commit detail/diff/range patches, and the submodule
---- change graph. Each returns a `Future` (util.make_future) over `vim.fn.jobstart`
+--- change graph. Each returns a `Future` (util.make_future) over `vim.system`
 --- run in the **active repository root** (`M.set_cwd`, spec §2.1 — defaulting to
 --- Neovim's cwd until a graph sets it), so the graph can target a submodule or
 --- the main module. The one Neovim-coupled corner of gitloom.git; everything
@@ -47,7 +47,9 @@ end
 -- ===== spawn diagnostics (`vim.g.gitloom_git_debug`) ========================
 --
 -- Windows' `CreateProcess` ceiling on the command line, measured against
--- `vim.fn.jobstart` by bisection on nvim 0.11.6 AND 0.12.5 (identical): the
+-- `vim.fn.jobstart` by bisection on nvim 0.11.6 AND 0.12.5 (identical), and
+-- holding unchanged for `vim.system`, which every spawn now uses (the same
+-- `uv_spawn` + `exepath` substitution; re-checked in tests/git_debug_spec.lua): the
 -- final command line — the *quoted* resolved argv[0] plus each quoted argument,
 -- space-separated — may be at most this many characters. One more and the spawn
 -- fails with `ERROR_FILENAME_EXCED_RANGE`, which libuv translates to
@@ -129,7 +131,7 @@ local function spawn_record(r)
             :format(len - WIN_CMDLINE_MAX)
     end
     if r.ok then
-        out[#out + 1] = ("    result  = job id %s"):format(tostring(r.id))
+        out[#out + 1] = ("    result  = pid %s"):format(tostring(r.id))
     else
         out[#out + 1] = ("    result  = SPAWN FAILED: %s"):format(tostring(r.id))
     end
@@ -145,8 +147,8 @@ end
 --- only: never let it break a fetch, so every step is guarded.
 ---@param cmd string[]
 ---@param cwd string?
----@param ok boolean       -- did jobstart return without throwing?
----@param id any           -- the job id, or the error jobstart threw
+---@param ok boolean       -- did the spawn return without throwing?
+---@param id any           -- the pid / job id, or the error the spawn threw
 ---@param site string?     -- the fetch.lua/window.lua call chain that issued it
 local function debug_log(cmd, cwd, ok, id, site)
     local path = vim.g.gitloom_git_debug
@@ -205,52 +207,79 @@ local function next_tick(fn)
     end)
 end
 
--- jobstart wrapper that pins every git job to the active repository root, so a
--- single setter retargets the whole I/O layer. Drop-in for `vim.fn.jobstart`:
--- it only fills in `cwd` (when unset). When `active_cwd` is nil the field stays
--- nil and jobstart observes Neovim's cwd, as before.
+-- THE one place gitloom starts a git process: `vim.system` (luv pipes), pinned
+-- to the active repository root, with the `vim.g.gitloom_git_debug` record.
+-- Every git command goes through here — the commit stream directly, every
+-- buffered query through `run` below — so a single setter (`M.set_cwd`)
+-- retargets the whole I/O layer.
+--
+-- Why `vim.system` and never `jobstart`: a `jobstart` job LOSES its unread
+-- output when the process exits while the main loop is behind on draining it.
+-- Neovim stops reading the pipe under backpressure, git still writes everything
+-- and exits 0, and `on_exit` arrives without the rest (measured on 0.12.5 /
+-- Windows: a 20 ms batch handler dropped over half of a 496-commit log, the last
+-- record cut mid-line -- see tests/stream_complete_spec.lua). `vim.system` reads
+-- in luv callbacks, which never stop reading, and calls `on_exit` only after
+-- stdout AND stderr have hit EOF, so its result is always the whole output.
+--
+-- It only fills in `cwd` (when unset): with `active_cwd` nil the field stays nil
+-- and the process observes Neovim's cwd, as before. `o.env` is merged over
+-- Neovim's environment (vim.system's default, as jobstart's `env` was); a string
+-- `o.stdin` is written and then closed. As with `vim.system` itself, the
+-- callbacks (a function `o.stdout`, and `on_exit`) run in a FAST context — `run`
+-- is the main-loop wrapper. On Windows Neovim substitutes `exepath(argv[1])`
+-- before spawning exactly as jobstart did, and both go through libuv's
+-- `uv_spawn`, so the WIN_CMDLINE_MAX model holds unchanged (re-measured against
+-- vim.system in tests/git_debug_spec.lua).
 --
 -- When `vim.g.gitloom_git_debug` names a file, every spawn is appended to it
 -- (full argv, resolved cwd + exe, command-line length vs. the Windows ceiling,
--- the job id or the failure). The failure path re-raises the original error, so
--- behaviour is unchanged either way; with the global unset this costs one type
--- check.
-local function js(cmd, o)
-    o.cwd = o.cwd or active_cwd
-    if type(vim.g.gitloom_git_debug) ~= "string" then
-        return vim.fn.jobstart(cmd, o)
-    end
-    local site = call_site()
-    local ok, id = pcall(vim.fn.jobstart, cmd, o)
-    debug_log(cmd, o.cwd, ok, id, site)
-    if not ok then error(id, 0) end
-    return id
-end
-
--- `js` for a **streamed** command: `vim.system` (luv pipes) instead of
--- `jobstart`, same cwd pinning and the same `vim.g.gitloom_git_debug` record.
--- A `jobstart` stream LOSES its unread tail when the process exits while the
--- main loop is behind on draining it: Neovim stops reading the pipe under
--- backpressure, git still writes everything and exits 0, and `on_exit` arrives
--- without the rest (measured on 0.12.5 / Windows: a 20 ms batch handler dropped
--- over half of a 496-commit log, the last record cut mid-line -- see
--- tests/stream_complete_spec.lua). `vim.system` reads in luv callbacks, which
--- never stop reading, and calls `on_exit` only after stdout has hit EOF.
--- Both callbacks run in a FAST context.
+-- the pid or the failure). A spawn failure (no git, a missing cwd, an overlong
+-- command line — `ENAMETOOLONG`) re-raises vim.system's error with
+-- `error(msg, 0)` whether or not the hook is armed; with the global unset the
+-- hook costs one type check.
 ---@param cmd string[]
 ---@param o vim.SystemOpts
 ---@param on_exit fun(out: vim.SystemCompleted)
 ---@return vim.SystemObj
-local function js_stream(cmd, o, on_exit)
+local function spawn(cmd, o, on_exit)
     o.cwd = o.cwd or active_cwd
-    if type(vim.g.gitloom_git_debug) ~= "string" then
-        return vim.system(cmd, o, on_exit)
-    end
-    local site = call_site()
+    local armed = type(vim.g.gitloom_git_debug) == "string"
+    local site = armed and call_site() or nil
     local ok, obj = pcall(vim.system, cmd, o, on_exit)
-    debug_log(cmd, o.cwd, ok, ok and obj.pid or obj, site)
+    if armed then debug_log(cmd, o.cwd, ok, ok and obj.pid or obj, site) end
     if not ok then error(obj, 0) end
     return obj
+end
+
+--- Run a git command to completion and resolve a future with its WHOLE output,
+--- `{ code, out, err }` (raw strings — CRs kept, nothing trimmed) **on the main
+--- loop**: the exit callback hops there with `vim.schedule` before resolving, so
+--- a `.next` may touch any Neovim state. `o.cwd` overrides the active root for
+--- this one command, `o.env` adds variables, `o.stdin` is written then closed.
+--- A spawn failure raises (see `spawn`).
+---@param cmd string[]
+---@param o { cwd?: string, env?: table<string, string>, stdin?: string }?
+---@return Future  -- resolving { code: integer, out: string, err: string }
+local function run(cmd, o)
+    o = o or {}
+    local future, promise = make_future()
+    spawn(cmd, { cwd = o.cwd, env = o.env, stdin = o.stdin }, function(res)
+        vim.schedule(function()
+            promise.resolve({ code = res.code, out = res.stdout or "", err = res.stderr or "" })
+        end)
+    end)
+    return future
+end
+
+--- A buffered output string as the line list `jobstart`'s `stdout_buffered`
+--- delivered (and the callers were written against): split on `\n` only (a CR
+--- stays on its line), the last element the text after the final newline —
+--- `""` when the output ends with one, `{ "" }` for no output at all.
+---@param s string
+---@return string[]
+local function lines_of(s)
+    return vim.split(s, "\n", { plain = true })
 end
 
 -- Test seam for the spawn diagnostics (not the public API; see CLAUDE.md).
@@ -261,6 +290,8 @@ M._internal = {
     spawn_record = spawn_record,
     debug_log = debug_log,
     next_tick = next_tick,
+    spawn = spawn,
+    run = run,
 }
 
 -- The `%x1f`-delimited `git log` pretty-format shared by the initial stream and
@@ -337,19 +368,12 @@ end
 ---@param taken table<string, boolean>
 ---@return Future
 local function read_worktree_refs(taken)
-    local future, promise = make_future()
-    local lines = {}
-    js({ "git", "worktree", "list", "--porcelain" }, {
-        stdout_buffered = true,
-        on_stdout = function(_, out)
-            for _, line in ipairs(out or {}) do lines[#lines + 1] = trim_ws(line) end
-        end,
-        on_exit = function(_, code)
-            if code ~= 0 then return promise.resolve({}) end
-            promise.resolve(worktree_refs(parse_worktrees(lines), taken))
-        end,
-    })
-    return future
+    return run({ "git", "worktree", "list", "--porcelain" }).next(function(res)
+        if res.code ~= 0 then return {} end
+        local lines = {}
+        for _, line in ipairs(lines_of(res.out)) do lines[#lines + 1] = trim_ws(line) end
+        return worktree_refs(parse_worktrees(lines), taken)
+    end)
 end
 
 --- Read all refs via `git for-each-ref` and resolve each to its commit. Local
@@ -359,34 +383,22 @@ end
 --- know which commits the real refs already name.
 ---@param repo Repo
 function M.fetch_refs(repo)
-    local future, promise = make_future()
     local taken = {}
-
-    js(
-        { "git", "for-each-ref", "--format=" .. REF_FMT,
-            "refs/heads", "refs/remotes", "refs/tags" },
-        {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                for _, line in ipairs(lines) do
-                    if line ~= "" then
-                        local r = parse_ref_line(line)
-                        if r then
-                            add_ref(repo, r.name, r.kind, r.hash, r.upstream)
-                            taken[r.hash] = true
-                        end
-                    end
+    return run({ "git", "for-each-ref", "--format=" .. REF_FMT,
+        "refs/heads", "refs/remotes", "refs/tags" }).next(function(res)
+        for _, line in ipairs(lines_of(res.out)) do
+            if line ~= "" then
+                local r = parse_ref_line(line)
+                if r then
+                    add_ref(repo, r.name, r.kind, r.hash, r.upstream)
+                    taken[r.hash] = true
                 end
-            end,
-            on_exit = function()
-                read_worktree_refs(taken).next(function(wts)
-                    for _, w in ipairs(wts) do add_ref(repo, w.name, w.kind, w.hash) end
-                    promise.resolve()
-                end)
-            end,
-        })
-
-    return future
+            end
+        end
+        return read_worktree_refs(taken).next(function(wts)
+            for _, w in ipairs(wts) do add_ref(repo, w.name, w.kind, w.hash) end
+        end)
+    end)
 end
 
 --- Mark HEAD's commit with a `head` ref. On a branch (`symbolic-ref` resolves)
@@ -395,42 +407,24 @@ end
 --- nil, so the graph still shows where HEAD is (§3.2).
 ---@param repo Repo
 function M.fetch_head(repo)
-    local future, promise = make_future()
-
-    js(
-        { "git", "symbolic-ref", "--short", "--quiet", "HEAD" },
-        {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                local name = lines[1]
-                if name and name ~= "" then
-                    repo.head = name
-                    local localref = repo.refs[name]
-                    if localref then
-                        add_ref(repo, "HEAD", "head", localref.commit.hash)
-                    end
-                end
-            end,
-            on_exit = function()
-                if repo.head then
-                    promise.resolve()
-                    return
-                end
-                -- Detached HEAD: no branch name. Mark the checked-out commit.
-                js({ "git", "rev-parse", "HEAD" }, {
-                    stdout_buffered = true,
-                    on_stdout = function(_, lines)
-                        local hash = lines[1]
-                        if hash and hash ~= "" then
-                            add_ref(repo, "HEAD", "head", hash)
-                        end
-                    end,
-                    on_exit = function() promise.resolve() end,
-                })
-            end,
-        })
-
-    return future
+    return run({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }).next(function(res)
+        local name = lines_of(res.out)[1]
+        if name and name ~= "" then
+            repo.head = name
+            local localref = repo.refs[name]
+            if localref then
+                add_ref(repo, "HEAD", "head", localref.commit.hash)
+            end
+        end
+        if repo.head then return end
+        -- Detached HEAD: no branch name. Mark the checked-out commit.
+        return run({ "git", "rev-parse", "HEAD" }).next(function(rp)
+            local hash = lines_of(rp.out)[1]
+            if hash and hash ~= "" then
+                add_ref(repo, "HEAD", "head", hash)
+            end
+        end)
+    end)
 end
 
 --- Read the current ref set **without mutating the model** — the resync (§3.4)
@@ -448,64 +442,45 @@ end
 --- worktree has checked out (§3.4).
 ---@return Future
 function M.fetch_ref_entries()
-    local future, promise = make_future()
     local entries = {}
     local taken = {}
 
-    js(
-        { "git", "for-each-ref", "--format=" .. REF_FMT,
-            "refs/heads", "refs/remotes", "refs/tags" },
-        {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                for _, line in ipairs(lines) do
-                    if line ~= "" then
-                        local r = parse_ref_line(line)
-                        if r then
-                            entries[#entries + 1] =
-                                { name = r.name, kind = r.kind, hash = r.hash, upstream = r.upstream }
-                            taken[r.hash] = true
-                        end
-                    end
-                end
-            end,
-            on_exit = function()
-                -- Chain HEAD's symbolic-ref so the head binding can be reconciled
-                -- in the same pass. When detached (no branch), chain `rev-parse HEAD`
-                -- so the checked-out commit can still be marked (§3.2).
-                local head = nil
-                local function finish(res)
-                    read_worktree_refs(taken).next(function(wts)
-                        for _, w in ipairs(wts) do entries[#entries + 1] = w end
-                        promise.resolve(res)
-                    end)
-                end
-                js({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }, {
-                    stdout_buffered = true,
-                    on_stdout = function(_, l)
-                        if l[1] and l[1] ~= "" then head = l[1] end
-                    end,
-                    on_exit = function()
-                        if head then
-                            finish({ entries = entries, head = head })
-                            return
-                        end
-                        local detached = nil
-                        js({ "git", "rev-parse", "HEAD" }, {
-                            stdout_buffered = true,
-                            on_stdout = function(_, l)
-                                if l[1] and l[1] ~= "" then detached = l[1] end
-                            end,
-                            on_exit = function()
-                                finish({ entries = entries, head = nil, detached = detached })
-                            end,
-                        })
-                    end,
-                })
-            end,
-        })
+    local function first_line(res)
+        local l = lines_of(res.out)[1]
+        return (l and l ~= "") and l or nil
+    end
+    local function finish(res)
+        return read_worktree_refs(taken).next(function(wts)
+            for _, w in ipairs(wts) do entries[#entries + 1] = w end
+            return res
+        end)
+    end
 
-    return future
+    return run({ "git", "for-each-ref", "--format=" .. REF_FMT,
+        "refs/heads", "refs/remotes", "refs/tags" }).next(function(res)
+        for _, line in ipairs(lines_of(res.out)) do
+            if line ~= "" then
+                local r = parse_ref_line(line)
+                if r then
+                    entries[#entries + 1] =
+                        { name = r.name, kind = r.kind, hash = r.hash, upstream = r.upstream }
+                    taken[r.hash] = true
+                end
+            end
+        end
+        -- Chain HEAD's symbolic-ref so the head binding can be reconciled in the
+        -- same pass. When detached (no branch), chain `rev-parse HEAD` so the
+        -- checked-out commit can still be marked (§3.2).
+        return run({ "git", "symbolic-ref", "--short", "--quiet", "HEAD" }).next(function(sr)
+            local head = first_line(sr)
+            if head then
+                return finish({ entries = entries, head = head })
+            end
+            return run({ "git", "rev-parse", "HEAD" }).next(function(rp)
+                return finish({ entries = entries, head = nil, detached = first_line(rp) })
+            end)
+        end)
+    end)
 end
 
 --- Stream `git log` and hand commits to `opts.on_batch` in batches as they
@@ -596,11 +571,11 @@ function M.fetch_commits(opts)
         end
     end
 
-    -- Streamed through `js_stream` (vim.system), not `jobstart`: see there for
+    -- Streamed through `spawn` (vim.system), never `jobstart`: see there for
     -- the truncated-stream regression. Both callbacks are FAST-context; they
     -- only stitch + enqueue (next_tick is a uv timer, safe here), and the
     -- completion hops onto the main loop before resolving the future.
-    js_stream(
+    spawn(
         command,
         {
             stdout = function(_, data)
@@ -675,34 +650,25 @@ function M.fetch_new_commits(new_tips, old_tips)
 
     local command, revs = M.new_commits_query(new_tips, old_tips)
 
-    local commits = {}
-    local jid = js(command, {
-        stdout_buffered = true,
-        on_stdout = function(_, lines)
-            for _, line in ipairs(lines) do
-                if line ~= "" then
-                    local c = parse_commit_line(line)
-                    if c then commits[#commits + 1] = c end
-                end
-            end
-        end,
-        on_exit = function()
-            promise.resolve(commits)
-        end,
-    })
-
-    -- Feed the revision list, then **close stdin** — `--stdin` reads until EOF,
-    -- so a missed close wedges the resync forever with no error to show for it.
-    -- pcall'd because the job may already be gone (a failed spawn returns 0/-1
-    -- and fires no on_exit, so resolve here rather than leave the future hanging).
-    if type(jid) == "number" and jid > 0 then
-        pcall(vim.fn.chansend, jid, revs)
-        pcall(vim.fn.chanclose, jid, "stdin")
-    else
+    -- The revision list rides stdin: `run` writes it and then **closes stdin** —
+    -- `--stdin` reads until EOF, so a missed close would wedge the resync forever
+    -- with no error to show for it. A failed spawn resolves empty rather than
+    -- leaving the resync hanging (as a failed `jobstart` did).
+    local ok, job = pcall(run, command, { stdin = revs })
+    if not ok then
         vim.schedule(function() promise.resolve({}) end)
+        return future
     end
-
-    return future
+    return job.next(function(res)
+        local commits = {}
+        for _, line in ipairs(lines_of(res.out)) do
+            if line ~= "" then
+                local c = parse_commit_line(line)
+                if c then commits[#commits + 1] = c end
+            end
+        end
+        return commits
+    end)
 end
 
 --- Ask git for an exact commit order — the `rev`-based sort modes (spec §3.1).
@@ -712,24 +678,17 @@ end
 ---@param flag string      the order flag (`--topo-order` / `--date-order` / …)
 ---@return Future
 function M.fetch_rev_order(branch, flag)
-    local future, promise = make_future()
     -- Appended by hand, not `unpack(branch)` — see fetch_commits: the refspec is
     -- the caller's list and LuaJIT caps unpack's return count.
     local command = { "git", "rev-list", flag }
     for _, b in ipairs(branch) do command[#command + 1] = b end
-    local hashes = {}
-    js(command, {
-        stdout_buffered = true,
-        on_stdout = function(_, lines)
-            for _, line in ipairs(lines) do
-                if line ~= "" then hashes[#hashes + 1] = line end
-            end
-        end,
-        on_exit = function()
-            promise.resolve(hashes)
-        end,
-    })
-    return future
+    return run(command).next(function(res)
+        local hashes = {}
+        for _, line in ipairs(lines_of(res.out)) do
+            if line ~= "" then hashes[#hashes + 1] = line end
+        end
+        return hashes
+    end)
 end
 
 --- Run a git command and resolve the future with its stdout as a list of
@@ -741,19 +700,13 @@ end
 ---@param cwd string?  -- explicit working directory; nil = the active root
 ---@return Future
 local function git_lines(args, cwd)
-    local future, promise = make_future()
-    local out = {}
-    js(vim.list_extend({ "git" }, args), {
-        cwd = cwd,
-        stdout_buffered = true,
-        on_stdout = function(_, lines)
-            for _, l in ipairs(lines) do
-                if l ~= "" then out[#out + 1] = l end
-            end
-        end,
-        on_exit = function() promise.resolve(out) end,
-    })
-    return future
+    return run(vim.list_extend({ "git" }, args), { cwd = cwd }).next(function(res)
+        local out = {}
+        for _, l in ipairs(lines_of(res.out)) do
+            if l ~= "" then out[#out + 1] = l end
+        end
+        return out
+    end)
 end
 
 --- Run a git command and resolve the future with its full stdout as one string
@@ -762,16 +715,7 @@ end
 ---@param args string[]
 ---@return Future
 local function git_string(args)
-    local future, promise = make_future()
-    local out = {}
-    js(vim.list_extend({ "git" }, args), {
-        stdout_buffered = true,
-        on_stdout = function(_, lines)
-            for _, l in ipairs(lines) do out[#out + 1] = l end
-        end,
-        on_exit = function() promise.resolve(table.concat(out, "\n")) end,
-    })
-    return future
+    return run(vim.list_extend({ "git" }, args)).next(function(res) return res.out end)
 end
 
 -- ===== the repository picker (spec §2.1) ===================================
@@ -864,39 +808,31 @@ end
 ---@param cwd string
 ---@return Future
 function M.fetch_submodules(cwd)
-    local future, promise = make_future()
-    local gitlinks = {}
-    -- Filter in the stdout handler: the index of a large repository is mostly
-    -- ordinary files, and only the gitlinks are worth keeping.
-    js({ "git", "ls-files", "--stage" }, {
-        cwd = cwd,
-        stdout_buffered = true,
-        on_stdout = function(_, lines)
-            for _, l in ipairs(lines or {}) do
-                if l:sub(1, 6) == "160000" then gitlinks[#gitlinks + 1] = l end
-            end
-        end,
-        on_exit = function()
-            local out = {}
-            for _, e in ipairs(submodule.parse_gitlinks(gitlinks)) do
-                local head = head_info(cwd .. "/" .. e.path)
-                local state = submodule.submodule_state(e.sha, {
-                    gitdir = head ~= nil,
-                    head = head and head.hash or nil,
-                    conflict = e.conflict,
-                })
-                out[#out + 1] = {
-                    name = e.name,
-                    path = e.path,
-                    sha = e.sha,
-                    state = state,
-                    checked_out = state ~= "uninitialized",
-                }
-            end
-            promise.resolve(out)
-        end,
-    })
-    return future
+    return run({ "git", "ls-files", "--stage" }, { cwd = cwd }).next(function(res)
+        -- Filter first: the index of a large repository is mostly ordinary
+        -- files, and only the gitlinks are worth keeping.
+        local gitlinks = {}
+        for _, l in ipairs(lines_of(res.out)) do
+            if l:sub(1, 6) == "160000" then gitlinks[#gitlinks + 1] = l end
+        end
+        local out = {}
+        for _, e in ipairs(submodule.parse_gitlinks(gitlinks)) do
+            local head = head_info(cwd .. "/" .. e.path)
+            local state = submodule.submodule_state(e.sha, {
+                gitdir = head ~= nil,
+                head = head and head.hash or nil,
+                conflict = e.conflict,
+            })
+            out[#out + 1] = {
+                name = e.name,
+                path = e.path,
+                sha = e.sha,
+                state = state,
+                checked_out = state ~= "uninitialized",
+            }
+        end
+        return out
+    end)
 end
 
 --- A one-line summary of the repository at `cwd` for a picker row (spec §2.1):
@@ -950,7 +886,7 @@ local function fetch_untracked_diff()
                 return
             end
             -- `git diff --no-index` exits non-zero when the files differ; we
-            -- collect stdout regardless (on_exit ignores the code).
+            -- collect stdout regardless (git_string ignores the code).
             git_string({ "diff", "--no-index", "--", NULL_DEVICE, files[i] }).next(function(p)
                 if p and p ~= "" then parts[#parts + 1] = p end
                 step()
@@ -982,25 +918,9 @@ end
 --- graph stream.
 ---@param hash string
 function M.fetch_commit_detail(hash)
-    local future, promise = make_future()
-    local out = {}
-
-    js(
-        { "git", "show", "-s", "--date=iso",
-            "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%cn%x1f%ce%x1f%cd%x1f%P%x1f%B", hash },
-        {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                for _, l in ipairs(lines) do
-                    out[#out + 1] = l
-                end
-            end,
-            on_exit = function()
-                promise.resolve(table.concat(out, "\n"))
-            end,
-        })
-
-    return future
+    return run({ "git", "show", "-s", "--date=iso",
+        "--format=%H%x1f%an%x1f%ae%x1f%ad%x1f%cn%x1f%ce%x1f%cd%x1f%P%x1f%B", hash })
+        .next(function(res) return res.out end)
 end
 
 --- Fetch a commit's diff via `git show --format= -p` (specification.md §11.3).
@@ -1008,68 +928,37 @@ end
 --- fetch_commit_detail by the commit view.
 ---@param hash string
 function M.fetch_commit_diff(hash)
-    local future, promise = make_future()
-    local out = {}
-
-    js(
-        { "git", "show", "--format=", "-p", hash },
-        {
-            stdout_buffered = true,
-            on_stdout = function(_, lines)
-                for _, l in ipairs(lines) do
-                    out[#out + 1] = l
-                end
-            end,
-            on_exit = function()
-                promise.resolve(table.concat(out, "\n"))
-            end,
-        })
-
-    return future
+    return run({ "git", "show", "--format=", "-p", hash })
+        .next(function(res) return res.out end)
 end
 
---- Run a git command and resolve `{ code, out, err }` (stdout/stderr joined with
---- newlines). A thin future over `jobstart` for the submodule change view (§11.7)
---- and the range diff (§13.5). The submodule is addressed with `git -C <path>` by
---- the caller (the path is relative to the active repository root, §2.1) rather
---- than jobstart's own `cwd`, so a missing checkout fails the command (nonzero
---- exit) instead of throwing on an invalid working directory. Resolves
---- `{ code = -1 }` if the job cannot be spawned.
+--- Run a git command and resolve `{ code, out, err }` (stdout raw, stderr
+--- whitespace-trimmed). A thin future over `run` for the submodule change view
+--- (§11.7) and the range diff (§13.5). The submodule is addressed with
+--- `git -C <path>` by the caller (the path is relative to the active repository
+--- root, §2.1) rather than the process's own `cwd`, so a missing checkout fails
+--- the command (nonzero exit) instead of throwing on an invalid working
+--- directory. Resolves `{ code = -1, err = <the spawn error> }` if the process
+--- cannot be spawned.
 --- `cwd` overrides the active root for this one command (checkout, §10.4.1,
---- runs in the graph's own `repo.root`). `env` adds variables to the job's
+--- runs in the graph's own `repo.root`). `env` adds variables to the process's
 --- environment (merged over Neovim's; the palette's fetch / pull, §17.3).
 ---@param args string[]
 ---@param cwd string?
 ---@param env table<string, string>?
 ---@return table  -- future resolving { code: integer, out: string, err: string }
 local function git_code(args, cwd, env)
-    local future, promise = make_future()
-    local out, err = {}, {}
-    local ok, jid = pcall(js, args, {
-        cwd = cwd,
-        env = env,
-        stdout_buffered = true,
-        stderr_buffered = true,
-        on_stdout = function(_, lines)
-            for _, l in ipairs(lines) do out[#out + 1] = l end
-        end,
-        on_stderr = function(_, lines)
-            for _, l in ipairs(lines) do err[#err + 1] = l end
-        end,
-        on_exit = function(_, code)
-            promise.resolve({
-                code = code,
-                out = table.concat(out, "\n"),
-                err = trim_ws(table.concat(err, "\n")),
-            })
-        end,
-    })
-    if not ok or jid <= 0 then
+    local ok, job = pcall(run, args, { cwd = cwd, env = env })
+    if not ok then
+        local future, promise = make_future()
         vim.schedule(function()
-            promise.resolve({ code = -1, out = "", err = (not ok) and tostring(jid) or "" })
+            promise.resolve({ code = -1, out = "", err = tostring(job) })
         end)
+        return future
     end
-    return future
+    return job.next(function(res)
+        return { code = res.code, out = res.out, err = trim_ws(res.err) }
+    end)
 end
 
 --- Run a checkout command (`checkout_spec`'s argv, §10.4.1) in the repository

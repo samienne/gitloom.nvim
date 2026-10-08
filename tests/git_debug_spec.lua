@@ -83,23 +83,29 @@ describe("git spawn debug hook", function()
         -- The whole diagnostic rests on `cmdline_len` being EXACT, not a
         -- model: spawn one command line of exactly WIN_CMDLINE_MAX characters
         -- and one of WIN_CMDLINE_MAX + 1, and require the OS to agree.
-        it("predicts a real jobstart failure to the character", function()
+        -- Through fetch.lua's own `spawn` (vim.system), the one spawner every
+        -- git command uses: the ceiling was first bisected against jobstart,
+        -- and this pins that it carried over unchanged.
+        it("predicts a real spawn failure to the character", function()
             if vim.fn.has("win32") ~= 1 or vim.fn.executable("git") ~= 1 then return end
             local exe = vim.fn.exepath("git")
-            local function spawn(pad)
+            local function try(pad)
                 local argv = { "git", "-c", "x=" .. string.rep("a", pad), "--version" }
                 local resolved = { exe, argv[2], argv[3], argv[4] }
-                local ok, id = pcall(vim.fn.jobstart, argv, { on_exit = function() end })
-                if ok and type(id) == "number" and id > 0 then pcall(vim.fn.jobstop, id) end
-                return D.cmdline_len(resolved), (ok and type(id) == "number" and id > 0)
+                local done = false
+                local ok, obj = pcall(D.spawn, argv, {}, function() done = true end)
+                if ok then vim.wait(10000, function() return done end, 10) end
+                return D.cmdline_len(resolved), ok, obj
             end
             local pad = D.WIN_CMDLINE_MAX - D.cmdline_len({ exe, "-c", "x=", "--version" })
-            local len_at, spawned_at = spawn(pad)
-            local len_over, spawned_over = spawn(pad + 1)
+            local len_at, spawned_at = try(pad)
+            local len_over, spawned_over, err = try(pad + 1)
             assert.equals(D.WIN_CMDLINE_MAX, len_at)
             assert.equals(D.WIN_CMDLINE_MAX + 1, len_over)
             assert.is_true(spawned_at)   -- exactly at the cap still spawns
             assert.is_false(spawned_over) -- one character over does not
+            -- ...and the failure is re-raised as vim.system reported it.
+            assert.truthy(tostring(err):find("ENAMETOOLONG", 1, true), tostring(err))
         end)
     end)
 
@@ -123,7 +129,7 @@ describe("git spawn debug hook", function()
             assert.truthy(rec:find([[C:\Program Files\Git\cmd\git.EXE]], 1, true))
             assert.truthy(rec:find("argc = 4", 1, true))
             assert.truthy(rec:find("spawn #7", 1, true))
-            assert.truthy(rec:find("job id 12", 1, true))
+            assert.truthy(rec:find("pid 12", 1, true))
             assert.is_nil(rec:find("EXCEEDS", 1, true))
         end)
 
@@ -167,7 +173,7 @@ describe("git spawn debug hook", function()
         end)
     end)
 
-    describe("the js wrapper", function()
+    describe("the spawn helper", function()
         it("captures a real spawn when the global is set", function()
             if vim.fn.executable("git") ~= 1 then return end
             local path = tmpfile()

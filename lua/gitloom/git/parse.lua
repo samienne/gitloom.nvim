@@ -48,10 +48,11 @@ function M.parse_commit_line(line)
     }
 end
 
---- Stateful line de-chunker for an **unbuffered** `jobstart` stdout stream.
---- Neovim delivers stdout as lists of strings split on "\n": the first element
---- continues the previous chunk's trailing (partial) line, and the last element
---- is itself partial — continued in the next chunk (`:help channel-lines`).
+--- Stateful line de-chunker for an **unbuffered** stdout stream (the commit
+--- stream: fetch.lua splits each `vim.system` chunk on "\n" into the list shape
+--- `jobstart` used to deliver): the first element continues the previous
+--- chunk's trailing (partial) line, and the last element is itself partial —
+--- continued in the next chunk (`:help channel-lines`).
 --- `feed(data)` returns the complete lines contained in this chunk; `flush()`
 --- returns the final held line at EOF (git's last line has no trailing newline).
 --- Pure (no I/O) so it is unit-testable via `_internal`.
