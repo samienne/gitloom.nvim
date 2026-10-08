@@ -70,11 +70,12 @@ the repository (§3.4) — re-reads refs, pulls newly-reachable commits, prunes
 unreachable ones, re-sorts, and rebuilds the working-tree virtual commits (§4.2),
 preserving cursor/scroll/selection. `<C-Space>` (also `<C-@>`, which many
 terminals send for it) opens the **command palette** (§17) — a picker of the
-graph's actions: first the cursor row's (collapse / expand / hide, open diff,
-checkout, checkout & examine; §10.4) — or, while a `V` selection is active, the
-selection's — then the graph-wide commands: refresh (the `R` resync), fetch (all
-remotes, or one), pull, and **Return** while a checkout & examine (§10.4.2) is
-active. `S` cycles the **row sort mode** (§3.1) —
+graph's actions scoped to what the cursor is on: first the context's (a commit's
+open diff / checkout / checkout & examine, a branch's checkout / collapse / expand
+/ hide, a selected packed marker's, or, while a `V` selection is active, the
+selection's; §10.4) — then the graph-wide commands: fetch (all remotes, or one),
+pull, and **Return** while a checkout & examine (§10.4.2) is active — then the
+graph's **keys** that apply there (§17.1), each with its key shown. `S` cycles the **row sort mode** (§3.1) —
 gitloom's own topological order (reproducing git's `--topo-order`), or git's date
 / author-date order — reordering in place and keeping the cursor on its commit.
 `L` opens the **pinned-branches dialog** (§10.6.1) — the pinned branches in
@@ -99,7 +100,10 @@ persistent view.
   it; §6), so `<CR>` / the palette's row actions act on that branch with no further
   navigation. Picking HEAD — whose label is its branch's, or the unselectable detached `HEAD` — just centers, cursor at the
   message.
-  `?` opens a float listing all keybindings. The window **title** identifies the
+  `?` opens a float listing **every** graph key, grouped, generated from the same
+  **key registry** the palette reads (§17.1), so it cannot drift from what is
+  bound; every graph key is also bound with a `desc` (`Gitloom: …`), so
+  `:map` and which-key-style plugins name it. The window **title** identifies the
   repository the graph is for (§2.1): its name, plus the current branch once HEAD
   is known — or `detached @<short>` (HEAD's 7-character hash) on a detached HEAD,
   so the title always says what is checked out (a caller-supplied `win.title` is left untouched). The graph's buffer
@@ -1987,19 +1991,28 @@ commit the trunk reaches (the mainline) is not collapsible.
   the expanded region's tip), so repeated `<Space>` flips it open/closed in place.
   (`<Tab>` / `<C-i>` is reserved for forward navigation, §14.3.)
 - `<C-Space>` — the **command palette** (§17), gitloom's single action menu
-  (`vim.ui.select`): the row's actions come first, then the global commands. On a
-  **plain commit row** (cursor on a normal commit's message, no ref selected) the
-  row entries are **open diff**, **checkout commit**, **checkout & examine**. When
-  a ref is selected with `h`/`l`, or the row is a **collapsed head** or a
-  **packed-marker line**, they are every applicable action, most-relevant first
-  (collapse, expand, **hide**, open diff), then **checkout** (§10.4.1) and
-  **checkout & examine** (§10.4.2) last; a packed line lists expand / hide per
-  marker, then checkout of the selected marker's tip. The palette is where hidden
-  and full mode control live, and it is the overflow-proof way to reach any marker
-  on a packed line even when not all labels fit. (Collapse/expand are also on
-  `<Space>`; diff is also on `D`.) A §4.2 working-tree virtual commit gets no
-  checkout entry; open diff and checkout & examine appear only when a diff
-  provider is configured (§11.5). There is no examine entry: that is `<CR>`.
+  (`vim.ui.select`): the row's actions come first, then the global commands, then
+  the keys (§17.1). The row entries are **scoped to what is selected** — a commit
+  or a branch, never both:
+  - **commit** — a **plain commit row** (cursor on a normal commit's message, no
+    ref selected): **open diff** (`D`), **checkout commit** (detached),
+    **checkout & examine**. No branch actions.
+  - **branch** — a ref selected with `h`/`l`, or a **collapsed head**:
+    **checkout** of that branch (§10.4.1; a collapsed head detaches at its tip),
+    then **collapse** (`<Space>`) + **hide** of an expanded branch or **expand**
+    (`<Space>`) + **hide** of a collapsed one. No commit open diff and no
+    detached checkout & examine — those are the commit's, reached from its message.
+  - **packed-marker line, a marker selected** (`h`/`l`) — that marker's actions
+    only: **checkout** of its tip, **expand**, **hide**. (The keys then follow the
+    branch context.)
+  - **packed-marker line, no marker selected** — **expand** / **hide** per marker,
+    by name. The palette is the overflow-proof way to reach any marker on a packed
+    line even when not all labels fit.
+
+  The palette is where hidden and full mode control live. A §4.2 working-tree
+  virtual commit gets no checkout entry; open diff and checkout & examine appear
+  only when a diff provider is configured (§11.5). There is no examine entry: that
+  is `<CR>`.
 - `<CR>` — **examine**: the commit view (§11) of the row's commit, directly (§11).
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
@@ -2117,10 +2130,9 @@ asynchronously in the graph's repository root, and one examine / Return runs at 
 time per graph session (shared with the palette's fetch / pull, §17.3).
 
 **Entry points.** Both are in the command palette (`<C-Space>`, §17). Among the
-row entries (§10.4) **Checkout & examine** follows the checkout entry — on a
-plain commit row and, examining the ref's commit (a collapsed head's tip), with a
-ref selected or on a collapsed head; never on a §4.2 working-tree row or a
-packed-marker line. While a §13 selection is active the selection's entries
+row entries (§10.4) **Checkout & examine** follows the checkout entry on a plain
+commit row (the commit context) — never in the branch context (a selected ref or
+a collapsed head), on a §4.2 working-tree row or on a packed-marker line. While a §13 selection is active the selection's entries
 replace the row's and lead with **Checkout & examine selection** (§17.1). Both
 appear only when a diff provider is configured (§11.5).
 
@@ -3440,25 +3452,39 @@ beyond merely being the only normal commits among the `◍` heads.
 
 `<C-Space>` in the graph buffer opens the **command palette**: a
 `vim.ui.select` picker that is gitloom's **single action menu**. It lists, in one
-ordered list, the **context** entries first — the actions on the cursor row
-(§10.4: collapse / expand / hide, open diff, checkout, checkout & examine), or,
-while a §13 selection is active, the selection's entries instead — and then the
-**global** commands gitloom can run on the graph as a whole. There is no examine
-entry: `<CR>` examines directly (§11). Many terminals send `<C-Space>` as `<C-@>`
-(the same key as `<Nul>`), so that is mapped too.
+ordered list, three sections:
 
-### 17.1 The registry
+1. the **context** entries — the actions on what the cursor is on (§10.4: a
+   commit, a branch, a selected packed marker, a packed line), or, while a §13
+   selection is active, the selection's entries instead;
+2. the **global** commands gitloom runs on the repository (Return, fetch, pull);
+3. the graph's **keys** that apply in this context (§17.1), grouped, each showing
+   its key — so every keyed action is reachable (and discoverable) from here.
 
-The context entries for the cursor row are derived from the row (§10.4) — what
-it is (a plain commit, a selected ref or collapsed head, a packed-marker line),
-its branch state, and whether a diff provider is configured — in the order §10.4
-gives. Everything else comes from **one registry**. Each registry entry has:
+There is no examine entry: `<CR>` examines directly (§11). Many terminals send
+`<C-Space>` as `<C-@>` (the same key as `<Nul>`), so that is mapped too.
 
-- `id` — a stable name (`refresh`, `fetch`, `pull`); a per-remote command's
-  entries are `<id>:<remote>` (`fetch:origin`);
+### 17.1 The registries
+
+**The context.** The palette first classifies the cursor into one context:
+
+| Context | When | Row entries (§10.4) |
+|---|---|---|
+| `commit` | a plain commit row, cursor on its message, no ref selected | open diff, checkout (detached), checkout & examine |
+| `branch` | a ref selected with `h`/`l`, or a collapsed head; also a packed line **with** a marker selected | checkout, collapse / expand, hide — of that branch (or that one marker) |
+| `markers` | a packed line with **no** marker selected | expand / hide per marker |
+| `selection` | a §13 selection is active | the `selection` commands (below) |
+
+A row entry that a key also runs carries that key (open diff `D`, collapse /
+expand `<Space>`) and shows it after the label, e.g. `Open diff  (D)`.
+
+**The commands.** The non-key commands come from **one registry**. Each entry has:
+
+- `id` — a stable name (`fetch`, `pull`); a per-remote command's entries are
+  `<id>:<remote>` (`fetch:origin`);
 - `label` — what the picker shows;
 - `key` — optional, the direct key that runs the same command; when present the
-  picker shows it after the label, e.g. `Refresh  (R)`;
+  picker shows it after the label, e.g. `Open diff  (D)`;
 - `scope` — what the command acts on: `global` (the repository as a whole) or
   `selection` (the active §13 commit selection);
 - optionally **per-remote** — the entry expands to one entry per remote;
@@ -3474,6 +3500,33 @@ is active the `selection` entries in registry order **instead** — then the
 (§10.4.2), both only with a diff provider. Among the globals **Return** (§10.4.2)
 comes first while an examine is active, since it is then the likeliest choice.
 
+**The keys.** Every graph key is one entry of a single **key registry** — the
+one table the buffer-local mappings are bound from, the `?` help is generated
+from (§2) and the palette's third section is drawn from. Each entry has:
+
+- the **key** (or keys, for an alias like `<C-Space>` / `<C-@>`; the first is the
+  one shown);
+- a one-line **description** — the mapping's `desc` (`Gitloom: …`), the palette
+  label and the help text (help may carry a longer form);
+- a **group**: `refs` (branches, refs and search), `view` (rendering toggles),
+  `select` (commit, examine and selection), `other` — or **none**: motions and
+  plumbing (`j k h l <C-d> <C-u> n N o`, `<Esc>`, `q`, `<C-w>q`, `<C-o>` / `<C-i>`,
+  the palette key itself, the `<leader>wD` debug dump) are bound and listed in
+  help but **never** in the palette;
+- the **contexts** it applies to — none means everywhere (the view toggles,
+  `<leader>b`, `L`, `/`, `<leader>gl`, `R`, `?`); `P` and `<Space>` only in the
+  `branch` context; `D`, `<CR>` and `V` in `commit` and `selection`; `K` in
+  `commit` and `branch`;
+- optionally a **condition** on the same session state (`D` needs a diff
+  provider).
+
+The palette lists the grouped keys of the current context, groups in the order
+`refs` → `view` → `select` → `other`, each group in registry order, labelled
+`<description>  (<key>)` — the hint always comes from the registry, never from a
+label. A key already shown on an earlier entry (`D` on Open diff, `<Space>` on
+collapse / expand) is not listed again. Choosing a key entry runs that key's
+handler, exactly as pressing the key would.
+
 **The remote list.** When the graph opens, gitloom runs `git remote` (local, no
 network) asynchronously in the graph's repository root and caches the names, in
 git's order, on the session; every resync (§3.4 — `R`, and the resync after a
@@ -3486,10 +3539,12 @@ first read lands the per-remote entries are simply absent.
 | Command | Key | Runs |
 |---|---|---|
 | **Return to `<orig>`** — only while a Checkout & examine (§10.4.2) is active | — | `git switch <orig>` (or `git checkout --detach <hash>`), then `git stash apply <sha>` of the examine's stash if any |
-| **Refresh** | `R` | the in-place resync (§3.4) — exactly the `R` key |
 | **Fetch** | — | `git fetch --all` |
 | **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch <remote>` |
 | **Pull** | — | `git pull --ff-only` |
+
+The in-place resync (§3.4) is the `R` key's registry entry (`Refresh: resync with
+the repository  (R)`, group `other`), listed with the keys — not a second command.
 
 The `selection` entries (while selecting, with a diff provider):
 
@@ -3497,6 +3552,9 @@ The `selection` entries (while selecting, with a diff provider):
 |---|---|---|
 | **Open diff** | `D` | the selection's range in the diff provider (§13.5) — exactly `D` |
 | **Checkout & examine selection** | — | Checkout & examine (§10.4.2) of the selection |
+
+Exiting the selection is the `V` key's entry (listed with the keys in the
+`selection` context).
 
 There is no per-remote pull: a pull follows the current branch's upstream.
 

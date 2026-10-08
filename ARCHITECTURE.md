@@ -473,8 +473,8 @@ lua/gitloom/
   Neovim-window-coupled layer; it drives the engine and the data library. A graph
   session is a **`GraphCtx`** (`ctx`) — `open_graph` assembles it and the helpers,
   keymap handlers, and autocmd bodies are *module-level* functions taking `ctx`
-  (gathered in `GRAPH_HELPERS` → `ctx:method()` and `GRAPH_KEYS` → buffer-local
-  binds), so the controller closure stays well under LuaJIT's 60-upvalue cap. The
+  (gathered in `GRAPH_HELPERS` → `ctx:method()` and the `GRAPH_KEYS` key
+  registry → buffer-local binds, the `?` help and the palette's key entries), so the controller closure stays well under LuaJIT's 60-upvalue cap. The
   pane machinery and one-time stream/`on_show` setup stay nested.
 - **gitloom.git** — the data library: the immutable commit model, the parsers
   and formatters that turn raw `git` output into structured data, the owned
@@ -1785,8 +1785,9 @@ disk.
 commit directly — no menu: `select.menu_target` maps a collapsed head to its tip,
 and a packed line uses the selected marker's tip (the first marker's when none
 is selected). The row's other actions are the command palette's **row entries**
-(below): `ctx:palette()` classifies the row (`plain` / `branch` / `markers`) and
-the pure `palette.row_entries(row, has_diff)` returns them in order, each tagged
+(below): `ctx:palette()` classifies the row (`plain` / `branch` / `markers`, with
+the selected marker) and the pure `palette.row_entries(row, has_diff)` returns
+them in order — scoped to the commit or the branch, never both — each tagged
 with an `op` that the palette helper maps to its glue. The repository-mutating
 **checkout** entry (specification.md §10.4.1) is built by the pure
 `select.checkout_spec(commit,
@@ -1935,19 +1936,39 @@ preview) share the commit-view renderer.
 single action menu: a `vim.ui.select` over `palette.palette_entries(info)`, where
 `info` is a snapshot — the classified cursor row, whether a §13 selection is
 active, `ctx.remotes`, the repository's examine state (`nav.examine[root]`) and
-whether a diff provider is configured. The pure builder returns ONE ordered list:
-the **context** first — `row_entries(row)` (collapse / expand / hide, diff,
-checkout, checkout & examine; the old `<CR>` menu minus examine), or the registry's
-`selection` entries instead while selecting — then the registry's `global`
-entries. The registry (`graph/palette.lua`, `COMMANDS`) is a list of `{ id, label
+whether a diff provider is configured, and the key registry. The pure builder
+returns ONE ordered list: the **context** first — `row_entries(row)` (a commit's
+diff / checkout / checkout & examine, a branch's checkout / collapse / expand /
+hide, a selected marker's actions only; `row_context(row)` names it `commit` /
+`branch` / `markers`), or the registry's `selection` entries instead while
+selecting — then the registry's `global` entries, then `key_entries` (below). The
+command registry (`graph/palette.lua`, `COMMANDS`) is a list of `{ id, label
 (string or fun(state)), key?, scope, per_remote?, when?(state), action(ctx,
 remote?) }`; the builder filters by scope and `when`, appends `  (<key>)` to the
 label, and expands a `per_remote` entry once per cached remote name
 (`fetch:<remote>`). A registry entry carries an `action` that only calls ctx
-methods (`resync`, `run_remote`, `open_selection_diff`, `examine_selection`,
+methods (`run_remote`, `open_selection_diff`, `examine_selection`,
 `examine_return`); a row entry carries an `op` + its data instead, which the
 palette helper runs against the row (and branch / marker units) it resolved. So
 the module is window-free and unit-tested.
+
+**The key registry** (specification.md §17.1) is window.lua's `GRAPH_KEYS`, an
+ordered list of `GraphKey` = `{ key (lhs, or an alias list), run?(ctx), desc,
+help?, group?, contexts?, when?(state) }` — the handlers are window locals, so the
+table lives there while everything that reads it is pure in `graph/palette.lua`.
+`open_graph` binds each lhs buffer-local with `desc = "Gitloom: " .. desc` (an
+entry without `run` — `<C-o>`/`<C-i>`, bound by `nav.install_nav_keys` — is
+listed only); `h_help` renders `palette.help_lines(keys)` (grouped by
+`KEY_GROUPS`, ungrouped keys last as "Motion & misc"); and `palette_entries`
+appends `palette.key_entries(keys, context, state, taken)` — keys with a `group`,
+offered in the context (`contexts` nil = everywhere), `when` holding, groups in
+`refs → view → select → other` order, labelled `<desc>  (<key>)`, skipping any key
+an earlier entry already carries (`D` on Open diff, `<Space>` on collapse /
+expand). A key entry's action runs the handler (scheduled, so a picker it opens
+follows the select's close). The resync is the `R` key's entry, not a command.
+Because window.lua is at the 200-local ceiling, the registry is reached from the
+helpers defined above it through `ctx:key_registry()` (a `GRAPH_HELPERS` field),
+and exposed to tests as `window._internal.keys`.
 
 `ctx.remotes` is filled by `ctx:load_remotes()` — `git.fetch_remotes(repo.root)`
 (`git remote` → the pure `remote.parse_remotes`) — once when the session is

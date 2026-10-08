@@ -367,39 +367,6 @@ local function overlay_zindex(host_win) return host_zindex(host_win) + Z_OVERLAY
 ---@param host_win integer?
 local function float_zindex(host_win) return host_zindex(host_win) + Z_FLOAT end
 
--- Graph window keybindings — the single source of truth for the `?` help
--- float. Handlers are registered in M.open.
-local KEYBINDS = {
-    { "q", "Hide the graph (<leader>wg returns; <C-w>q destroys)" },
-    { "<C-o> / <C-i>", "Navigate back / forward through the view history" },
-    { "m", "Cycle the merge/split rendering style" },
-    { "C", "Cycle the lane layout policy (compact / survivors / linear / straight)" },
-    { "M", "Toggle mirroring (lane 1 on the right)" },
-    { "B", "Cycle ref label placement (right / inline / own line)" },
-    { "<Space>", "Collapse / expand the branch under the cursor (toggle)" },
-    { "<CR>", "Open the commit view (a head / packed marker: its tip; selecting: the range)" },
-    { "D", "Open the commit's diff (external viewer)" },
-    { "d", "Toggle absolute / relative dates" },
-    { "h/l", "Select previous / next ref (switch branch while selecting)" },
-    { "V", "Commit selection: range along a branch (j/k walk · h/l switch · o swap · <CR>/D diff · Esc exit)" },
-    { "H", "Toggle reachability highlighting (dimming)" },
-    { "c", "Toggle first-parent focus (collapse non-mainline branches)" },
-    { "P", "Pin / unpin the branch under the cursor as an anchor" },
-    { "L", "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
-    { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
-    { "R", "Resync with the repository (refs + new commits + working tree)" },
-    { "<C-Space>", "Command palette: row / selection actions, then refresh / fetch / pull / return (also <C-@>)" },
-    { "S", "Cycle the row sort mode (topo / date / author-date)" },
-    { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
-    { "<leader>gl", "Search commits by subject / author (picker; :GitloomSearch)" },
-    { "/", "Filter the graph to matching commits (live; C-j/C-k step · CR jump · C-s stamp · Esc cancel)" },
-    { "F", "Toggle the off-screen context panes (header + footer)" },
-    { "K", "Lane breakdown for the commit under the cursor" },
-    { "i", "Toggle lane-id debug + the cutoff/seam highlight" },
-    { "<leader>wD", "Write a pane debug dump (seam/boundary) to stdpath('data')" },
-    { "?", "Show this help" },
-}
-
 -- The graph window footer: live status (the current mode, and whether the graph
 -- is mirrored) plus a hint to the help float.
 ---@param mirror boolean?
@@ -438,15 +405,6 @@ local function footer_text(mirror, modes, focus, nanchors, sort_label, track_str
     end
     if mirror then status = status .. "  (mirrored)" end
     return status .. "    ?: help"
-end
-
--- Lines for the `?` help float.
-local function help_lines()
-    local lines = { "gitloom keys", "" }
-    for _, kb in ipairs(KEYBINDS) do
-        lines[#lines + 1] = ("  %-2s  %s"):format(kb[1], kb[2])
-    end
-    return lines
 end
 
 -- gitloom's own minimal promise (vendored in util.lua; see CLAUDE.md
@@ -2380,11 +2338,12 @@ end
 local function h_resync(ctx) ctx:resync(false) end
 
 -- <C-Space> / <C-@>: the command palette (§17) — gitloom's single action menu.
--- Classifies the cursor row (plain / branch / markers, as `<CR>`'s old menu did)
--- and hands it, with the §13 selection flag, the cached remotes and the examine
--- state, to the pure `palette.palette_entries`: the context entries first, then
--- the global commands, in a `vim.ui.select`. A registry entry runs its own
--- `action`; a row entry's `op` is run here against the row resolved now.
+-- Classifies the cursor row (plain / branch / markers, a packed line's selected
+-- marker included) and hands it, with the §13 selection flag, the cached remotes,
+-- the examine state and the key registry, to the pure `palette.palette_entries`:
+-- the context entries first, then the global commands, then the context's keys,
+-- in a `vim.ui.select`. A registry or key entry runs its own `action`; a row
+-- entry's `op` is run here against the row resolved now.
 -- A GRAPH_HELPERS field, not a module local: this chunk is at LuaJIT's 200-local
 -- limit (see CLAUDE.md), and the palette module is required here for the same reason.
 GRAPH_HELPERS.palette = function(ctx)
@@ -2402,7 +2361,8 @@ GRAPH_HELPERS.palette = function(ctx)
             local texts = {}
             for i, u in ipairs(units) do texts[i] = u.text end
             b = ctx:branch_under_cursor(line)
-            row = { kind = "markers", markers = texts, commit = b and b.commit }
+            row = { kind = "markers", markers = texts, commit = b and b.commit,
+                selected = (st.commit == item and st.index and units[st.index]) and st.index or nil }
         elseif item and item.commit and not item.commit.collapsed and not ref_selected then
             row = { kind = "plain", commit = item.commit }
         elseif item then
@@ -2417,7 +2377,7 @@ GRAPH_HELPERS.palette = function(ctx)
     -- lands, so no per-remote entries yet) — the palette never waits on git.
     local entries = require("gitloom.graph.palette").palette_entries({
         row = row, selection = ctx.sel.active, remotes = ctx.remotes,
-        examine = nav.examine[repo.root], has_diff = has_diff,
+        examine = nav.examine[repo.root], has_diff = has_diff, keys = ctx:key_registry(),
     })
     if #entries == 0 then return end
     local function owners_of(u)
@@ -2438,7 +2398,11 @@ GRAPH_HELPERS.palette = function(ctx)
         end)
     end
     local function run(e)
-        if e.action then e.action(ctx); return end
+        if e.action then
+            -- A key's handler may open a picker / float of its own: let the select close first.
+            if e.id:sub(1, 4) == "key:" then vim.schedule(function() e.action(ctx) end) else e.action(ctx) end
+            return
+        end
         local op = e.op
         if op == "diff" then
             open_diff(opts, e.commit, repo.root)
@@ -3504,9 +3468,10 @@ local function h_dump(ctx)
     vim.notify("gitloom: pane dump -> " .. path, vim.log.levels.INFO)
 end
 
--- ?: float listing all keybindings.
+-- ?: float listing every graph key, generated from the key registry (§2/§17.1).
 local function h_help(ctx)
-    vim.lsp.util.open_floating_preview(help_lines(), "", {
+    local lines = require("gitloom.graph.palette").help_lines(ctx:key_registry())
+    vim.lsp.util.open_floating_preview(lines, "", {
         border = "rounded",
         focusable = true,
         zindex = float_zindex(ctx:win()),
@@ -3524,48 +3489,93 @@ local function h_esc(ctx)
     if ctx.sel.active then exit_selection(ctx) end
 end
 
--- The single source of truth: key → handler(ctx). Bound buffer-local in open_graph.
+-- The key registry (§17.1) — the single source of truth for every graph key: the
+-- buffer-local mappings are bound from it (open_graph, with `desc`), the `?` help
+-- is generated from it and the <C-Space> palette lists its grouped entries. A
+-- `GraphKey` list (gitloom.graph.palette), in help / palette order within each
+-- group. No `group` = bound and in help, never in the palette (motions, plumbing);
+-- no `run` = bound elsewhere (the §14.3 navigation keys), listed in help only.
+---@type GraphKey[]
 local GRAPH_KEYS = {
-    ["q"] = h_q,
-    ["<C-w>q"] = h_destroy,
-    ["m"] = h_merge_style,
-    ["C"] = h_layout_policy,
-    ["M"] = h_mirror,
-    ["B"] = h_label_mode,
-    ["<Space>"] = h_space,
-    ["<CR>"] = h_cr,
-    ["D"] = h_diff,
-    ["K"] = h_lane,
-    ["d"] = h_date,
-    ["H"] = h_dim,
-    ["R"] = h_resync,
-    -- The command palette (§17). Many terminals send <C-Space> as <C-@> (= <Nul>).
-    ["<C-Space>"] = function(ctx) ctx:palette() end,
-    ["<C-@>"] = function(ctx) ctx:palette() end,
-    ["S"] = h_sort,
-    ["c"] = h_focus,
-    ["p"] = h_pack,
-    ["<leader>b"] = h_refpick,
-    ["<leader>gl"] = h_commit_search,
-    ["/"] = h_filter,
-    ["n"] = function(ctx) if ctx.filter then filter_goto(ctx, 1) end end,
-    ["N"] = function(ctx) if ctx.filter then filter_goto(ctx, -1) end end,
-    ["P"] = h_pin,
-    ["L"] = function(ctx) ctx:pin_dialog() end,
-    ["i"] = h_laneids,
-    ["F"] = h_panes,
-    ["<leader>wD"] = h_dump,
-    ["?"] = h_help,
-    ["V"] = h_select,
-    ["<Esc>"] = h_esc,
-    ["h"] = function(ctx) move_ref(ctx, -1) end,
-    ["l"] = function(ctx) move_ref(ctx, 1) end,
-    ["j"] = function(ctx) if ctx.sel.active then selection_move(ctx, "down") else feed(vim.v.count1 .. "j") end end,
-    ["k"] = function(ctx) if ctx.sel.active then selection_move(ctx, "up") else feed(vim.v.count1 .. "k") end end,
-    ["<C-d>"] = function(ctx) if ctx.sel.active then selection_page(ctx, "down") else feed("<C-d>") end end,
-    ["<C-u>"] = function(ctx) if ctx.sel.active then selection_page(ctx, "up") else feed("<C-u>") end end,
-    ["o"] = function(ctx) if ctx.sel.active then selection_swap(ctx) end end,
+    -- Branches, refs & search
+    { key = "<leader>b", run = h_refpick, group = "refs", desc = "Jump to branch / ref…",
+        help = "Jump to a branch / ref (picker; recent first)" },
+    { key = "P", run = h_pin, group = "refs", contexts = { "branch" }, desc = "Pin / unpin branch",
+        help = "Pin / unpin the branch under the cursor as an anchor" },
+    { key = "<Space>", run = h_space, group = "refs", contexts = { "branch" },
+        desc = "Collapse / expand branch",
+        help = "Collapse / expand the branch under the cursor (selecting: fold / unfold the head)" },
+    { key = "L", run = function(ctx) ctx:pin_dialog() end, group = "refs", desc = "Pinned branches…",
+        help = "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
+    { key = "/", run = h_filter, group = "refs", desc = "Filter the graph…",
+        help = "Filter the graph to matching commits (live; C-j/C-k step · CR jump · C-s stamp · Esc cancel)" },
+    { key = "<leader>gl", run = h_commit_search, group = "refs", desc = "Search commits…",
+        help = "Search commits by subject / author (picker; :GitloomSearch)" },
+    -- View
+    { key = "m", run = h_merge_style, group = "view", desc = "Cycle merge / split style" },
+    { key = "C", run = h_layout_policy, group = "view", desc = "Cycle lane layout policy",
+        help = "Cycle the lane layout policy (compact / survivors / linear / straight / gutter)" },
+    { key = "M", run = h_mirror, group = "view", desc = "Toggle mirroring",
+        help = "Toggle mirroring (lane 1 on the right)" },
+    { key = "B", run = h_label_mode, group = "view", desc = "Cycle ref label placement",
+        help = "Cycle ref label placement (right / inline / own line)" },
+    { key = "d", run = h_date, group = "view", desc = "Toggle absolute / relative dates" },
+    { key = "H", run = h_dim, group = "view", desc = "Toggle reachability highlighting" },
+    { key = "c", run = h_focus, group = "view", desc = "Toggle first-parent focus",
+        help = "Toggle first-parent focus (collapse non-mainline branches)" },
+    { key = "p", run = h_pack, group = "view", desc = "Toggle marker packing",
+        help = "Toggle marker packing (concurrent collapsed heads share a line)" },
+    { key = "S", run = h_sort, group = "view", desc = "Cycle row sort mode",
+        help = "Cycle the row sort mode (topo / date / author-date)" },
+    { key = "F", run = h_panes, group = "view", desc = "Toggle context panes",
+        help = "Toggle the off-screen context panes (header + footer)" },
+    { key = "i", run = h_laneids, group = "view", desc = "Toggle lane-id debug",
+        help = "Toggle lane-id debug + the cutoff/seam highlight" },
+    -- Commit & selection
+    { key = "<CR>", run = h_cr, group = "select", contexts = { "commit", "selection" },
+        desc = "Open the commit view",
+        help = "Open the commit view (a head / packed marker: its tip; selecting: the range)" },
+    { key = "D", run = h_diff, group = "select", contexts = { "commit", "selection" },
+        when = function(st) return st.has_diff == true end, desc = "Open diff",
+        help = "Open the commit's diff (external viewer; selecting: the range)" },
+    { key = "V", run = h_select, group = "select", contexts = { "commit", "selection" },
+        desc = "Start / exit commit selection",
+        help = "Commit selection: range along a branch (j/k walk · h/l switch · o swap · <CR>/D diff · Esc exit)" },
+    -- Other
+    { key = "R", run = h_resync, group = "other", desc = "Refresh: resync with the repository",
+        help = "Resync with the repository (refs + new commits + working tree)" },
+    { key = "K", run = h_lane, group = "other", contexts = { "commit", "branch" },
+        desc = "Lane breakdown", help = "Lane breakdown for the commit under the cursor" },
+    { key = "?", run = h_help, group = "other", desc = "Show key help" },
+    -- Motion & misc: bound, in help, never in the palette.
+    { key = { "<C-Space>", "<C-@>" }, run = function(ctx) ctx:palette() end,
+        -- Many terminals send <C-Space> as <C-@> (= <Nul>).
+        desc = "Command palette (actions + keys for the row / selection)" },
+    { key = "j", desc = "Next row (selecting: walk the path down)",
+        run = function(ctx) if ctx.sel.active then selection_move(ctx, "down") else feed(vim.v.count1 .. "j") end end },
+    { key = "k", desc = "Previous row (selecting: walk the path up)",
+        run = function(ctx) if ctx.sel.active then selection_move(ctx, "up") else feed(vim.v.count1 .. "k") end end },
+    { key = "<C-d>", desc = "Half page down (selecting: walk a page)",
+        run = function(ctx) if ctx.sel.active then selection_page(ctx, "down") else feed("<C-d>") end end },
+    { key = "<C-u>", desc = "Half page up (selecting: walk a page)",
+        run = function(ctx) if ctx.sel.active then selection_page(ctx, "up") else feed("<C-u>") end end },
+    { key = "h", run = function(ctx) move_ref(ctx, -1) end,
+        desc = "Select previous ref / marker (selecting: switch branch)" },
+    { key = "l", run = function(ctx) move_ref(ctx, 1) end,
+        desc = "Select next ref / marker (selecting: switch branch)" },
+    { key = "n", run = function(ctx) if ctx.filter then filter_goto(ctx, 1) end end,
+        desc = "Next filter match" },
+    { key = "N", run = function(ctx) if ctx.filter then filter_goto(ctx, -1) end end,
+        desc = "Previous filter match" },
+    { key = "o", run = function(ctx) if ctx.sel.active then selection_swap(ctx) end end,
+        desc = "Swap the selection's ends (selecting)" },
+    { key = "<Esc>", run = h_esc, desc = "Exit commit selection" },
+    { key = { "<C-o>", "<C-i>" }, desc = "Back / forward through the view history" },
+    { key = "q", run = h_q, desc = "Hide the graph (<leader>wg returns; <C-w>q destroys)" },
+    { key = "<C-w>q", run = h_destroy, desc = "Destroy the graph window" },
+    { key = "<leader>wD", run = h_dump, desc = "Write a pane debug dump to stdpath('data')" },
 }
+GRAPH_HELPERS.key_registry = function() return GRAPH_KEYS end
 
 -- ── Autocmd bodies + debounce schedulers (spec §3.4/§12). Module-level, ctx-driven;
 -- the autocmds are registered in open_graph but their bodies live here. ──────────
@@ -4092,6 +4102,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field update_footer fun(self:GraphCtx)
     ---@field resync fun(self:GraphCtx, silent:boolean?, follow:{ note?: string }?)
     ---@field palette fun(self:GraphCtx)  the command palette (§17)
+    ---@field key_registry fun(self:GraphCtx): GraphKey[]  the key registry `GRAPH_KEYS` (§17.1)
     ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
     ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
@@ -4599,7 +4610,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end,
     }
 
-    -- The graph keymaps live in the module-level GRAPH_KEYS table (key → handler(ctx));
+    -- The graph keymaps live in the module-level GRAPH_KEYS registry (§17.1);
     -- bound OURSELVES buffer-local below, not via snacks window keys (snacks binds on
     -- its own buffer only). Buffer-local binding is what lets the same handlers drive
     -- any frame buffer the host swaps in — the uniform frames model (§14). Ensure
@@ -4636,8 +4647,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- needs. They read the live host window via ctx:win() and act on the session
         -- via ctx, so the same handlers drive the graph whether it owns the window or
         -- is an attached frame in a shared host (§14 uniform frames).
-        for key, handler in pairs(GRAPH_KEYS) do
-            vim.keymap.set("n", key, function() handler(ctx) end, { buffer = buf, nowait = true })
+        for _, k in ipairs(GRAPH_KEYS) do
+            local run = k.run
+            if run then
+                for _, lhs in ipairs(require("gitloom.graph.palette").lhs_of(k)) do
+                    vim.keymap.set("n", lhs, function() run(ctx) end,
+                        { buffer = buf, nowait = true, desc = "Gitloom: " .. k.desc })
+                end
+            end
         end
         -- `:GitloomSearch` — the command equivalent of `<leader>gl` (spec §15.1),
         -- bound buffer-local on the graph buffer (search targets this graph's repo).
@@ -6554,6 +6571,7 @@ M._internal = {
     integrate_commit = integrate_commit,
     build_display_index = build_display_index,
     open_diffview = open_diffview, -- the default diff provider (§11.5); diff_provider_spec
+    keys = GRAPH_HELPERS.key_registry(), -- the key registry GRAPH_KEYS (§17.1); palette_spec
 }
 
 return M

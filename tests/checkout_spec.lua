@@ -1,7 +1,9 @@
 --- Tests for the row actions and checkout (spec §10.4, §10.4.1): the palette's
---- pure row-entry builder (`palette.row_entries` — entry order per row kind, the
---- examine entry gone since `<CR>` examines directly, no checkout on a §4.2
---- virtual commit), the selected-ref resolver (`selected_ref`), the per-ref-kind
+--- pure row-entry builder (`palette.row_entries` — entry order per row kind,
+--- scoped to the context (§17.1): a commit's diff / checkout / checkout & examine,
+--- a branch's checkout / collapse / expand / hide only, a selected packed marker's
+--- actions only; the examine entry gone since `<CR>` examines directly, no
+--- checkout on a §4.2 virtual commit), the selected-ref resolver (`selected_ref`), the per-ref-kind
 --- argv (`checkout_spec` — never forcing), and `run_checkout` against a REAL
 --- scratch repository: a switch that lands, and a refused one (a dirty file the
 --- checkout would overwrite) reporting a non-zero code + git's stderr while
@@ -118,14 +120,15 @@ describe("checkout_spec (§10.4.1)", function()
     end)
 end)
 
-describe("row_entries (§10.4, the palette's row scope)", function()
+describe("row_entries (§10.4, the palette's row scope — commit vs branch, §17.1)", function()
     local function entries(row) return row_entries(row, row.has_diff) end
 
-    it("plain row: diff, checkout, checkout & examine — no examine (<CR> is examine)", function()
+    it("commit (plain row): diff, checkout, checkout & examine — no examine (<CR> is examine)", function()
         local m = entries({ kind = "plain", commit = commit(), has_diff = true })
         assert.same({ "diff", "checkout", "checkout_examine" }, actions(m))
-        assert.same({ "Open diff", "Checkout commit aaaaaaa (detached)",
+        assert.same({ "Open diff  (D)", "Checkout commit aaaaaaa (detached)",
             "Checkout & examine aaaaaaa (detached)" }, labels(m))
+        assert.equals("D", m[1].key)
     end)
 
     it("plain row without a diff provider: checkout only", function()
@@ -137,30 +140,42 @@ describe("row_entries (§10.4, the palette's row scope)", function()
         assert.same({ "diff" }, actions(m))
     end)
 
-    it("selected expanded branch: collapse, hide, diff, then the checkouts last", function()
+    it("selected expanded branch: checkout of the branch, collapse, hide — no commit diff / examine", function()
         local m = entries({ kind = "branch", state = "expanded", commit = commit(), has_diff = true,
             ref = { kind = "local", name = "main" } })
-        assert.same({ "collapse", "hide", "diff", "checkout", "checkout_examine" }, actions(m))
-        assert.equals("Checkout branch main", m[4].label)
+        assert.same({ "checkout", "collapse", "hide" }, actions(m))
+        assert.same({ "Checkout branch main", "Collapse branch  (<Space>)", "Hide branch" }, labels(m))
     end)
 
-    it("collapsed head: expand, hide, diff, checkout of the tip", function()
+    it("collapsed head: checkout of the tip, expand, hide", function()
         local head = { collapsed = true, hash = "collapsed:x", refs = {}, tip = commit() }
         local m = entries({ kind = "branch", state = "collapsed", commit = head, has_diff = true })
-        assert.same({ "expand", "hide", "diff", "checkout", "checkout_examine" }, actions(m))
-        assert.equals(H, m[3].commit.hash)
-        assert.same({ "git", "checkout", "--detach", H }, m[4].checkout.argv)
-        assert.equals(H, m[5].commit.hash)
+        assert.same({ "checkout", "expand", "hide" }, actions(m))
+        assert.same({ "git", "checkout", "--detach", H }, m[1].checkout.argv)
+        assert.equals("Expand branch  (<Space>)", m[2].label)
     end)
 
-    it("packed markers: expand/hide per marker; checkout only with a marker selected", function()
+    it("a mainline branch: just its checkout", function()
+        local m = entries({ kind = "branch", state = "mainline", commit = commit(), has_diff = true,
+            ref = { kind = "local", name = "main" } })
+        assert.same({ "checkout" }, actions(m))
+    end)
+
+    it("packed markers, none selected: expand/hide per marker, no checkout", function()
         local m = entries({ kind = "markers", markers = { "◍ a", "◍ b" } })
         assert.same({ "expand", "hide", "expand", "hide" }, actions(m))
         assert.equals(2, m[3].marker)
         assert.same({ "expand:1", "hide:1", "expand:2", "hide:2" },
             vim.tbl_map(function(e) return e.id end, m))
-        local sel = entries({ kind = "markers", markers = { "◍ a", "◍ b" }, commit = commit(), has_diff = true })
-        assert.same({ "expand", "hide", "expand", "hide", "checkout" }, actions(sel))
+    end)
+
+    it("packed markers, one selected: ONLY that marker's checkout, expand, hide", function()
+        local m = entries({ kind = "markers", markers = { "◍ a", "◍ b", "◍ c" }, selected = 3,
+            commit = commit(), has_diff = true })
+        assert.same({ "checkout", "expand", "hide" }, actions(m))
+        assert.same({ "checkout", "expand:3", "hide:3" }, vim.tbl_map(function(e) return e.id end, m))
+        assert.same({ "Expand ◍ c", "Hide ◍ c" }, { m[2].label, m[3].label })
+        assert.equals(3, m[2].marker)
     end)
 
     it("no row: nothing", function()

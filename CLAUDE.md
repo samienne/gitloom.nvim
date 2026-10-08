@@ -379,13 +379,15 @@ Coverage:
   in the final cleanup: closing one between tests races diffview's async load
 - `tests/checkout_spec.lua` — the palette's row entries + checkout (incl. the
   leading `(HEAD → x)` label resolving to branch `x`)
-  (§10.4/§10.4.1): `palette.row_entries` order per row kind (plain → diff,
-  checkout, checkout & examine — **no examine**, `<CR>` is examine now; a selected
-  branch / collapsed head → collapse|expand, hide, diff, then checkout and
-  checkout & examine of the tip LAST; packed markers → per-marker expand/hide
-  (`expand:<i>`/`hide:<i>`), checkout only with a marker selected, never checkout &
-  examine; diff and checkout & examine only with a provider; no checkout of either
-  kind on a §4.2 virtual commit; no row → nothing), `selected_ref` (decoration index → local /
+  (§10.4/§10.4.1): `palette.row_entries` order per row kind, scoped to the
+  context (§17.1) (plain = commit → diff `(D)`, checkout, checkout & examine —
+  **no examine**, `<CR>` is examine now; a selected branch / collapsed head →
+  checkout of the branch / the tip, then collapse|expand `(<Space>)`, hide —
+  **no** commit diff and **no** checkout & examine; a mainline branch → its
+  checkout only; packed markers with none selected → per-marker expand/hide
+  (`expand:<i>`/`hide:<i>`), no checkout; one selected → ONLY its checkout,
+  `expand:<i>`, `hide:<i>`; diff and checkout & examine only with a provider; no
+  checkout of either kind on a §4.2 virtual commit; no row → nothing), `selected_ref` (decoration index → local /
   remote-only / tag / worktree ref, a branch group preferring its local branch),
   `checkout_spec` (the argv per ref kind — `git switch <name>`, `git switch
   <short>` for a remote, `git checkout --detach <hash>` otherwise, a collapsed
@@ -397,11 +399,22 @@ Coverage:
   as ONE ordered list — the context first (the row's entries, or the `selection`
   entries **instead** while selecting: Open diff `(D)` + Checkout & examine
   selection, only with a provider), then the globals (Return first, only while an
-  examine is active; Refresh / Fetch / per-remote Fetch / Pull, the `  (R)` key
-  suffix, remotes nil / {} / a list giving no / no / one `fetch:<remote>` entry
+  examine is active; Fetch / per-remote Fetch / Pull — no Refresh command, `R` is a
+  key; remotes nil / {} / a list giving no / no / one `fetch:<remote>` entry
   each); no examine entry; a row entry carries an `op`, a registry entry an
   `action` (bound to ctx + remote); scope + `when` filtering and function labels
-  on a custom registry; `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
+  on a custom registry; then the **key entries** over a FAKE registry (§17.1):
+  `row_context` (commit / branch / markers, a packed line with a marker selected
+  → branch), the per-context sets (commit: no `P`/`<Space>`; branch: no commit
+  diff / examine; marker selected: only that marker's checkout / expand / hide;
+  no marker: per-marker expand / hide + global keys; selection: `V`, `D` once),
+  groups refs → view → select → other, hints derived from the registry key, a key
+  already shown never repeated (so no duplicate `R`), ungrouped / handler-less
+  keys never listed, a key entry running its handler; `help_lines` (grouped,
+  ungrouped last, aliases joined, aligned, a newly added fake key picked up with
+  its `help` text); and the REAL `GRAPH_KEYS` (`window._internal.keys`):
+  well-formed (a desc each, known groups / contexts, no lhs bound twice), motions
+  and plumbing ungrouped, `R` once, every key in the help; `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
   `git pull --ff-only`, `GIT_TERMINAL_PROMPT=0` in a fresh env table, pull's
   resync-on-failure, never forcing), `remote.parse_remotes` (blank lines, CR), `remote.failure_text`
   (the `fatal:`/`error:` line first, stderr as is, stdout fallback), and
@@ -765,7 +778,8 @@ owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
 `filter_keep` (the filter-search matcher + keep-set; §16.2), and `selected_ref` /
 `checkout_spec` (checkout; §10.4/§10.4.1 — the row entries themselves are
 `require("gitloom.graph.palette").row_entries`).
-`window._internal` additionally exposes `effective_pins` / `effective_pinned`,
+`window._internal` additionally exposes `keys` (the `GRAPH_KEYS` key registry, §17.1),
+`effective_pins` / `effective_pinned`,
 `pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live
 graph session, recorded by `open_graph`. The headless smoke test reads the
 projected model through `ctx` because without a UI there is no rendered text to
@@ -1187,11 +1201,12 @@ Details not covered by the spec or architecture:
   Every other row action moved to the `<C-Space>` palette (below), which is now the
   single action menu: `ctx:palette()` classifies the row as `<CR>` used to — a
   normal commit row with **no ref selected** (cursor on the message) is `plain`
-  (diff, checkout, checkout & examine); a ref selected with `h`/`l` or a
-  **collapsed head** is `branch` (collapse / expand / hide, diff, checkout,
-  checkout & examine last); a **packed-marker row** is `markers` (expand/hide per
-  marker by name, then checkout of the selected marker's tip) — keyed off
-  `selection_state.index` (the h/l ref selection), and the pure
+  (the commit context: diff, checkout, checkout & examine); a ref selected with
+  `h`/`l` or a **collapsed head** is `branch` (checkout of the branch, collapse /
+  expand, hide — no commit diff, no checkout & examine); a **packed-marker row** is
+  `markers` (with a marker selected — `row.selected` — ONLY that marker's checkout /
+  expand / hide, which is the branch context; with none, expand/hide per marker by
+  name) — keyed off `selection_state.index` (the h/l ref selection), and the pure
   `palette.row_entries(row, has_diff)` returns those entries, each with an `op`
   the palette helper maps to its glue. **Checkout** (§10.4.1) is
   `select.checkout_spec(commit, select.selected_ref(commit, index))` → `git switch
@@ -1217,14 +1232,29 @@ Details not covered by the spec or architecture:
 - **Command palette = the action menu** (spec §17, `<C-Space>` + `<C-@>`, which
   many terminals send for it — `<C-@>` and `<Nul>` are one key code):
   `palette_entries(info)` is the pure builder over ONE snapshot (`row`,
-  `selection`, `remotes`, `examine`, `has_diff`; `commands` a test seam) and
-  returns one ordered list — the **context** first (`row_entries(row)`, or the
+  `selection`, `remotes`, `examine`, `has_diff`, `keys`; `commands` a test seam)
+  and returns one ordered list — the **context** first (`row_entries(row)`, or the
   registry's `selection` entries instead while a §13 selection is active), then the
-  registry's `global` entries. The registry (`COMMANDS`: `{ id, label (string or
+  registry's `global` entries, then the context's **keys** (`key_entries`). The
+  command registry (`COMMANDS`: `{ id, label (string or
   fun(state)), key?, scope, per_remote?, when?(state), action(ctx, remote?) }`) is
   filtered by scope and `when`, gets the `  (key)` suffix, and expands a
   `per_remote` entry per cached remote as `fetch:<remote>`. Registry entries carry
   an `action`; row entries an `op` the window runs against the row it resolved.
+  There is no Refresh command: the resync is the `R` key's entry.
+  **The key registry is `GRAPH_KEYS`** (window.lua, an ordered `GraphKey[]`:
+  `{ key (lhs or alias list), run?(ctx), desc, help?, group?, contexts?, when? }`)
+  — the ONE table the buffer-local maps are bound from (`desc = "Gitloom: " ..`),
+  `h_help` renders (`palette.help_lines`) and the palette lists
+  (`palette.key_entries(keys, context, state, taken)`: grouped keys offered in the
+  context — `row_context(row)` = `commit` / `branch` / `markers`, or `selection` —
+  groups `refs → view → select → other`, registry order within, `<desc>  (<key>)`,
+  a key an earlier entry already carries skipped). No `group` = bound + in help,
+  never in the palette (motions, `q`, `<Esc>`, the palette key, `<leader>wD`); no
+  `run` = bound elsewhere (`<C-o>`/`<C-i>`, `nav.install_nav_keys`), help only. A
+  new graph key goes in this table — nowhere else — with a `desc`. Helpers defined
+  above it reach it through `ctx:key_registry()` (a `GRAPH_HELPERS` field; the
+  local ceiling again); tests through `window._internal.keys`.
   The glue is `GRAPH_HELPERS` fields (window.lua's local ceiling): `palette` (row
   classification + a `vim.ui.select` built from cached state only — never waits)
   and `run_remote` (`git.remote_command` → `git.run_remote(argv, repo.root, env)`,
