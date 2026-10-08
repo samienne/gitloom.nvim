@@ -2677,8 +2677,9 @@ GRAPH_HELPERS.examine_selection = function(ctx)
     if newer and older then ctx:examine(newer, older) end
 end
 
--- Return (§10.4.2): switch back to `orig`, re-apply the examine's stash by SHA
--- (dropped only after a clean apply). A failed switch keeps the state (retry); a
+-- Return (§10.4.2): switch back to `orig`, re-apply the examine's stash by SHA with
+-- `--index` (falling back to a plain apply, with a WARN, when git refuses to restore
+-- the index; dropped only after a clean apply). A failed switch keeps the state (retry); a
 -- failed apply keeps the stash, names it, and clears the state.
 GRAPH_HELPERS.examine_return = function(ctx)
     local root = ctx.repo.root
@@ -2699,8 +2700,14 @@ GRAPH_HELPERS.examine_return = function(ctx)
             end
             nav.examine[root] = nil
             if r.ok then
+                if r.unstaged then
+                    -- git refused `--index`; the plain apply brought the changes back.
+                    vim.notify("gitloom: the staged state could not be restored — the changes are back, but unstaged",
+                        vim.log.levels.WARN)
+                end
                 -- The resync names where HEAD landed (§10.4.2).
-                ctx:resync(false, { note = rp.apply and "changes restored" or nil })
+                ctx:resync(false, { note = rp.apply and (r.unstaged and "changes restored (unstaged)"
+                    or "changes restored") or nil })
             else
                 vim.notify(ctx:git_failure("git stash apply", r.res)
                     .. (" — the stash was kept: %s"):format(rp.stash_message or rp.stash),

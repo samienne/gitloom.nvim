@@ -2063,7 +2063,10 @@ state, root })` → `open` (a §4.2 working-tree newer end: just the existing ra
 `checkout` (`git checkout --detach <newer>`, an optional `git stash push -u -m`
 step, the state to record, and the range); `examine_stash_message`;
 `return_plan(state)` (`git switch` or a detached checkout, then `git stash apply
-<sha>`); `stash_index` (a stash's current position from its SHA). The range is
+--index <sha>`, plus the plain `git stash apply <sha>` fallback); `index_refused`
+(whether a failed `--index` apply was git's "conflicts in index" refusal — checked
+before git touches anything, so only it licenses the fallback); `stash_index` (a
+stash's current position from its SHA). The range is
 `range.examine_range(newer, older, root)` — ONE rev, the base `range_endpoints`
 uses, against the working tree, so diffview's right side is `RevType.LOCAL`.
 
@@ -2071,7 +2074,9 @@ The git side is `fetch.lua`: `examine_probe(root)` (HEAD, its branch, `git statu
 --porcelain` → `parse_status`), `examine_run(plan, root)` (reads `stash@{0}`
 before and after the push, so "nothing stashed" is detected rather than mistaking
 an older stash for ours; a failed checkout re-applies the stash at once and drops
-it only after a clean apply), `examine_return(rp, root)` and `drop_stash(sha,
+it only after a clean apply), `examine_return(rp, root)` (the `--index` apply
+under `LC_ALL=C`; on `index_refused` the plain apply, reported as `unstaged`) and
+`drop_stash(sha,
 root)` — which re-derives `stash@{n}` from `git stash list --format=%H` right
 before dropping, since the stash is shared with every worktree and session. All
 are `git_code` (`run`, i.e. `vim.system`) in an explicit cwd.
