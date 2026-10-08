@@ -217,14 +217,18 @@ end
 --- Count the staged / unstaged / untracked files from `git status --porcelain`
 --- output (spec §3.3). Each porcelain line is `XY <path>`: X is the index
 --- (staged) status, Y the working-tree (unstaged) status; `??` is untracked.
---- The three counts seed the three working-tree virtual commits (§4.2). Pure;
---- exposed for testing.
+--- The three counts seed the three working-tree virtual commits (§4.2). `paths`
+--- is the number of changed paths, each counted ONCE (a staged + unstaged `MM`
+--- file is one path in both `staged` and `unstaged`; a rename is one line) — the
+--- §10.4.2 stash prompt's N, which must not be the per-state sum. Pure; exposed
+--- for testing.
 ---@param lines string[]
----@return { staged: integer, unstaged: integer, untracked: integer }
+---@return { staged: integer, unstaged: integer, untracked: integer, paths: integer }
 function M.parse_status(lines)
-    local st = { staged = 0, unstaged = 0, untracked = 0 }
+    local st = { staged = 0, unstaged = 0, untracked = 0, paths = 0 }
     for _, line in ipairs(lines or {}) do
         if #line >= 2 then
+            st.paths = st.paths + 1
             if line:sub(1, 2) == "??" then
                 st.untracked = st.untracked + 1
             else

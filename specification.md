@@ -2128,7 +2128,9 @@ what makes "the working tree" equal "that commit".
 
 **A dirty tree.** Before checking out, gitloom reads `git status --porcelain`.
 If there are staged, unstaged or untracked changes it asks (`vim.ui.select`):
-**Stash N changes and continue** / **Cancel**. Continue runs
+**Stash N changes and continue** / **Cancel**, where N is the number of changed
+files, each path counted once (a file with both staged and unstaged edits is one
+change, as is a rename or an untracked file). Continue runs
 `git stash push -u -m "gitloom: examine <short> (from <branch or short hash>)"`
 and records the new stash's SHA (`git rev-parse stash@{0}`). If the push fails,
 git's error is shown and nothing is checked out. If the checkout then fails,

@@ -454,7 +454,9 @@ Coverage:
   `range.examine_range` (ONE rev — the older end's first parent — `to =
   "worktree"`, `-C<root> <base>` as diffview args; a root older end → the empty
   tree; a raw-hash parent; a working-tree newer end → exactly `range_endpoints`),
-  `examine_stash_message` (branch vs detached origin), `examine_plan` over clean /
+  `examine_stash_message` (branch vs detached origin), `dirty_count` (the prompt's
+  N = changed PATHS, each once: an `MM` file and a rename count 1, so N is not the
+  per-state sum), `examine_plan` over clean /
   dirty × single / range × a working-tree newer end (`open`, no checkout, no
   stash) × an examine already active (clean: `orig` + stash kept, only `examined`
   moves, the active state not mutated; dirty: `refuse` "Return to … first" — no
@@ -463,7 +465,7 @@ Coverage:
   label); `stash_index` (by SHA, CRLF-safe, nil when absent); the palette entries
   that reach it. Then the git side against REAL scratch repositories
   (`fetch.examine_probe` / `examine_run` / `examine_return`): the probe's branch /
-  detached / counts; dirty → stash (`stash@{0}`, the message) → detached checkout
+  detached / counts (a staged-only + an `MM` + an untracked file → N = 3); dirty → stash (`stash@{0}`, the message) → detached checkout
   → clean tree, then Return → branch, edits AND untracked files restored, stash
   dropped; clean → no stash, Return switches back; a second examine keeps orig +
   stash and a dirty one is refused; a conflicting apply KEEPS the stash (HEAD back
@@ -475,7 +477,8 @@ Coverage:
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
   the three nodes staged / unstaged / untracked (spec §3.3/§4.2/§11.8):
   `parse_status` (the `git status --porcelain` staged/unstaged/untracked counter —
-  X vs Y, `??`, renames/adds, mixed, clean), `commit_range` for a virtual commit
+  X vs Y, `??`, renames/adds, mixed, clean, plus the `paths` count — each changed
+  path once, the §10.4.2 prompt's N), `commit_range` for a virtual commit
   (staged → `--cached`/`to=index`, unstaged → `HEAD`/`to=worktree`, untracked →
   the same worktree range as unstaged, real commits unchanged; §11.5),
   `worktree_label` (the graph-row subject + pluralized counts) and

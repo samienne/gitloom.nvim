@@ -35,11 +35,15 @@ local M = {}
 ---@field state? ExamineState    checkout: the state to record on success (`stash`
 ---                              is filled in by the runner once the push lands)
 
---- The number of changes a `parse_status` result holds — the prompt's N.
----@param st { staged?: integer, unstaged?: integer, untracked?: integer }?
+--- The number of changes a `parse_status` result holds — the prompt's N: the
+--- changed PATHS, each counted once (`st.paths`), never the per-state sum, which
+--- counts a staged + unstaged file twice. The sum is only the fallback for a
+--- status table without `paths`.
+---@param st { staged?: integer, unstaged?: integer, untracked?: integer, paths?: integer }?
 ---@return integer
 function M.dirty_count(st)
     st = st or {}
+    if st.paths then return st.paths end
     return (st.staged or 0) + (st.unstaged or 0) + (st.untracked or 0)
 end
 

@@ -19,7 +19,7 @@ local palette = require("gitloom.graph.palette")
 
 local A, B, C, P = ("a"):rep(40), ("b"):rep(40), ("c"):rep(40), ("p"):rep(40)
 local ROOT = "C:/r"
-local CLEAN = { staged = 0, unstaged = 0, untracked = 0 }
+local CLEAN = { staged = 0, unstaged = 0, untracked = 0, paths = 0 }
 local DIRTY = { staged = 1, unstaged = 2, untracked = 1 }
 local ON_MAIN = { branch = "main", hash = C }
 
@@ -63,6 +63,25 @@ describe("examine_range (§10.4.2)", function()
         local r = range.examine_range(v, older, ROOT)
         assert.same(range.range_endpoints(v, older, ROOT), r)
         assert.equals(P, r.rev)
+    end)
+end)
+
+describe("dirty_count (§10.4.2 — the prompt's N)", function()
+    local parse_status = require("gitloom.git.parse").parse_status
+
+    it("counts each changed path once: a staged+unstaged (MM) file is one change", function()
+        local st = parse_status({ "M  staged.lua", "MM both.lua", "?? new.lua" })
+        assert.equals(3, examine.dirty_count(st))
+    end)
+
+    it("counts a rename once", function()
+        assert.equals(1, examine.dirty_count(parse_status({ "RM old.lua -> new.lua" })))
+    end)
+
+    it("the plan's stash count is the path count", function()
+        local st = parse_status({ "MM a", "MM b" })
+        assert.equals(2, examine.examine_plan({ newer = newer, older = older, status = st,
+            head = ON_MAIN }).stash.count)
     end)
 end)
 
@@ -284,11 +303,28 @@ describe("examine against a real repository (§10.4.2)", function()
         write(dir .. "/new", "u\n")
         sh(dir, "add", "g") -- nothing staged (unchanged) — still 1 unstaged + 1 untracked
         p = await(fetch.examine_probe(dir))
-        assert.same({ staged = 0, unstaged = 1, untracked = 1 }, p.status)
+        assert.same({ staged = 0, unstaged = 1, untracked = 1, paths = 2 }, p.status)
         sh(dir, "checkout", "-q", "-f", "--detach", root_hash)
         p = await(fetch.examine_probe(dir))
         assert.is_nil(p.head.branch)
         assert.equals(root_hash, p.head.hash)
+        vim.fn.delete(dir, "rf")
+    end)
+
+    it("probe: a staged + unstaged (MM) file counts once in the prompt's N", function()
+        local dir, root_hash = scratch()
+        write(dir .. "/f", "staged\n")
+        sh(dir, "add", "f")                   -- f: staged only
+        write(dir .. "/g", "staged\n")
+        sh(dir, "add", "g")
+        write(dir .. "/g", "and unstaged\n")  -- g: MM
+        write(dir .. "/new", "u\n")           -- untracked
+        local p = await(fetch.examine_probe(dir))
+        assert.equals(3, examine.dirty_count(p.status))
+        local c = { hash = root_hash, parents = {} }
+        local plan = examine.examine_plan({ newer = c, older = c, status = p.status,
+            head = p.head, root = dir })
+        assert.equals(3, plan.stash.count)
         vim.fn.delete(dir, "rf")
     end)
 
