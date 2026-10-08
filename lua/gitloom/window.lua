@@ -2295,53 +2295,79 @@ local function h_space(ctx)
     end
 end
 
--- <CR>: commit view on a message (§11.1), else the branch action menu (§10.4).
+-- <CR>: the row's action menu (§10.4). On a plain commit row: examine (first, so
+-- <CR><CR> opens the commit view, §11.1), diff, checkout; with a ref selected, on
+-- a collapsed head or a packed-marker line: collapse/expand/hide, examine, diff,
+-- checkout last (§10.4.1). The entries come from the pure `selectm.cr_menu`.
 local function h_cr(ctx)
     if ctx.sel.active then open_selection_view(ctx); return end
     local line = vim.api.nvim_win_get_cursor(ctx:win() --[[@as integer]])[1]
     local item = ctx:order_at(line)
     if not item then return end
     local selection_state, opts, repo = ctx.selection_state, ctx.opts, ctx.repo
+    local has_diff = (opts.diff and opts.diff.open) and true or false
     local ref_selected = selection_state.commit == item.commit and selection_state.index ~= nil
-    if item.type ~= "markers" and item.commit and not item.commit.collapsed and not ref_selected then
-        open_commit_view(opts, item.commit, nil, repo.root)
-        return
-    end
-    local actions = {}
-    local function add(label, run) actions[#actions + 1] = { label = label, run = run } end
+    local row, b, units
     if item.type == "markers" then
-        for _, u in ipairs(marker_units(item)) do
-            local owners = {}
-            for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
-            local tip = u.marker.tip and u.marker.tip.hash
-            add("Expand " .. u.text, function() ctx:set_branch({ owners = owners }, "normal", tip) end)
-            add("Hide " .. u.text, function() ctx:set_branch({ owners = owners }, "hidden", nil) end)
-        end
+        units = marker_units(item)
+        local texts = {}
+        for i, u in ipairs(units) do texts[i] = u.text end
+        b = ctx:branch_under_cursor(line)
+        row = { kind = "markers", markers = texts, commit = b and b.commit }
+    elseif item.commit and not item.commit.collapsed and not ref_selected then
+        row = { kind = "plain", commit = item.commit, has_diff = has_diff }
     else
-        local b = ctx:branch_under_cursor(line)
-        if b then
-            if b.state == "expanded" then
-                add("Collapse branch", function() ctx:set_branch(b, "collapsed", b.follow) end)
-                add("Hide branch", function() ctx:set_branch(b, "hidden", nil) end)
-            elseif b.state == "collapsed" then
-                add("Expand branch", function() ctx:set_branch(b, "normal", b.follow) end)
-                add("Hide branch", function() ctx:set_branch(b, "hidden", nil) end)
-            end
-            if b.commit then
-                add(b.state == "collapsed" and "Examine tip commit" or "Examine commit",
-                    function() open_commit_view(opts, b.commit, nil, repo.root) end)
-                if opts.diff and opts.diff.open then
-                    add("Open diff", function() open_diff(opts, b.commit, repo.root) end)
+        b = ctx:branch_under_cursor(line)
+        if not b then return end
+        row = { kind = "branch", state = b.state, commit = b.commit, has_diff = has_diff,
+            ref = ref_selected and selectm.selected_ref(item.commit, selection_state.index) or nil }
+    end
+    local function owners_of(u)
+        local owners = {}
+        for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
+        return owners
+    end
+    local function checkout(spec)
+        git.run_checkout(spec.argv, repo.root).next(function(res)
+            vim.schedule(function()
+                if res.code ~= 0 then
+                    vim.notify(git.format_git_error(table.concat(spec.argv, " ", 1, 2), res),
+                        vim.log.levels.ERROR)
+                    return
                 end
+                ctx:resync(false)
+            end)
+        end)
+    end
+    local function run(e)
+        if e.action == "examine" then
+            open_commit_view(opts, e.commit, nil, repo.root)
+        elseif e.action == "diff" then
+            open_diff(opts, e.commit, repo.root)
+        elseif e.action == "checkout" then
+            checkout(e.checkout)
+        elseif e.marker then
+            local u = units[e.marker]
+            if e.action == "expand" then
+                ctx:set_branch({ owners = owners_of(u) }, "normal", u.marker.tip and u.marker.tip.hash)
+            else
+                ctx:set_branch({ owners = owners_of(u) }, "hidden", nil)
             end
+        elseif e.action == "collapse" then
+            ctx:set_branch(b, "collapsed", b.follow)
+        elseif e.action == "expand" then
+            ctx:set_branch(b, "normal", b.follow)
+        elseif e.action == "hide" then
+            ctx:set_branch(b, "hidden", nil)
         end
     end
+    local actions = selectm.cr_menu(row)
     if #actions == 0 then return end
     vim.ui.select(actions, {
         prompt = "gitloom",
         format_item = function(a) return a.label end,
     }, function(choice)
-        if choice then choice.run() end
+        if choice then run(choice) end
     end)
 end
 

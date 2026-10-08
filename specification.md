@@ -24,7 +24,9 @@ implementation detail: the planned view features — collapsing, pinning,
 toggling branch visibility, and reflowing (§10) — are only possible if
 gitloom controls ordering and layout rather than delegating them to git.
 
-Today the view is read-only and shows a single fixed projection of the graph.
+gitloom never stages, commits or rewrites history. **Checkout** (§10.4.1) is
+the single exception to an otherwise read-only view, and it only moves HEAD and
+the working tree.
 The view-transformation features in §10 are the direction this is built
 toward; the current non-graph surface (window, streaming fetch, rendering)
 exists primarily to exercise and validate the graph algorithm.
@@ -47,11 +49,12 @@ exists primarily to exercise and validate the graph algorithm.
   expand toggle** for the branch under the cursor (§10.4): it collapses an
   expanded branch or expands a marker, in place, and the cursor follows so
   repeated `<Space>` flips it open/closed. (`<Tab>` is `<C-i>`, the navigation
-  *forward* key — §14.3.) `<CR>` opens the **commit view** (§11)
-  for the commit under the cursor when the cursor is on the message (no ref
-  selected); when a ref is selected with `h`/`l`, or on a collapsed head or a
-  packed-marker line, it instead opens an **action menu** (§10.4) — collapse /
-  expand / hide the selected branch, examine, open its diff.
+  *forward* key — §14.3.) `<CR>` opens an **action menu** (§10.4). On a
+  plain commit row (cursor on the message, no ref selected) it lists **examine
+  commit** first — so `<CR><CR>` opens the **commit view** (§11) — then open
+  diff and **checkout** (§10.4.1). When a ref is selected with `h`/`l`, or on a
+  collapsed head or a packed-marker line, it lists collapse / expand / hide the
+  selected branch, examine, open its diff, and checkout last.
   `D` opens that commit's diff in an external diff viewer via the configured
   provider (§11.5; a no-op on a collapsed head). Two debug
   aids: `K` opens a float with the full lane breakdown for the commit under
@@ -275,8 +278,9 @@ worktrees do not; that is the general case §10.2's total owner coverage handles
 
 When the working tree is dirty, gitloom shows the uncommitted changes as up to
 three **virtual commits** (§4.2) stacked on top of HEAD — the live state the user
-is building. This is read-only: gitloom **displays** the index and working tree,
-it never stages, unstages, or commits (§9).
+is building. gitloom **displays** the index and working tree; it never stages,
+unstages, or commits (§9). The one operation that changes them is an explicit
+**checkout** (§10.4.1), which only moves HEAD and the working tree.
 
 The state is read with porcelain queries that run **after** the commit stream
 (§3.1) has its HEAD anchor:
@@ -1737,7 +1741,8 @@ plugin load so `<leader>` resolves against the user's `mapleader`. Set
 
 ## 9. Non-goals
 
-gitloom is a **viewer**: today it does not itself mutate the repository. What is
+gitloom is a **viewer**: apart from an explicit **checkout** (§10.4.1), which
+only moves HEAD and the working tree, it does not itself mutate the repository. What is
 permanently out of scope is **implicit index or history mutation as a side
 effect of viewing** — gitloom never stages, unstages, commits, resets, or
 rewrites history silently while you browse.
@@ -1953,14 +1958,18 @@ commit the trunk reaches (the mainline) is not collapsible.
   reflow the cursor is repositioned onto the resulting node (the new marker, or
   the expanded region's tip), so repeated `<Space>` flips it open/closed in place.
   (`<Tab>` / `<C-i>` is reserved for forward navigation, §14.3.)
-- `<CR>` — opens the **commit view** (§11) directly when the cursor is on a
-  normal commit's message (no ref selected). When a ref is selected with `h`/`l`,
-  or the row is a **collapsed head** or a **packed-marker line**, it instead opens
-  an **action menu** for the row: every applicable action, most-relevant first
-  (collapse, expand, **hide**, examine commit, open diff). The menu is where
-  hidden and full mode control live, and it is the overflow-proof way to reach
-  any marker on a packed line even when not all labels fit. (Collapse/expand are
-  also on `<Space>`; diff is also on `D`.)
+- `<CR>` — opens an **action menu** for the row (`vim.ui.select`). On a
+  **plain commit row** (cursor on a normal commit's message, no ref selected) the
+  entries are **examine commit**, **open diff**, **checkout commit** — examine
+  first, so `<CR><CR>` still opens the commit view (§11). When a ref is selected
+  with `h`/`l`, or the row is a **collapsed head** or a **packed-marker line**,
+  the menu lists every applicable action, most-relevant first (collapse, expand,
+  **hide**, examine commit, open diff), then **checkout** last (§10.4.1). The
+  menu is where hidden and full mode control live, and it is the overflow-proof
+  way to reach any marker on a packed line even when not all labels fit.
+  (Collapse/expand are also on `<Space>`; diff is also on `D`.) A §4.2
+  working-tree virtual commit gets no checkout entry; open diff appears only when
+  a diff provider is configured (§11.5).
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
 which labels fit); `<Space>` and the menu act on the selected marker. Reachability
@@ -1968,6 +1977,33 @@ emphasis (§12) **follows the selection**: the selected head's branch — its `�
 node, label, and lane — stays its normal colour while the sibling heads/branches
 sharing the row dim, exactly as moving onto a normal head dims everything outside
 its cone. With no marker selected the line is neutral (all lit).
+
+#### 10.4.1 Checkout
+
+The menu's **checkout** entry is the one action that changes the repository: it
+moves HEAD and the working tree, nothing else. What it runs depends on what the
+row selects, and the entry's label says which:
+
+| Selection | Command | Label |
+|---|---|---|
+| a local branch (`foo`) | `git switch foo` | `Checkout branch foo` |
+| a remote branch only (`origin/foo`) | `git switch foo` | `Checkout branch foo (from origin/foo)` |
+| a tag, a worktree label, or no ref (a bare commit, a collapsed head's tip, a selected packed marker's tip) | `git checkout --detach <hash>` | `Checkout commit <short> (detached)` |
+
+A branch group that has a local branch checks out the local one. The remote form
+relies on git's DWIM: it creates a local tracking branch `foo` when none exists,
+and switches to the existing local `foo` when one does. HEAD has no selectable
+label (§6), so a row whose only ref is HEAD is a bare commit. A §4.2 working-tree
+virtual commit has no checkout entry, and neither does a packed-marker line with
+no marker selected.
+
+Checkout **never forces**. The menu choice is the confirmation — there is no extra
+prompt. git runs in the graph's repository root (§2.1), which may be a submodule,
+not Neovim's cwd. If git exits non-zero (a dirty file the checkout would
+overwrite, a branch checked out in another worktree, an ambiguous remote name…),
+gitloom shows git's error as one line at ERROR level and changes nothing. On
+success it runs the in-place resync (§3.4, the `R` key), so HEAD's marker and the
+working-tree rows (§3.3) move to their new place.
 
 ### 10.5 Reflow
 
@@ -2242,11 +2278,13 @@ all-normal.
 
 ## 11. Commit view
 
-Pressing `<CR>` on a commit row — with the cursor on the message (no ref
-selected; §10.4) — opens the **commit view**: a read-only view pushed onto the host
+Choosing **examine commit** from a commit row's `<CR>` menu (§10.4) — the first
+entry on a plain row (cursor on the message, no ref selected), so `<CR><CR>` —
+opens the **commit view**: a read-only view pushed onto the host
 window's navigation stack (§14), showing the full details of that one commit.
 `<C-o>` returns to the graph; `q` hides the host window (§14.1). Like the
-graph, it is a viewer — it never mutates the repository (§9).
+graph, it is a viewer — it never mutates the repository (§9; checkout, §10.4.1,
+lives in the graph's menu, not here).
 
 ### 11.1 Data source
 

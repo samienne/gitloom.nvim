@@ -150,7 +150,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
 | `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
-| `<CR>` | Open the commit view (cursor on the message); action menu (examine / diff / collapse / expand / hide) when a ref is selected, on a collapsed head, or a packed marker line |
+| `<CR>` | Action menu. On a commit's message: examine (first, so `<CR><CR>` opens the commit view) / diff / checkout commit. With a ref selected, on a collapsed head, or a packed marker line: collapse / expand / hide / examine / diff / checkout. Checkout switches to the selected branch (`git switch`), else detaches at the commit; it never forces, shows git's error on failure, and resyncs on success |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
 | `h` / `l` | Select the previous / next ref decoration on the current row — on a packed marker line, the previous / next collapsed head, with the reachability emphasis following it (switch the followed branch while selecting) |
@@ -179,9 +179,11 @@ commit's history — no ref needed, so they work for ref-less regions too
 
 - `<Space>` toggles **collapse ⇄ expand** in place; the cursor follows the
   result, so holding `<Space>` flips a branch open and closed.
-- `<CR>` on the message opens the commit view directly; with a ref selected, on a
-  collapsed head, or a packed marker line it opens an **action menu** for the row
-  — examine commit, open diff, collapse, expand, **hide** — most-relevant first.
+- `<CR>` opens an **action menu** for the row. On the message it is examine
+  commit (first, so `<CR><CR>` opens the commit view), open diff, checkout; with a
+  ref selected, on a collapsed head, or a packed marker line it is collapse,
+  expand, **hide**, examine commit, open diff — most-relevant first — then
+  **checkout** last.
   On a packed line it lists every marker by name, so any branch is reachable even
   when labels overflow.
 - `h`/`l` selects a ref (or a marker on a packed line) for the toggle/menu to
@@ -307,7 +309,8 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
-Pressing `<CR>` on a commit's message opens the **commit view** — a read-only
+Pressing `<CR><CR>` on a commit's message (examine, the menu's first entry)
+opens the **commit view** — a read-only
 view of that commit's full details (hash, refs, author, committer when it
 differs, parents, the full message, a diffstat, and the diff), fetched on demand.
 It opens **in the host window** as a navigation step, not a separate float: `q`

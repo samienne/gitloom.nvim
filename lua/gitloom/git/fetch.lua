@@ -1002,12 +1002,16 @@ end
 --- than jobstart's own `cwd`, so a missing checkout fails the command (nonzero
 --- exit) instead of throwing on an invalid working directory. Resolves
 --- `{ code = -1 }` if the job cannot be spawned.
+--- `cwd` overrides the active root for this one command (checkout, §10.4.1,
+--- runs in the graph's own `repo.root`).
 ---@param args string[]
+---@param cwd string?
 ---@return table  -- future resolving { code: integer, out: string, err: string }
-local function git_code(args)
+local function git_code(args, cwd)
     local future, promise = make_future()
     local out, err = {}, {}
     local ok, jid = pcall(js, args, {
+        cwd = cwd,
         stdout_buffered = true,
         stderr_buffered = true,
         on_stdout = function(_, lines)
@@ -1030,6 +1034,17 @@ local function git_code(args)
         end)
     end
     return future
+end
+
+--- Run a checkout command (`checkout_spec`'s argv, §10.4.1) in the repository
+--- `root` — the graph's `repo.root`, which may be a submodule, never implicitly
+--- Neovim's cwd. Resolves `{ code, out, err }`; the caller reports a non-zero
+--- code with git's stderr and changes nothing. The argv never forces.
+---@param argv string[]
+---@param root string?
+---@return table  -- future resolving { code: integer, out: string, err: string }
+function M.run_checkout(argv, root)
+    return git_code(argv, root)
 end
 
 --- Fetch the **combined** patch for a `DiffRange` (spec §13.5): `git diff

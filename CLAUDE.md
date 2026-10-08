@@ -15,7 +15,8 @@ Do NOT duplicate content from these files here. Refer to them instead.
 
 ## What this is
 
-A read-only git commit-graph viewer for Neovim. `:GitloomGraph` opens a
+A read-only git commit-graph viewer for Neovim (checkout from the `<CR>` menu
+is the single mutating exception, spec §10.4.1). `:GitloomGraph` opens a
 floating window showing the commit DAG as a colored, lane-based graph for the
 repo at Neovim's cwd. Part of the loomworks suite, but **standalone** — its
 only third-party dependency is snacks.nvim.
@@ -364,6 +365,19 @@ Coverage:
   (the reported `Failed to parse rev '<hash>^!'`) AND a working-tree range (which
   without `-C` "succeeds" silently in the cwd repository). Views are closed only
   in the final cleanup: closing one between tests races diffview's async load
+- `tests/checkout_spec.lua` — the `<CR>` action menu + checkout (§10.4/§10.4.1):
+  `cr_menu` entry order per row kind (plain → examine, diff, checkout — examine
+  first so `<CR><CR>` is the commit view; a selected branch / collapsed head →
+  collapse|expand, hide, examine, diff, checkout LAST; packed markers → per-marker
+  expand/hide, checkout only with a marker selected; diff only with a provider; no
+  checkout on a §4.2 virtual commit), `selected_ref` (decoration index → local /
+  remote-only / tag / worktree ref, a branch group preferring its local branch),
+  `checkout_spec` (the argv per ref kind — `git switch <name>`, `git switch
+  <short>` for a remote, `git checkout --detach <hash>` otherwise, a collapsed
+  head detaching at its tip — and never a force flag), and `run_checkout` against
+  a REAL scratch repository passed as the root (not the cwd): a branch switch and
+  a detach land, and a switch over a conflicting dirty file is refused with a
+  non-zero code + stderr, HEAD and the file untouched
 - `tests/worktree_spec.lua` — the working-tree virtual-commit pure helpers, for
   the three nodes staged / unstaged / untracked (spec §3.3/§4.2/§11.8):
   `parse_status` (the `git status --porcelain` staged/unstaged/untracked counter —
@@ -690,8 +704,9 @@ helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
 marker-packing pass; §10.4), `collapse_owners` (the region's collapsible
 owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
 `pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
-`reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), and `smartcase_match` /
-`filter_keep` (the filter-search matcher + keep-set; §16.2).
+`reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), `smartcase_match` /
+`filter_keep` (the filter-search matcher + keep-set; §16.2), and `selected_ref` /
+`checkout_spec` / `cr_menu` (the `<CR>` menu + checkout; §10.4/§10.4.1).
 `window._internal` additionally exposes `effective_pins` / `effective_pinned`,
 `pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live
 graph session, recorded by `open_graph`. The headless smoke test reads the
@@ -1107,13 +1122,25 @@ Details not covered by the spec or architecture:
   the commit's signature (`collapse_owners`) into `{state, owners, follow,
   commit}`. `<Tab>` is the 2-state collapse⇄expand toggle (`set_branch` flips the
   owners, reflows, then `goto_hash` repositions the cursor on the result so it is
-  repeatable). `<CR>` on a normal commit row with **no ref selected** (cursor on
-  the message) opens the commit view directly (`open_commit_view`; the common
-  case, §11.1). When a ref is selected with `h`/`l`, or on a **collapsed head** or
-  a **packed-marker row**, `<CR>` instead opens the action menu (`vim.ui.select`)
-  — collapse / expand / hide / examine / diff, listing every marker by name on a
-  packed line. The direct-vs-menu split keys off `selection_state.index` (the
-  h/l ref selection).
+  repeatable). `<CR>` always opens the action menu (`vim.ui.select`), whose
+  entries come from the pure `select.cr_menu(row)` — `h_cr` only classifies the
+  row and maps each entry's `action` to its glue. A normal commit row with **no
+  ref selected** (cursor on the message) is the `plain` kind: examine (first, so
+  `<CR><CR>` is the old direct commit view, §11.1), diff, checkout. A ref
+  selected with `h`/`l` or a **collapsed head** is `branch` (collapse / expand /
+  hide, examine, diff, checkout last); a **packed-marker row** is `markers`
+  (expand/hide per marker by name, then checkout of the selected marker's tip).
+  The plain-vs-branch split keys off `selection_state.index` (the h/l ref
+  selection). **Checkout** (§10.4.1, the one repository-mutating action) is
+  `select.checkout_spec(commit, select.selected_ref(commit, index))` → `git switch
+  <local>` / `git switch <short>` for a remote (git's DWIM) / `git checkout
+  --detach <hash>`; never forced, none for a §4.2 virtual commit, and a collapsed
+  head resolves to its `tip` (its own hash is a synthetic `collapsed:` id — the
+  menu's examine/diff now resolve it the same way). It runs through
+  `git.run_checkout(argv, repo.root)` (`git_code` with an explicit cwd, so a
+  submodule graph checks out in the submodule); a non-zero exit is one
+  `format_git_error` line at ERROR, success runs `ctx:resync(false)` (the `R`
+  path).
 - **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
   recompute from the visible range each scroll, so a varying column bounces. A
   column can *only grow* (never shrink): `col_max` (a per-column cap, implies
