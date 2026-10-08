@@ -185,7 +185,13 @@ commit's history — no ref needed, so they work for ref-less regions too
   a ref selected, on a collapsed head, or a packed marker line they are collapse,
   expand, **hide**, open diff — most-relevant first — then **checkout** and
   **checkout & examine** last. On a packed line it lists every marker by name, so
-  any branch is reachable even when labels overflow.
+  any branch is reachable even when labels overflow. After a checkout the cursor
+  lands on the commit now checked out and the notice says where HEAD is
+  (`HEAD → main (1a2b3c4)` or `HEAD detached at 1a2b3c4`); plain `R` keeps the
+  cursor where it was.
+- **HEAD always reads as `HEAD`** and its label comes first on its row, so the
+  `+N` overflow never hides it: `(HEAD → main …)` on a branch, a bare `HEAD` when
+  detached. The window title shows the branch, or `detached @<short>`.
 - `<CR>` examines: it opens the commit view directly (a head's tip on a
   collapsed head or packed marker).
 - `h`/`l` selects a ref (or a marker on a packed line) for the toggle/palette to
@@ -201,8 +207,9 @@ are kept across the switch. Disable the default with `collapse_merged = false`
 (§10.7).
 
 **Anchors (pinning).** Focus folds everything toward the *anchors* — by default
-the current branch (HEAD) plus the common trunks `master` / `main` / `dev` when
-they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
+HEAD (the current branch, or the checked-out commit itself when HEAD is detached,
+so it is never folded into a `◍`) plus the common trunks `master` / `main` /
+`dev` when they exist. Press `P` on a branch to pin it as another anchor (or unpin it):
 pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
 a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
@@ -430,7 +437,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- (0–1) gives a proportional size; a number > 1 is absolute columns/rows.
         width = function() return math.max(vim.o.columns - 4, 1) end,
         height = function() return math.max(vim.o.lines - 4, 1) end,
-        -- title defaults to the repository name + current branch (§2.1); set
+        -- title defaults to the repository name + current branch, or
+        -- `detached @<short>` (§2.1); set
         -- win.title here to pin your own.
         footer = "(status + key hints)",
     },
@@ -439,7 +447,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         author = "Comment",
         branch = "WarningMsg",   -- local branch name in (name ↑remotes)
         remote = "Comment",      -- the ↑remotes suffix (and remote-only names)
-        head = "Special",        -- the current branch's label (a detached HEAD's marker)
+        head = "Special",        -- HEAD's label: (HEAD → branch), or a detached HEAD
         message = nil,
         tags = "Comment",
         worktree = "Comment",    -- a linked worktree's HEAD label, {wt:<dir>}

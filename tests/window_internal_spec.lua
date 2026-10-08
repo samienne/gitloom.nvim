@@ -127,6 +127,31 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         local ctx = new_ctx(repo, { seed_pin_names = { feature = true } })
         assert.is_true(internal.effective_pinned(ctx).feature)
     end)
+
+    -- A detached HEAD (§10.6): no branch to pin, so the `HEAD` ref itself is the
+    -- default anchor — first, like the attached case.
+    local function detached_repo()
+        local repo = repo_with_branches()
+        repo.head = nil
+        git.add_ref(repo, "HEAD", "head", "h_detached")
+        return repo
+    end
+
+    it("pins the HEAD ref itself first when HEAD is detached", function()
+        assert.same({ "HEAD", "master", "main", "dev" }, ids(internal.effective_pins(new_ctx(detached_repo()))))
+    end)
+
+    it("an explicit unpin of HEAD suppresses the detached default", function()
+        local ctx = new_ctx(detached_repo(), { view_state = vs({}, { HEAD = true }) })
+        assert.is_nil(internal.effective_pinned(ctx).HEAD)
+    end)
+
+    it("drops a HEAD entry pinned while detached once HEAD is on a branch again", function()
+        local repo = repo_with_branches()
+        git.add_ref(repo, "HEAD", "head", "h_main").branch = "main"
+        local ctx = new_ctx(repo, { view_state = vs({ { id = "HEAD", reserved = false } }) })
+        assert.same({ "main", "master", "dev" }, ids(internal.effective_pins(ctx)))
+    end)
 end)
 
 describe("window._internal.reconcile_refs (§3.4)", function()
@@ -175,6 +200,7 @@ describe("window._internal.reconcile_refs (§3.4)", function()
         assert.is_not_nil(repo.refs.HEAD)
         assert.equals("h5", repo.refs.HEAD.commit.hash) -- follows main to h5
         assert.equals("main", repo.head)
+        assert.equals("main", repo.refs.HEAD.branch) -- names its branch (§6: HEAD → main)
     end)
 
     it("binds HEAD to the checked-out commit when detached (§3.2)", function()
@@ -184,6 +210,7 @@ describe("window._internal.reconcile_refs (§3.4)", function()
         }, nil, "h9")
         assert.is_nil(repo.head)
         assert.equals("h9", repo.refs.HEAD.commit.hash)
+        assert.is_nil(repo.refs.HEAD.branch) -- detached: an owner of its own (§10.6)
     end)
 
     it("refreshes upstream divergence even when the tip did not move (§6.3)", function()

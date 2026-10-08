@@ -87,6 +87,29 @@ describe("windowed right-ref overflow (integration, §6)", function()
         assert.is_not_nil(line:find("+3", 1, true))           -- the others as a left marker
     end)
 
+    -- §6: HEAD's label is FIRST, so with no selection the +N overflow never hides
+    -- it — even when HEAD's branch was the ref listed last.
+    it("HEAD's label stays visible when its branch would have overflowed", function()
+        local item, commit = commit_item({ "alpha", "beta", "gamma", "delta" })
+        commit.refs[#commit.refs + 1] = { kind = "head", name = "HEAD", branch = "delta" }
+        local line = render(item, { commit = nil, index = nil })
+        assert.is_not_nil(line:find("(HEAD → delta)", 1, true))
+        assert.is_not_nil(line:find("%+%d"))              -- something else overflowed
+        assert.is_nil(line:find("(gamma)", 1, true))      -- the last non-HEAD label
+        -- h/l index 1 is that label, and the cursor target finds it.
+        local sel = render(item, { commit = commit, index = 1 })
+        assert.is_not_nil(gi.ref_byte_col(sel, gi.decoration_texts(commit)[1]))
+    end)
+
+    it("a detached HEAD shows a bare HEAD first, not hidden by the overflow", function()
+        local item, commit = commit_item({ "alpha", "beta", "gamma", "delta" })
+        commit.refs[#commit.refs + 1] = { kind = "head", name = "HEAD" }
+        local line = render(item, { commit = nil, index = nil })
+        local at = line:find("HEAD", 1, true)
+        assert.is_not_nil(at)
+        assert.is_true(at < line:find("(alpha)", 1, true))
+    end)
+
     -- A packed marker-group row (§10.4): the labels are left-aligned after the
     -- graph (line_right_align = "left") but get the same windowed overflow.
     local function markers_item(names)

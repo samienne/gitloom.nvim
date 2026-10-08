@@ -1771,7 +1771,8 @@ whether it landed), then centers on it with `center_view` (a window-local
 The cone is then recomputed for the new pivot/viewport. The target is the
 **remembered position** for the repo if there is one, else **HEAD**
 (`repo.refs["HEAD"]`, gated on `repo.head` so only a branch checkout focuses; a
-detached HEAD still carries a marker (§3.2) but falls back to the top).
+detached HEAD still carries a marker (§3.2) — and is an anchor row (§10.6) — but
+falls back to the top).
 The remembered position is a module-level `saved_positions` table keyed by
 the repository root (`repo.root`, §2.1); the `CursorMoved` handler records the hash
 under the cursor (`cursor_hash`) on every row change, so it is always current
@@ -1793,7 +1794,25 @@ select.selected_ref(commit, index))` (an argv that never forces; none for a §4.
 virtual commit; a collapsed head resolves to its tip) and run by
 `git.run_checkout(argv, repo.root)` — `git_code` with an explicit `cwd`, so a
 submodule graph checks out in the submodule. A non-zero exit is reported via
-`format_git_error`; success runs the §3.4 resync (`ctx:resync(false)`).
+`format_git_error`; success runs the §3.4 resync in its **follow-HEAD** form
+(`ctx:resync(false, {})`, also used by checkout & examine and Return with a
+`note`): the cursor lands on HEAD's row instead of the remembered one, and the
+notice is `git.head_summary` — `HEAD → <branch> (<short>)` / `HEAD detached at
+<short>`. Every resync also drops the signature cache (`sig_cache.sig = nil`):
+its key is the order and owner *counts*, which a moved ref tip — a detached HEAD
+moving, a force-pushed ref — leaves unchanged.
+
+**HEAD is always an anchor and always labelled first** (specification.md §6,
+§10.6). The `head` Ref carries `branch` (the branch HEAD is on; set by
+`fetch_head` and `reconcile_refs`, nil when detached). `owners_from_refs` skips an
+attached HEAD (its branch is the owner) but makes a **detached** one an owner with
+id `HEAD`, which `effective_pins` pins by default — `HEAD` rather than a
+hash-named id because it is re-bound, not renamed, by every resync, so a pin,
+unpin or mode override on it follows the checkout. `git.group_refs` moves the
+group `branch` names to the front and flags it `current`; since every label
+consumer (`decoration_texts`, `display_item`, `pane_labels`, `selected_ref`,
+`selected_owner_ids`, `ref_decoration_index`) walks that one order, the leading
+`(HEAD → name)` label, the `h`/`l` index and the checkout target cannot disagree.
 `open_commit_view(opts, commit)` is the runtime glue: it opens a
 `snacks.win` float (same geometry as the graph window), chains
 `fetch_commit_detail(commit.hash)` then `fetch_commit_diff(commit.hash)`, and on

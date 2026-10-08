@@ -135,11 +135,16 @@ Tests use plenary.busted.
 Coverage:
 
 - `tests/refs_spec.lua` — `classify_ref`, `group_refs` (compact ref display,
-  incl. carrying a tracked local branch's upstream onto its group; §6.3),
+  incl. carrying a tracked local branch's upstream onto its group; §6.3, and
+  moving the branch HEAD is on — the head ref's `branch`, else the fallback — to
+  the FRONT flagged `current`; none when detached), `head_summary` (the
+  post-checkout notice), `decoration_texts` / `pane_labels` drawing it first as
+  `(HEAD → name …)` (§6),
   `track_segments` / `track_label` (the upstream divergence indicator's coloured
   segments + byte-identical plain label: ahead/behind/diverged/gone/in-sync),
   `decoration_texts` + `ref_picker_items` upstream threading (§6.3),
-  `owners_from_refs` (view-builder owners per ref, HEAD skipped; §10), the
+  `owners_from_refs` (view-builder owners per ref; an attached HEAD skipped, a
+  detached HEAD an owner with id `HEAD`; §10/§10.6), the
   branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
   (§10/§10.4), and the **linked-worktree refs** (§3.2/§4.1): `parse_worktrees`
   (the `git worktree list --porcelain` stanza parser — main-vs-linked, bare,
@@ -159,7 +164,9 @@ Coverage:
   `ref_decoration_index` (picked ref → its decoration index for pre-selection:
   local/remote → branch group by short name, tag → after the branches, HEAD/absent
   → nil)
-- `tests/view_spec.lua` — the view builder `view.project` (spec §10): monotone
+- `tests/view_spec.lua` — the view builder `view.project` (spec §10) — incl.
+  **HEAD is always an anchor** (§10.6/§10.7: a detached HEAD's commit stays a
+  normal row, never folded into a `◍`; an attached HEAD is no owner of its own); monotone
   signatures, the all-normal identity, hidden removal (shared ancestors kept),
   collapsed contraction to one head with junctions kept, **branch-topology
   preservation** (a kept junction — a fork, or a merge that still has a visible
@@ -216,7 +223,9 @@ Coverage:
   left/right `+N` markers; greedy right-then-left growth; the selected item always
   shown even when it alone overflows; sel clamping; empty), and `refresh_columns`
   width aggregation from `below` and from every stacked `above`/`below` row (§6.1)
-- `tests/ref_window_spec.lua` — the windowed right-ref overflow **end to end** (§6):
+- `tests/ref_window_spec.lua` — the windowed right-ref overflow **end to end** (§6),
+  incl. HEAD's label staying visible ahead of the `+N` (attached `(HEAD → x)` and a
+  detached bare `HEAD`):
   gitloom's `display_item` (setting `line_right` + `line_right_sel`) feeding the
   listview's `build_line` windowing, rendered into a stubbed window — default shows
   whole labels + a trailing `+N` (overflow hidden), selecting the overflowed ref
@@ -368,7 +377,8 @@ Coverage:
   (the reported `Failed to parse rev '<hash>^!'`) AND a working-tree range (which
   without `-C` "succeeds" silently in the cwd repository). Views are closed only
   in the final cleanup: closing one between tests races diffview's async load
-- `tests/checkout_spec.lua` — the palette's row entries + checkout
+- `tests/checkout_spec.lua` — the palette's row entries + checkout (incl. the
+  leading `(HEAD → x)` label resolving to branch `x`)
   (§10.4/§10.4.1): `palette.row_entries` order per row kind (plain → diff,
   checkout, checkout & examine — **no examine**, `<CR>` is examine now; a selected
   branch / collapsed head → collapse|expand, hide, diff, then checkout and
@@ -619,8 +629,10 @@ Coverage:
   dialog in a real float over a stub ctx (open/`<Space>`/`<C-j>`/`D`/`q`) — the
   keymaps, re-render and focus handoff, which the pure tests cannot reach.
   `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`
-  (default order, nothing reserved by default, pin-the-pair adjacency, and the
-  auto-upstream dropping with its local).
+  (default order, nothing reserved by default, pin-the-pair adjacency, the
+  auto-upstream dropping with its local, and a detached HEAD pinning the `HEAD`
+  ref first / unpinnable / dropped once attached), and `reconcile_refs` stamping
+  the head ref's `branch` (nil when detached).
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -1116,7 +1128,7 @@ Details not covered by the spec or architecture:
   set). It is stored as **one ordered list**, `view_state.pins` (`PinEntry` =
   `{ id, reserved }`, priority order) plus `view_state.unpinned` (ids explicitly
   removed, which suppress the HEAD / `master` / `main` / `dev` / seeded-mark
-  defaults). `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`)
+  defaults; HEAD is its branch when attached, the `HEAD` ref itself when detached). `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`)
   and applies the pin-the-pair upstream rule — an auto entry carries
   `auto = <local id>` and is re-derived each resolve, so unpinning the local drops
   it; `ctx:effective_pinned()` is that list reduced to ids and is still what
@@ -1186,11 +1198,22 @@ Details not covered by the spec or architecture:
   <local>` / `git switch <short>` for a remote (git's DWIM) / `git checkout
   --detach <hash>`; never forced, none for a §4.2 virtual commit, and a collapsed
   head resolves to its `tip` (its own hash is a synthetic `collapsed:` id —
-  `<CR>` and the diff entry resolve it the same way). It runs through  menu's examine/diff now resolve it the same way). It runs through
+  `<CR>` and the diff entry resolve it the same way). It runs through
   `git.run_checkout(argv, repo.root)` (`git_code` with an explicit cwd, so a
   submodule graph checks out in the submodule); a non-zero exit is one
-  `format_git_error` line at ERROR, success runs `ctx:resync(false)` (the `R`
-  path).
+  `format_git_error` line at ERROR, success runs `ctx:resync(false, {})` — the `R`
+  path in its **follow-HEAD** form (checkout & examine and Return pass a `note`):
+  the cursor lands on HEAD's row and the notice is `git.head_summary`
+  (`HEAD → x (abc1234)` / `HEAD detached at abc1234`). Every resync also clears
+  `sig_cache.sig`, whose count-only key cannot see a ref tip that moved.
+- **HEAD is always an anchor, labelled first** (spec §6/§10.6): the `head` Ref
+  carries `branch` (nil when detached). `owners_from_refs` makes a DETACHED HEAD
+  an owner with id `HEAD` (re-bound, not renamed, by resync — so pins and mode
+  overrides on it follow the checkout); `effective_pins` defaults it in and drops
+  a `HEAD` entry while attached. `git.group_refs` moves the current branch's group
+  to the front (`current = true`), so `decoration_texts` / `display_item` /
+  `pane_labels` draw `(HEAD → x …)` first and `selected_ref` / `selected_owner_ids`
+  / `ref_byte_col` agree on index 1 without any change of their own.
 - **Command palette = the action menu** (spec §17, `<C-Space>` + `<C-@>`, which
   many terminals send for it — `<C-@>` and `<Nul>` are one key code):
   `palette_entries(info)` is the pure builder over ONE snapshot (`row`,

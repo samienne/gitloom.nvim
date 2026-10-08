@@ -299,16 +299,19 @@ end
 M.pack_markers = pack_markers
 
 --- Owners for the view builder (specification.md §10): one per ref, carrying
---- its current mode. The `HEAD` marker is skipped — it is a symref onto a branch
---- already present as its own owner, not an independent branch. The owner id is
---- the ref's table key (its name), so a mode keyed by that name survives reflow.
+--- its current mode. An **attached** `HEAD` marker (one naming its `branch`) is
+--- skipped — it is a symref onto a branch already present as its own owner. A
+--- **detached** HEAD is an owner of its own, id `HEAD` (§10.1/§10.6): it is what
+--- keeps the checked-out commit a pinnable anchor when no branch names it, and
+--- the id survives a resync because HEAD is re-bound, not renamed. The owner id
+--- is the ref's table key (its name), so a mode keyed by that name survives reflow.
 ---@param refs table<string, Ref>
 ---@param modes table<string, string>  -- ref name → "normal"|"collapsed"|"hidden"
 ---@return table[]  -- { id, tip = Commit, mode }
 local function owners_from_refs(refs, modes)
     local out = {}
     for name, ref in pairs(refs) do
-        if ref.kind ~= "head" and ref.commit then
+        if ref.commit and not (ref.kind == "head" and ref.branch) then
             out[#out + 1] = { id = name, tip = ref.commit, mode = modes[name] or "normal" }
         end
     end

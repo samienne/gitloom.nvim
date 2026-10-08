@@ -1527,7 +1527,9 @@ end
 -- The effective **pin list** (§10.6): an ORDERED list of `{ id, reserved }`. The
 -- user's explicitly ordered entries (`view_state.pins`) come first, then the
 -- default anchors — HEAD, master/main/dev, the seeded marks — that are not
--- already on it; `view_state.unpinned` suppresses a default. `pin_resolve` is the
+-- already on it. HEAD is an anchor attached OR detached: on a branch it is that
+-- branch's owner; detached it is the `HEAD` ref itself (an owner only then —
+-- owners_from_refs), so a `HEAD` entry is dropped while HEAD is on a branch; `view_state.unpinned` suppresses a default. `pin_resolve` is the
 -- pure core; the pin-the-pair upstream rule (§6.3) is applied here because it
 -- needs the ref registry, and the auto-pinned upstream is inserted **right after**
 -- its local branch so the pair reads together in the dialog (§10.6.1).
@@ -1540,7 +1542,7 @@ GRAPH_HELPERS.effective_pins = function(ctx)
     local function def(name)
         if repo.refs[name] then defaults[#defaults + 1] = name end
     end
-    if repo.head then def(repo.head) end
+    if repo.head then def(repo.head) else def("HEAD") end
     for _, name in ipairs({ "master", "main", "dev" }) do def(name) end
     -- Seeded pointer marks (§11.7.6) come from a set; sort so the list is stable.
     local seeds = {}
@@ -1549,6 +1551,15 @@ GRAPH_HELPERS.effective_pins = function(ctx)
     for _, name in ipairs(seeds) do def(name) end
 
     local pins = selectm.pin_resolve(view_state.pins, view_state.unpinned, defaults, repo.refs)
+    if repo.head then
+        -- Attached: the `HEAD` ref is not an owner (its branch is), so an entry the
+        -- user pinned while detached would be an inert row in the dialog.
+        local kept = {}
+        for _, e in ipairs(pins) do
+            if e.id ~= "HEAD" then kept[#kept + 1] = e end
+        end
+        pins = kept
+    end
     -- Pin-the-pair (§6.3): an entry auto-pinned as a local branch's upstream carries
     -- `auto = <local id>`. It is re-derived on every resolve — dropped when its
     -- source leaves the list (so unpinning the local drops it too) and re-inserted
@@ -1724,7 +1735,7 @@ local function reconcile_refs(ctx, entries, head, detached)
     unlink_ref("HEAD")
     repo.head = head
     if head and repo.refs[head] and repo.refs[head].commit then
-        add_ref(repo, "HEAD", "head", repo.refs[head].commit.hash)
+        add_ref(repo, "HEAD", "head", repo.refs[head].commit.hash).branch = head
     elseif not head and detached then
         add_ref(repo, "HEAD", "head", detached)
     end
@@ -2422,7 +2433,7 @@ GRAPH_HELPERS.palette = function(ctx)
                         vim.log.levels.ERROR)
                     return
                 end
-                ctx:resync(false)
+                ctx:resync(false, {}) -- land on HEAD and name it (§10.4.1)
             end)
         end)
     end
@@ -2563,10 +2574,11 @@ GRAPH_HELPERS.examine = function(ctx, newer, older)
                                 if not r.stash then st.stash_message = nil end
                             end
                             nav.examine[root] = st
-                            ctx:resync(false)
+                            -- Land on HEAD (the examined commit) and name it; the
+                            -- notice says how to get back (§10.4.2).
+                            ctx:resync(false, { note = ("examining — %s from the palette (<C-Space>)")
+                                :format(git.return_plan(st).label) })
                             open(plan.range)
-                            vim.notify(("gitloom: examining %s — %s from the palette (<C-Space>)")
-                                :format(short, git.return_plan(st).label), vim.log.levels.INFO)
                             return
                         end
                         if r.stage == "stash" then
@@ -2627,14 +2639,14 @@ GRAPH_HELPERS.examine_return = function(ctx)
             end
             nav.examine[root] = nil
             if r.ok then
-                vim.notify("gitloom: back on " .. (st.detached and st.orig:sub(1, 7) or st.orig)
-                    .. (rp.apply and ", changes restored" or ""), vim.log.levels.INFO)
+                -- The resync names where HEAD landed (§10.4.2).
+                ctx:resync(false, { note = rp.apply and "changes restored" or nil })
             else
                 vim.notify(ctx:git_failure("git stash apply", r.res)
                     .. (" — the stash was kept: %s"):format(rp.stash_message or rp.stash),
                     vim.log.levels.ERROR)
+                ctx:resync(true, {}) -- HEAD did move: land on it, keep the ERROR visible
             end
-            ctx:resync(false)
         end)
     end)
 end
@@ -3701,7 +3713,11 @@ GRAPH_HELPERS.refresh_worktree = refresh_worktree
 -- the scroll. Worktree virtuals are dropped up front and re-applied at the end.
 -- `silent` suppresses the completion notice. Re-reads the live window after every
 -- async boundary (the host can hide/re-show with a new id, §14).
-local function resync(ctx, silent)
+-- `follow` (checkout / examine / Return, §10.4.1/§10.4.2) lands the cursor on
+-- HEAD's row instead of the remembered one and names HEAD in the notice
+-- (`git.head_summary`), with `follow.note` appended when given.
+---@param follow? { note?: string }
+local function resync(ctx, silent, follow)
     if not ctx:win() then return end
     local repo = ctx.repo
     ctx:load_remotes() -- the palette's per-remote entries (§17.1)
@@ -3745,21 +3761,35 @@ local function resync(ctx, silent)
     end).next(function(state)
         if not ctx:win() then return end
         if state then ctx:apply_worktree(state) end
+        -- Refs moved, so the owner TIPS may have moved with the owner and commit
+        -- counts unchanged (a detached HEAD moving, a force-pushed ref) — which the
+        -- signature cache's count key cannot see. Recompute (§10.5).
+        ctx.sig_cache.sig = nil
         ctx:reflow()
         ctx:update_footer()
         -- Restore the scroll first, then re-home the cursor on the focused commit
-        -- (goto_hash only scrolls if its new row is off-screen).
+        -- (goto_hash only scrolls if its new row is off-screen) — or, following a
+        -- checkout, on HEAD's row (always visible: HEAD is an anchor, §10.6).
         if view then pcall(vim.fn.winrestview, view) end
-        if not (focus and ctx:goto_hash(focus)) then
+        local headref = repo.refs["HEAD"]
+        local head_hash = headref and headref.commit and headref.commit.hash
+        if not (follow and head_hash and ctx:goto_hash(head_hash))
+            and not (focus and ctx:goto_hash(focus)) then
             -- The focused commit is gone (rewound away) — fall back to HEAD.
-            local headref = repo.refs["HEAD"]
-            if headref and headref.commit then ctx:goto_hash(headref.commit.hash) end
+            if head_hash then ctx:goto_hash(head_hash) end
         end
         ctx:place_cursor()
         ctx:update_cone()
         if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
         ctx:update_panes()
-        if not silent then vim.notify("gitloom: resynced") end
+        if silent then return end
+        local said = follow and git.head_summary(repo.head, head_hash)
+        if said then
+            local note = follow and follow.note
+            vim.notify("gitloom: " .. said .. (note and (" — " .. note) or ""), vim.log.levels.INFO)
+        else
+            vim.notify("gitloom: resynced")
+        end
     end)
 end
 GRAPH_HELPERS.resync = resync
@@ -4060,7 +4090,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field update_panes fun(self:GraphCtx)
     ---@field maybe_update_panes fun(self:GraphCtx)
     ---@field update_footer fun(self:GraphCtx)
-    ---@field resync fun(self:GraphCtx, silent:boolean?)
+    ---@field resync fun(self:GraphCtx, silent:boolean?, follow:{ note?: string }?)
     ---@field palette fun(self:GraphCtx)  the command palette (§17)
     ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
@@ -6253,9 +6283,14 @@ local function branch_under_cursor(ctx, line)
 end
 GRAPH_HELPERS.branch_under_cursor = branch_under_cursor
 
--- The window title identifying the repository (§2.1): its name + current branch.
+-- The window title identifying the repository (§2.1): its name + current branch,
+-- or `detached @<short>` on a detached HEAD, so it always says what is checked out.
 local function graph_title(ctx)
     local b = ctx.repo.head
+    if not b then
+        local h = ctx.repo.refs["HEAD"]
+        b = h and h.commit and ("detached @" .. h.commit.hash:sub(1, 7))
+    end
     return b and (" %s · %s "):format(ctx.repo_name, b) or (" %s "):format(ctx.repo_name)
 end
 GRAPH_HELPERS.graph_title = graph_title

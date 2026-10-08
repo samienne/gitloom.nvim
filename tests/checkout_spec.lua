@@ -63,6 +63,19 @@ describe("selected_ref (§10.4.1)", function()
         assert.is_nil(selected_ref(commit(refs), nil))
         assert.is_nil(selected_ref(nil, 1))
     end)
+
+    -- §6: the attached HEAD label `(HEAD → feat)` is FIRST and is the branch.
+    it("resolves the leading HEAD label to the current branch (a no-op switch)", function()
+        local c = commit({
+            { kind = "local", name = "alpha" },
+            { kind = "local", name = "feat" },
+            { kind = "head", name = "HEAD", branch = "feat" },
+        })
+        assert.same({ kind = "local", name = "feat" }, selected_ref(c, 1))
+        assert.same({ kind = "local", name = "alpha" }, selected_ref(c, 2))
+        assert.same({ "git", "switch", "feat" }, spec_of(c, selected_ref(c, 1)).argv)
+        assert.same({ "feat" }, internal.selected_owner_ids(c, 1))
+    end)
 end)
 
 describe("checkout_spec (§10.4.1)", function()

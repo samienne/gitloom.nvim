@@ -93,14 +93,21 @@ end
 --- that tracks an upstream carries its `track` (the §6.3 divergence) on the group.
 ---
 --- The three lists are the decoration order (§6): branches, tags, worktrees.
+--- **HEAD's label goes first** (§6): when the HEAD marker names the branch it is
+--- on (`Ref.branch`, or the `head_branch` fallback for a ref list that does not
+--- carry it), that branch's group is flagged `current` and moved to the front of
+--- `branches` — so every consumer that walks this order (the rendered labels, the
+--- `h`/`l` selection, the owner / checkout lookups) agrees on it.
 ---@class RefGroup
 ---@field name string
 ---@field has_local boolean
 ---@field remotes string[]
 ---@field track? Upstream   the local branch's upstream divergence, if it tracks one
+---@field current? boolean  the branch HEAD is on — drawn `(HEAD → name …)`, first
 ---@param refs Ref[]?
----@return { head: boolean, branches: RefGroup[], tags: string[], worktrees: string[] }
-function M.group_refs(refs)
+---@param head_branch? string  the current branch, when the head ref does not name it
+---@return { head: boolean, current: RefGroup?, branches: RefGroup[], tags: string[], worktrees: string[] }
+function M.group_refs(refs, head_branch)
     local head = false
     local tags = {}
     local worktrees = {}
@@ -118,6 +125,7 @@ function M.group_refs(refs)
     for _, ref in ipairs(refs or {}) do
         if ref.kind == "head" then
             head = true
+            head_branch = ref.branch or head_branch
         elseif ref.kind == "tag" then
             tags[#tags + 1] = ref.name
         elseif ref.kind == "worktree" then
@@ -138,10 +146,31 @@ function M.group_refs(refs)
     end
 
     local branches = {}
-    for _, short in ipairs(order) do
-        branches[#branches + 1] = by_name[short]
+    local current = head and head_branch and by_name[head_branch] or nil
+    if current then
+        current.current = true
+        branches[1] = current
     end
-    return { head = head, branches = branches, tags = tags, worktrees = worktrees }
+    for _, short in ipairs(order) do
+        if by_name[short] ~= current then branches[#branches + 1] = by_name[short] end
+    end
+    return { head = head, current = current, branches = branches, tags = tags, worktrees = worktrees }
+end
+
+--- The text HEAD's label opens with on a branch (§6): `(HEAD → name …)`.
+M.HEAD_ARROW = "HEAD → "
+
+--- What is checked out, in words (§10.4.1): `HEAD → <branch> (<short>)` on a
+--- branch, `HEAD detached at <short>` otherwise (`<short>` = 7 hex chars); nil
+--- when there is no HEAD commit. Pure — the post-checkout notice.
+---@param branch string?
+---@param hash string?
+---@return string?
+function M.head_summary(branch, hash)
+    if not hash then return nil end
+    local short = hash:sub(1, 7)
+    if branch then return ("HEAD → %s (%s)"):format(branch, short) end
+    return "HEAD detached at " .. short
 end
 
 --- Push a ref name to the front of a session most-recently-used list, dropping

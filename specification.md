@@ -97,11 +97,12 @@ persistent view.
   ref whose commit is currently hidden (§10.1) is a no-op with a notice. Landing
   also **pre-selects that ref's label** on the row (as if `h`/`l` had moved onto
   it; §6), so `<CR>` / the palette's row actions act on that branch with no further
-  navigation. Picking HEAD — which has no own label — just centers, cursor at the
+  navigation. Picking HEAD — whose label is its branch's, or the unselectable detached `HEAD` — just centers, cursor at the
   message.
   `?` opens a float listing all keybindings. The window **title** identifies the
   repository the graph is for (§2.1): its name, plus the current branch once HEAD
-  is known (a caller-supplied `win.title` is left untouched). The graph's buffer
+  is known — or `detached @<short>` (HEAD's 7-character hash) on a detached HEAD,
+  so the title always says what is checked out (a caller-supplied `win.title` is left untouched). The graph's buffer
   is additionally **named** after the repository root (`<root path> (gitloom)`), so
   an external GUI window title — e.g. Neovide's OS titlebar, which Neovim derives
   from the active buffer — identifies the repo by path instead of showing an
@@ -390,7 +391,7 @@ Each ref is classified by its refname and resolved to its target commit:
 | `refs/heads/<name>`              | `local`  | `<name>`              |
 | `refs/remotes/<remote>/<name>`   | `remote` | `<remote>/<name>`     |
 | `refs/tags/<name>`               | `tag`    | `<name>` (annotated tags resolved to their commit via the dereferenced hash) |
-| HEAD (symbolic)                  | `head`   | marks the current branch's commit (drawn by colouring that branch's label in the HEAD colour, §6); a detached HEAD marks the checked-out commit directly |
+| HEAD (symbolic)                  | `head`   | marks the current branch's commit (drawn as that branch's label, `(HEAD → <name>)` in the HEAD colour, §6) and records which branch it is on; a detached HEAD marks the checked-out commit directly (a bare `HEAD` label) and is an owner of its own (§10.6) |
 | a linked worktree's HEAD (§3.2)  | `worktree` | `wt:<dir>` — `<dir>` is the worktree directory's **basename** |
 
 `refs/remotes/<remote>/HEAD` (the remote's default-branch symref) is skipped.
@@ -1337,16 +1338,21 @@ with `…` when it does not fit.
 **Ref decorations** — branch groups, then tags as `[name]`, then worktree
 labels as `{wt:<dir>}` (§4.1). The bracket carries the kind, as it already does
 for branches and tags; the `wt:` prefix keeps the label self-describing without
-colour. The **current
-branch** carries no separate marker: it is drawn in the **HEAD colour**
-(`palette.head`) instead of the normal branch colour, so "you are here" reads
-from the label itself. A literal `HEAD` marker appears **only on a detached
-HEAD** (no current branch, §3.2) — there is no branch name to colour, so the
-checked-out commit shows the bare `HEAD`. Branch refs (local + remote) that
-share a **short name** collapse into one group: the name is shown once, followed
-by the remotes that also point at this commit, as `(name ↑remote1,remote2)`. The
-name is highlighted when a local branch exists (the HEAD colour when it is the
-current branch) and dimmed when the group is remote-only. A local branch with no matching remotes is just `(name)`. This
+colour. **HEAD always reads as `HEAD`, and its label comes first.** On a
+branch, the **current branch's** group is drawn as one label
+`(HEAD → name …)` in the **HEAD colour** (`palette.head`) instead of the normal
+branch colour, and it is moved to the **front** of the row's labels; on a
+**detached HEAD** (no current branch, §3.2) the checked-out commit carries a bare
+`HEAD` label, also first. Being first, HEAD is the label the `+N` overflow
+(below) never hides while no ref is selected — "you are here" is always on
+screen. The attached label is still the branch: selecting it selects the current
+branch (its owners, §10.4; its checkout, §10.4.1). The detached `HEAD` label is
+not selectable (there is no ref behind it to act on). Branch refs (local +
+remote) that share a **short name** collapse into one group: the name is shown
+once, followed by the remotes that also point at this commit, as
+`(name ↑remote1,remote2)`. The name is highlighted when a local branch exists
+(the HEAD colour when it is the current branch) and dimmed when the group is
+remote-only. A local branch with no matching remotes is just `(name)`. This
 keeps the common case (a branch plus its remote-tracking copies all at one
 commit) from repeating the name per remote. A local branch that **tracks an
 upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
@@ -1429,7 +1435,9 @@ footer when scrolled to the bottom (the roots are then already on-screen). This
 falls out of the sizing rule below (`G = 0` at the extreme).
 
 **What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
-labels only — no date, author, or message. Off-screen topology is folded onto
+labels only — no date, author, or message. The labels read as in the main view
+(§6): HEAD's label — `(HEAD → <branch>)` or the detached `HEAD` — first and in
+the HEAD colour. Off-screen topology is folded onto
 the **pinned anchors** (§10.6): an anchor's line is drawn; everything else is
 contracted.
 
@@ -1797,14 +1805,16 @@ principle (§1.1).
 
 Each **owner** has a mode. An owner is one of:
 
-- a **ref** (its tip commit);
+- a **ref** (its tip commit) — every ref except an *attached* HEAD, which only
+  points at its branch's ref; a **detached** HEAD is an owner of its own, id
+  `HEAD` (§10.6);
 - an **anonymous merge-parent** — each *non-first* parent of a merge, identified
   by `(merge-hash, parent-index)`, so merged-in work that has no ref of its own
   can still be collapsed/expanded (and so the first-parent default, §10.7, has
   something to attach to);
 Under the first-parent focus (§10.7) **every** owner is *first-parent-only*
 (§10.2) — it covers only its tip's first-parent line. The **trunk owner** (the
-current branch, HEAD) is just the one that defaults to normal, so HEAD's mainline
+current branch, or the `HEAD` owner when detached) is just the one that defaults to normal, so HEAD's mainline
 stays in full.
 
 Modes:
@@ -2014,8 +2024,10 @@ row selects, and the entry's label says which:
 
 A branch group that has a local branch checks out the local one. The remote form
 relies on git's DWIM: it creates a local tracking branch `foo` when none exists,
-and switches to the existing local `foo` when one does. HEAD has no selectable
-label (§6), so a row whose only ref is HEAD is a bare commit. A §4.2 working-tree
+and switches to the existing local `foo` when one does. The attached HEAD label
+`(HEAD → foo)` (§6) is the current branch's group, so it checks out `foo` (a
+no-op switch); a detached HEAD's bare `HEAD` label is not selectable, so a row
+whose only ref is a detached HEAD is a bare commit. A §4.2 working-tree
 virtual commit has no checkout entry, and neither does a packed-marker line with
 no marker selected.
 
@@ -2025,7 +2037,12 @@ not Neovim's cwd. If git exits non-zero (a dirty file the checkout would
 overwrite, a branch checked out in another worktree, an ambiguous remote name…),
 gitloom shows git's error as one line at ERROR level and changes nothing. On
 success it runs the in-place resync (§3.4, the `R` key), so HEAD's marker and the
-working-tree rows (§3.3) move to their new place.
+working-tree rows (§3.3) move to their new place — and then, unlike a plain `R`
+(which keeps the cursor on the commit it was on), it **moves the cursor to HEAD's
+row**: the commit just checked out, which is always a visible row because HEAD is
+always an anchor (§10.6). The completion notice names the result instead of a
+bare "resynced": `HEAD → <branch> (<short>)` on a branch, `HEAD detached at
+<short>` otherwise (`<short>` = the 7-character hash).
 
 #### 10.4.2 Checkout & examine
 
@@ -2090,7 +2107,12 @@ in `git stash list`, never by position). The rules on failure:
 
 The state is cleared only after a successful switch plus a successful apply (or
 none needed). Every outcome that changed HEAD or the working tree is followed by
-the in-place resync (§3.4). Like checkout, nothing here forces, everything runs
+the in-place resync (§3.4). After a successful examine and after a Return that
+moved HEAD, the resync follows HEAD exactly as checkout does (§10.4.1): the
+cursor lands on HEAD's row and the notice names it (`HEAD detached at <short>` /
+`HEAD → <branch> (<short>)`), with what happened appended — `examining — Return
+from the palette (<C-Space>)` after an examine, `changes restored` after a Return
+that re-applied a stash. A failure's ERROR message is not overwritten. Like checkout, nothing here forces, everything runs
 asynchronously in the graph's repository root, and one examine / Return runs at a
 time per graph session (shared with the palette's fetch / pull, §17.3).
 
@@ -2140,9 +2162,22 @@ collapsed or hidden.)
 The pinned set **generalises the trunk** of the first-parent focus (§10.7).
 Today HEAD is the single distinguished owner the rest of the graph folds
 toward; pinning lets the user name *several* anchors — e.g. `master`, `dev`, a
-release branch, a few personal branches. **HEAD (the current branch) is pinned
-by default, along with the common trunks `master` / `main` / `dev` when they
-exist**; the user may pin or unpin any ref.
+release branch, a few personal branches. **HEAD is pinned by default, along
+with the common trunks `master` / `main` / `dev` when they exist**; the user may
+pin or unpin any ref. HEAD is a default anchor **whether attached or detached**,
+so the checked-out commit is always a normal, visible row — never folded into a
+`◍` head:
+
+- **on a branch** the anchor is the current branch's owner (its ref name), as
+  for any branch;
+- **detached**, the `HEAD` ref itself is the owner (owner id `HEAD`, §10.2) —
+  there is no branch to name, and `HEAD` is the one id that keeps meaning "what
+  is checked out": it is re-bound to the new commit by every resync (§3.4), so a
+  pin, an unpin or a mode override on it follows HEAD from detached commit to
+  detached commit instead of going stale with a hash-named id. Unpinning it
+  (`P`, the dialog) suppresses the default like any other. While HEAD is on a
+  branch the `HEAD` ref is not an owner (it duplicates the branch's), so an entry
+  for it is not part of the resolved list then.
 
 **The pinned branches are an ordered list, not a set.** Each entry is a ref
 owner id plus one flag, **reserved** (§10.6.2) — so the state is *one* list:
@@ -2303,7 +2338,8 @@ only the user's explicit overrides on top.
 Under focus **every owner is first-parent-only** (§10.2) — each covers only its
 own tip's first-parent line. The defaults are:
 
-- the **pinned owners** (HEAD pinned by default, §10.6) → **normal**; a pinned
+- the **pinned owners** (HEAD — attached or detached — pinned by default,
+  §10.6) → **normal**; a pinned
   owner's first-parent line is the mainline (plus the history shared below
   merge-bases), so those stay visible;
 - **every other owner** (unpinned refs — including the `worktree` refs of §3.2 —
@@ -2329,9 +2365,11 @@ collapsed branch can be expanded and any branch hidden.
 
 This behavior is controlled by the **`collapse_merged`** option (default on) and
 can be toggled live; with it off, every owner defaults **normal** (the plain
-full graph) and no trunk/anonymous owners are introduced. When HEAD is absent
-(detached or a bare checkout) there is no trunk, so the graph also falls back to
-all-normal.
+full graph) and no trunk/anonymous owners are introduced. A **detached** HEAD is
+still the trunk — its owner is the `HEAD` ref (§10.6), so the checked-out
+commit's first-parent line stays in full and the rest folds toward it. Only when
+there is **no anchor at all** (no HEAD — e.g. an empty repository — no default
+trunk branch and nothing pinned) does the graph fall back to all-normal.
 
 ### 10.8 Open / deferred
 

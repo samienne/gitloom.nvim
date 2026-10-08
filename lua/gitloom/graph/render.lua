@@ -140,16 +140,18 @@ end
 -- ── Ref decorations (specification.md §6) ───────────────────────────────────
 
 --- The plain text of each selectable ref decoration on a commit, in selection
---- order (branch groups, tags, then linked-worktree labels §3.2). The single
---- source of truth so the rendered
---- text and the cursor-target search use byte-identical strings.
+--- order (branch groups — the current branch's `(HEAD → name)` first — then tags,
+--- then linked-worktree labels §3.2). The single source of truth so the rendered
+--- text and the cursor-target search use byte-identical strings. A detached
+--- HEAD's bare `HEAD` is not selectable, so it is not listed here.
 ---@param commit { refs: Ref[] }?   only the ref list is read
+---@param head_branch? string  fallback current branch when the head ref does not name it
 ---@return string[]
-function M.decoration_texts(commit)
-    local g = git.group_refs(commit and commit.refs or {})
+function M.decoration_texts(commit, head_branch)
+    local g = git.group_refs(commit and commit.refs or {}, head_branch)
     local out = {}
     for _, b in ipairs(g.branches) do
-        local t = "(" .. b.name
+        local t = "(" .. (b.current and git.HEAD_ARROW or "") .. b.name
         if #b.remotes > 0 then
             t = t .. " ↑" .. table.concat(b.remotes, ",")
         end
@@ -168,17 +170,16 @@ end
 
 --- The labels to draw for a commit in a topology PANE (header/footer), as
 --- `{ text, kind }` segments so each can be coloured by kind ("head"|"branch"|"remote"|
---- "tag"|"worktree") the same way the main view colours them (§6). The **current branch** carries
---- no separate marker: it is emitted as its own branch group but with kind "head", so it
---- renders in the HEAD colour ("you are here"). `head_branch` (= repo.head) identifies it.
---- A literal `HEAD` marker is emitted only on a **detached HEAD** — a head marker present
---- (`g.head`) with no current branch (`head_branch == nil`) — since there is no branch
---- name to colour.
+--- "tag"|"worktree") the same way the main view colours them (§6). HEAD's label comes
+--- first: the **current branch** as `(HEAD → name)` with kind "head" (the HEAD colour),
+--- or, on a **detached HEAD** (a head marker with no current branch), a bare `HEAD`.
+--- The head ref's `branch` identifies the current branch; `head_branch` (= repo.head)
+--- is the fallback for a ref list that does not carry it.
 ---@param commit { refs: Ref[] }?
 ---@param head_branch string?  -- the current branch (coloured as HEAD); nil when detached
 ---@return { text: string, kind: string, hl: string? }[]
 function M.pane_labels(commit, head_branch)
-    local g = git.group_refs(commit and commit.refs or {})
+    local g = git.group_refs(commit and commit.refs or {}, head_branch)
     -- Per-ref colour override (§11.7.6): a tag with `hl` (a pointer mark) keeps
     -- its colour in the panes too, so the new/old labels match the main view.
     local hl_by_name = {}
@@ -187,13 +188,12 @@ function M.pane_labels(commit, head_branch)
     end
     local out = {}
     -- Detached HEAD: no branch to colour, so show the bare HEAD marker.
-    if g.head and not head_branch then out[#out + 1] = { text = "HEAD", kind = "head" } end
+    if g.head and not g.current then out[#out + 1] = { text = "HEAD", kind = "head" } end
     for _, b in ipairs(g.branches) do
-        local t = "(" .. b.name
+        local t = "(" .. (b.current and git.HEAD_ARROW or "") .. b.name
         if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
         -- The current branch takes the HEAD colour; others their own kind.
-        local is_head = g.head and head_branch and b.name == head_branch
-        out[#out + 1] = { text = t .. ")", kind = is_head and "head" or (b.has_local and "branch" or "remote") }
+        out[#out + 1] = { text = t .. ")", kind = b.current and "head" or (b.has_local and "branch" or "remote") }
     end
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag", hl = hl_by_name[tag] }
@@ -713,8 +713,9 @@ end
 ---@param cone table<Commit, boolean>|nil  the pivot's reachability cone (§12), or nil
 ---@param sel_cursor? table  the commit-selection moving end (§13.4), so a packed
 ---  marker row can mark the selected head; nil when not selecting
----@param head_branch? string  the current branch (= repo.head); its label is drawn in
----  the HEAD colour (§6), and the bare `HEAD` marker shows only when this is nil (detached)
+---@param head_branch? string  the current branch (= repo.head) — a fallback for a ref
+---  list whose head ref does not name its `branch`; that branch's label is drawn first as
+---  `(HEAD → name)` in the HEAD colour (§6), a detached HEAD as a bare first `HEAD`
 ---@param match? { query: string, current?: string }  the active filter-search (§16.7):
 ---  highlight the matched substring in a commit's message (`palette.search`), brighter
 ---  (`IncSearch`) on the current match (`current` = its hash); nil when not filtering
@@ -750,18 +751,18 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- Refs (§6) as a list of right-pinned items: branch groups, then tags. Branch
     -- refs sharing a short name collapse to "(name ↑remote1,remote2)" — the name
     -- once (highlighted if a local exists, dimmed if remote-only) plus the remotes
-    -- that also point here (group_refs). The **current branch** carries no separate
-    -- marker: its name is drawn in the HEAD colour (palette.head) instead of the
-    -- branch colour ("you are here", §6); the bare `HEAD` marker shows only on a
-    -- detached HEAD (head marker present, no current branch).
+    -- that also point here (group_refs). HEAD's label comes FIRST (§6) so the `+N`
+    -- overflow never hides it: the **current branch** is drawn `(HEAD → name …)` in
+    -- the HEAD colour (palette.head) instead of the branch colour ("you are here");
+    -- a detached HEAD (head marker present, no current branch) a bare `HEAD`.
     -- A tracked local branch appends its upstream divergence "⇡N⇣M"/"gone" (§6.3),
     -- each token coloured by palette.track.
     -- The `selected`-th decoration (branches then tags) is drawn with
     -- palette.selected (§2). The listview packs these against the right edge
     -- with a width budget and a "+N" overflow marker.
     local get_ref_items = function(commit)
-        local g = git.group_refs(commit.refs)
-        local texts = M.decoration_texts(commit) -- same order; shared with the cursor target
+        local g = git.group_refs(commit.refs, head_branch)
+        local texts = M.decoration_texts(commit, head_branch) -- same order; shared with the cursor target
         local items = {}
         -- Per-ref colour override (§11.7.6): a tag carrying `hl` — the submodule
         -- new/old **pointer marks**, injected as refs so they pin / show in the
@@ -770,18 +771,17 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         for _, r in ipairs(commit.refs or {}) do
             if r.hl and r.name then hl_by_name[r.name] = r.hl end
         end
-        if g.head and not head_branch then
+        if g.head and not g.current then
             items[#items + 1] = rh("HEAD", palette.head)
         end
         local di = 0
         for _, b in ipairs(g.branches) do
             di = di + 1
-            local is_head = g.head and head_branch and b.name == head_branch
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                local name_hl = is_head and palette.head or (b.has_local and palette.branch or palette.remote)
-                local segs = { rh("(" .. b.name, name_hl) }
+                local name_hl = b.current and palette.head or (b.has_local and palette.branch or palette.remote)
+                local segs = { rh("(" .. (b.current and git.HEAD_ARROW or "") .. b.name, name_hl) }
                 if #b.remotes > 0 then
                     segs[#segs + 1] = rh(" ↑" .. table.concat(b.remotes, ","), palette.remote)
                 end
@@ -1005,7 +1005,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 -- prepend a non-selectable HEAD marker), so the listview windows
                 -- the right-pinned refs around it (§6). nil → leftmost-first +N.
                 if selected then
-                    local extra = #ref_items - #M.decoration_texts(item.commit)
+                    local extra = #ref_items - #M.decoration_texts(item.commit, head_branch)
                     element.line_right_sel = selected + extra
                 end
             end

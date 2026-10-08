@@ -1006,3 +1006,45 @@ describe("view chunking hook (§10.5)", function()
         assert.equals(reference, proj_sig(result))
     end)
 end)
+
+describe("view.owners — HEAD is always an anchor (§10.6/§10.7)", function()
+    -- f3 → f2 → f1 on `feature`, m2 → m1 on `master`, both off `base`. The ref
+    -- registry is built the way fetch/resync build it: an attached HEAD names its
+    -- branch (`branch`), a detached one does not.
+    local function build(head_at, branch)
+        local items, by = dag({
+            { "f3", { "f2" } }, { "f2", { "f1" } }, { "m2", { "m1" } },
+            { "f1", { "base" } }, { "m1", { "base" } }, { "base", {} },
+        })
+        local refs = {
+            master = { name = "master", kind = "local", commit = by.m2 },
+            feature = { name = "feature", kind = "local", commit = by.f3 },
+            HEAD = { name = "HEAD", kind = "head", commit = by[head_at], branch = branch },
+        }
+        return items, refs
+    end
+    local function rows(items, refs, pinned)
+        local owners = view.owners(items, graph.owners_from_refs(refs, {}), pinned, {}, true)
+        local out = {}
+        for _, it in ipairs(view.project(items, owners, nil).items) do
+            out[#out + 1] = it.commit.collapsed and "◍" or it.commit.hash
+        end
+        return table.concat(out, " ")
+    end
+
+    it("a detached HEAD's commit stays a normal row, never folded into a ◍", function()
+        local items, refs = build("f2", nil)
+        -- The default anchors when detached: HEAD + master (effective_pins).
+        local shown = rows(items, refs, { HEAD = true, master = true })
+        assert.truthy(shown:find("f2", 1, true), shown)
+        assert.equals("◍ f2 m2 f1 m1 base", shown)
+    end)
+
+    it("an attached HEAD is not an owner of its own (its branch is)", function()
+        local items, refs = build("f3", "feature")
+        local ids = {}
+        for _, o in ipairs(graph.owners_from_refs(refs, {})) do ids[o.id] = true end
+        assert.is_nil(ids.HEAD)
+        assert.equals("f3 f2 m2 f1 m1 base", rows(items, refs, { feature = true, master = true }))
+    end)
+end)

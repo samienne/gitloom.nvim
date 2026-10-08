@@ -381,7 +381,8 @@ function M.fetch_head(repo)
                     repo.head = name
                     local localref = repo.refs[name]
                     if localref then
-                        add_ref(repo, "HEAD", "head", localref.commit.hash)
+                        -- The head ref names its branch (§6: drawn `(HEAD → name)`).
+                        add_ref(repo, "HEAD", "head", localref.commit.hash).branch = name
                     end
                 end
             end,
