@@ -445,7 +445,7 @@ lua/gitloom/
     order.lua       order_commits — gitloom's owned topo-sort (§3.1)
     date.lua        Timestamp parse + date formatters (§4/§6)
     remote.lua      Palette fetch / pull argv + env, `git remote` parse, failure text (§17)
-    fetch.lua       The async git I/O (jobstart) — the only Neovim-coupled corner
+    fetch.lua       The async git I/O (vim.system) — the only Neovim-coupled corner
   graph/          The graph ENGINE (gitloom.graph): commits + view state → rows
     init.lua        Engine entry: data-model types (Lane/Segment/GraphColumn/
                     OrderItem/…) + layout orchestration (build_graph,
@@ -477,7 +477,7 @@ lua/gitloom/
   pane machinery and one-time stream/`on_show` setup stay nested.
 - **gitloom.git** — the data library: the immutable commit model, the parsers
   and formatters that turn raw `git` output into structured data, the owned
-  topo-sort, and the `jobstart` I/O (`fetch.lua`, its sole Neovim coupling).
+  topo-sort, and the `vim.system` I/O (`fetch.lua`, its sole Neovim coupling).
   Pure everywhere else.
 - **gitloom.graph** — the engine: a pure function of (commits, view state,
   options) → renderable rows. `view.lua` projects modes (§10), `columns.lua` is
@@ -662,7 +662,7 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   (epoch) + `%ai` (offset) feed the parsed author timestamp; `%ct` (committer
   epoch) seeds `order_commits` (§3.1). No `--decorate`; refs are a separate query
   (specification.md §3). **Streamed unbuffered** so the view fills progressively
-  (spec §3, §10.5) through `vim.system` (`js_stream`), **not** `jobstart`: a
+  (spec §3, §10.5) through `vim.system` (`spawn`), **not** `jobstart`: a
   `jobstart` stream drops its unread tail when git exits while the main loop is
   behind on draining the pipe (Neovim stops reading under backpressure and
   `on_exit` arrives without the rest — the last record cut mid-line, parsed as a
@@ -703,7 +703,7 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   `fetch_worktree_diff("untracked")` is the synthesized untracked additions
   (`fetch_untracked_diff`: each `git ls-files --others --exclude-standard` file
   rendered via `git diff --no-index -- /dev/null <f>`, capped at
-  `UNTRACKED_DIFF_CAP`). `git_lines` / `git_output` are the thin jobstart helpers
+  `UNTRACKED_DIFF_CAP`). `git_lines` / `git_string` are the thin `run` helpers
   these share.
 
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
@@ -714,15 +714,26 @@ one-line swap with no real gain today. gitloom owns row ordering (`order_commits
 paint (it equals the `topo` sort mode's own output), and the active sort mode
 produces the authoritative order at completion.
 
-All but the commit stream (above) run via `vim.fn.jobstart` and resolve a
-`Future` on `on_exit`. The
-controller chains them refs → head → commits.
+Every git command spawns through ONE helper, `spawn` (`vim.system`; the commit
+stream above calls it directly), and every other query through `run`, which
+resolves a `Future` with the **whole** `{ code, out, err }` on the main loop
+(the exit callback hops there with `vim.schedule`). Nothing uses `jobstart`: a
+buffered `jobstart` job loses its output the same way the stream did — measured
+on 0.12.5 / Windows, a `stdout_buffered` `git log` of 1500 lines delivered
+**0** lines (exit 0) while the main loop was held by 20 ms slices, against all
+1500 when idle — whereas `vim.system` calls its exit callback only after
+stdout and stderr have hit EOF (`tests/stream_complete_spec.lua` pins it for a
+buffered query and `git_code`). `lines_of` turns a buffered output string back
+into the `\n`-split line list the callers were written against (CRs kept, the
+last element `""` after a trailing newline). `env` is merged over Neovim's
+environment and a string `stdin` is written then closed, both by `vim.system`
+itself. The controller chains them refs → head → commits.
 
 **Repository root (spec §2.1).** The git layer runs every query in an
 **active repository root** rather than implicitly following Neovim's cwd. A
 module-level `active_cwd` in `fetch.lua` (set via `M.set_cwd`, exposed as
-`git.set_cwd`) is injected as each job's `cwd` by a single `js` wrapper around
-`vim.fn.jobstart`; `nil` falls back to Neovim's cwd (the original behaviour
+`git.set_cwd`) is injected as each process's `cwd` by the single `spawn` helper around
+`vim.system`; `nil` falls back to Neovim's cwd (the original behaviour
 until a graph sets it). This mirrors the window's existing module-level state
 (one active graph). The window resolves the root once when the graph opens
 (`git -C <folder|cwd> rev-parse --show-toplevel`, defaulting to the cwd repo
@@ -731,11 +742,11 @@ when no folder is passed), stores it on `Repo.root`, and pushes it with
 **main module** instead of the cwd repo; the window's per-session view state
 (`saved_positions`, `recent_refs`) is keyed by `repo.root` accordingly.
 
-**Spawn diagnostics (`vim.g.gitloom_git_debug`).** Because *every* git job funnels
-through that one `js` wrapper, it is also the natural capture point. Set the
-global to a file path and `js` appends one record per spawn: the full argv (each
+**Spawn diagnostics (`vim.g.gitloom_git_debug`).** Because *every* git process funnels
+through that one `spawn` helper, it is also the natural capture point. Set the
+global to a file path and `spawn` appends one record per spawn: the full argv (each
 element on its own line), the resolved cwd and executable, the fetch.lua → caller
-chain, the job id — or, on a failed spawn, the error, plus the command line's
+chain, the pid — or, on a failed spawn, the error, plus the command line's
 length priced against the **32766-character Windows ceiling** (the pure
 `quoted_len` / `cmdline_len` model the record shares with `tests/fetch_spec.lua`;
 see specification.md §3.4). That ceiling is the sole cause of `E903: Process
@@ -1933,7 +1944,7 @@ never waits on it (nil ⇒ no per-remote entries).
 `ctx:run_remote(kind, remote?)` takes the pure `remote.remote_command` (`argv`,
 `env = { GIT_TERMINAL_PROMPT = "0" }`, notices, `resync_on_failure`) and runs it
 through `git.run_remote(argv, repo.root, env)` — `git_code` with an explicit cwd
-and the env merged over Neovim's (jobstart's `env`), the same shape as
+and the env merged over Neovim's (`vim.system`'s `env`), the same shape as
 `run_checkout`. `ctx.remote_busy` refuses a second run; the result notifies
 (failure via `format_git_error` over `remote.failure_text` — git's first
 `fatal:`/`error:` line ahead of the progress and hints, stdout when stderr is empty)
@@ -2017,7 +2028,7 @@ in graph.lua.
 
 graph.lua glue (gated, async — never fetches; §11.7.1/§11.7.4):
 
-- `git_code(args)` is a thin future over `jobstart` resolving `{ code, out }`
+- `git_code(args)` is a thin future over `run` resolving `{ code, out, err }`
   (used for the submodule queries; runs in the active repository root like the
   rest, with the submodule addressed by `git -C <path>` relative to it, so a
   missing checkout fails the query rather than throwing on an invalid `cwd`).
@@ -2220,7 +2231,7 @@ gitloom.nvim/
 │   │   ├── init.lua       Aggregator
 │   │   ├── model.lua / parse.lua / format.lua / refs.lua
 │   │   ├── range.lua / order.lua / date.lua / remote.lua
-│   │   └── fetch.lua      Async git I/O (jobstart) — the only Neovim coupling
+│   │   └── fetch.lua      Async git I/O (vim.system) — the only Neovim coupling
 │   ├── graph/             The graph engine (gitloom.graph)
 │   │   ├── init.lua       Engine entry: types + layout glue + _internal seam
 │   │   ├── view.lua       View builder: projection under view state (§10)

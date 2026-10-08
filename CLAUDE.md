@@ -258,7 +258,11 @@ Coverage:
   under a deliberately slow (20 ms) batch handler: every commit of a 1500-commit
   scratch repository arrives, none cut mid-record. Guards the `jobstart`
   truncated-tail regression (the subject-less 1970 "root" row at the bottom),
-  fixed by streaming through `vim.system` (`fetch.lua`'s `js_stream`)
+  fixed by streaming through `vim.system` (`fetch.lua`'s `spawn`). Plus the
+  BUFFERED side: `fetch_rev_order` and `git_code` (via `run_checkout`) return
+  all 1500 lines while a hog holds the main loop in 20 ms slices — a buffered
+  `jobstart` delivered 0 of them there (exit 0), which is why every spawn moved
+  to `vim.system`
 - `tests/stream_tick_spec.lua` — the stream worker's hand-off (§3.1's "paints
   progressively"): `fetch._internal.next_tick` defers rather than running inline,
   a `next_tick` self-chain lets the **event loop iterate** between slices, and a
@@ -273,15 +277,17 @@ Coverage:
   future (the gitloom sort mode's `apply_sort`) dropped its chained callbacks, so
   the open-time worktree + reflow (the §10.7 default collapse) never ran
 - `tests/git_debug_spec.lua` — the `vim.g.gitloom_git_debug` spawn-capture hook
-  (fetch.lua's `js` wrapper): `quoted_len` / `cmdline_len` (libuv's
+  (fetch.lua's `spawn` helper): `quoted_len` / `cmdline_len` (libuv's
   `quote_cmd_arg` model — verbatim, empty, space-wrapped, backslash-doubling —
   pinned against the two bisected data points, `cmd` and a space-bearing `git`
   path, that both land on exactly 32766), `spawn_record` (every argv element on
   its own line, cwd, site, exe, argc, the `EXCEEDS` flag and the failure text),
-  `debug_log` (inert unset, appends one record per spawn) and `js` end to end
+  `debug_log` (inert unset, appends one record per spawn) and `spawn` end to end
   (a real spawn captured / nothing written when unset). Plus **the model against
-  the real OS**: two `jobstart`s, one command line of exactly `WIN_CMDLINE_MAX`
-  characters and one of `+1`, asserting the first spawns and the second does not
+  the real OS**: two spawns through fetch.lua's own `spawn` (`vim.system`), one
+  command line of exactly `WIN_CMDLINE_MAX` characters and one of `+1`, asserting
+  the first spawns and the second does not (re-raising `ENAMETOOLONG`) — the cap
+  bisected against `jobstart` carried over unchanged
   — so the number the diagnostic reports can never drift from the OS
 - `tests/repo_picker_spec.lua` — the repository picker's **discovery core**
   (§2.1), the pure pieces behind its 1 + N spawns: `submodule.parse_gitlinks`
@@ -1216,7 +1222,7 @@ Details not covered by the spec or architecture:
   (Commit/Ref types), `parse` (log/show/diff/status parsers), `format`
   (commit-detail/diff/diffstat/range/worktree formatters), `refs`, `range`
   (DiffRange), `order` (`order_commits`, §3.1), `date`, and `fetch` (the async
-  `jobstart` I/O — its only Neovim coupling), behind a `git/init.lua` aggregator.
+  `vim.system` I/O — its only Neovim coupling), behind a `git/init.lua` aggregator.
   **gitloom.graph** (`graph/`): `view` (the pre-Phase-1 projection §10),
   `sigset` (the interned persistent owner sets the §10.2 signatures are computed
   in), `columns` (Phase 1 lane layout), `render` (Phase 2 glyphs/colour/dimming +
@@ -1401,8 +1407,11 @@ Details not covered by the spec or architecture:
   test (`random_dag(7, 108)`) locks the current look. The other four styles pass
   the full suite incl. grid colour. This is the one place a cell may have two
   turns (the per-column cap is 1 otherwise).
-- **git runs in the active repository root** (spec §2.1) — every `jobstart`
-  goes through fetch.lua's `js` wrapper, which pins `cwd` to a module-level
+- **git runs in the active repository root** (spec §2.1) — every git spawn
+  goes through fetch.lua's `spawn` helper (`vim.system`, never `jobstart` — a
+  buffered or streamed `jobstart` job drops output under a busy main loop; the
+  buffered queries reach it through `run`, which resolves `{ code, out, err }`
+  on the main loop), which pins `cwd` to a module-level
   active root set by `git.set_cwd`. `window.open` resolves it (the given
   `folder` or Neovim's cwd → `git rev-parse --show-toplevel`), stores it on
   `repo.root`, and keys the per-session view state by it. So the graph can
@@ -1437,7 +1446,7 @@ Details not covered by the spec or architecture:
   measured at 21 ms and deliberately left alone (a `vim.fs` walk cannot promise
   the identical string `git rev-parse --show-toplevel` returns, and that string
   keys the per-repository session state).
-  `js` is also the **spawn-diagnostics seam**: with `vim.g.gitloom_git_debug` set
+  `spawn` is also the **spawn-diagnostics seam**: with `vim.g.gitloom_git_debug` set
   to a file path it appends one record per spawn — the full argv (one element per
   line, so nothing is lost to concatenation), the resolved cwd + executable, the
   call chain, the job id or the thrown error, and the command line's length
@@ -1500,10 +1509,11 @@ Details not covered by the spec or architecture:
   the same total). In gitloom's pre-fix shape that is **398 ref tips per side**
   (399 fails) — i.e. roughly 400 distinct refs, since a resync passes nearly the
   same set as both positives and exclusions. `vim.g.gitloom_git_debug` (fetch.lua's
-  `js` wrapper, README → Diagnostics) prices every spawn against that cap.
+  `spawn` helper, README → Diagnostics) prices every spawn against that cap.
   The pure builder `git.new_commits_query` is the tested seam and
-  `fetch_new_commits` closes stdin after `chansend` — `--stdin` reads to EOF, so
-  a missed close would wedge the resync silently) →
+  `fetch_new_commits` hands the list to `run` as `stdin`, which `vim.system`
+  writes and then closes — `--stdin` reads to EOF, so a missed close would wedge
+  the resync silently) →
   `integrate_commit` (the shared stream/resync per-commit linker, extracted from
   `on_batch`) → `prune_to_reachable` (`reachable_hashes` orphan prune) →
   `apply_sort` (re-establish the active sort mode) → `refresh_worktree` +

@@ -591,7 +591,7 @@ Set any of them to a **file path** and gitloom writes a plain-text dump there.
 
 ```lua
 -- Every git command gitloom spawns: the full argv (one element per line), the
--- resolved cwd and executable, the call site, the resulting job id — and, on a
+-- resolved cwd and executable, the call site, the resulting process id — and, on a
 -- failed spawn, the error plus the command-line length measured against the
 -- 32766-character Windows ceiling. Appends; unset it to stop.
 vim.g.gitloom_git_debug = vim.fn.stdpath("data") .. "/gitloom_git.log"

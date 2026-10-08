@@ -102,7 +102,7 @@ describe("format_relative", function()
     end)
 end)
 
--- The de-chunker that turns an unbuffered jobstart stdout stream (lists of
+-- The de-chunker that turns an unbuffered stdout stream (lists of
 -- strings split on "\n", with partial lines at the chunk seams) into whole
 -- lines. This is the new logic behind streaming the git log in batches.
 describe("make_line_buffer", function()
