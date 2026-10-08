@@ -24,9 +24,10 @@ implementation detail: the planned view features — collapsing, pinning,
 toggling branch visibility, and reflowing (§10) — are only possible if
 gitloom controls ordering and layout rather than delegating them to git.
 
-gitloom never stages, commits or rewrites history. **Checkout** (§10.4.1) is
-the single exception to an otherwise read-only view, and it only moves HEAD and
-the working tree.
+gitloom never stages, commits or rewrites history by itself. The exceptions to
+an otherwise read-only view are actions the user explicitly picks: **checkout**
+(§10.4.1), which only moves HEAD and the working tree, and **fetch** / **pull**
+from the command palette (§17).
 The view-transformation features in §10 are the direction this is built
 toward; the current non-graph surface (window, streaming fetch, rendering)
 exists primarily to exercise and validate the graph algorithm.
@@ -66,7 +67,10 @@ show the full graph. `p` toggles **marker packing** (§10.4) — merge concurren
 collapsed heads onto shared lines, or one per line. `R` **resyncs** the view with
 the repository (§3.4) — re-reads refs, pulls newly-reachable commits, prunes
 unreachable ones, re-sorts, and rebuilds the working-tree virtual commits (§4.2),
-preserving cursor/scroll/selection. `S` cycles the **row sort mode** (§3.1) —
+preserving cursor/scroll/selection. `<C-Space>` (also `<C-@>`, which many
+terminals send for it) opens the **command palette** (§17) — a picker of the
+graph-wide commands: refresh (the `R` resync), fetch (all remotes, or one)
+and pull. `S` cycles the **row sort mode** (§3.1) —
 gitloom's own topological order (reproducing git's `--topo-order`), or git's date
 / author-date order — reordering in place and keeping the cursor on its commit.
 `L` opens the **pinned-branches dialog** (§10.6.1) — the pinned branches in
@@ -279,8 +283,10 @@ worktrees do not; that is the general case §10.2's total owner coverage handles
 When the working tree is dirty, gitloom shows the uncommitted changes as up to
 three **virtual commits** (§4.2) stacked on top of HEAD — the live state the user
 is building. gitloom **displays** the index and working tree; it never stages,
-unstages, or commits (§9). The one operation that changes them is an explicit
-**checkout** (§10.4.1), which only moves HEAD and the working tree.
+unstages, or commits by itself (§9). The operations that change them are the
+ones the user explicitly picks: **checkout** (§10.4.1), which only moves HEAD and
+the working tree, and **pull** from the command palette (§17), which only
+fast-forwards the current branch to its upstream (it never creates a commit).
 
 The state is read with porcelain queries that run **after** the commit stream
 (§3.1) has its HEAD anchor:
@@ -1609,9 +1615,10 @@ target stay byte-identical (§2).
 
 **Computed against the last fetch.** The ahead/behind counts are git's own,
 computed against the **local remote-tracking ref** — i.e. the remote's state *as
-of your last `git fetch`*, not the live remote. gitloom is read-only and never
-fetches (§9), so the indicator reflects what is already on disk; a `git fetch`
-outside gitloom followed by `R` (resync, §3.4) refreshes it.
+of your last `git fetch`*, not the live remote. gitloom never fetches on its own
+(§9), so the indicator reflects what is already on disk; the palette's **Fetch**
+(§17, which resyncs when it finishes), or a `git fetch` outside gitloom followed
+by `R` (resync, §3.4), refreshes it.
 
 The same tracking data drives **pin-the-pair** (§10.6) and a current-branch
 status in the window footer.
@@ -1741,8 +1748,10 @@ plugin load so `<leader>` resolves against the user's `mapleader`. Set
 
 ## 9. Non-goals
 
-gitloom is a **viewer**: apart from an explicit **checkout** (§10.4.1), which
-only moves HEAD and the working tree, it does not itself mutate the repository. What is
+gitloom is a **viewer**: it never stages, commits or rewrites history by itself.
+The exceptions are actions the user explicitly picks — **checkout** (§10.4.1),
+which only moves HEAD and the working tree, and **fetch** / **pull** from the
+command palette (§17). What is
 permanently out of scope is **implicit index or history mutation as a side
 effect of viewing** — gitloom never stages, unstages, commits, resets, or
 rewrites history silently while you browse.
@@ -1980,8 +1989,9 @@ its cone. With no marker selected the line is neutral (all lit).
 
 #### 10.4.1 Checkout
 
-The menu's **checkout** entry is the one action that changes the repository: it
-moves HEAD and the working tree, nothing else. What it runs depends on what the
+The menu's **checkout** entry is the menu's one action that changes the
+repository (the others are the palette's fetch and pull, §17): it moves HEAD and
+the working tree, nothing else. What it runs depends on what the
 row selects, and the entry's label says which:
 
 | Selection | Command | Label |
@@ -3294,3 +3304,76 @@ beyond merely being the only normal commits among the `◍` heads.
   the filter input (§16.2).
 - Composing the filter with the body **live-grep** mode (§15.5) — filtering by
   message body via `git log --grep`, async — is a later extension.
+
+## 17. Command palette
+
+`<C-Space>` in the graph buffer opens the **command palette**: a
+`vim.ui.select` picker (the mechanism the `<CR>` action menu uses, §10.4) of the
+commands gitloom can run on the graph as a whole. Many terminals send
+`<C-Space>` as `<C-@>` (the same key as `<Nul>`), so that is mapped too.
+
+### 17.1 The registry
+
+The palette lists commands from **one registry**. Each entry has:
+
+- `id` — a stable name (`refresh`, `fetch`, `pull`); a per-remote command's
+  entries are `<id>:<remote>` (`fetch:origin`);
+- `label` — what the picker shows;
+- `key` — optional, the direct key that runs the same command; when present the
+  picker shows it after the label, e.g. `Refresh  (R)`;
+- `scope` — what the command acts on: `global` (the repository as a whole), or
+  the reserved `commit` / `ref` (a command about the row or the selected ref);
+- optionally **per-remote** — the entry expands to one entry per remote;
+- an **action** run on the graph session.
+
+The palette lists the `global` entries, in registry order. `commit` and `ref`
+are reserved for later; a non-global entry never appears in the global palette.
+
+**The remote list.** When the graph opens, gitloom runs `git remote` (local, no
+network) asynchronously in the graph's repository root and caches the names, in
+git's order, on the session; every resync (§3.4 — `R`, and the resync after a
+palette fetch / pull) reloads it. The palette opens **instantly**, built only
+from what is already cached: it never waits on the remote list, so until the
+first read lands the per-remote entries are simply absent.
+
+### 17.2 The commands
+
+| Command | Key | Runs |
+|---|---|---|
+| **Refresh** | `R` | the in-place resync (§3.4) — exactly the `R` key |
+| **Fetch** | — | `git fetch --all` |
+| **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch <remote>` |
+| **Pull** | — | `git pull --ff-only` |
+
+There is no per-remote pull: a pull follows the current branch's upstream.
+
+A pull **only fast-forwards**: it moves the current branch to its upstream when
+the branch is strictly behind, and never merges, rebases or creates a commit. If
+the branch has diverged from its upstream — or there is no upstream, or HEAD is
+detached — git refuses and its error is shown (§17.3); nothing is merged or
+rebased, and integrating a diverged branch is left to the user. Neither command
+ever forces.
+
+### 17.3 How fetch and pull run
+
+- **Asynchronously** — the job runs in the background and the graph stays
+  usable; a `Fetching…` / `Pulling…` notice shows while it runs.
+- In the graph's **repository root** (§2.1), which may be a submodule — never
+  implicitly Neovim's cwd.
+- With `GIT_TERMINAL_PROMPT=0` in the job's environment, so a credential
+  prompt **fails** instead of hanging an invisible job. Credential helpers still
+  work.
+- A per-remote fetch runs exactly like **Fetch** (everything in this list
+  applies to it).
+- **One at a time per graph session**: a second fetch or pull while one is
+  running is refused with a notice.
+- **On success**: an INFO notice, then the in-place resync (§3.4), so new remote
+  branches, moved tips and a pull's fast-forward appear without a reopen.
+- **On failure**: git's error as one line at ERROR level — its `fatal:` /
+  `error:` line when there is one, not the progress and hints ahead of it (the same formatting as
+  a failed checkout, §10.4.1). A failed **pull** still resyncs, because its
+  fetch half may already have moved the remote-tracking refs before the
+  fast-forward was refused (a diverged branch), and the graph must show them. A failed fetch changes nothing worth
+  re-reading.
+- If the graph window has closed by the time the job finishes, the resync is
+  skipped (the next open reads the repository afresh).

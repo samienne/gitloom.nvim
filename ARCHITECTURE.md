@@ -444,6 +444,7 @@ lua/gitloom/
     range.lua       DiffRange builders (§11.5/§13.5)
     order.lua       order_commits — gitloom's owned topo-sort (§3.1)
     date.lua        Timestamp parse + date formatters (§4/§6)
+    remote.lua      Palette fetch / pull argv + env, `git remote` parse, failure text (§17)
     fetch.lua       The async git I/O (jobstart) — the only Neovim-coupled corner
   graph/          The graph ENGINE (gitloom.graph): commits + view state → rows
     init.lua        Engine entry: data-model types (Lane/Segment/GraphColumn/
@@ -457,6 +458,7 @@ lua/gitloom/
     reach.lua       Reachability cone + the Lane-graph emphasis walk (§12)
     select.lua      Selection / branch-mode pure helpers (§2/§10/§13)
     pane.lua        Context-pane layout core (§6.2)
+    palette.lua     Command-palette registry + per-scope entry builder (§17)
     color.lua       OKLCH↔sRGB conversion + golden-angle colour generation (§5.5)
   listview.lua    Reusable virtualized list widget (snacks.win)
   submodule.lua   Submodule change classification + budget/truncate (§11.7)
@@ -1905,6 +1907,32 @@ the host keeps a fixed zindex and transient floats layer at `float_zindex` (host
 `build_commit_rows` is exposed as `M.build_commit_rows` so the picker (and its
 preview) share the commit-view renderer.
 
+### Command palette
+
+`<C-Space>` / `<C-@>` (specification.md §17) open `ctx:palette()`, a
+`vim.ui.select` over `palette.palette_entries("global", ctx.remotes)`. The pure
+registry (`graph/palette.lua`, `COMMANDS`) is one ordered list of `{ id, label,
+key?, scope, per_remote?, action(ctx, remote?) }`; the builder filters by scope,
+appends `  (<key>)` to the label, and expands a `per_remote` entry once per
+cached remote name (`fetch:<remote>`). Actions only call ctx methods
+(`resync`, `run_remote`), so the module is window-free and unit-tested.
+
+`ctx.remotes` is filled by `ctx:load_remotes()` — `git.fetch_remotes(repo.root)`
+(`git remote` → the pure `remote.parse_remotes`) — once when the session is
+assembled and at the top of every `resync`. The palette reads only the cache and
+never waits on it (nil ⇒ no per-remote entries).
+
+`ctx:run_remote(kind, remote?)` takes the pure `remote.remote_command` (`argv`,
+`env = { GIT_TERMINAL_PROMPT = "0" }`, notices, `resync_on_failure`) and runs it
+through `git.run_remote(argv, repo.root, env)` — `git_code` with an explicit cwd
+and the env merged over Neovim's (jobstart's `env`), the same shape as
+`run_checkout`. `ctx.remote_busy` refuses a second run; the result notifies
+(failure via `format_git_error` over `remote.failure_text` — git's first
+`fatal:`/`error:` line ahead of the progress and hints, stdout when stderr is empty)
+and resyncs on success, or always for a pull. `resync` returns early when the
+graph window has gone. Both helpers are `GRAPH_HELPERS` fields — window.lua is at
+the 200-local ceiling.
+
 ### Filter search (in-graph)
 
 `/` (`h_filter(ctx)`) is the in-graph **filter** (specification.md §16) — a
@@ -2183,7 +2211,7 @@ gitloom.nvim/
 │   ├── git/               The git data library (gitloom.git)
 │   │   ├── init.lua       Aggregator
 │   │   ├── model.lua / parse.lua / format.lua / refs.lua
-│   │   ├── range.lua / order.lua / date.lua
+│   │   ├── range.lua / order.lua / date.lua / remote.lua
 │   │   └── fetch.lua      Async git I/O (jobstart) — the only Neovim coupling
 │   ├── graph/             The graph engine (gitloom.graph)
 │   │   ├── init.lua       Engine entry: types + layout glue + _internal seam
@@ -2194,6 +2222,7 @@ gitloom.nvim/
 │   │   ├── reach.lua      Reachability cone + emphasis walk (§12)
 │   │   ├── select.lua     Selection/branch-mode pure helpers (§2/§10/§13)
 │   │   ├── pane.lua       Context-pane layout core (§6.2)
+│   │   ├── palette.lua    Command-palette registry (§17)
 │   │   └── color.lua      OKLCH colour generation (§5.5)
 │   ├── submodule.lua      Submodule change view: pure core (§11.7)
 │   └── listview.lua

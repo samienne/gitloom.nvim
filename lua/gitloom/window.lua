@@ -383,6 +383,7 @@ local KEYBINDS = {
     { "L", "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
     { "p", "Toggle marker packing (concurrent collapsed heads share a line)" },
     { "R", "Resync with the repository (refs + new commits + working tree)" },
+    { "<C-Space>", "Command palette: refresh / fetch / pull (also <C-@>)" },
     { "S", "Cycle the row sort mode (topo / date / author-date)" },
     { "<leader>b", "Jump to a branch / ref (picker; recent first)" },
     { "<leader>gl", "Search commits by subject / author (picker; :GitloomSearch)" },
@@ -2415,6 +2416,64 @@ end
 -- R: resync with the repository (§3.4).
 local function h_resync(ctx) ctx:resync(false) end
 
+-- <C-Space> / <C-@>: the command palette (§17) — the global entries of the pure
+-- registry (`gitloom.graph.palette`) in a `vim.ui.select`, like the <CR> menu.
+-- A GRAPH_HELPERS field, not a module local: this chunk is at LuaJIT's 200-local
+-- limit (see CLAUDE.md), and the palette module is required here for the same reason.
+GRAPH_HELPERS.palette = function(ctx)
+    -- Built from the cached remote list only (nil until `load_remotes` lands, so
+    -- no per-remote entries yet) — the palette never waits on git.
+    local entries = require("gitloom.graph.palette").palette_entries("global", ctx.remotes)
+    if #entries == 0 then return end
+    vim.ui.select(entries, {
+        prompt = "gitloom",
+        format_item = function(e) return e.label end,
+    }, function(choice)
+        if choice then choice.action(ctx) end
+    end)
+end
+
+-- The remote list the palette's per-remote Fetch entries come from (§17.1):
+-- `git remote` in the graph's repository root, cached on `ctx.remotes`. Run at
+-- open and on every resync; a failed read keeps the previous list.
+GRAPH_HELPERS.load_remotes = function(ctx)
+    git.fetch_remotes(ctx.repo.root).next(function(names)
+        if names then ctx.remotes = names end
+    end)
+end
+
+-- Palette fetch / pull (§17.3): run `git.remote_command(kind, remote)` async in the
+-- graph's repository root with GIT_TERMINAL_PROMPT=0, one at a time per session
+-- (`ctx.remote_busy`). Success: INFO notice, then resync. Failure: git's error at
+-- ERROR level; a pull resyncs anyway (its fetch half may have moved remote-tracking
+-- refs before the fast-forward was refused).
+-- `resync` itself returns early once the graph window is gone (§14).
+GRAPH_HELPERS.run_remote = function(ctx, kind, remote)
+    local cmd = git.remote_command(kind, remote)
+    if not cmd then return end
+    if ctx.remote_busy then
+        vim.notify(("gitloom: %s is still running"):format(ctx.remote_busy), vim.log.levels.WARN)
+        return
+    end
+    ctx.remote_busy = cmd.label
+    vim.notify(cmd.running)
+    git.run_remote(cmd.argv, ctx.repo.root, cmd.env).next(function(res)
+        vim.schedule(function()
+            ctx.remote_busy = nil
+            local ok = res.code == 0
+            if ok then
+                vim.notify(cmd.done, vim.log.levels.INFO)
+            else
+                -- git's fatal:/error: line, not the progress / hints ahead of it.
+                local err = git.failure_text(res.out, res.err)
+                vim.notify(git.format_git_error(cmd.label, { code = res.code, err = err }),
+                    vim.log.levels.ERROR)
+            end
+            if ok or cmd.resync_on_failure then ctx:resync(false) end
+        end)
+    end)
+end
+
 -- S: cycle the row sort mode (§3.1).
 local function h_sort(ctx)
     local keep
@@ -3303,6 +3362,9 @@ local GRAPH_KEYS = {
     ["d"] = h_date,
     ["H"] = h_dim,
     ["R"] = h_resync,
+    -- The command palette (§17). Many terminals send <C-Space> as <C-@> (= <Nul>).
+    ["<C-Space>"] = function(ctx) ctx:palette() end,
+    ["<C-@>"] = function(ctx) ctx:palette() end,
     ["S"] = h_sort,
     ["c"] = h_focus,
     ["p"] = h_pack,
@@ -3477,6 +3539,7 @@ GRAPH_HELPERS.refresh_worktree = refresh_worktree
 local function resync(ctx, silent)
     if not ctx:win() then return end
     local repo = ctx.repo
+    ctx:load_remotes() -- the palette's per-remote entries (§17.1)
 
     -- What we already have: every current ref tip becomes a negative ref, so the
     -- fetch returns only commits newly reachable since this point.
@@ -3784,6 +3847,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field selection_visible boolean
     ---@field filter? { query: string, keep: table<string,boolean>, current?: string }  in-graph filter-search (§16); nil = none
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
+    ---@field remotes? string[]     `git remote` names for the palette (§17.1); nil until the first read lands
+    ---@field remote_busy? string   the palette fetch / pull running now (its `git fetch` label), nil when idle (§17.3)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     --- == debounce state (Phase B4) ==
     ---@field reflow_gen? integer  async-reflow generation (§10.5): a newer reflow
@@ -3831,6 +3896,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field maybe_update_panes fun(self:GraphCtx)
     ---@field update_footer fun(self:GraphCtx)
     ---@field resync fun(self:GraphCtx, silent:boolean?)
+    ---@field palette fun(self:GraphCtx)  the command palette (§17)
+    ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
+    ---@field load_remotes fun(self:GraphCtx)  refresh `remotes` from `git remote` (§17.1)
     ---@field refresh_worktree fun(self:GraphCtx, silent:boolean?)
     --- == debounce schedulers (Phase B4; attached from GRAPH_HELPERS) ==
     ---@field schedule_cone_update fun(self:GraphCtx)
@@ -4022,6 +4090,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
     -- reference here — GRAPH_HELPERS — instead of one upvalue per helper).
     for k, f in pairs(GRAPH_HELPERS) do ctx[k] = f end
+    ctx:load_remotes() -- async; the palette lists per-remote fetches once it lands (§17.1)
     -- Diagnostic / test seam: the most recently assembled graph session. The
     -- window glue has no busted coverage (it needs a real window), so the
     -- headless smoke test reads the projected model through here rather than
