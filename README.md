@@ -106,13 +106,16 @@ suite. With lazy.nvim:
 :GitloomGraph
 :GitloomGraph path/to/submodule
 :GitloomPick
+:GitloomResetView
 ```
 
 Opens the graph for the repository at Neovim's current working directory. With
 an optional path argument it opens the graph for that repository instead — a
 submodule of the current repo, or any other repo root (the path is resolved to
 its git top level). View state (cursor position, ref-picker history) is
-remembered per repository for the session.
+remembered per repository for the session. The view toggles and each repository's pin list are
+remembered across sessions (see `persist` under Configuration);
+`:GitloomResetView` forgets them (after a confirmation).
 
 `:GitloomPick` opens a picker listing the **main module** and its **direct
 submodules**; choosing one opens the graph for that repository. The picker
@@ -269,7 +272,10 @@ examine selection** — instead. Then the graph-wide commands:
   `git remote` order (the list is read when the graph opens and on every resync;
   the palette never waits for it, so the entries appear once it has arrived);
 - **Pull** — `git pull --ff-only` (fast-forward only: a branch that has diverged
-  from its upstream is refused with git's error, never merged or rebased).
+  from its upstream is refused with git's error, never merged or rebased);
+- **Reset view settings…** — after a Reset / Cancel prompt, forget the remembered
+  view toggles and this repository's pin list and go back to your configuration
+  (below, and `:GitloomResetView`).
 
 Then the graph's **keys** that apply where the cursor is, grouped (branches /
 refs / search, then view toggles, then commit & selection, then other), each
@@ -502,6 +508,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     pin_upstream = true,     -- pinning a local branch also pins its tracked upstream (§6.3/§10.6)
+    persist = true,          -- remember the view toggles + pin lists across sessions (§18)
     search = {               -- commit search (§15; <leader>gl or :GitloomSearch)
         snippet = 7,         -- graph rows shown around the commit in the preview
         layout = "vertical", -- preview arrangement (snippet above the detail)
@@ -550,7 +557,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   two rows (a further ~12% fewer rows and ~44% fewer crossings expanded — again
   nothing at all in the default view).
   Cycle live with `C` to compare them on a real repository; the
-  live value is per-window and resets to this option on reopen. See
+  cycled value is remembered for the next open (see `persist`). See
   [specification.md](specification.md) §5.6.
 - **`branches`** — the ref arguments passed to `git log` (default `--all`).
 - **`sort_mode`** — the initial row sort mode (default `"topo"`): `"topo"`
@@ -611,6 +618,19 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   how many graph rows are shown around the commit in the preview (default `7`,
   odd so the commit is centered); `layout` is the preview arrangement (currently
   only `"vertical"` — the snippet above the commit detail).
+- **`persist`** — remember how you left the graph (§18), on by default. The view
+  toggles `m C M B d H S c p F i` are saved when you press them, and each
+  repository's pin list (`P`, the `L` dialog) when it changes, in one JSON file,
+  `stdpath("state")/gitloom.json`, shared by every Neovim instance (each write
+  re-reads and merges, so two instances do not clobber each other). They come back
+  on the next open, taking precedence over your `setup()` values — **unless you
+  change that option in your config afterwards**: each saved toggle records the
+  configured value it overrode, and a changed configuration wins. Collapse /
+  expand choices are not remembered. **Reset view settings…** in the `<C-Space>`
+  palette, or `:GitloomResetView`, clears the toggles and the current repository's
+  pin list (other repositories keep theirs) and restores your configuration live.
+  A corrupt file is ignored with one warning. `persist = false` neither reads nor
+  writes the file.
 - **`pick_key`** — the normal-mode mapping `setup()` installs for the repository
   picker (`:GitloomPick`, §2.1; default `<leader>wG`). Set to a string to remap,
   or `false` to install no mapping. A setup-level option, not a graph option.

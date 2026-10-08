@@ -432,6 +432,9 @@ lua/gitloom/
   window.lua      The graph window CONTROLLER (gitloom.window): floating window,
                   keymaps, autocmds, streaming/resync, the reachability debounce,
                   context panes, the commit view, external-diff glue — M.open
+  persist.lua     Persisted view state (§18): the JSON state file (lazy read,
+                  re-read-merge-rename write), the {value, base} precedence rule,
+                  the pin-list save/restore and Reset — pure core + thin I/O
   util.lua        Vendored helpers: make_future (promise), compose/highlight_text
                   (highlight builders), trim_ws
   git/            The git DATA LIBRARY (gitloom.git)
@@ -1995,6 +1998,37 @@ and resyncs on success, or always for a pull. `resync` returns early when the
 graph window has gone. Both helpers are `GRAPH_HELPERS` fields — window.lua is at
 the 200-local ceiling.
 
+### Persisted view state
+
+`persist.lua` (§18) owns `stdpath("state")/gitloom.json` — one file, every Neovim
+instance. Its pure half works on the decoded table: `config_values(user)` resolves
+each persisted key from the caller's own options (else `BUILTIN`, normalised the
+way the renderer reads it — `x ~= false` keys as booleans, a merge style
+deep-extended over the built-in one); `overlay` applies a stored `{ value, base }`
+only while `base` equals that resolved value (a changed `setup()` wins);
+`set_pref` records one key and prunes every other stale entry; `pins_for_save`
+drops what the open-time resolution re-derives (an unreserved default anchor or
+auto-pinned upstream), so a then-current HEAD branch does not become a permanent
+pin. The I/O half reads lazily once (`load`) for opens and, for every change,
+re-reads → merges the one key → writes a temp file → `fs_rename`s it over the
+original (unlinking first where rename cannot replace), so concurrent instances
+keep each other's keys. A corrupt file is `{}` with one WARN. `set_path` redirects
+it — `tests/minimal_init.lua` points it at a temp file for every test run.
+
+The window glue is thin and keeps window.lua's local count unchanged (every call
+is an inline `require`): `open_graph` computes `persist_config` from the caller's
+options **before** the defaults merge, overlays the file's view entries, re-syncs
+the merge-style cycle index, and seeds `view_state.pins` / `unpinned` from the
+repository's entry; the eleven toggle handlers call `ctx:save_pref(<field>)`
+(`S` now also writes `opts.sort_mode`, which it previously left stale); `P` and
+the `L` dialog's `commit` call `save_pins`, which writes only from a root graph
+(`persist_writable`, §14.8) and only from the base view (a stamped filter's
+`unpinned` table is a copy) and re-points `base_view.pins` at the saved list.
+`reset_view_now` clears the file entries, re-applies `persist_config`, re-syncs
+the three module cycle indices, restores the default anchors and re-sorts /
+re-lays out / refreshes. `nav.ctxs[root]` lets `:GitloomResetView` find the open
+graph from outside it.
+
 ### Checkout & examine
 
 Checkout & examine (specification.md §10.4.2) splits three ways. The pure
@@ -2298,6 +2332,7 @@ gitloom.nvim/
 ├── lua/gitloom/
 │   ├── init.lua           Thin facade (setup + :GitloomGraph)
 │   ├── window.lua         The window controller (gitloom.window): M.open
+│   ├── persist.lua        Persisted view state: toggles + per-repo pins (§18)
 │   ├── util.lua           Vendored helpers (make_future/compose/highlight_text/trim_ws)
 │   ├── git/               The git data library (gitloom.git)
 │   │   ├── init.lua       Aggregator

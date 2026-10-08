@@ -53,53 +53,63 @@ describe("palette_entries (§17.1)", function()
 
     it("lists Fetch, Pull in order (the resync is the R key's entry, not a command)", function()
         local e = palette.palette_entries({})
-        assert.same({ "fetch", "pull" }, ids(e))
-        assert.same({ "Fetch", "Pull" }, labels(e))
+        assert.same({ "fetch", "pull", "reset_view" }, ids(e))
+        assert.same({ "Fetch", "Pull", "Reset view settings…" }, labels(e))
         assert.same(ids(e), ids(palette.palette_entries()))
         for _, c in ipairs(palette.COMMANDS) do assert.is_true(c.id ~= "refresh") end
     end)
 
     it("has no per-remote entries while the remote list is unknown or empty", function()
-        assert.same({ "fetch", "pull" }, ids(palette.palette_entries({ remotes = nil })))
-        assert.same({ "fetch", "pull" }, ids(palette.palette_entries({ remotes = {} })))
+        assert.same({ "fetch", "pull", "reset_view" }, ids(palette.palette_entries({ remotes = nil })))
+        assert.same({ "fetch", "pull", "reset_view" }, ids(palette.palette_entries({ remotes = {} })))
     end)
 
     it("expands Fetch <remote> per remote, in git remote order, before Pull", function()
         local e = palette.palette_entries({ remotes = { "origin", "upstream" } })
-        assert.same({ "fetch", "fetch:origin", "fetch:upstream", "pull" }, ids(e))
-        assert.same({ "Fetch", "Fetch origin", "Fetch upstream", "Pull" }, labels(e))
+        assert.same({ "fetch", "fetch:origin", "fetch:upstream", "pull", "reset_view" }, ids(e))
+        assert.same({ "Fetch", "Fetch origin", "Fetch upstream", "Pull", "Reset view settings…" }, labels(e))
     end)
 
     it("puts the row's entries FIRST, then the global commands; no examine entry", function()
         local e = palette.palette_entries({ row = plain, has_diff = true, remotes = { "origin" } })
-        assert.same({ "diff", "checkout", "checkout_examine", "fetch", "fetch:origin", "pull" }, ids(e))
+        assert.same({ "diff", "checkout", "checkout_examine", "fetch", "fetch:origin", "pull", "reset_view" }, ids(e))
         assert.equals("Open diff  (D)", e[1].label)
         for _, x in ipairs(e) do assert.is_true(x.id ~= "examine") end
     end)
 
     it("while selecting, the selection's entries replace the row's", function()
         local e = palette.palette_entries({ row = plain, selection = true, has_diff = true })
-        assert.same({ "selection_diff", "examine_selection", "fetch", "pull" }, ids(e))
+        assert.same({ "selection_diff", "examine_selection", "fetch", "pull", "reset_view" }, ids(e))
         assert.same({ "Open diff  (D)", "Checkout & examine selection" }, { e[1].label, e[2].label })
         -- Without a diff provider the selection has no entries of its own.
-        assert.same({ "fetch", "pull" }, ids(palette.palette_entries({ row = plain, selection = true })))
+        assert.same({ "fetch", "pull", "reset_view" }, ids(palette.palette_entries({ row = plain, selection = true })))
     end)
 
     it("lists Return first among the globals, only while an examine is active", function()
         local st = { orig = "main", detached = false, examined = H }
         local e = palette.palette_entries({ row = plain, examine = st })
-        assert.same({ "checkout", "return", "fetch", "pull" }, ids(e))
+        assert.same({ "checkout", "return", "fetch", "pull", "reset_view" }, ids(e))
         assert.equals("Return to main", e[2].label)
-        assert.same({ "checkout", "fetch", "pull" }, ids(palette.palette_entries({ row = plain })))
+        assert.same({ "checkout", "fetch", "pull", "reset_view" }, ids(palette.palette_entries({ row = plain })))
     end)
 
     it("binds each action to the session (and a per-remote one to its remote)", function()
         local calls = {}
         local ctx = {
             run_remote = function(_, kind, r) calls[#calls + 1] = { kind, r } end,
+            reset_view = function() calls[#calls + 1] = { "reset" } end,
         }
         for _, e in ipairs(palette.palette_entries({ remotes = { "origin" } })) do e.action(ctx) end
-        assert.same({ { "fetch" }, { "fetch", "origin" }, { "pull" } }, calls)
+        assert.same({ { "fetch" }, { "fetch", "origin" }, { "pull" }, { "reset" } }, calls)
+    end)
+
+    it("lists Reset view settings last among the globals, in every context (§18.5)", function()
+        for _, info in ipairs({ {}, { row = plain, has_diff = true }, { row = plain, selection = true, has_diff = true },
+            { row = plain, examine = { orig = "main", examined = H } }, { remotes = { "origin" } } }) do
+            local e = palette.palette_entries(info)
+            assert.equals("reset_view", e[#e].id)
+            assert.equals("Reset view settings…", e[#e].label)
+        end
     end)
 
     it("row entries carry an op (run by the window), registry entries an action", function()
@@ -177,7 +187,7 @@ describe("palette key entries (§17.1)", function()
 
     it("commit: commit actions, globals, then grouped keys refs → view → select → other", function()
         local e = entries({ row = plain, has_diff = true })
-        assert.same({ "diff", "checkout", "checkout_examine", "fetch", "pull",
+        assert.same({ "diff", "checkout", "checkout_examine", "fetch", "pull", "reset_view",
             "key:<leader>b", "key:m", "key:V", "key:R", "key:K" }, ids(e))
         -- No branch actions; D is shown once, on Open diff.
         for _, x in ipairs(e) do
@@ -196,12 +206,12 @@ describe("palette key entries (§17.1)", function()
 
     it("commit without a diff provider: D's condition fails, so no D at all", function()
         local e = entries({ row = plain })
-        assert.same({ "checkout", "fetch", "pull", "key:<leader>b", "key:m", "key:V", "key:R", "key:K" }, ids(e))
+        assert.same({ "checkout", "fetch", "pull", "reset_view", "key:<leader>b", "key:m", "key:V", "key:R", "key:K" }, ids(e))
     end)
 
     it("branch: the branch's actions + branch keys; no commit diff / examine", function()
         local e = entries({ row = branch, has_diff = true })
-        assert.same({ "checkout", "collapse", "hide", "fetch", "pull",
+        assert.same({ "checkout", "collapse", "hide", "fetch", "pull", "reset_view",
             "key:<leader>b", "key:P", "key:m", "key:R", "key:K" }, ids(e))
         assert.equals("Checkout branch main", e[1].label)
         assert.equals("Collapse branch  (<Space>)", e[2].label) -- <Space> not repeated as a key
@@ -215,20 +225,20 @@ describe("palette key entries (§17.1)", function()
 
     it("packed line, a marker selected: only THAT marker's actions + branch keys", function()
         local e = entries({ row = packed_sel, has_diff = true })
-        assert.same({ "checkout", "expand:2", "hide:2", "fetch", "pull",
+        assert.same({ "checkout", "expand:2", "hide:2", "fetch", "pull", "reset_view",
             "key:<leader>b", "key:P", "key:<Space>", "key:m", "key:R", "key:K" }, ids(e))
         assert.same({ "Expand ◍ b", "Hide ◍ b" }, { e[2].label, e[3].label })
     end)
 
     it("packed line, no marker selected: expand / hide per marker, global keys only", function()
         local e = entries({ row = packed, has_diff = true })
-        assert.same({ "expand:1", "hide:1", "expand:2", "hide:2", "expand:3", "hide:3", "fetch", "pull",
+        assert.same({ "expand:1", "hide:1", "expand:2", "hide:2", "expand:3", "hide:3", "fetch", "pull", "reset_view",
             "key:<leader>b", "key:m", "key:R" }, ids(e))
     end)
 
     it("selection: the selection's entries + selection keys (V exits), D once", function()
         local e = entries({ row = plain, selection = true, has_diff = true })
-        assert.same({ "selection_diff", "examine_selection", "fetch", "pull",
+        assert.same({ "selection_diff", "examine_selection", "fetch", "pull", "reset_view",
             "key:<leader>b", "key:m", "key:V", "key:R" }, ids(e))
     end)
 
@@ -247,7 +257,7 @@ describe("palette key entries (§17.1)", function()
     end)
 
     it("no keys without a registry (the default snapshot)", function()
-        assert.same({ "expand:1", "hide:1", "expand:2", "hide:2", "expand:3", "hide:3", "fetch", "pull" },
+        assert.same({ "expand:1", "hide:1", "expand:2", "hide:2", "expand:3", "hide:3", "fetch", "pull", "reset_view" },
             ids(palette.palette_entries({ row = packed })))
     end)
 

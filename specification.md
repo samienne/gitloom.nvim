@@ -1694,7 +1694,8 @@ status in the window footer.
 ```
 GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
-                 message_min, label_mode, diff, working_tree, scrolloff, search }
+                 message_min, label_mode, diff, working_tree, scrolloff, search,
+                 persist }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -1743,10 +1744,8 @@ Endpoint     = Commit | "index" | "worktree"
   linear slide + survivor compaction), `"survivors"`, `"linear"`, `"straight"`
   (no lane ever moves sideways), or `"gutter"` (`straight`, plus the lane owning
   the current subject row held in a fixed column beside the message). Cycle live
-  with `C`. Like the merge style (`m`)
-  and mirroring (`M`), the live value lives on the graph's options, which are
-  rebuilt each time the graph is opened — so it **resets to the configured value
-  on reopen**.
+  with `C`. Like the other view toggles, the cycled value is persisted (§18) and
+  restored on the next open unless the configured value has changed since.
 - `mirror` — render the graph mirrored with lane 1 at the right edge of the
   graph column, nearest the message (§5.4). **Default true.** Set false for the
   conventional left-to-right layout. Purely a rendering transform; ordering and
@@ -1779,6 +1778,11 @@ Endpoint     = Commit | "index" | "worktree"
 - `pin_upstream` — when pinning a local branch, also pin its tracked upstream
   remote-tracking ref as an anchor (§6.3, §10.6). **Default true.** Set false to
   pin only the local branch.
+- `persist` — remember the view toggles (`m C M B d H S c p F i`) and each
+  repository's pin list across Neovim sessions in `stdpath("state")/gitloom.json`
+  (§18). **Default true.** Set false to neither read nor write the file. A
+  persisted toggle yields to a `setup()` value changed since it was saved (§18.3);
+  **Reset view settings** (`<C-Space>`, `:GitloomResetView`) clears it.
 - `search` — the commit-search picker (§15): `snippet` is the number of graph
   rows shown around the commit in the preview (**default `7`**, odd so the commit
   sits centered); `layout` is how the graph snippet and the commit detail are
@@ -3282,8 +3286,7 @@ operational concern, not a model rule).
 
 ### 14.8 Durable state ownership
 
-When per-repository view state is persisted (disk persistence itself is
-deferred — see §14.9), only a repository's **own host window** writes it, and only
+When per-repository view state is persisted (§18 — today the pin list), only a repository's **own host window** writes it, and only
 from that window's **root (canonical) entry**. A drilled-in instance of a
 repository (§14.7) **reads** the durable state as a seed but never writes back —
 it is mid-stack in another repository's window, not canonical. So exploring a
@@ -3291,10 +3294,8 @@ submodule update can never quietly mutate the submodule's saved layout.
 
 ### 14.9 Open / deferred
 
-- **Disk persistence** of durable view state (collapse / pin, keyed by ref name,
-  per repository, under `stdpath("state")`, one file per repository) is a
-  separate amendment. The ownership rule (§14.8) is stated now so the in-memory
-  model already reflects it.
+- **Disk persistence** of the remaining durable view state — collapse / expand
+  overrides — is deferred; the pin list and the view toggles are persisted (§18).
 - **Cold rebuild.** Hiding (`q`) retains buffers, so re-show is instant.
   Rebuilding a destroyed entry from a serialized descriptor (scope + modifiers +
   state snapshot) — to survive a full teardown or a Neovim restart — would reuse
@@ -3498,7 +3499,8 @@ ordered list, three sections:
 1. the **context** entries — the actions on what the cursor is on (§10.4: a
    commit, a branch, a selected packed marker, a packed line), or, while a §13
    selection is active, the selection's entries instead;
-2. the **global** commands gitloom runs on the repository (Return, fetch, pull);
+2. the **global** commands gitloom runs on the repository (Return, fetch, pull)
+   and **Reset view settings** (§18.5);
 3. the graph's **keys** that apply in this context (§17.1), grouped, each showing
    its key — so every keyed action is reachable (and discoverable) from here.
 
@@ -3584,6 +3586,7 @@ first read lands the per-remote entries are simply absent.
 | **Fetch** | — | `git fetch --all` |
 | **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch <remote>` |
 | **Pull** | — | `git pull --ff-only` |
+| **Reset view settings** | — | after a Reset / Cancel confirmation, clear the persisted view preferences and this repository's pin list and restore the configured values in the live graph (§18.5) |
 
 The in-place resync (§3.4) is the `R` key's registry entry (`Refresh: resync with
 the repository  (R)`, group `other`), listed with the keys — not a second command.
@@ -3630,3 +3633,107 @@ ever forces.
   re-reading.
 - If the graph window has closed by the time the job finishes, the resync is
   skipped (the next open reads the repository afresh).
+
+## 18. Persisted view state
+
+gitloom remembers how the user left the graph across Neovim sessions: the
+**view toggles** (global) and each repository's **pin list** (per repository).
+Nothing else is persisted — collapse / expand mode overrides (§10.1), the
+cursor position (§2), a filter (§16), a selection (§13) and an examine (§10.4.2)
+all stay in-memory.
+
+### 18.1 The file
+
+One JSON file, `stdpath("state") .. "/gitloom.json"`, shared by every Neovim
+instance:
+
+```json
+{
+  "version": 1,
+  "view": {
+    "mirror":        { "value": false,    "base": true },
+    "layout_policy": { "value": "gutter", "base": "compact" }
+  },
+  "repos": {
+    "C:/src/project": {
+      "pins": [ { "id": "release/2.0", "reserved": true } ],
+      "unpinned": [ "dev" ]
+    }
+  }
+}
+```
+
+### 18.2 What is persisted
+
+**Global view preferences** — written when the user changes one interactively,
+read when a graph opens:
+
+| Key | Option (§8) |
+|---|---|
+| `m` | `merge_style` |
+| `C` | `layout_policy` |
+| `M` | `mirror` |
+| `B` | `label_mode` |
+| `d` | `date_mode` |
+| `H` | `highlight` |
+| `S` | `sort_mode` |
+| `c` | `collapse_merged` |
+| `p` | `pack_markers` |
+| `F` | `panes` |
+| `i` | `show_lane_ids` |
+
+**Per-repository state**, keyed by the repository root (§2.1): the pin list
+(§10.6) — its entries `{ id, reserved }` in priority order — and the set of
+explicitly **unpinned** ids. Written whenever the list changes (`P`, every
+action of the `L` dialog, §10.6.1); read when a graph session for that root is
+created. The saved list omits what the open-time resolution re-derives anyway:
+an **unreserved** entry that is a **default anchor** at the time of saving
+(HEAD's branch, `master` / `main` / `dev`, a seeded mark) and an unreserved
+auto-pinned upstream (§6.3). So pinning a branch while on `feature/x` does not
+make `feature/x` an anchor forever after the user checks out something else;
+an unpinned default stays unpinned, and a reserved entry keeps its flag and
+place.
+
+### 18.3 Precedence
+
+Built-in defaults < `setup()` configuration < persisted. Each persisted view
+preference is stored as `{ value, base }`, where `base` is the
+**configuration-resolved** value (the user's `setup()` value, else the built-in
+default) when it was saved. On open a stored `value` is applied only when the
+current configuration-resolved value still equals its `base`; otherwise the user
+has changed their configuration since, the **configuration wins**, and the stale
+entry is ignored (and dropped on the next write). A stored value of the wrong
+type is ignored too.
+
+### 18.4 Writing
+
+- The file is read lazily, once, when it is first needed; a missing file is an
+  empty state.
+- Every write **re-reads** the file, merges the one change into it and writes
+  the result to a temporary file in the same directory, which is then renamed
+  over the original — so concurrent Neovim instances writing different keys do
+  not lose each other's changes, and a crash never leaves a half-written file.
+- A corrupt or unreadable file is ignored with **one** warning; opening the
+  graph never fails because of it. The next write replaces it.
+- Only a repository's own canonical graph writes its pin list (§14.8): a
+  drilled-in submodule frame (§14.7) and a stamped filter view (§16.5, whose pin
+  list is a private copy) read it but never write it back.
+- `persist = false` (§8) disables both reading and writing.
+
+### 18.5 Reset
+
+**Reset view settings** — a global entry of the `<C-Space>` palette (§17.2) and
+the `:GitloomResetView` command — asks for confirmation (Reset / Cancel), then:
+
+1. removes the **global view preferences** and **this repository's** pins /
+   unpinned from the file (other repositories' pin lists are kept — they are
+   per-repository state the user set up there, and are reset from their own
+   graph);
+2. restores the live session to the configuration-resolved values (the built-in
+   defaults where `setup()` sets nothing) and to the default anchors (§10.6),
+   re-sorting, re-laying out and re-rendering as the individual toggles do.
+
+`:GitloomResetView` targets the graph in the current window, else the
+repository at Neovim's cwd (its file entries are cleared even when no graph is
+open for it). Reset works with `persist = false` too: it then only restores the
+live session.

@@ -72,6 +72,10 @@ M.COMMANDS = {
         action = function(ctx, remote) ctx:run_remote("fetch", remote) end },
     { id = "pull", label = "Pull", scope = "global",
         action = function(ctx) ctx:run_remote("pull") end },
+    -- Reset (§18.5): clear the persisted view settings + this repository's pins and
+    -- restore the configured values live. Asks for confirmation itself.
+    { id = "reset_view", label = "Reset view settings…", scope = "global",
+        action = function(ctx) ctx:reset_view() end },
 }
 
 ---@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"collapse"|"expand"|"hide"

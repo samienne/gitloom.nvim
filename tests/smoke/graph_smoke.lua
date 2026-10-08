@@ -168,6 +168,46 @@ function M.run()
     step("sort-1", "S"); settle(400)
     step("sort-2", "S"); settle(400)
 
+    -- Persisted view state (§18): the toggles above wrote the (test-redirected,
+    -- see minimal_init) state file; Reset clears it and restores the live opts.
+    do
+        local persist = require("gitloom.persist")
+        local view = persist.read().view or {}
+        local function val(k) return view[k] and view[k].value end
+        if val("date_mode") ~= "relative" then fail("persist: d did not save date_mode") end
+        if val("mirror") ~= true then fail("persist: M M did not save mirror = true") end
+        if val("sort_mode") ~= "author" then fail("persist: S S did not save sort_mode = author") end
+        if not (val("merge_style") and val("merge_style").merge_on_separate_line) then
+            fail("persist: m did not save the merge style")
+        end
+        if sess then
+            focus()
+            pcall(function() sess:reset_view_now() end)
+            settle(600)
+            if persist.read().view ~= nil then fail("persist: reset left global preferences in the file") end
+            if sess.opts.date_mode ~= "absolute" or sess.opts.sort_mode ~= "topo" then
+                fail("persist: reset did not restore the configured options")
+            end
+            step("reset-view")
+            -- The pin writer (P / the L dialog): an explicit pin is stored for this
+            -- root, an unreserved default anchor is not (§18.2).
+            local defaults = sess:pin_defaults()
+            sess.view_state.pins = { { id = "smoke/explicit", reserved = true } }
+            for _, id in ipairs(defaults) do
+                table.insert(sess.view_state.pins, { id = id, reserved = false })
+            end
+            sess:save_pins()
+            local saved = persist.repo_state(persist.read(), sess.repo.root)
+            if not (#saved == 1 and saved[1].id == "smoke/explicit" and saved[1].reserved) then
+                fail("persist: save_pins stored " .. vim.inspect(saved))
+            end
+            sess:reset_view_now(); settle(400)
+            if #persist.repo_state(persist.read(), sess.repo.root) ~= 0 then
+                fail("persist: reset left this repository's pins in the file")
+            end
+        end
+    end
+
     -- Commit selection (range) walk.
     focus()
     step("select-start", "V"); step("select-walk", "jj")

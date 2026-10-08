@@ -103,7 +103,9 @@ local recent_refs = {}
 -- here, not on a ctx, so it survives closing and reopening the graph (like
 -- saved_positions; in-memory for the Neovim session). Also here rather than as its
 -- own local: this chunk is at LuaJIT's 200-local limit.
-local nav = { sessions = {}, mru = {}, examine = {} }
+-- `ctxs[root]` is the live session of a repository's own (root) graph, so
+-- `:GitloomResetView` can reach it from outside the graph (§18.5).
+local nav = { sessions = {}, mru = {}, examine = {}, ctxs = {} }
 
 function nav.valid(sess)
     return sess ~= nil and sess.host ~= nil and sess.host.buf ~= nil
@@ -1404,6 +1406,7 @@ end
 ---@field pin_upstream? boolean  pinning a local branch also pins its tracked upstream (default true); §6.3/§10.6
 ---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
+---@field persist? boolean  persist the view toggles + pin lists to stdpath("state")/gitloom.json (default true); §18
 
 ---@class GraphAttach : ListViewAttach
 ---@field host_root string  the parent repo whose host window/session receives the frame (§14)
@@ -1484,6 +1487,95 @@ local function reorder_by_hashes(ctx, hashlist)
     repo.order = new_order
 end
 
+-- The default anchors (§10.6), in order: HEAD (its branch when attached, the `HEAD`
+-- ref when detached), then `master` / `main` / `dev` and the seeded marks
+-- (§11.7.6) — each only when the ref exists. Shared by effective_pins and the
+-- §18 pin save, which leaves an unreserved default out of the stored list.
+---@return string[]
+GRAPH_HELPERS.pin_defaults = function(ctx)
+    local repo = ctx.repo
+    local defaults = {}
+    local function def(name)
+        if repo.refs[name] then defaults[#defaults + 1] = name end
+    end
+    if repo.head then def(repo.head) else def("HEAD") end
+    for _, name in ipairs({ "master", "main", "dev" }) do def(name) end
+    -- Seeded pointer marks (§11.7.6) come from a set; sort so the list is stable.
+    local seeds = {}
+    for name in pairs(ctx.seed_pin_names or {}) do seeds[#seeds + 1] = name end
+    table.sort(seeds)
+    for _, name in ipairs(seeds) do def(name) end
+    return defaults
+end
+
+-- Persist one toggled view preference (§18.2); `key` is its GraphOptions field.
+GRAPH_HELPERS.save_pref = function(ctx, key)
+    require("gitloom.persist").save_pref(ctx.opts, ctx.persist_config or {}, key)
+end
+
+-- Persist this repository's pin list after a change (§18.2). Only the repository's
+-- own root graph writes (§14.8 — never a drilled-in frame), and only from the BASE
+-- view: a stamped filter (§16.5) edits a private copy, recognisable because its
+-- `unpinned` table is not the base's (that table is only ever mutated in place).
+-- The base's `pins` is re-pointed too, since `P` and the dialog replace the table
+-- — so returning from a stamped filter restores the list just saved.
+GRAPH_HELPERS.save_pins = function(ctx)
+    local vs, base = ctx.view_state, ctx.base_view
+    if base and vs.unpinned ~= base.unpinned then return end
+    if base then base.pins = vs.pins end
+    if not ctx.persist_writable then return end
+    require("gitloom.persist").save_pins(ctx.opts, ctx.repo.root, vs.pins, vs.unpinned, GRAPH_HELPERS.pin_defaults(ctx))
+end
+
+-- Reset view settings (§18.5): confirm, then reset_view_now.
+GRAPH_HELPERS.reset_view = function(ctx)
+    require("gitloom.persist").confirm_reset(function() ctx:reset_view_now() end)
+end
+
+-- The reset itself, without the prompt: clear the persisted global preferences +
+-- this repository's pins, re-apply every persisted key's configuration-resolved
+-- value, re-sync the cycle indices, restore the default anchors, then re-sort /
+-- re-lay out / re-render as the individual toggles do.
+GRAPH_HELPERS.reset_view_now = function(ctx)
+    local persist = require("gitloom.persist")
+    if ctx.persist_writable then persist.reset(ctx.opts, ctx.repo.root) end
+    local cfg = ctx.persist_config or persist.config_values({})
+    for _, k in ipairs(persist.KEYS) do ctx.opts[k] = vim.deepcopy(cfg[k]) end
+    if ctx.pane_opts then ctx.pane_opts.layout_policy = ctx.opts.layout_policy end
+    for i, m in ipairs(MERGE_STYLES) do
+        if vim.deep_equal(m.style, ctx.opts.merge_style) then merge_style_index = i; break end
+    end
+    for i, m in ipairs(LABEL_MODES) do
+        if m.mode == ctx.opts.label_mode then label_mode_index = i; break end
+    end
+    for i, m in ipairs(SORT_MODES) do
+        if m.id == ctx.opts.sort_mode then sort_mode_index = i; break end
+    end
+    -- Pins: back to the defaults. A stamped filter's private copy is replaced too,
+    -- but the base then gets tables of its own so the copy still reads as stamped.
+    local vs, base = ctx.view_state, ctx.base_view
+    local stamped = base and vs.unpinned ~= base.unpinned
+    vs.pins, vs.unpinned = {}, {}
+    if base then
+        if stamped then base.pins, base.unpinned = {}, {} else base.pins, base.unpinned = vs.pins, vs.unpinned end
+    end
+    ctx.selection_state.index = nil
+    local keep
+    local ok, pos = pcall(vim.api.nvim_win_get_cursor, ctx:win())
+    if ok then keep = ctx:cursor_hash(pos[1]) end
+    ctx:apply_sort().next(function()
+        ctx:reflow()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.relayout() end
+        ctx:update_footer()
+        if keep then ctx:goto_hash(keep) end
+        ctx:place_cursor()
+        ctx:update_cone()
+        if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
+        ctx:update_panes()
+        vim.notify("gitloom: view settings reset", vim.log.levels.INFO)
+    end)
+end
+
 -- The effective **pin list** (§10.6): an ORDERED list of `{ id, reserved }`. The
 -- user's explicitly ordered entries (`view_state.pins`) come first, then the
 -- default anchors — HEAD, master/main/dev, the seeded marks — that are not
@@ -1498,19 +1590,7 @@ end
 ---@return PinEntry[]
 GRAPH_HELPERS.effective_pins = function(ctx)
     local repo, view_state, opts = ctx.repo, ctx.view_state, ctx.opts
-    local defaults = {}
-    local function def(name)
-        if repo.refs[name] then defaults[#defaults + 1] = name end
-    end
-    if repo.head then def(repo.head) else def("HEAD") end
-    for _, name in ipairs({ "master", "main", "dev" }) do def(name) end
-    -- Seeded pointer marks (§11.7.6) come from a set; sort so the list is stable.
-    local seeds = {}
-    for name in pairs(ctx.seed_pin_names) do seeds[#seeds + 1] = name end
-    table.sort(seeds)
-    for _, name in ipairs(seeds) do def(name) end
-
-    local pins = selectm.pin_resolve(view_state.pins, view_state.unpinned, defaults, repo.refs)
+    local pins = selectm.pin_resolve(view_state.pins, view_state.unpinned, GRAPH_HELPERS.pin_defaults(ctx), repo.refs)
     if repo.head then
         -- Attached: the `HEAD` ref is not an owner (its branch is), so an entry the
         -- user pinned while detached would be an inert row in the dialog.
@@ -2219,6 +2299,7 @@ local function h_destroy(ctx) nav.destroy(ctx.host_root) end
 local function h_merge_style(ctx)
     merge_style_index = (merge_style_index % #MERGE_STYLES) + 1
     ctx.opts.merge_style = vim.deepcopy(MERGE_STYLES[merge_style_index].style)
+    ctx:save_pref("merge_style")
     ctx:reflow()
     ctx:update_footer()
     ctx:place_cursor()
@@ -2242,6 +2323,7 @@ local function h_layout_policy(ctx)
     -- The panes hold a shallow copy of `opts` frozen at window creation, so the
     -- footer would silently keep the open-time policy and read as a pane bug.
     if ctx.pane_opts then ctx.pane_opts.layout_policy = ctx.opts.layout_policy end
+    ctx:save_pref("layout_policy")
     ctx:reflow()
     ctx:update_footer()
     if keep then ctx:goto_hash(keep) end
@@ -2251,6 +2333,7 @@ end
 -- M: toggle graph mirroring — render-only.
 local function h_mirror(ctx)
     ctx.opts.mirror = not ctx.opts.mirror
+    ctx:save_pref("mirror")
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
     ctx:update_footer()
     ctx:update_panes()
@@ -2261,6 +2344,7 @@ end
 local function h_label_mode(ctx)
     label_mode_index = (label_mode_index % #LABEL_MODES) + 1
     ctx.opts.label_mode = LABEL_MODES[label_mode_index].mode
+    ctx:save_pref("label_mode")
     ctx.selection_state.index = nil
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.relayout() end
     ctx:update_footer()
@@ -2331,6 +2415,7 @@ end
 -- d: toggle the date column — render-only.
 local function h_date(ctx)
     ctx.opts.date_mode = (ctx.opts.date_mode == "relative") and "absolute" or "relative"
+    ctx:save_pref("date_mode")
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
     ctx:place_cursor()
 end
@@ -2338,6 +2423,7 @@ end
 -- H: toggle reachability dimming (§12) — render-only.
 local function h_dim(ctx)
     ctx.opts.highlight = ctx.opts.highlight == false
+    ctx:save_pref("highlight")
     ctx:update_cone()
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
     ctx:maybe_update_panes()
@@ -2631,6 +2717,8 @@ local function h_sort(ctx)
     local ok, pos = pcall(vim.api.nvim_win_get_cursor, ctx:win())
     if ok then keep = ctx:cursor_hash(pos[1]) end
     sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
+    ctx.opts.sort_mode = SORT_MODES[sort_mode_index].id
+    ctx:save_pref("sort_mode")
     ctx:apply_sort().next(function()
         ctx:reflow()
         ctx:update_footer()
@@ -2645,6 +2733,7 @@ end
 -- c: toggle first-parent focus (§10.7) — reflow.
 local function h_focus(ctx)
     ctx.opts.collapse_merged = ctx.opts.collapse_merged == false
+    ctx:save_pref("collapse_merged")
     ctx:reflow()
     ctx:update_footer()
     ctx:place_cursor()
@@ -2653,6 +2742,7 @@ end
 -- p: toggle marker packing (§10.4) — reflow.
 local function h_pack(ctx)
     ctx.opts.pack_markers = ctx.opts.pack_markers == false
+    ctx:save_pref("pack_markers")
     ctx:reflow()
     ctx:update_footer()
     ctx:place_cursor()
@@ -3266,6 +3356,7 @@ local function h_pin(ctx)
         end
     end
     view_state.pins = pins
+    ctx:save_pins()
     ctx:reflow()
     ctx:update_footer()
     if b.follow then ctx:goto_hash(b.follow) end
@@ -3353,6 +3444,7 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
         local ok, cur = pcall(vim.api.nvim_win_get_cursor, gwin)
         local hash = ok and ctx:cursor_hash(cur[1]) or nil
         ctx.view_state.pins = pins
+        GRAPH_HELPERS.save_pins(ctx) -- direct: the dialog's test stub carries no helpers
         ctx:reflow()
         if hash then ctx:goto_hash(hash) end
         ctx:place_cursor()
@@ -3456,6 +3548,7 @@ end
 -- i: toggle the per-lane id debug column.
 local function h_laneids(ctx)
     ctx.opts.show_lane_ids = not ctx.opts.show_lane_ids
+    ctx:save_pref("show_lane_ids")
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
     ctx:update_panes()
     ctx:place_cursor()
@@ -3464,6 +3557,7 @@ end
 -- F: toggle the context panes (§6.2).
 local function h_panes(ctx)
     ctx.opts.panes = ctx.opts.panes == false
+    ctx:save_pref("panes")
     ctx:update_panes()
     ctx:place_cursor()
 end
@@ -4001,8 +4095,20 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- Likewise the default title shows the repo (§2.1); leave a caller-supplied
     -- win.title untouched (graph_title/update_footer also skip it).
     local user_title = opts and opts.win and opts.win.title
+    -- Persisted view state (§18): built-in < setup() < persisted. The
+    -- configuration-resolved value of each persisted key is taken from the
+    -- caller's own options BEFORE the merge — it is the `base` every later save
+    -- records, and what Reset restores.
+    local persist_config = require("gitloom.persist").config_values(opts)
     ---@type GraphOptions
     opts = vim.tbl_deep_extend("force", defaults, opts or {})
+    if require("gitloom.persist").enabled(opts) then
+        require("gitloom.persist").overlay(opts, persist_config, require("gitloom.persist").load().view)
+    end
+    -- Sync the merge-style cycle to the resolved style so `m` advances from it.
+    for i, m in ipairs(MERGE_STYLES) do
+        if vim.deep_equal(m.style, opts.merge_style) then merge_style_index = i; break end
+    end
     if not user_footer then
         opts.win.footer = footer_text(opts.mirror)
     end
@@ -4069,6 +4175,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field remotes? string[]     `git remote` names for the palette (§17.1); nil until the first read lands
     ---@field remote_busy? string   the palette fetch / pull, examine or Return running now (its label), nil when idle (§17.3, §10.4.2)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
+    ---@field persist_config table<string, any>  configuration-resolved value of each persisted key: the save base + Reset target (§18.3/§18.5)
+    ---@field persist_writable boolean  this session writes its repository's pin list (a root graph, not a drilled-in frame; §14.8/§18.4)
     --- == debounce state (Phase B4) ==
     ---@field reflow_gen? integer  async-reflow generation (§10.5): a newer reflow
     ---                           bumps it and the in-flight one drops itself
@@ -4118,6 +4226,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field resync fun(self:GraphCtx, silent:boolean?, follow:{ note?: string }?)
     ---@field palette fun(self:GraphCtx)  the command palette (§17)
     ---@field key_registry fun(self:GraphCtx): GraphKey[]  the key registry `GRAPH_KEYS` (§17.1)
+    ---@field pin_defaults fun(self:GraphCtx): string[]  the default anchors in order (§10.6)
+    ---@field save_pref fun(self:GraphCtx, key: string)  persist one toggled view preference (§18.2)
+    ---@field save_pins fun(self:GraphCtx)  persist this repository's pin list (§18.2/§18.4)
+    ---@field reset_view fun(self:GraphCtx)  confirm, then reset_view_now (§18.5)
+    ---@field reset_view_now fun(self:GraphCtx)  clear the persisted state + restore the configured view (§18.5)
     ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
     ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
@@ -4189,6 +4302,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- two into the live list and `ctx:effective_pinned()` reduces it to the anchor
     -- set, which generalises the single trunk of §10.7.
     local view_state = { cone = nil, modes = {}, effective = {}, pins = {}, unpinned = {} }
+    -- The repository's persisted pin list (§18.2) seeds the session.
+    view_state.pins, view_state.unpinned = require("gitloom.persist").restore_pins(opts, root)
 
     -- The effective anchor set (§10.6). Pinned by default: the current branch
     -- (HEAD) and the common trunks `master`/`main`/`dev` when present. The user's
@@ -4311,6 +4426,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- private copy into view_state and restores these on exit, so the base's
         -- collapse/pin are provably untouched (no per-change bookkeeping).
         base_view = { modes = view_state.modes, pins = view_state.pins, unpinned = view_state.unpinned },
+        -- §18: the configuration-resolved persisted keys (save base + Reset target),
+        -- and whether this session may write its pin list (a root graph — never a
+        -- drilled-in frame, §14.8).
+        persist_config = persist_config,
+        persist_writable = attach == nil,
         win = gwin,
     }
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
@@ -4323,6 +4443,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- guessing at it from the buffer -- which, without a UI, holds no rendered
     -- text at all (the listview draws through a decoration provider).
     M._internal.ctx = ctx
+    if not attach then nav.ctxs[root] = ctx end
 
 
     -- Re-establish gitloom's owned row order (§3.1): run order_commits over the
@@ -6435,6 +6556,31 @@ function M.open(folder, opts, focus_hash, seed_refs)
     local lv, on_show = open_graph(folder, opts, focus_hash, seed_refs)
     if lv and lv.win then nav.register(root, lv.win, on_show) end
     return lv
+end
+
+--- Reset view settings (`:GitloomResetView`, spec §18.5): the graph in the
+--- current window, else the repository at Neovim's cwd. With a live graph for it
+--- this is the palette entry (confirm, clear, restore live); with none, it asks the
+--- same question and clears that repository's entries + the global preferences
+--- from the file.
+---@param opts GraphOptions?
+function M.reset_view(opts)
+    local cur = vim.api.nvim_get_current_buf()
+    local target
+    for _, c in pairs(nav.ctxs) do
+        if c.buf == cur and nav.valid(nav.sessions[c.host_root]) then target = c end
+    end
+    local root = target and target.repo.root or resolve_root(nil)
+    if not target then
+        local c = nav.ctxs[root]
+        if c and nav.valid(nav.sessions[c.host_root]) then target = c end
+    end
+    if target then return target:reset_view() end
+    local persist = require("gitloom.persist")
+    persist.confirm_reset(function()
+        persist.reset(opts or {}, root)
+        vim.notify("gitloom: view settings reset", vim.log.levels.INFO)
+    end)
 end
 
 --- Return to the most-recently-shown host window (`<leader>wg`, §14) — the
