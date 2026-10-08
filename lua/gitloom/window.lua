@@ -1376,6 +1376,8 @@ end
 
 ---@class Icons
 ---@field merge? string
+---@field head? string  HEAD's node marker (default "●"; "" off); §5.3
+---@field pin? string   the pinned-anchor label icon (default "⚲"; "" off); §6/§10.6
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
@@ -1552,6 +1554,14 @@ local function effective_pinned(ctx)
     return selectm.pin_ids(ctx:effective_pins())
 end
 GRAPH_HELPERS.effective_pinned = effective_pinned
+
+-- The pin set the label renderers are handed (§6/§10.6): the effective anchors +
+-- `icons.pin`. Resolved fresh on every call (it is a handful of entries), so a
+-- label can never show a stale pin after `P`, the dialog, or a resync.
+---@return PinMarks
+GRAPH_HELPERS.pin_marks = function(ctx)
+    return { set = effective_pinned(ctx), icon = ctx.opts.icons and ctx.opts.icons.pin }
+end
 
 -- node hash → repo.display index, and packed-head marker locations (§13.4).
 local function build_display_index(ctx)
@@ -3981,6 +3991,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         },
         icons = {
             --merge = "M",
+            head = "●", -- HEAD's node marker (§5.3); "" turns it off
+            pin = "⚲", -- the pinned-anchor label icon (§6/§10.6); "" turns it off
         },
     }
     -- The default footer is computed before opts.mirror is resolved; unless the
@@ -4071,6 +4083,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field open_nbatch? integer   streamed batches seen so far
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
+    ---@field pin_marks fun(self:GraphCtx):PinMarks
     ---@field build_display_index fun(self:GraphCtx)
     ---@field order_at fun(self:GraphCtx, line:integer):table?,integer,integer
     ---@field apply_sort fun(self:GraphCtx):Future
@@ -4454,7 +4467,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         end,
         display = function(item)
             return display_item(opts, item, selection_state, view_state.cone,
-                sel.active and sel.cursor or nil, repo.head, ctx.filter)
+                sel.active and sel.cursor or nil, repo.head, ctx.filter, ctx:pin_marks())
         end,
         on_controller = function(controller)
             -- Refs first: they create sparse Commit placeholders with refs
@@ -4968,6 +4981,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                                    emphasis, incone)
             local lines, marks = {}, {}
             local pal = opts.palette or {}
+            local pins = ctx:pin_marks() -- the pin icon on pinned labels (§6/§10.6)
             -- Ref-label highlight by kind, matching the main view's ref colours.
             local label_hl = { head = pal.head, branch = pal.branch, remote = pal.remote, tag = pal.tags,
                 worktree = pal.worktree or pal.tags }
@@ -5009,7 +5023,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local lit = node_lit(c)
                 -- Ref labels in the SAME colours as the main view (HEAD, branches, tags);
                 -- dimmed toward the background on an out-of-cone row (§6.2).
-                for _, seg in ipairs(c and pane_labels(c, repo.head) or {}) do
+                for _, seg in ipairs(c and pane_labels(c, repo.head, pins) or {}) do
                     text = text .. " "
                     local s = #text
                     text = text .. seg.text
@@ -6186,7 +6200,7 @@ local function place_cursor(ctx)
     if ctx.sel.active then
         local item = ctx:order_at(line)
         if item and item.type == "markers" and ctx.sel.cursor then
-            for _, u in ipairs(marker_units(item)) do
+            for _, u in ipairs(marker_units(item, ctx:pin_marks())) do
                 if u.marker == ctx.sel.cursor then
                     local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
                     local mcol = ref_byte_col(text, u.text)
@@ -6207,7 +6221,7 @@ local function place_cursor(ctx)
     if item and item.type == "markers" then
         local col = nil
         if ctx.selection_state.commit == item and ctx.selection_state.index then
-            local u = marker_units(item)[ctx.selection_state.index]
+            local u = marker_units(item, ctx:pin_marks())[ctx.selection_state.index]
             if u then
                 local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
                 col = ref_byte_col(text, u.text)
@@ -6222,7 +6236,7 @@ local function place_cursor(ctx)
     if not item or not item.commit then return end
     local col = nil
     if ctx.selection_state.commit == item.commit and ctx.selection_state.index then
-        local texts = decoration_texts(item.commit)
+        local texts = decoration_texts(item.commit, nil, ctx:pin_marks())
         if ctx.selection_state.index <= #texts then
             local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
             col = ref_byte_col(text, texts[ctx.selection_state.index])

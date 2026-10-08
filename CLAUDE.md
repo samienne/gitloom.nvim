@@ -155,7 +155,17 @@ Coverage:
   label; the caller's `taken` set is not mutated), and the new kind flowing
   through `group_refs` (its own `worktrees` bucket) / `decoration_texts` +
   `pane_labels` (`{wt:<dir>}`, after the tags) / `ref_decoration_index` /
-  `selected_owner_ids` / `owners_from_refs`
+  `selected_owner_ids` / `owners_from_refs`; plus the **pin icon** (§6/§10.6):
+  `decoration_texts` / `pane_labels` / `marker_units` given a `PinMarks` prefix a
+  pinned ref's label inside its bracket (branch group via its local or any listed
+  remote ref, tag, worktree), never HEAD's label (attached or detached), and
+  `icon = ""` turns it off
+- `tests/head_marker_spec.lua` — HEAD's node marker (§5.3) through the real
+  `get_column_chars`: `●` in `palette.head` for the commit carrying the `head` ref
+  (attached / detached), overriding tip / root / the merge icon; a §4.2 virtual
+  node keeps `◌`; a collapsed head holding HEAD keeps `◍` in the HEAD colour; an
+  out-of-cone HEAD node dims; `icons.head` honoured and `""` turns it off; and a
+  laid-out graph marks exactly HEAD's row, mirrored or not
 - `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
   `bump_recent` (the session MRU list — newest first, deduped, input not mutated),
   `ref_picker_items` (name → Ref registry → ordered picker entries: session-
@@ -231,7 +241,9 @@ Coverage:
   whole labels + a trailing `+N` (overflow hidden), selecting the overflowed ref
   scrolls it fully into view with the cursor target (`ref_byte_col`) resolving to
   it, and a single over-long selected ref truncates cleanly with `…` within the
-  window (never spilling past the edge); plus the **packed marker row** (§10.4):
+  window (never spilling past the edge); the **pin icon** is part of the drawn label
+  (windowed into view when selected, found by `ref_byte_col`, never on HEAD's
+  label); plus the **packed marker row** (§10.4):
   its labels left-align after the graph (`line_right_align = "left"`) but window the
   same way around the selected marker (`+N` overflow, selected scrolled into view)
 - `tests/label_mode_spec.lua` — the dual label mode's continuation graph
@@ -759,6 +771,7 @@ only** (not the public API): `classify_ref`, `group_refs`, `parse_worktrees` /
 `wt:<dir>` labelling and skip rules; §3.2), `bump_recent` /
 `ref_picker_items` (the `<leader>b` ref-picker MRU + ordered entries; §2),
 `ref_decoration_index` (picked ref → decoration index for pre-selection; §2),
+`marker_units` (a packed row's selectable marker labels; §10.4),
 `display_item` (the per-row renderer — exposed for the §6 ref-window integration
 test), `decoration_texts`,
 `move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`

@@ -659,3 +659,60 @@ describe("pane_labels — worktree labels (§3.2/§6.2)", function()
         assert.same({ "branch", "tag", "worktree" }, k)
     end)
 end)
+
+describe("pin icon on pinned labels (§6/§10.6)", function()
+    local pane_labels = internal.pane_labels
+    local marker_units = internal.marker_units
+    local function ref(kind, name, extra)
+        local r = { kind = kind, name = name }
+        for k, v in pairs(extra or {}) do r[k] = v end
+        return r
+    end
+    local PINS = { set = { dev = true, ["origin/rel"] = true, v1 = true, ["wt:rev"] = true, main = true },
+        icon = "⚲" }
+
+    it("prefixes a pinned ref's label inside its bracket; unpinned labels are untouched", function()
+        local commit = { refs = {
+            ref("local", "dev"), ref("remote", "origin/dev"),
+            ref("local", "feat"),
+            ref("tag", "v1"), ref("tag", "v2"),
+            ref("worktree", "wt:rev"),
+        } }
+        assert.same({ "(⚲dev ↑origin)", "(feat)", "[⚲v1]", "[v2]", "{⚲wt:rev}" },
+            decoration_texts(commit, nil, PINS))
+        -- No pin set → today's labels.
+        assert.same({ "(dev ↑origin)", "(feat)", "[v1]", "[v2]", "{wt:rev}" }, decoration_texts(commit))
+    end)
+
+    it("marks a group when only one of its remote refs is pinned (auto-pinned upstream)", function()
+        local commit = { refs = { ref("local", "rel"), ref("remote", "origin/rel") } }
+        assert.same({ "(⚲rel ↑origin)" }, decoration_texts(commit, nil, PINS))
+        -- A remote-only group is marked by its remote ref, never by a same-named local elsewhere.
+        assert.same({ "(⚲rel ↑origin)" }, decoration_texts({ refs = { ref("remote", "origin/rel") } }, nil, PINS))
+        assert.same({ "(dev ↑up)" }, decoration_texts({ refs = { ref("remote", "up/dev") } }, nil, PINS))
+    end)
+
+    it("never marks HEAD's label, attached or detached, though HEAD's branch is pinned", function()
+        local attached = { refs = { ref("local", "main"), ref("local", "dev"), ref("head", "HEAD", { branch = "main" }) } }
+        assert.same({ "(HEAD → main)", "(⚲dev)" }, decoration_texts(attached, nil, PINS))
+        local segs = pane_labels({ refs = { ref("local", "dev"), ref("head", "HEAD") } }, nil, PINS)
+        assert.same("HEAD", segs[1].text)
+        assert.same("(⚲dev)", segs[2].text)
+    end)
+
+    it("icon \"\" turns it off", function()
+        local commit = { refs = { ref("local", "dev") } }
+        assert.same({ "(dev)" }, decoration_texts(commit, nil, { set = PINS.set, icon = "" }))
+    end)
+
+    it("pane labels and packed marker units carry the same icon", function()
+        local segs = pane_labels({ refs = { ref("local", "dev"), ref("tag", "v2") } }, nil, PINS)
+        assert.same({ "(⚲dev)", "[v2]" }, { segs[1].text, segs[2].text })
+        local item = { type = "markers", markers = {
+            { hash = "x", collapsed = true, count = 2, refs = { ref("local", "dev") } },
+            { hash = "y", collapsed = true, count = 3, refs = { ref("local", "feat") } },
+        } }
+        local units = marker_units(item, PINS)
+        assert.same({ "(⚲dev)", "(feat)" }, { units[1].text, units[2].text })
+    end)
+end)

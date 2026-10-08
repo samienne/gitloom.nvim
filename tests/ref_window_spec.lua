@@ -46,12 +46,12 @@ describe("windowed right-ref overflow (integration, §6)", function()
     end)
 
     -- Render `item` with the given selection state and return the first buffer line.
-    local function render(item, sel_state)
+    local function render(item, sel_state, pins)
         local ctrl
         local inst = listview.open({
             win = {}, flex = 4, message_min = OPTS.message_min, overflow_hl = "R",
             line_count = function() return 1 end,
-            display = function(d) return gi.display_item(OPTS, d, sel_state, nil) end,
+            display = function(d) return gi.display_item(OPTS, d, sel_state, nil, nil, nil, nil, pins) end,
             on_controller = function(c) ctrl = c end,
         })
         ctrl.insert({ item }, 1)
@@ -137,5 +137,29 @@ describe("windowed right-ref overflow (integration, §6)", function()
         assert.is_not_nil(line:find("(lauri/embed_2d)", 1, true)) -- selected scrolled into view
         assert.is_not_nil(line:match("%+%d"))                     -- earlier markers hidden left
         assert.is_nil(line:find("(lauri/on_frame)", 1, true))
+    end)
+
+    -- The pin icon (§6/§10.6) is part of the label text: the windowing, the
+    -- selection highlight and the cursor target all see the label as drawn.
+    it("draws the pin icon on pinned labels and the cursor target still finds them", function()
+        local pins = { set = { delta = true, alpha = true }, icon = "⚲" }
+        local item, commit = commit_item({ "alpha", "beta", "gamma", "delta" })
+        local line = render(item, { commit = nil, index = nil }, pins)
+        assert.is_not_nil(line:find("(⚲alpha)", 1, true))
+        assert.is_nil(line:find("(⚲beta)", 1, true))
+        local sel = render(item, { commit = commit, index = 4 }, pins)
+        assert.is_not_nil(sel:find("(⚲delta)", 1, true)) -- selected, windowed into view
+        local texts = gi.decoration_texts(commit, nil, pins)
+        assert.equals("(⚲delta)", texts[4])
+        assert.is_not_nil(gi.ref_byte_col(sel, texts[4]))
+    end)
+
+    it("never puts the pin icon on HEAD's label", function()
+        local pins = { set = { main = true }, icon = "⚲" }
+        local item, commit = commit_item({ "main" })
+        commit.refs[#commit.refs + 1] = { kind = "head", name = "HEAD", branch = "main" }
+        local line = render(item, { commit = nil, index = nil }, pins)
+        assert.is_not_nil(line:find("(HEAD → main)", 1, true))
+        assert.is_nil(line:find("⚲", 1, true))
     end)
 end)

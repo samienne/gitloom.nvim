@@ -776,6 +776,21 @@ node-less junction, §10.4). Commit markers:
 | `◌`    | working-tree commit (a virtual staged/unstaged/untracked node, §4.2) |
 | `◍`    | collapsed head (a contracted region, §10.3) |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
+| `●`    | the commit **HEAD** points at, attached or detached (`icons.head`), in the HEAD colour |
+
+**HEAD's node** is drawn `●` (`icons.head`, §8) in the **HEAD colour**
+(`palette.head`, the colour of HEAD's label, §6) instead of the marker its shape
+would pick (`○`, `◉`, `◎` or the merge icon) — "you are here" in the graph
+itself, not only in the labels. The renderer recognises HEAD's commit by the
+`head` ref it carries (§3.2), so a resync or checkout (§3.4, §10.4.1) moves the
+marker with no extra state. Precedence: a working-tree node (§4.2) keeps `◌`;
+when HEAD's commit is folded into a collapsed `◍` head (§10.3) or a packed marker
+(§10.4), that node keeps `◍` but takes the HEAD colour. Only the glyph and its
+colour change — the cell stays one column wide, so the layout is untouched — and
+out-of-cone dimming (§12) applies to it as to any node. The mirror transform
+(§5.4), the context panes (§6.2) and the commit-search snippet (§15.3) mark it
+the same way. Setting `icons.head = ""` turns the marker off (the ordinary glyph
+and lane colour).
 
 ### 5.4 Mirroring
 
@@ -1359,7 +1374,20 @@ once, followed by the remotes that also point at this commit, as
 (the HEAD colour when it is the current branch) and dimmed when the group is
 remote-only. A local branch with no matching remotes is just `(name)`. This
 keeps the common case (a branch plus its remote-tracking copies all at one
-commit) from repeating the name per remote. A local branch that **tracks an
+commit) from repeating the name per remote. A label whose ref is a **pinned
+anchor** (§10.6 — the effective pin set, so the default anchors `master` / `main`
+/ `dev` and an auto-pinned upstream count too) opens with the **pin icon**
+(`icons.pin`, default `⚲`, §8) inside its bracket: `(⚲dev)`,
+`(⚲release/2.1 ↑origin)`, `[⚲v1.0]`, `{⚲wt:review}`. A branch group is marked
+when any ref in it is pinned (its local branch, or one of the listed
+`remote/name` refs). **HEAD's label never carries it** — neither
+`(HEAD → name …)` nor a detached `HEAD` — although HEAD (or its branch) is always
+an anchor: HEAD is already marked by its first place and colour. The icon is part
+of the label's text, so the width budget, the `+N` windowing, the `h`/`l`
+selection and the cursor parking (§2) all measure the label as drawn; packed
+marker labels (§10.4) and the context panes' labels (§6.2) carry it too. It
+follows the pin set live (`P`, the dialog §10.6.1, a resync), and
+`icons.pin = ""` turns it off. A local branch that **tracks an
 upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
 §6.3.
 
@@ -1705,6 +1733,9 @@ Endpoint     = Commit | "index" | "worktree"
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
+- `icons` — glyph overrides: `merge` (the folded merge marker, §5.3; unset by
+  default), `head` (HEAD's node, §5.3; default `●`) and `pin` (the pinned-anchor
+  label icon, §6; default `⚲`). `""` turns `head` / `pin` off.
 - `sort_mode` — the initial **row sort mode** (§3.1): `"topo"` (default,
   gitloom's own order reproducing git's `--topo-order`), `"date"`, or `"author"`.
   Cycle live with `S`.
@@ -2194,6 +2225,10 @@ so the checked-out commit is always a normal, visible row — never folded into 
   (`P`, the dialog) suppresses the default like any other. While HEAD is on a
   branch the `HEAD` ref is not an owner (it duplicates the branch's), so an entry
   for it is not part of the resolved list then.
+
+Every pinned ref's label shows the **pin icon** (`⚲`, `icons.pin`; §6), so the
+anchor set is visible on the graph itself — except HEAD's label, which is
+already singled out.
 
 **The pinned branches are an ordered list, not a set.** Each entry is a ref
 owner id plus one flag, **reserved** (§10.6.2) — so the state is *one* list:

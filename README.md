@@ -193,7 +193,9 @@ commit's history — no ref needed, so they work for ref-less regions too
   cursor where it was.
 - **HEAD always reads as `HEAD`** and its label comes first on its row, so the
   `+N` overflow never hides it: `(HEAD → main …)` on a branch, a bare `HEAD` when
-  detached. The window title shows the branch, or `detached @<short>`.
+  detached. The window title shows the branch, or `detached @<short>`. In the
+  graph itself HEAD's commit is drawn `●` in the HEAD colour (`icons.head`;
+  a `◍` head that folded HEAD in keeps `◍` but takes the colour).
 - `<CR>` examines: it opens the commit view directly (a head's tip on a
   collapsed head or packed marker).
 - `h`/`l` selects a ref (or a marker on a packed line) for the toggle/palette to
@@ -217,7 +219,9 @@ a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
 (§10.6). Pinning a local branch also pins its **tracked upstream** (so both lanes
 stay in full and a divergence is drawn rather than the remote collapsing);
-disable with `pin_upstream = false`.
+disable with `pin_upstream = false`. Every pinned branch's label carries a pin
+icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except HEAD's own label
+(`icons.pin`; `""` turns it off).
 
 Press `L` for the **pinned-branches dialog** — the anchors in priority order,
 where they are managed together:
@@ -479,6 +483,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     },
     icons = {
         -- merge = "M",
+        head = "●",          -- HEAD's node marker (§5.3); "" = off
+        pin = "⚲",           -- pinned-anchor label icon (§6/§10.6); "" = off
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     layout_policy = "compact", -- lane placement (§5.6); cycle with C:

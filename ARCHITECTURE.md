@@ -1689,9 +1689,17 @@ real line, so the cursor sits physically on it) and on the message on the messag
 row. The `CursorMoved` handler pre-selects index `1` when it lands on a labelled
 commit's label row.
 
-`decoration_texts(commit)` is the single source for the decoration strings
-(branch groups then tags), so `display_item` (rendering + the `palette.selected`
-highlight) and the cursor target use byte-identical text. `place_cursor` parks
+`decoration_texts(commit, head_branch, pins)` is the single source for the
+decoration strings (branch groups then tags), so `display_item` (rendering + the
+`palette.selected` highlight) and the cursor target use byte-identical text.
+`pins` is a `PinMarks { set, icon }` — the effective anchor ids plus `icons.pin`
+— that the window resolves (`ctx:pin_marks()`, fresh per call) and hands to
+`display_item` / `pane_labels` / `marker_units` / `place_cursor`, so the pin icon
+(§6) is part of the label text everywhere a label is measured; the renderer never
+reads the session. HEAD's node marker (§5.3) needs no such argument:
+`get_column_chars` recognises HEAD's commit by the `head` ref in its `refs`
+(`render.has_head_ref`), which a collapsed head aggregates from its region and a
+resync re-binds. `place_cursor` parks
 the cursor: for a selected ref it finds the decoration in the rendered line via
 `ref_byte_col` (refs are pinned to the right edge, so their column is not
 fixed); otherwise it parks at the message via `controller.col_offset(line,

@@ -139,6 +139,41 @@ end
 
 -- ── Ref decorations (specification.md §6) ───────────────────────────────────
 
+--- The pin set a label render is given (§6/§10.6): the **effective** pinned ref
+--- ids (ref names, as `repo.refs` keys them — so the default anchors and an
+--- auto-pinned upstream are in it) and the icon to prefix a pinned label with.
+--- Passed in by the caller so the renderer stays pure; nil = no pin icons.
+---@class PinMarks
+---@field set table<string, boolean>  pinned ref ids
+---@field icon? string  the label prefix (default "⚲"; "" turns it off)
+
+--- The icon for a pinned ref name, or "" (§6).
+---@param pins PinMarks?
+---@param name string
+---@return string
+function M.name_pin(pins, name)
+    if not (pins and pins.set and pins.set[name]) then return "" end
+    return pins.icon or "⚲"
+end
+
+--- The icon for a branch group (§6): marked when its local branch or any of its
+--- listed `remote/name` refs is pinned. HEAD's group (`current`) never is — HEAD
+--- is already singled out by its place and colour.
+---@param pins PinMarks?
+---@param b RefGroup
+---@return string
+function M.group_pin(pins, b)
+    if b.current or not (pins and pins.set) then return "" end
+    -- The bare name is a ref only when a local exists (or the group is a
+    -- malformed remote shown raw) — a remote-only group must not be marked by a
+    -- same-named local branch sitting elsewhere.
+    if (b.has_local or #b.remotes == 0) and pins.set[b.name] then return pins.icon or "⚲" end
+    for _, r in ipairs(b.remotes) do
+        if pins.set[r .. "/" .. b.name] then return pins.icon or "⚲" end
+    end
+    return ""
+end
+
 --- The plain text of each selectable ref decoration on a commit, in selection
 --- order (branch groups — the current branch's `(HEAD → name)` first — then tags,
 --- then linked-worktree labels §3.2). The single source of truth so the rendered
@@ -146,24 +181,25 @@ end
 --- HEAD's bare `HEAD` is not selectable, so it is not listed here.
 ---@param commit { refs: Ref[] }?   only the ref list is read
 ---@param head_branch? string  fallback current branch when the head ref does not name it
+---@param pins? PinMarks  the effective pin set + icon (§6/§10.6); nil = no pin icons
 ---@return string[]
-function M.decoration_texts(commit, head_branch)
+function M.decoration_texts(commit, head_branch, pins)
     local g = git.group_refs(commit and commit.refs or {}, head_branch)
     local out = {}
     for _, b in ipairs(g.branches) do
-        local t = "(" .. (b.current and git.HEAD_ARROW or "") .. b.name
+        local t = "(" .. (b.current and git.HEAD_ARROW or "") .. M.group_pin(pins, b) .. b.name
         if #b.remotes > 0 then
             t = t .. " ↑" .. table.concat(b.remotes, ",")
         end
         out[#out + 1] = t .. git.track_label(b.track) .. ")"
     end
     for _, tag in ipairs(g.tags) do
-        out[#out + 1] = "[" .. tag .. "]"
+        out[#out + 1] = "[" .. M.name_pin(pins, tag) .. tag .. "]"
     end
     -- A worktree label already carries its `wt:` stem (§4.1); the braces are the
     -- kind bracket, matching ( ) for branches and [ ] for tags.
     for _, wt in ipairs(g.worktrees) do
-        out[#out + 1] = "{" .. wt .. "}"
+        out[#out + 1] = "{" .. M.name_pin(pins, wt) .. wt .. "}"
     end
     return out
 end
@@ -177,8 +213,9 @@ end
 --- is the fallback for a ref list that does not carry it.
 ---@param commit { refs: Ref[] }?
 ---@param head_branch string?  -- the current branch (coloured as HEAD); nil when detached
+---@param pins? PinMarks  the pin set + icon (§6/§10.6); nil = no pin icons
 ---@return { text: string, kind: string, hl: string? }[]
-function M.pane_labels(commit, head_branch)
+function M.pane_labels(commit, head_branch, pins)
     local g = git.group_refs(commit and commit.refs or {}, head_branch)
     -- Per-ref colour override (§11.7.6): a tag with `hl` (a pointer mark) keeps
     -- its colour in the panes too, so the new/old labels match the main view.
@@ -190,16 +227,16 @@ function M.pane_labels(commit, head_branch)
     -- Detached HEAD: no branch to colour, so show the bare HEAD marker.
     if g.head and not g.current then out[#out + 1] = { text = "HEAD", kind = "head" } end
     for _, b in ipairs(g.branches) do
-        local t = "(" .. (b.current and git.HEAD_ARROW or "") .. b.name
+        local t = "(" .. (b.current and git.HEAD_ARROW or "") .. M.group_pin(pins, b) .. b.name
         if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
         -- The current branch takes the HEAD colour; others their own kind.
         out[#out + 1] = { text = t .. ")", kind = b.current and "head" or (b.has_local and "branch" or "remote") }
     end
     for _, tag in ipairs(g.tags) do
-        out[#out + 1] = { text = "[" .. tag .. "]", kind = "tag", hl = hl_by_name[tag] }
+        out[#out + 1] = { text = "[" .. M.name_pin(pins, tag) .. tag .. "]", kind = "tag", hl = hl_by_name[tag] }
     end
     for _, wt in ipairs(g.worktrees) do
-        out[#out + 1] = { text = "{" .. wt .. "}", kind = "worktree" }
+        out[#out + 1] = { text = "{" .. M.name_pin(pins, wt) .. wt .. "}", kind = "worktree" }
     end
     return out
 end
@@ -208,11 +245,12 @@ end
 --- marker, its text being the marker's ref decoration(s) or a "(N)" count when
 --- it carries no ref. Used for rendering, `h`/`l` selection, and `<CR>` expand.
 ---@param item OrderItem  -- a type == "markers" item
+---@param pins? PinMarks  the pin set + icon (§6/§10.6); nil = no pin icons
 ---@return { marker: table, text: string }[]
-function M.marker_units(item)
+function M.marker_units(item, pins)
     local units = {}
     for _, m in ipairs(item.markers or {}) do
-        local decos = M.decoration_texts(m)
+        local decos = M.decoration_texts(m, nil, pins)
         local text = (#decos > 0) and table.concat(decos, " ") or ("(" .. (m.count or 0) .. ")")
         units[#units + 1] = { marker = m, text = text }
     end
@@ -318,6 +356,18 @@ local function top_lane(segs, emphasis, is_node, own_lane_up)
     return segs[1]
 end
 M.top_lane = top_lane
+
+--- Whether `commit` is the one HEAD points at (§5.3): it carries the `head` ref
+--- (attached or detached, §3.2). Data the renderer is already handed, so a resync
+--- or checkout moves the marker with no extra state.
+---@param commit { refs: Ref[]? }?
+---@return boolean
+function M.has_head_ref(commit)
+    for _, r in ipairs((commit and commit.refs) or {}) do
+        if r.kind == "head" then return true end
+    end
+    return false
+end
 
 --- Mirror a row's cells for right-aligned rendering (specification.md §5.4).
 --- Reverses the column order (so lane 1 becomes the rightmost column, nearest
@@ -447,6 +497,14 @@ function M.get_column_chars(opts, columns, emphasis)
         end
 
         local char = " "
+        -- HEAD's node (§5.3): the commit carrying the `head` ref (attached or
+        -- detached — a collapsed head aggregates its region's refs, so one folding
+        -- HEAD in carries it too) draws `icons.head` in the HEAD colour. A
+        -- working-tree node keeps ◌; a ◍ marker keeps its glyph but takes the colour.
+        local head_icon = opts.icons and opts.icons.head
+        if head_icon == nil then head_icon = "●" end
+        local is_head = is_node and head_icon ~= "" and not track.commit.virtual
+            and M.has_head_ref(track.commit)
         -- Colour (and dim state) from the Column's "top" Segment (§5): the
         -- Segment whose edge colours the glyph (a highlighted edge wins, but
         -- only with emphasis — so the picture is unchanged when it is off).
@@ -461,6 +519,7 @@ function M.get_column_chars(opts, columns, emphasis)
             -- the marker anchors its ref and signals the fold (message stays blank).
             char = track.commit.virtual and "◌" or
                 (track.commit.collapsed or (track.commit.junction and opts.junction_markers ~= false)) and "◍" or
+                is_head and head_icon or
                 (#track.commit.parents == 0) and "◎" or
                 not opts.merge_style.merge_on_separate_line and (#track.commit.parents > 1) and opts.icons.merge or
                 (#track.commit.children == 0) and "◉" or "○"
@@ -540,6 +599,7 @@ function M.get_column_chars(opts, columns, emphasis)
             cell_active = not color_seg or seg_hl(color_seg)
         end
         local cell_hl = get_highlight(track_color)
+        if is_head and track.override == nil and opts.palette.head then cell_hl = opts.palette.head end
         if not cell_active then cell_hl = M.dim_hl(opts, cell_hl) end
         result = compose({ result, highlight_text(char, cell_hl) })
 
@@ -719,8 +779,10 @@ end
 ---@param match? { query: string, current?: string }  the active filter-search (§16.7):
 ---  highlight the matched substring in a commit's message (`palette.search`), brighter
 ---  (`IncSearch`) on the current match (`current` = its hash); nil when not filtering
+---@param pins? PinMarks  the effective pin set + icon: a pinned ref's label is drawn
+---  with the pin icon (§6/§10.6); nil = no pin icons
 ---@return DisplayElement
-function M.display_item(opts, item, selection_state, cone, sel_cursor, head_branch, match)
+function M.display_item(opts, item, selection_state, cone, sel_cursor, head_branch, match, pins)
     local palette = opts.palette
 
     -- The 1-based decoration index selected on this row, or nil. Selection is
@@ -762,7 +824,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- with a width budget and a "+N" overflow marker.
     local get_ref_items = function(commit)
         local g = git.group_refs(commit.refs, head_branch)
-        local texts = M.decoration_texts(commit, head_branch) -- same order; shared with the cursor target
+        local texts = M.decoration_texts(commit, head_branch, pins) -- same order + text; shared with the cursor target
         local items = {}
         -- Per-ref colour override (§11.7.6): a tag carrying `hl` — the submodule
         -- new/old **pointer marks**, injected as refs so they pin / show in the
@@ -781,7 +843,8 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
                 local name_hl = b.current and palette.head or (b.has_local and palette.branch or palette.remote)
-                local segs = { rh("(" .. (b.current and git.HEAD_ARROW or "") .. b.name, name_hl) }
+                local segs = { rh("(" .. (b.current and git.HEAD_ARROW or "") .. M.group_pin(pins, b) .. b.name,
+                    name_hl) }
                 if #b.remotes > 0 then
                     segs[#segs + 1] = rh(" ↑" .. table.concat(b.remotes, ","), palette.remote)
                 end
@@ -801,7 +864,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                items[#items + 1] = rh("[" .. t .. "]", hl_by_name[t] or palette.tags)
+                items[#items + 1] = rh("[" .. M.name_pin(pins, t) .. t .. "]", hl_by_name[t] or palette.tags)
             end
         end
         -- Linked-worktree labels (§3.2) come last: they are the least branch-like
@@ -812,7 +875,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                items[#items + 1] = rh("{" .. w .. "}", palette.worktree or palette.tags)
+                items[#items + 1] = rh("{" .. M.name_pin(pins, w) .. w .. "}", palette.worktree or palette.tags)
             end
         end
         return items
@@ -845,7 +908,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         local graph_item = M.get_column_chars(opts, item.columns, emphasis)
         local sel = (selection_state and selection_state.commit == item) and selection_state.index or nil
         local labels = {}
-        for _, u in ipairs(M.marker_units(item)) do
+        for _, u in ipairs(M.marker_units(item, pins)) do
             -- The commit-selection cursor head (§13.4) draws with palette.selected.
             -- Otherwise the h/l marker selection drives the §12 reachability cone
             -- (update_cone seeds it from the selected head), so the selected
@@ -1005,7 +1068,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 -- prepend a non-selectable HEAD marker), so the listview windows
                 -- the right-pinned refs around it (§6). nil → leftmost-first +N.
                 if selected then
-                    local extra = #ref_items - #M.decoration_texts(item.commit, head_branch)
+                    local extra = #ref_items - #M.decoration_texts(item.commit, head_branch, pins)
                     element.line_right_sel = selected + extra
                 end
             end

@@ -358,6 +358,7 @@ M._internal = {
     -- gitloom.graph.render (Phase 2)
     decoration_texts = render.decoration_texts,
     pane_labels = render.pane_labels,
+    marker_units = render.marker_units,
     display_item = render.display_item,
     get_column_chars = render.get_column_chars,
     graph_snippet = render.graph_snippet,
