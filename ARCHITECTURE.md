@@ -264,6 +264,12 @@ told this scroll's panes are current.
    above an off-screen columns line, and `win_screenpos` is the **frame** top (drifts by
    the border). Verified against nvim's actual rendering — a real bordered window with
    `virt_lines` — in `tests/screen_window_spec`.
+   The live glue calls it through **`pane.footer_bottom`**, which compares the
+   **unclamped** window bottom against the model first and declines with `"at bottom"`
+   when it reaches the last screen row (nothing below the window — the mirror of the
+   header's `"at top"`, §6.2). `footer_bs` alone clamps to the model, which turned a
+   window past the graph's end into a footer over the graph's own last commits (or,
+   with filler rows, an overlay seamed to nothing).
    **`pane.footer_seam(sm, bs, cover)`** then walks up from `bs` to the first
    **block boundary** (the last screen row of a commit's block) leaving ≥ `cover` rows
    below it, so the overlay covers **whole commit blocks** and its top butts the seam
