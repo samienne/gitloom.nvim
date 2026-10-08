@@ -49,6 +49,13 @@ vim.api.nvim_create_user_command("GitloomGraph", function(cmd)
     window.open(folder, M.config)
 end, { nargs = "?", complete = "dir" })
 
+-- Reset view settings (§18.5): clear the persisted view toggles and this
+-- repository's pin list (after a confirmation), restoring the configured values
+-- in its open graph. Targets the graph in the current window, else the cwd repo.
+vim.api.nvim_create_user_command("GitloomResetView", function()
+    window.reset_view(M.config)
+end, {})
+
 -- Repository picker (§2.1): choose the main module or a submodule, then open the
 -- graph for it. setup() also binds this to <leader>wG by default (configurable
 -- via pick_key). Forwards the stored setup() config so the opened graph honours it.

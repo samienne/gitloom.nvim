@@ -13,3 +13,7 @@ end
 -- Disable swap files and shada for test runs
 vim.opt.swapfile = false
 vim.opt.shadafile = "NONE"
+
+-- Never read or write the user's real view-state file (spec §18): point the
+-- persistence module at a throwaway file for the whole run.
+require("gitloom.persist").set_path(vim.fn.tempname() .. "-gitloom-state.json")

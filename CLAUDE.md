@@ -424,7 +424,8 @@ Coverage:
   selection, only with a provider), then the globals (Return first, only while an
   examine is active; Fetch / per-remote Fetch / Pull — no Refresh command, `R` is a
   key; remotes nil / {} / a list giving no / no / one `fetch:<remote>` entry
-  each); no examine entry; a row entry carries an `op`, a registry entry an
+  each; **Reset view settings** last among the globals in every context, §18.5);
+  no examine entry; a row entry carries an `op`, a registry entry an
   `action` (bound to ctx + remote); scope + `when` filtering and function labels
   on a custom registry; then the **key entries** over a FAKE registry (§17.1):
   `row_context` (commit / branch / markers, a packed line with a marker selected
@@ -658,6 +659,22 @@ Coverage:
 - `tests/color_spec.lua` — `gitloom.color`: sRGB↔OKLab/OKLCH round-trips, known
   conversions, and `generate` (golden-angle hues distinct and in-gamut)
 - `tests/gitloom_spec.lua` — public surface (setup, command registration)
+- `tests/persist_spec.lua` — the persisted view state (`gitloom.persist`, §18):
+  `config_values` (setup() value else built-in, normalised; a partial merge style
+  resolved over the built-in), `overlay` (a stored value wins only while its
+  `base` equals today's configuration-resolved value; a wrong-typed / value-less
+  entry is ignored), `set_pref` (stores `{ value, base }`, prunes other stale
+  entries), `pins_for_save` (unreserved defaults + auto upstreams dropped, order
+  and reserve flags kept), `set_repo` / `repo_state` (per-root round trip, junk
+  sanitised, an empty state removes the entry); and against a scratch file: round
+  trip, rename-over-existing leaving no temp files, **two writers with different
+  keys both surviving** (re-read before write), a corrupt / non-object file ignored
+  with ONE warning and replaced by the next write, `persist = false` neither
+  reading nor writing, and Reset clearing the global preferences + only the given
+  repository. `tests/minimal_init.lua` redirects the module to a temp file for
+  every test run, so no test touches the real `stdpath("state")/gitloom.json`; the
+  smoke test (`make smoke`) checks the toggles' saves, `save_pins` and the live
+  reset end to end
 - `tests/snippet_spec.lua` — `graph_snippet` (the commit-search graph snippet,
   §15.3): the `[focus±radius]` window + reported focus row, top/bottom clamping,
   the focus-row gutter marker, the per-row subject, the shared graph-column width
@@ -1784,5 +1801,15 @@ Details not covered by the spec or architecture:
   `highlighted`), and re-renders. A cursor move that doesn't scroll takes the cheap
   `repaint_panes` path (no rebuild); `maybe_update_panes` rebuilds only on a real
   scroll. `H` re-dims via the same path.
+- **Persisted view state** (§18, `persist.lua`; see ARCHITECTURE "Persisted view
+  state"): one JSON file, `stdpath("state")/gitloom.json`. The toggles
+  `m C M B d H S c p F i` save `{ value, base }` via `ctx:save_pref(<field>)`
+  (`base` = the configuration-resolved value, computed in `open_graph` from the
+  caller's options BEFORE the defaults merge, kept as `ctx.persist_config`); a
+  changed config beats a stale entry. Per-repo pins save via `save_pins` from `P`
+  and the `L` dialog — root graph + base view only (§14.8). Reset (palette /
+  `:GitloomResetView`) clears the toggles + THIS repository's pins only. All glue
+  uses inline `require("gitloom.persist")` — no new window.lua locals. Tests must
+  never hit the real file: `persist.set_path` (minimal_init does it).
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.
