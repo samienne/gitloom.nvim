@@ -2152,11 +2152,23 @@ per examine.
 **Return.** While an examine is active, the command palette (§17) lists
 **Return to `<orig>`**. It runs `git switch <branch>` (or
 `git checkout --detach <hash>` when `orig` was detached), then, if a stash was
-recorded, `git stash apply <sha>`. A clean apply drops that stash (found by SHA
-in `git stash list`, never by position). The rules on failure:
+recorded, `git stash apply --index <sha>`, which restores the index as well as
+the working tree: staged changes come back staged, unstaged ones unstaged, and
+untracked files are restored. A clean apply drops that stash (found by SHA in
+`git stash list`, never by position). The rules on failure:
 
 - the switch back fails (new local edits it would overwrite…): git's error is
   shown at ERROR level and the state is **kept**, so Return can be retried;
+- git refuses to restore the index (`conflicts in index. Try without --index.`
+  — e.g. `<branch>` moved meanwhile so the staged patch no longer applies
+  exactly). git checks this before touching the index, the working tree or the
+  untracked files, so nothing has changed; gitloom then runs a plain
+  `git stash apply <sha>` and, when that applies cleanly, drops the stash as
+  usual and warns (WARN) that the staged state could not be restored — the
+  changes are back, but unstaged. Only that refusal falls back: any other
+  failure of the `--index` apply is handled as below. (The `--index` apply runs
+  with `LC_ALL=C`, so the refusal is recognised by git's untranslated message.)
+  If the plain apply then conflicts or fails, it is handled as below;
 - the apply conflicts or fails: the stash is **kept**, git's error is shown at
   ERROR level together with the kept stash's message, and the state is cleared
   (HEAD is back; the stash is the user's to resolve).
@@ -2168,7 +2180,8 @@ moved HEAD, the resync follows HEAD exactly as checkout does (§10.4.1): the
 cursor lands on HEAD's row and the notice names it (`HEAD detached at <short>` /
 `HEAD → <branch> (<short>)`), with what happened appended — `examining — Return
 from the palette (<C-Space>)` after an examine, `changes restored` after a Return
-that re-applied a stash. A failure's ERROR message is not overwritten. Like checkout, nothing here forces, everything runs
+that re-applied a stash (`changes restored (unstaged)` after the plain-apply
+fallback). A failure's ERROR message is not overwritten. Like checkout, nothing here forces, everything runs
 asynchronously in the graph's repository root, and one examine / Return runs at a
 time per graph session (shared with the palette's fetch / pull, §17.3).
 
@@ -3586,7 +3599,7 @@ first read lands the per-remote entries are simply absent.
 
 | Command | Key | Runs |
 |---|---|---|
-| **Return to `<orig>`** — only while a Checkout & examine (§10.4.2) is active | — | `git switch <orig>` (or `git checkout --detach <hash>`), then `git stash apply <sha>` of the examine's stash if any |
+| **Return to `<orig>`** — only while a Checkout & examine (§10.4.2) is active | — | `git switch <orig>` (or `git checkout --detach <hash>`), then `git stash apply --index <sha>` of the examine's stash if any (a plain apply when git refuses `--index`) |
 | **Fetch** | — | `git fetch --all` |
 | **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch <remote>` |
 | **Pull** | — | `git pull --ff-only` |

@@ -1086,21 +1086,37 @@ end
 ---@field stage? "switch"|"apply"   where it failed
 ---@field res? table                that step's `{ code, out, err }`
 ---@field drop_res? table           the clean apply's drop
+---@field unstaged? boolean         git refused `--index`; the plain apply restored the changes unstaged
+---@field index_res? table          that refused `--index` apply's result
 
 --- Run a `return_plan` in `root` (§10.4.2): switch back, then apply the stash by
---- SHA when one was recorded, dropping it only after a clean apply. A failed
+--- SHA with `--index` when one was recorded, so staged changes come back staged.
+--- When git refuses to restore the index ("conflicts in index" — checked before
+--- anything is touched, `examine.index_refused`) it falls back to a plain apply
+--- and reports `unstaged`. The stash is dropped only after a clean apply. A failed
 --- switch stops before the apply; a failed apply keeps the stash.
 ---@param rp ReturnPlan
 ---@param root string?
 ---@return table  -- future resolving ExamineReturnResult
 function M.examine_return(rp, root)
+    local function applied(ar, extra)
+        if ar.code ~= 0 then
+            return { ok = false, stage = "apply", res = ar,
+                unstaged = extra.unstaged, index_res = extra.index_res }
+        end
+        return M.drop_stash(rp.stash, root).next(function(dr)
+            return { ok = true, drop_res = dr, unstaged = extra.unstaged, index_res = extra.index_res }
+        end)
+    end
     return git_code(rp.switch, root).next(function(sr)
         if sr.code ~= 0 then return { ok = false, stage = "switch", res = sr } end
         if not rp.apply then return { ok = true } end
-        return git_code(rp.apply, root).next(function(ar)
-            if ar.code ~= 0 then return { ok = false, stage = "apply", res = ar } end
-            return M.drop_stash(rp.stash, root).next(function(dr)
-                return { ok = true, drop_res = dr }
+        -- LC_ALL=C: `index_refused` reads git's untranslated message.
+        return git_code(rp.apply, root, { LC_ALL = "C" }).next(function(ar)
+            local examine = require("gitloom.git.examine")
+            if not (rp.apply_plain and examine.index_refused(ar)) then return applied(ar, {}) end
+            return git_code(rp.apply_plain, root).next(function(pr)
+                return applied(pr, { unstaged = true, index_res = ar })
             end)
         end)
     end)

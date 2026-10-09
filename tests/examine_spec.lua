@@ -7,7 +7,9 @@
 --- selection's Checkout & examine, the row's). Then the git side
 --- (`fetch.examine_probe` / `examine_run` / `examine_return`) against REAL scratch
 --- repositories — never this one: a dirty tree is stashed, checked out detached
---- and restored by Return with the stash dropped; a conflicting apply keeps the
+--- and restored by Return with the stash dropped and the index restored (staged
+--- stays staged), falling back to a plain apply when git refuses `--index`
+--- (`index_refused`); a conflicting apply keeps the
 --- stash; a failed checkout after a stash re-applies it. Optionally, with diffview
 --- installed, the single-rev open's right side is the files on disk (LOCAL). The
 --- window glue (prompt, busy flag, notices, resync) is untested like the rest.
@@ -149,11 +151,12 @@ describe("examine_plan (§10.4.2)", function()
 end)
 
 describe("return_plan (§10.4.2)", function()
-    it("a branch orig with a stash: switch, then apply by SHA", function()
+    it("a branch orig with a stash: switch, then apply by SHA with --index (plain as fallback)", function()
         local rp = examine.return_plan({ orig = "main", detached = false, stash = C, stash_message = "m", examined = A })
         assert.equals("Return to main", rp.label)
         assert.same({ "git", "switch", "main" }, rp.switch)
-        assert.same({ "git", "stash", "apply", C }, rp.apply)
+        assert.same({ "git", "stash", "apply", "--index", C }, rp.apply)
+        assert.same({ "git", "stash", "apply", C }, rp.apply_plain)
         assert.equals(C, rp.stash)
         assert.equals("m", rp.stash_message)
     end)
@@ -163,6 +166,25 @@ describe("return_plan (§10.4.2)", function()
         assert.equals("Return to bbbbbbb", rp.label)
         assert.same({ "git", "checkout", "--detach", B }, rp.switch)
         assert.is_nil(rp.apply)
+        assert.is_nil(rp.apply_plain)
+    end)
+end)
+
+describe("index_refused (§10.4.2)", function()
+    it("only git's 'conflicts in index' refusal of --index licenses the plain fallback", function()
+        local refusal = "error: patch failed: a.txt:1\nerror: a.txt: patch does not apply\n"
+            .. "error: conflicts in index. Try without --index."
+        assert.is_true(examine.index_refused({ code = 1, out = "", err = refusal }))
+        -- older git capitalises it
+        assert.is_true(examine.index_refused({ code = 1, out = "", err = "Conflicts in index. Try without --index." }))
+        assert.is_false(examine.index_refused({ code = 0, out = "", err = refusal }))
+        -- a merge conflict, a local change in the way: the tree may already be
+        -- touched, so no fallback
+        assert.is_false(examine.index_refused({ code = 1, out = "CONFLICT (content): Merge conflict in g", err = "" }))
+        assert.is_false(examine.index_refused({ code = 1, out = "",
+            err = "error: Your local changes to the following files would be overwritten by merge:" }))
+        assert.is_false(examine.index_refused({ code = -1, out = "", err = "spawn failed" }))
+        assert.is_false(examine.index_refused(nil))
     end)
 end)
 
@@ -363,6 +385,98 @@ describe("examine against a real repository (§10.4.2)", function()
         write(dir .. "/g", "moved\n")
         sh(dir, "commit", "-q", "-am", "move g")
         sh(dir, "checkout", "-q", "--detach", root_hash)
+        local rr = await(fetch.examine_return(examine.return_plan(plan.state), dir))
+        assert.is_false(rr.ok)
+        assert.equals("apply", rr.stage)
+        assert.is_true(rr.res.code ~= 0)
+        assert.equals("main", sh(dir, "rev-parse", "--abbrev-ref", "HEAD"))
+        assert.equals(0, examine.stash_index(stash_list(dir), sha --[[@as string]]))
+        vim.fn.delete(dir, "rf")
+    end)
+
+    it("Return restores the index: staged stays staged, unstaged unstaged, untracked back", function()
+        local dir, root_hash = scratch()
+        write(dir .. "/g", "staged\n")
+        sh(dir, "add", "g")
+        write(dir .. "/f", "unstaged\n")
+        write(dir .. "/untracked", "u\n")
+        local before = stash_list(dir)
+        local plan = run_examine(dir, root_hash)
+        assert.equals("", sh(dir, "status", "--porcelain"))
+        local rr = await(fetch.examine_return(examine.return_plan(plan.state), dir))
+        assert.is_true(rr.ok)
+        assert.is_nil(rr.unstaged)
+        assert.equals("main", sh(dir, "rev-parse", "--abbrev-ref", "HEAD"))
+        assert.equals("g", sh(dir, "diff", "--cached", "--name-only"))
+        assert.equals("f", sh(dir, "diff", "--name-only"))
+        assert.equals("staged\n", read(dir .. "/g"))
+        assert.equals("unstaged\n", read(dir .. "/f"))
+        assert.equals("u\n", read(dir .. "/untracked"))
+        assert.equals(before, stash_list(dir))
+        vim.fn.delete(dir, "rf")
+    end)
+
+    it("a file with BOTH a staged and an unstaged edit round-trips both", function()
+        local dir, root_hash = scratch()
+        write(dir .. "/g", "in the index\n")
+        sh(dir, "add", "g")
+        write(dir .. "/g", "in the tree\n")
+        local plan = run_examine(dir, root_hash)
+        local rr = await(fetch.examine_return(examine.return_plan(plan.state), dir))
+        assert.is_true(rr.ok)
+        assert.equals("in the index", sh(dir, "show", ":g"))
+        assert.equals("in the tree\n", read(dir .. "/g"))
+        assert.equals("", stash_list(dir))
+        vim.fn.delete(dir, "rf")
+    end)
+
+    -- A five-line file whose line 1 is staged; meanwhile `main` changes line 3.
+    -- `--index` replays the staged patch with exact context, so git refuses it
+    -- ("conflicts in index") having touched nothing — but the plain 3-way apply
+    -- merges cleanly.
+    local function five_lines(dir)
+        write(dir .. "/h", "1\n2\n3\n4\n5\n")
+        sh(dir, "add", "h")
+        sh(dir, "commit", "-q", "-m", "h")
+        return sh(dir, "rev-parse", "HEAD")
+    end
+
+    it("--index refused → plain apply: changes back but unstaged, flagged, stash dropped", function()
+        local dir = scratch()
+        local base = five_lines(dir)
+        write(dir .. "/h", "ONE\n2\n3\n4\n5\n")
+        sh(dir, "add", "h")
+        write(dir .. "/g", "unstaged\n")
+        write(dir .. "/untracked", "u\n")
+        local plan = run_examine(dir, base)
+        sh(dir, "switch", "-q", "main")
+        write(dir .. "/h", "1\n2\nTHREE\n4\n5\n")
+        sh(dir, "commit", "-q", "-am", "move h")
+        sh(dir, "checkout", "-q", "--detach", base)
+        local rr = await(fetch.examine_return(examine.return_plan(plan.state), dir))
+        assert.is_true(rr.ok)
+        assert.is_true(rr.unstaged)
+        assert.is_true(examine.index_refused(rr.index_res))
+        assert.equals("main", sh(dir, "rev-parse", "--abbrev-ref", "HEAD"))
+        assert.equals("ONE\n2\nTHREE\n4\n5\n", read(dir .. "/h"))
+        assert.equals("unstaged\n", read(dir .. "/g"))
+        assert.equals("u\n", read(dir .. "/untracked"))
+        assert.equals("", sh(dir, "diff", "--cached", "--name-only"))
+        assert.equals("", stash_list(dir))
+        vim.fn.delete(dir, "rf")
+    end)
+
+    it("--index refused and the plain apply conflicts too: the stash is KEPT", function()
+        local dir = scratch()
+        local base = five_lines(dir)
+        write(dir .. "/h", "ONE\n2\n3\n4\n5\n")
+        sh(dir, "add", "h")
+        local plan = run_examine(dir, base)
+        local sha = plan.state.stash
+        sh(dir, "switch", "-q", "main")
+        write(dir .. "/h", "uno\n2\n3\n4\n5\n")
+        sh(dir, "commit", "-q", "-am", "clash on line 1")
+        sh(dir, "checkout", "-q", "--detach", base)
         local rr = await(fetch.examine_return(examine.return_plan(plan.state), dir))
         assert.is_false(rr.ok)
         assert.equals("apply", rr.stage)

@@ -303,8 +303,10 @@ work. The diff is the same combined change the range view shows. A dirty tree
 prompts **Stash N changes and continue** / **Cancel**; continuing runs
 `git stash push -u -m "gitloom: examine <short> (from <branch>)"`. The palette
 then offers **Return to `<orig>`**: it switches back (`git switch`, or a detached
-checkout when you started detached) and re-applies the stash by SHA, dropping it
-when the apply is clean. A failed switch keeps the state so Return can be
+checkout when you started detached) and re-applies the stash by SHA with
+`--index`, so staged changes come back staged, dropping it when the apply is
+clean. If git cannot restore the index (your branch moved so the staged patch no
+longer applies), the changes are re-applied unstaged and a warning says so. A failed switch keeps the state so Return can be
 retried; a conflicting apply keeps the stash and names it. The state survives
 closing and reopening the graph. A second examine while one is active just moves
 the examined commit — on a dirty tree it is refused ("Return first"), so there is

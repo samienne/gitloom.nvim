@@ -101,7 +101,8 @@ end
 ---@class ReturnPlan
 ---@field label string       the palette entry: `Return to <orig>`
 ---@field switch string[]    `git switch <branch>`, or `git checkout --detach <hash>`
----@field apply? string[]    `git stash apply <sha>` when a stash was recorded
+---@field apply? string[]    `git stash apply --index <sha>` when a stash was recorded
+---@field apply_plain? string[]  `git stash apply <sha>` — the fallback when git refuses `--index`
 ---@field stash? string      that stash's SHA
 ---@field stash_message? string
 
@@ -114,10 +115,26 @@ function M.return_plan(state)
         label = "Return to " .. name,
         switch = state.detached and { "git", "checkout", "--detach", state.orig }
             or { "git", "switch", state.orig },
-        apply = state.stash and { "git", "stash", "apply", state.stash } or nil,
+        apply = state.stash and { "git", "stash", "apply", "--index", state.stash } or nil,
+        apply_plain = state.stash and { "git", "stash", "apply", state.stash } or nil,
         stash = state.stash,
         stash_message = state.stash_message,
     }
+end
+
+--- Whether a failed `git stash apply --index` (§10.4.2) was git refusing to
+--- restore the INDEX — "conflicts in index. Try without --index." (capitalised by
+--- older git). git checks the staged patch with `git apply --cached`, atomically,
+--- before it touches the index, the working tree or the untracked files, so that
+--- refusal — and only that one — leaves everything as it was and licenses the
+--- plain `git stash apply` fallback. The caller runs the `--index` apply under
+--- `LC_ALL=C` so the message is git's untranslated one. Pure.
+---@param res { code: integer, out: string, err: string }?
+---@return boolean
+function M.index_refused(res)
+    if not res or res.code == 0 or res.code == -1 then return false end
+    local text = ((res.err or "") .. "\n" .. (res.out or "")):lower()
+    return text:find("conflicts in index", 1, true) ~= nil
 end
 
 --- The current `stash@{n}` index of the stash whose commit is `sha`, from

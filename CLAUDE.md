@@ -459,13 +459,21 @@ Coverage:
   stash) × an examine already active (clean: `orig` + stash kept, only `examined`
   moves, the active state not mutated; dirty: `refuse` "Return to … first" — no
   stash chain), unknown HEAD refused, never forcing; `return_plan` (branch → `git
-  switch`, detached → `git checkout --detach`, apply by SHA only with a stash, the
-  label); `stash_index` (by SHA, CRLF-safe, nil when absent); the palette entries
+  switch`, detached → `git checkout --detach`, apply `--index` by SHA + the plain
+  fallback argv only with a stash, the label); `index_refused` (only git's
+  "conflicts in index" refusal, either capitalisation, licenses the fallback — not
+  a merge conflict, a local change in the way, a success or a spawn failure);
+  `stash_index` (by SHA, CRLF-safe, nil when absent); the palette entries
   that reach it. Then the git side against REAL scratch repositories
   (`fetch.examine_probe` / `examine_run` / `examine_return`): the probe's branch /
   detached / counts; dirty → stash (`stash@{0}`, the message) → detached checkout
   → clean tree, then Return → branch, edits AND untracked files restored, stash
-  dropped; clean → no stash, Return switches back; a second examine keeps orig +
+  dropped; **the index round-trips** (a staged edit comes back staged, an unstaged
+  one unstaged, an untracked file restored; one file with BOTH a staged and an
+  unstaged edit keeps both); the **`--index` fallback** (a staged line-1 edit while
+  `main` moved line 3: git refuses `--index`, the plain apply merges, the changes
+  are back unstaged, `unstaged` flagged, stash dropped — and when the plain apply
+  conflicts too the stash is KEPT); clean → no stash, Return switches back; a second examine keeps orig +
   stash and a dirty one is refused; a conflicting apply KEEPS the stash (HEAD back
   on the branch); a failed switch stops before the apply; a checkout failing after
   the stash re-applies it (clean → dropped); and drop-by-SHA leaves another
@@ -1347,8 +1355,13 @@ Details not covered by the spec or architecture:
   examine while one is active keeps `orig` + the stash and only moves `examined`,
   and on a dirty tree is refused ("Return first"). Return clears the state only
   after a successful switch + apply; a failed switch keeps it (retry), a failed
-  apply clears it but keeps the stash and names it. The stash is applied without
-  `--index`, so staged changes come back unstaged.
+  apply clears it but keeps the stash and names it. The stash is applied with
+  `--index`, so staged changes come back staged. When git refuses that
+  ("conflicts in index" — `examine.index_refused`; git checks the staged patch
+  with an atomic `git apply --cached` BEFORE touching the index, tree or
+  untracked files, verified on 2.49) Return falls back to a plain apply and WARNs
+  that the changes are back unstaged; any other `--index` failure is a failed
+  apply. The `--index` apply runs under `LC_ALL=C` so the message is matchable.
 - **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
   recompute from the visible range each scroll, so a varying column bounces. A
   column can *only grow* (never shrink): `col_max` (a per-column cap, implies
