@@ -1023,8 +1023,9 @@ end
 --- upstream's commits, the branch HEAD is attached to, the ahead / behind counts
 --- (`git rev-list --left-right --count <branch>...<upstream>`) and — only when
 --- `t.branch` is the current branch — the changed tracked paths (`git status
---- --porcelain` → `sync.tracked_changes`: each changed tracked path once; untracked
---- files do not count, `reset --hard` never touches them). Resolves a `SyncProbe`; `err` set when a read
+--- --porcelain` → `parse_status`'s `paths - untracked`: each changed tracked path
+--- once; untracked files do not count, `reset --hard` never touches them — and
+--- without `--ignored` no `!!` line is emitted). Resolves a `SyncProbe`; `err` set when a read
 --- that must succeed failed (a branch / upstream that does not resolve is not an
 --- error: its hash is nil).
 ---@param t SyncTarget
@@ -1053,7 +1054,8 @@ function M.sync_probe(t, root)
                         if p.head_branch ~= t.branch then return p end
                         return git_code({ "git", "status", "--porcelain" }, root).next(function(sr)
                             if sr.code ~= 0 then p.err = sr; return p end
-                            p.dirty = require("gitloom.git.sync").tracked_changes(sr.out)
+                            local st = parse_status(lines_of(sr.out or ""))
+                            p.dirty = st.paths - st.untracked
                             return p
                         end)
                     end)
