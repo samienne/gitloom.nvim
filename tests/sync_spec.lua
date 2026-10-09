@@ -67,12 +67,20 @@ describe("sync_target / sync_offers (§17.2)", function()
     end)
 end)
 
-describe("tracked_changes (§17.2)", function()
-    it("counts each changed tracked path once; untracked / ignored never", function()
-        assert.equals(0, sync.tracked_changes(nil))
-        assert.equals(0, sync.tracked_changes(""))
-        assert.equals(0, sync.tracked_changes("?? new\n!! ignored\n"))
-        assert.equals(4, sync.tracked_changes("MM both\r\n M f\nA  added\nR  old -> new\n?? u\n"))
+describe("the reset prompt's change count (§17.2)", function()
+    -- `fetch.sync_probe` counts what a `reset --hard` discards as
+    -- `parse_status`'s `paths - untracked`: each changed TRACKED path once.
+    local parse_status = require("gitloom.git.parse").parse_status
+    local function tracked(lines)
+        local st = parse_status(lines)
+        return st.paths - st.untracked
+    end
+    it("counts each changed tracked path once; untracked never", function()
+        assert.equals(0, tracked({}))
+        assert.equals(0, tracked({ "" }))
+        assert.equals(0, tracked({ "?? new", "?? other" }))
+        -- an MM file is one path, a rename one line; a trailing CR is harmless
+        assert.equals(4, tracked({ "MM both\r", " M f", "A  added", "R  old -> new", "?? u", "" }))
     end)
 end)
 

@@ -455,8 +455,9 @@ Coverage:
 - `tests/sync_spec.lua` — the branch sync (§17.2). Pure (`gitloom.git.sync`):
   `sync_target` / `sync_offers` per tracking state (behind → ff + reset; ahead /
   diverged → reset; in sync / gone / no upstream / no refname / a remote ref / a
-  tag / a worktree → none), `tracked_changes` (each changed TRACKED path once —
-  `MM` and a rename count 1, `??` / `!!` never), `ff_command` / `reset_command`
+  tag / a worktree → none), the reset prompt's change count
+  (`parse_status`'s `paths - untracked`: each changed TRACKED path once — `MM` and
+  a rename count 1, `??` never), `ff_command` / `reset_command`
   for the current branch vs another (never a `+` refspec, `--force` or a remote
   name), `reset_prompt` / `prompt_text` per case (nothing lost → the question
   alone; commits / uncommitted lines; singular counts; another branch's dirty
@@ -1366,7 +1367,7 @@ Details not covered by the spec or architecture:
   while building the palette. But the current-vs-other form is decided from the
   fresh `fetch.sync_probe`, never the decoration: a stale "current" would aim
   `reset --hard` at whatever branch HEAD is on now. Untracked files are not
-  counted as "discarded" (`sync.tracked_changes`, not `parse_status`'s sum) since
+  counted as "discarded" (`parse_status`'s `paths - untracked`, not its per-state sum) since
   `reset --hard` never touches them. `ctx:branch_sync` is a `GRAPH_HELPERS` field
   (the 200-local ceiling) and shares `ctx.remote_busy`.
 - **Checkout & examine** (spec §10.4.2): check a commit (or a §13 selection's

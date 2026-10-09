@@ -2036,7 +2036,7 @@ local branch (`row.head` is the node whose labels the row shows). The entry's `o
 (`fast_forward` / `reset_branch`) runs `ctx:branch_sync(op, t)` (a `GRAPH_HELPERS`
 field): claim `ctx.remote_busy`, read `fetch.sync_probe(t, root)` (both tips via
 `rev-parse --verify`, HEAD's branch, `rev-list --left-right --count`, and for the
-current branch `sync.tracked_changes` over `git status --porcelain`). **Which form
+current branch `parse_status`'s `paths - untracked` over `git status --porcelain`). **Which form
 runs is decided from that probe**, never the cached decoration — a stale
 "current" must not aim `reset --hard` at whatever branch HEAD is on now:
 `ff_command(t, current)` = `merge --ff-only <upstream ref>` / `fetch . <upstream
