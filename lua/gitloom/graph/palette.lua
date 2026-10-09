@@ -14,6 +14,7 @@
 --- nor the help can drift from what is bound. Nothing here touches a window.
 
 local examine = require("gitloom.git.examine")
+local sync = require("gitloom.git.sync")
 local selectm = require("gitloom.graph.select")
 
 local M = {}
@@ -78,7 +79,7 @@ M.COMMANDS = {
         action = function(ctx) ctx:reset_view() end },
 }
 
----@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"collapse"|"expand"|"hide"
+---@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"
 
 ---@class PaletteEntry
 ---@field id string              `fetch:origin`, `collapse`, `hide:2`, `key:R`, …
@@ -89,6 +90,7 @@ M.COMMANDS = {
 ---@field commit? table          diff / checkout_examine: the real commit to act on
 ---@field checkout? CheckoutSpec checkout: what to run
 ---@field marker? integer        expand/hide on a packed line: the marker index
+---@field sync? SyncTarget       fast_forward / reset_branch: the branch + its upstream (§17.2)
 
 ---@class PaletteRow  the cursor row, as window.lua classifies it
 ---@field kind "plain"|"branch"|"markers"
@@ -98,6 +100,9 @@ M.COMMANDS = {
 ---@field state? string          `branch_under_cursor`'s state (expanded / collapsed / …)
 ---@field markers? string[]      a packed line's marker label texts
 ---@field selected? integer      a packed line: the marker selected with h/l, if any
+---@field head? table            a collapsed head / the selected marker: the node whose
+---                              labels the row shows (its region's refs), for the sync's
+---                              sole local branch (§17.2)
 
 --- The context a row is (§17.1): `commit` for a plain row, `branch` for a
 --- selected ref / collapsed head or a packed line with a marker selected,
@@ -124,11 +129,17 @@ end
 ---  * `"plain"` (commit) — open diff (`D`), checkout (detached), checkout &
 ---    examine;
 ---  * `"branch"` — a ref selected, or a collapsed head: checkout of the branch (a
----    head's tip), then collapse+hide (expanded) or expand+hide (collapsed), the
----    toggle carrying `<Space>`; no commit diff, no checkout & examine;
+---    head's tip), the branch sync entries (§17.2), then collapse+hide (expanded)
+---    or expand+hide (collapsed), the toggle carrying `<Space>`; no commit diff,
+---    no checkout & examine;
 ---  * `"markers"` — a packed line: with a marker selected (`row.selected`) that
----    marker's checkout (`row.commit`, its tip), expand and hide only; with none,
----    expand+hide per marker (`row.markers`).
+---    marker's checkout (`row.commit`, its tip), sync entries, expand and hide
+---    only; with none, expand+hide per marker (`row.markers`).
+---
+--- The sync entries (fast-forward / reset to upstream) are for a local branch
+--- with an upstream: the h/l-selected ref, else the sole local branch among the
+--- row's labels (`row.head`'s refs, else the commit's; `select.sole_local_ref`);
+--- offered from the cached tracking counts only.
 ---
 --- Open diff and checkout & examine need a diff provider (`has_diff`, §11.5); a
 --- §4.2 virtual commit gets neither checkout. Pure.
@@ -146,6 +157,16 @@ function M.row_entries(row, diff)
     local function checkout()
         if spec then add({ id = "checkout", op = "checkout", label = spec.label, checkout = spec }) end
     end
+    local function sync_entries()
+        local ref = row.ref
+        if not ref then ref = selectm.sole_local_ref(row.head or selectm.menu_target(row.commit)) end
+        local t = sync.sync_target(ref)
+        local offers = sync.sync_offers(t)
+        if not t then return end
+        local ff_label, reset_label = sync.sync_labels(t)
+        if offers.ff then add({ id = "fast_forward", op = "fast_forward", label = ff_label, sync = t }) end
+        if offers.reset then add({ id = "reset_branch", op = "reset_branch", label = reset_label, sync = t }) end
+    end
     local function marker(i, text)
         add({ id = "expand:" .. i, op = "expand", label = "Expand " .. text, marker = i })
         add({ id = "hide:" .. i, op = "hide", label = "Hide " .. text, marker = i })
@@ -162,12 +183,14 @@ function M.row_entries(row, diff)
         local texts = row.markers or {}
         if row.selected then
             checkout()
+            sync_entries()
             marker(row.selected, texts[row.selected] or "")
         else
             for i, text in ipairs(texts) do marker(i, text) end
         end
     elseif row.kind == "branch" then
         checkout()
+        sync_entries()
         if row.state == "expanded" then
             add({ id = "collapse", op = "collapse", label = "Collapse branch", key = "<Space>" })
             add({ id = "hide", op = "hide", label = "Hide branch" })

@@ -17,6 +17,8 @@
 ---@field falsy fun(value: any, message?: string)
 ---@field has_error fun(fn: function, message?: string)
 ---@field near fun(expected: number, actual: number, tolerance: number, message?: string)
+---@field not_equal fun(expected: any, actual: any, message?: string)
+---@field matches fun(pattern: string, actual: any, message?: string)
 
 ---@type luassert
 ---@diagnostic disable-next-line: assign-type-mismatch

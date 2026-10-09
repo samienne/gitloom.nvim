@@ -455,6 +455,7 @@ lua/gitloom/
     order.lua       order_commits — gitloom's owned topo-sort (§3.1)
     date.lua        Timestamp parse + date formatters (§4/§6)
     remote.lua      Palette fetch / pull argv + env, `git remote` parse, failure text (§17)
+    sync.lua        Branch sync plans: fast-forward / reset to upstream argv, prompt, stale check (§17.2)
     fetch.lua       The async git I/O (vim.system) — the only Neovim-coupled corner
   graph/          The graph ENGINE (gitloom.graph): commits + view state → rows
     init.lua        Engine entry: data-model types (Lane/Segment/GraphColumn/
@@ -2023,6 +2024,29 @@ and resyncs on success, or always for a pull. `resync` returns early when the
 graph window has gone. Both helpers are `GRAPH_HELPERS` fields — window.lua is at
 the 200-local ceiling.
 
+**Branch sync** (specification.md §17.2) — the branch context's *Fast-forward `<b>`
+to `<upstream>`* / *Reset `<b>` to `<upstream>`…* row entries. `row_entries` asks
+the pure `git/sync.lua`: `sync_target(ref)` (a local `SelectedRef` whose
+`upstream` — carried onto the branch group by `group_refs`, now with the full
+refname `ref` from `for-each-ref %(upstream)` — is set, not gone) and
+`sync_offers(t)` (ff when strictly behind, reset when behind / ahead / diverged)
+decide visibility from the cached counts only. The ref is the h/l selection, else
+`select.sole_local_ref(row.head)` — the collapsed head's / selected marker's only
+local branch (`row.head` is the node whose labels the row shows). The entry's `op`
+(`fast_forward` / `reset_branch`) runs `ctx:branch_sync(op, t)` (a `GRAPH_HELPERS`
+field): claim `ctx.remote_busy`, read `fetch.sync_probe(t, root)` (both tips via
+`rev-parse --verify`, HEAD's branch, `rev-list --left-right --count`, and for the
+current branch `sync.tracked_changes` over `git status --porcelain`). **Which form
+runs is decided from that probe**, never the cached decoration — a stale
+"current" must not aim `reset --hard` at whatever branch HEAD is on now:
+`ff_command(t, current)` = `merge --ff-only <upstream ref>` / `fetch . <upstream
+ref>:refs/heads/<b>`, `reset_command(t, current)` = `reset --hard` / `branch -f`.
+A fast-forward runs at once; a reset `vim.ui.select`s `{ "Cancel", "Reset" }` with
+`prompt_text(reset_prompt(t, probe))`, re-probes on Reset and aborts with WARN when
+`sync_stale(t, before, after)` names a change. Both run through `run_checkout`
+(`git_code` in `repo.root`); success → `ff_done` / `reset_done` at INFO +
+`resync(false)`, failure → `ctx:git_failure` at ERROR.
+
 ### Persisted view state
 
 `persist.lua` (§18) owns `stdpath("state")/gitloom.json` — one file, every Neovim
@@ -2362,7 +2386,7 @@ gitloom.nvim/
 │   ├── git/               The git data library (gitloom.git)
 │   │   ├── init.lua       Aggregator
 │   │   ├── model.lua / parse.lua / format.lua / refs.lua
-│   │   ├── range.lua / order.lua / date.lua / remote.lua / examine.lua
+│   │   ├── range.lua / order.lua / date.lua / remote.lua / examine.lua / sync.lua
 │   │   └── fetch.lua      Async git I/O (vim.system) — the only Neovim coupling
 │   ├── graph/             The graph engine (gitloom.graph)
 │   │   ├── init.lua       Engine entry: types + layout glue + _internal seam

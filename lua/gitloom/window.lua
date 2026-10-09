@@ -2457,15 +2457,17 @@ GRAPH_HELPERS.palette = function(ctx)
             local texts = {}
             for i, u in ipairs(units) do texts[i] = u.text end
             b = ctx:branch_under_cursor(line)
-            row = { kind = "markers", markers = texts, commit = b and b.commit,
-                selected = (st.commit == item and st.index and units[st.index]) and st.index or nil }
+            local sel_i = (st.commit == item and st.index and units[st.index]) and st.index or nil
+            row = { kind = "markers", markers = texts, commit = b and b.commit, selected = sel_i,
+                head = sel_i and units[sel_i].marker or nil }
         elseif item and item.commit and not item.commit.collapsed and not ref_selected then
             row = { kind = "plain", commit = item.commit }
         elseif item then
             b = ctx:branch_under_cursor(line)
             if b then
                 row = { kind = "branch", state = b.state, commit = b.commit,
-                    ref = ref_selected and selectm.selected_ref(item.commit, st.index) or nil }
+                    ref = ref_selected and selectm.selected_ref(item.commit, st.index) or nil,
+                    head = item.commit and item.commit.collapsed and item.commit or nil }
             end
         end
     end
@@ -2506,6 +2508,8 @@ GRAPH_HELPERS.palette = function(ctx)
             checkout(e.checkout)
         elseif op == "checkout_examine" then
             ctx:examine(e.commit, e.commit)
+        elseif op == "fast_forward" or op == "reset_branch" then
+            ctx:branch_sync(op, e.sync)
         elseif e.marker then
             local u = units[e.marker]
             if op == "expand" then
@@ -2566,6 +2570,74 @@ GRAPH_HELPERS.run_remote = function(ctx, kind, remote)
                     vim.log.levels.ERROR)
             end
             if ok or cmd.resync_on_failure then ctx:resync(false) end
+        end)
+    end)
+end
+
+-- Branch sync (§17.2): fast-forward (`op == "fast_forward"`) or reset
+-- (`"reset_branch"`) the local branch `t` to its upstream, in the graph's
+-- repository root. The decisions are the pure `gitloom.git.sync`; the state is
+-- read afresh first (`git.sync_probe`) — which branch is CURRENT comes from that
+-- read, never from the cached decoration, so a stale label cannot aim a
+-- `reset --hard` at another branch. A reset asks (Cancel first) and re-reads
+-- right before running, aborting if anything it showed changed. Shares
+-- `ctx.remote_busy` with fetch / pull / examine; success → INFO + resync.
+GRAPH_HELPERS.branch_sync = function(ctx, op, t)
+    if not t then return end
+    if ctx.remote_busy then
+        vim.notify(("gitloom: %s is still running"):format(ctx.remote_busy), vim.log.levels.WARN)
+        return
+    end
+    local root = ctx.repo.root
+    local reset = op == "reset_branch"
+    ctx.remote_busy = (reset and "reset of " or "fast-forward of ") .. t.branch
+    local function done() ctx.remote_busy = nil end
+    local function fail(label, res)
+        done()
+        vim.notify(ctx:git_failure(label, res), vim.log.levels.ERROR)
+    end
+    local function exec(cmd, notice)
+        git.run_checkout(cmd.argv, root).next(function(res)
+            vim.schedule(function()
+                if res.code ~= 0 then
+                    fail(cmd.label, res)
+                    return
+                end
+                done()
+                vim.notify(notice, vim.log.levels.INFO)
+                ctx:resync(false)
+            end)
+        end)
+    end
+    git.sync_probe(t, root).next(function(before)
+        vim.schedule(function()
+            if before.err then return fail("git rev-list", before.err) end
+            local why = git.sync_unavailable(t, before)
+            if why then
+                done()
+                vim.notify(why, vim.log.levels.WARN)
+                return
+            end
+            local current = before.head_branch == t.branch
+            if not reset then
+                return exec(git.ff_command(t, current), git.ff_done(t, before))
+            end
+            vim.ui.select({ "Cancel", "Reset" }, {
+                prompt = git.prompt_text(git.reset_prompt(t, before)),
+            }, function(_, idx)
+                if idx ~= 2 then return done() end
+                git.sync_probe(t, root).next(function(after)
+                    vim.schedule(function()
+                        local stale = git.sync_stale(t, before, after)
+                        if stale then
+                            done()
+                            vim.notify(stale, vim.log.levels.WARN)
+                            return
+                        end
+                        exec(git.reset_command(t, current), git.reset_done(t, before))
+                    end)
+                end)
+            end)
         end)
     end)
 end
@@ -4173,7 +4245,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field filter? { query: string, keep: table<string,boolean>, current?: string }  in-graph filter-search (§16); nil = none
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
     ---@field remotes? string[]     `git remote` names for the palette (§17.1); nil until the first read lands
-    ---@field remote_busy? string   the palette fetch / pull, examine or Return running now (its label), nil when idle (§17.3, §10.4.2)
+    ---@field remote_busy? string   the palette fetch / pull, branch sync, examine or Return running now (its label), nil when idle (§17.3, §10.4.2)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     ---@field persist_config table<string, any>  configuration-resolved value of each persisted key: the save base + Reset target (§18.3/§18.5)
     ---@field persist_writable boolean  this session writes its repository's pin list (a root graph, not a drilled-in frame; §14.8/§18.4)
@@ -4232,6 +4304,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field reset_view fun(self:GraphCtx)  confirm, then reset_view_now (§18.5)
     ---@field reset_view_now fun(self:GraphCtx)  clear the persisted state + restore the configured view (§18.5)
     ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
+    ---@field branch_sync fun(self:GraphCtx, op:"fast_forward"|"reset_branch", t:SyncTarget)  palette branch sync (§17.2)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
     ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
     ---@field examine_selection fun(self:GraphCtx)  Checkout & examine the §13 selection

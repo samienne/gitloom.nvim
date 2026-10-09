@@ -19,7 +19,9 @@ A read-only git commit-graph viewer for Neovim — it never stages, commits or
 rewrites history by itself; the exceptions are actions the user explicitly picks
 from the `<C-Space>` command palette: checkout (spec §10.4.1), checkout & examine
 (§10.4.2 — which may also `git stash push -u` the uncommitted changes, after a
-prompt, and re-apply them on Return) and fetch / pull (§17). `:GitloomGraph` opens a
+prompt, and re-apply them on Return), fetch / pull (§17) and the branch sync
+(§17.2: fast-forward / reset a local branch to its upstream — reset is the one
+action that can discard work, so it always confirms). `:GitloomGraph` opens a
 floating window showing the commit DAG as a colored, lane-based graph for the
 repo at Neovim's cwd. Part of the loomworks suite, but **standalone** — its
 only third-party dependency is snacks.nvim.
@@ -450,6 +452,26 @@ Coverage:
   branch, a diverged pull refused with HEAD unmoved, pull with
   no upstream failing with a code + stderr (HEAD unmoved), and the env reaching
   the job (a `!echo` alias prints `$GIT_TERMINAL_PROMPT`)
+- `tests/sync_spec.lua` — the branch sync (§17.2). Pure (`gitloom.git.sync`):
+  `sync_target` / `sync_offers` per tracking state (behind → ff + reset; ahead /
+  diverged → reset; in sync / gone / no upstream / no refname / a remote ref / a
+  tag / a worktree → none), `tracked_changes` (each changed TRACKED path once —
+  `MM` and a rename count 1, `??` / `!!` never), `ff_command` / `reset_command`
+  for the current branch vs another (never a `+` refspec, `--force` or a remote
+  name), `reset_prompt` / `prompt_text` per case (nothing lost → the question
+  alone; commits / uncommitted lines; singular counts; another branch's dirty
+  tree not mentioned), `sync_stale` (tip / upstream tip / current branch / dirty
+  count / a failed read), the notices; and `palette.row_entries` reaching it (a
+  selected local branch, a remote ref / tag / commit row getting none, a
+  collapsed head's or selected marker's SOLE local branch, none when ambiguous).
+  Then against REAL scratch repositories (`origin/main` a locally created
+  remote-tracking ref — no network): the ref read carrying `upstream.ref`,
+  `fetch.sync_probe`, a non-current fast-forward leaving the files untouched, a
+  current one, a diverged ff refused (both forms, branch unmoved), a ff over a
+  conflicting dirty file refused, reset of the current branch (ahead + dirty — an
+  untracked file survives; strictly ahead), of another branch, both refused for a
+  branch checked out in a linked worktree, the stale-tip / dirty abort decision,
+  and a LOCAL-branch upstream (`refs/heads/<x>`). The window glue is untested
 - `tests/examine_spec.lua` — Checkout & examine (§10.4.2). Pure:
   `range.examine_range` (ONE rev — the older end's first parent — `to =
   "worktree"`, `-C<root> <base>` as diffview args; a root older end → the empty
@@ -1325,6 +1347,17 @@ Details not covered by the spec or architecture:
   --ff-only`, which overrides any `pull.rebase` / `pull.ff` config, so it never
   merges or rebases; a failed pull still resyncs (its fetch half may have moved
   remote-tracking refs).
+- **Branch sync** (spec §17.2, ARCHITECTURE "Command palette"): the branch
+  context's fast-forward / reset-to-upstream entries. Visibility is decided from
+  the CACHED tracking counts (`SelectedRef.upstream`, carried from
+  `group_refs`'s `track`; `Upstream.ref` is the full refname from
+  `for-each-ref %(upstream)`, so a local-branch upstream works too) — no spawn
+  while building the palette. But the current-vs-other form is decided from the
+  fresh `fetch.sync_probe`, never the decoration: a stale "current" would aim
+  `reset --hard` at whatever branch HEAD is on now. Untracked files are not
+  counted as "discarded" (`sync.tracked_changes`, not `parse_status`'s sum) since
+  `reset --hard` never touches them. `ctx:branch_sync` is a `GRAPH_HELPERS` field
+  (the 200-local ceiling) and shares `ctx.remote_busy`.
 - **Checkout & examine** (spec §10.4.2): check a commit (or a §13 selection's
   newest end) out detached and open diffview on ONE rev — the older end's first
   parent, the empty tree for a root (`range.examine_range`) — so the right side is
