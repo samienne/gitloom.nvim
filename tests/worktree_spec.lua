@@ -68,9 +68,17 @@ describe("parse_status", function()
         assert.equal(2, st.untracked)
     end)
 
+    it("counts each changed path once in `paths` (MM, rename, untracked)", function()
+        local st = parse_status({ "M  a.lua", "MM b.lua", "RM old.lua -> new.lua", "?? c.lua" })
+        assert.equal(3, st.staged)   -- the per-state counts are unchanged
+        assert.equal(2, st.unstaged)
+        assert.equal(1, st.untracked)
+        assert.equal(4, st.paths)
+    end)
+
     it("returns all zeros for a clean tree", function()
         local st = parse_status({})
-        assert.same({ staged = 0, unstaged = 0, untracked = 0 }, st)
+        assert.same({ staged = 0, unstaged = 0, untracked = 0, paths = 0 }, st)
     end)
 end)
 
