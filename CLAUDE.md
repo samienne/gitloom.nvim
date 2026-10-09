@@ -1492,8 +1492,11 @@ Details not covered by the spec or architecture:
   (`update_panes` + its coroutine helpers) and the one-time stream/`on_show`
   setup remain nested inside `open_graph` (cohesive, already encapsulated via
   `ctx`). The float **z-order** is the single-window bounded model (§14):
-  `host_zindex`/`overlay_zindex`/`float_zindex`, fixed deltas above the host's
-  live zindex — no stacking ladder. pane.lua is the context-pane
+  `host_zindex`/`overlay_zindex`/`float_zindex`, fixed deltas (+1 overlays, +2
+  gitloom's transient floats) above the host's live zindex — no stacking ladder.
+  The host is created at `opts.zindex` (default 41, so 41/42/43: above ordinary
+  windows' decorations, below other plugins' floats such as fidget at 45);
+  floats gitloom does not own keep their own zindex. pane.lua is the context-pane
   layout core (boundary-line extraction; `continue`/`condense`/`footer` = the
   footer's down-rebuild; `continue_up` = the header's **minimal connecting subgraph**
   (only how the pinned anchors relate to each other + the lanes crossing the cutoff —

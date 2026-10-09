@@ -540,6 +540,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         provider = "auto",   -- "auto" (fidget if installed, else vim.notify) / "fidget" / "notify" / false / { start = fn }
         delay = 300,         -- ms an operation must run before it is shown at all
     },
+    zindex = 41,             -- the graph window's zindex; its overlays +1, its own floats +2 (§14.1)
     search = {               -- commit search (§15; <leader>gl or :GitloomSearch)
         snippet = 7,         -- graph rows shown around the commit in the preview
         layout = "vertical", -- preview arrangement (snippet above the detail)
@@ -674,6 +675,15 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   notify (fetch, checkout, …) are not announced twice. Success and error notices
   are kept under every provider. `provider = false` (or `progress = false`) turns
   reporting off; a table `{ start = function(op) … end }` plugs in your own.
+- **`zindex`** — the graph window's float zindex (default `41`, §14.1). gitloom
+  is a full-screen window, so it sits above ordinary windows' float decorations
+  (treesitter-context, scrollbars: ≤ 40) and below other plugins' floats —
+  fidget / oil / mason (44–45), pickers, `vim.ui.select` and notifications (50+)
+  draw over it. Its own layers follow: the context panes and the commit-view
+  sticky header at `zindex + 1`, the `?` / `K` floats, the pin dialog, the filter
+  prompt and the commit search at `zindex + 2`. Floats gitloom does not own keep
+  their own zindex. Raise it if another plugin's float should stay under the
+  graph.
 - **`pick_key`** — the normal-mode mapping `setup()` installs for the repository
   picker (`:GitloomPick`, §2.1; default `<leader>wG`). Set to a string to remap,
   or `false` to install no mapping. A setup-level option, not a graph option.

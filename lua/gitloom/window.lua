@@ -353,9 +353,15 @@ local COL = { flex = 4, author = 2, author_max = 25, graph = 3 }
 -- and the commit-view sticky header) and the **transient floats** (`?`/`K`, the
 -- pickers). Each is a fixed delta above the host's **live** zindex — the host can
 -- hide and re-show with a new id (§14), so always read it. Larger = nearer the user.
-local Z_HOST    = 50  -- the host window itself (snacks' default; documentary)
-local Z_OVERLAY = 5   -- panes + the commit-view sticky header, just above the host
-local Z_FLOAT   = 10  -- transient floats (`?`/`K`, pickers), above the overlays
+--
+-- The host is CREATED at `opts.zindex` (default Z_HOST = 41): a full-screen app
+-- window, so it sits above ordinary windows' float decorations (treesitter-context
+-- 20, scrollbars ~40) but below other plugins' floats (fidget / oil / mason 44–45,
+-- pickers / vim.ui.select / notifications 50+). The whole stack is 41 / 42 / 43,
+-- and floats gitloom does not own keep their own zindex.
+local Z_HOST    = 41  -- the host window itself (the `zindex` option's default; §8)
+local Z_OVERLAY = 1   -- panes + the commit-view sticky header, just above the host
+local Z_FLOAT   = 2   -- gitloom's transient floats (`?`/`K`, its pickers), above the overlays
 
 -- The host window's live zindex (its current config), defaulting to Z_HOST.
 ---@param host_win integer?
@@ -1352,7 +1358,7 @@ end
 ---@field height number|fun():number
 ---@field title string
 ---@field footer string
----@field zindex? integer  stacking order, assigned per-open so the newest graph is on top (§2.1)
+---@field zindex? integer  the host's zindex; set from GraphOptions.zindex at open (§8/§14)
 ---@field on_win? fun(w: table)  snacks calls this on every (re)show; refreshes the live window id (§14)
 ---@field keys? table  keymaps installed on the graph window (snacks.win keys)
 
@@ -1412,6 +1418,7 @@ end
 ---@field pin_upstream? boolean  pinning a local branch also pins its tracked upstream (default true); §6.3/§10.6
 ---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
+---@field zindex? integer  the host window's zindex (default 41); overlays at +1, gitloom's transient floats at +2; §8/§14
 ---@field persist? boolean  persist the view toggles + pin lists to stdpath("state")/gitloom.json (default true); §18
 ---@field progress? ProgressConfig|false  how long-running operations are reported (default { provider = "auto", delay = 300 }); §19
 
@@ -4180,6 +4187,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Refs are pinned to the right edge and use the free width; the message
         -- keeps at least message_min, and ref overflow becomes a "+N" marker.
         message_min = 24,
+        -- Float z-order (§14): the host window's zindex. Its overlays (context
+        -- panes, the sticky header) sit at zindex+1 and gitloom's transient floats
+        -- (`?`/`K`, its pickers and dialogs) at zindex+2. 41 keeps the graph above
+        -- ordinary windows' decorations (≤ 40) and below other plugins' floats
+        -- (fidget 45, pickers / vim.ui.select 50+).
+        zindex = Z_HOST,
         -- Ref label placement (§6.1): "right" (default), "inline", or "dual".
         -- Cycle live with B.
         label_mode = "right",
@@ -4241,6 +4254,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     if not user_footer then
         opts.win.footer = footer_text(opts.mirror)
     end
+    -- Create the host at the configured layer (§14); snacks' default would be 50,
+    -- above other plugins' floats. The layers above it read its LIVE zindex.
+    opts.win.zindex = opts.zindex
     -- Colour generation (§5.5) needs truecolor to realise RGB; without it Phase 1
     -- must not mint generated slots (they would have no colour), so degrade to
     -- the curated palette + sharing.
@@ -4688,9 +4704,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- the still-nested update_panes); exposed so the extracted helpers can call it.
     ctx.update_footer = update_footer
 
-    -- The host window keeps snacks' default zindex (Z_HOST); its overlays and the
-    -- transient floats layer above it via overlay_zindex / float_zindex (§2.1/§14,
-    -- the single-window bounded model — no stacking ladder).
+    -- The host window is created at opts.zindex (default Z_HOST = 41, set on
+    -- opts.win above); its overlays and the transient floats layer above it via
+    -- overlay_zindex / float_zindex (§2.1/§14, the single-window bounded model —
+    -- no stacking ladder).
 
     -- Refresh the live window/buffer ids on every (re)open. snacks calls on_win
     -- after open_win on each show() — including after a hide()/return (§14) — with
@@ -6898,6 +6915,10 @@ M._internal = {
     -- §19.4's "always ended" glue paths, driven over a stub ctx; progress_spec
     reflow_async = GRAPH_HELPERS.reflow_async,
     resync = GRAPH_HELPERS.resync,
+    -- The float z-order layers (§14), read off a host window; zorder_spec.
+    host_zindex = host_zindex,
+    overlay_zindex = overlay_zindex,
+    float_zindex = float_zindex,
 }
 
 return M

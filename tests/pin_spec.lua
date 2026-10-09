@@ -305,7 +305,7 @@ describe("pinned-branches dialog (§10.6.1) — windowed smoke", function()
         vim.api.nvim_buf_set_lines(hbuf, 0, -1, false, { "a", "b", "c" })
         local hwin = vim.api.nvim_open_win(hbuf, true, {
             relative = "editor", row = 1, col = 1, width = 60, height = 15,
-            style = "minimal", zindex = 50,
+            style = "minimal", zindex = 41, -- the host layer (§14.1)
         })
         local ctx = {
             repo = repo, opts = {}, repo_key = "/r",

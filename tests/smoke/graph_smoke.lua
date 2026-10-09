@@ -109,6 +109,13 @@ function M.run()
     end, 60)
 
     if not focus() then fail("no valid host window after open"); return M.finish() end
+    -- §14.1 z-order: the host is CREATED at the `zindex` option (default 41), not
+    -- snacks' default 50 — so other plugins' floats (fidget at 45, pickers 50+)
+    -- draw over the graph.
+    do
+        local hz = vim.api.nvim_win_get_config(focus() --[[@as integer]]).zindex
+        if hz ~= 41 then fail(("host zindex %s, expected 41 (§14.1)"):format(tostring(hz))) end
+    end
     if vim.api.nvim_buf_line_count(gbuf) < 2 then
         fail("graph buffer never populated (" .. vim.api.nvim_buf_line_count(gbuf) .. " lines)")
     end

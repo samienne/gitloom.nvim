@@ -1704,7 +1704,7 @@ status in the window footer.
 GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
                  message_min, label_mode, diff, working_tree, scrolloff, search,
-                 persist, progress }
+                 persist, progress, zindex }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -1797,6 +1797,12 @@ Endpoint     = Commit | "index" | "worktree"
   `"fidget"`, `"notify"`, `false`, or a custom provider table; `delay` is how long
   (ms) an operation must run before it is shown at all (**default `300`**).
   `progress = false` reports nothing, exactly as before §19. fidget is optional.
+- `zindex` — the host window's **zindex** (§14.1, "Z-order"; **default `41`**).
+  gitloom's own layers follow it: the overlays (context panes, the commit-view
+  sticky header) at `zindex + 1`, its transient floats (`?` / `K`, its pickers
+  and dialogs) at `zindex + 2`. The default places the full-screen graph above
+  ordinary windows' float decorations (≤ 40) and below other plugins' floats
+  (progress / notifications at 44–45, pickers and `vim.ui.select` at 50+).
 - `search` — the commit-search picker (§15): `snippet` is the number of graph
   rows shown around the commit in the preview (**default `7`**, odd so the commit
   sits centered); `layout` is how the graph snippet and the commit detail are
@@ -3190,6 +3196,19 @@ Two tiers, with two different kinds of identity:
   the repositories you glance at: following a submodule link (§14.7) pushes a
   *view* in the current window (tier 2); it does **not** create that submodule's
   host window. A submodule gets its own host window only via `<leader>wG`.
+- **Z-order.** The host is a full-screen *application* window, so it sits
+  **below other plugins' floats** — progress / notification floats (e.g.
+  fidget, oil, mason at 44–45), pickers, `vim.ui.select` and notifications
+  (50+) draw over it — but **above the float decorations of ordinary windows**
+  (sticky context, scrollbars: 20–40), which must not show through it. It is
+  created at the `zindex` option (§8, default `41`), and gitloom's own layers are
+  fixed offsets above it: the **overlays** (context panes §6.2, the commit-view
+  sticky header §11) at host + 1 and gitloom's **transient floats** (`?` / `K`,
+  the pin dialog, the filter prompt, its own pickers) at host + 2 — so `41` /
+  `42` / `43` by default. The offsets are taken from the host's *live* zindex,
+  since a hidden host re-shows as a new window. Floats gitloom merely invokes but
+  does not own (a plain snacks picker such as the ref picker, `vim.ui.select`)
+  keep their own zindex.
 
 ### 14.2 Views and modifiers
 

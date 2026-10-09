@@ -240,12 +240,19 @@ told this scroll's panes are current.
    `zindex` sits just above the host window's content but below the transient
    `?`/`K` floats. With the single-window model (§14) there is only one host
    window on screen, so the z-order is bounded rather than a stacking ladder:
-   `host_zindex` (the host's live zindex, snacks' default ~50) with fixed deltas
-   above it — `overlay_zindex` (= host + 5: the panes and the commit-view sticky
-   header) and `float_zindex` (= host + 10: the `?`/`K` floats and the pickers).
-   Each reads the host's *live* zindex (it can hide and re-show with a new id),
-   so the panes always layer correctly over whichever window the host currently
-   is. The seam is computed in **screen-row space** on the flattened `screen_lines`
+   `host_zindex` (the host's live zindex) with fixed deltas above it —
+   `overlay_zindex` (= host + 1: the panes and the commit-view sticky header) and
+   `float_zindex` (= host + 2: the `?`/`K` floats, the pin dialog, the filter
+   prompt and gitloom's own pickers). The host itself is **created** at
+   `opts.zindex` (default `Z_HOST` = 41, copied onto `opts.win.zindex` before the
+   listview makes the snacks window — snacks' own default, 50, would put the graph
+   over other plugins' floats). So the stack is 41 / 42 / 43: above ordinary
+   windows' float decorations (treesitter-context 20, scrollbars ~40) and below
+   other plugins' floats (fidget / oil / mason 44–45, pickers / `vim.ui.select` /
+   notifications 50+, §14.1). Floats gitloom invokes but does not own (a plain
+   snacks picker, `vim.ui.select`) keep their own zindex. Each layer reads the
+   host's *live* zindex (it can hide and re-show with a new id), so the panes
+   always layer correctly over whichever window the host currently is. The seam is computed in **screen-row space** on the flattened `screen_lines`
    model. **`pane.screen_lines(display, rows_of)`** flattens the display OrderItems
    into the actual sequence of rendered **screen rows** — real `columns` lines PLUS the
    **virtual** fan rows (`virt_lines`; each takes a screen row but *no* real buffer line,
@@ -1966,8 +1973,8 @@ notice, mirroring the ref picker.
 
 The picker float sits above the graph via `layout = { preset = "default", layout =
 { zindex = float_zindex(ctx:win()) } }` — the single-window z-order model (§2.1):
-the host keeps a fixed zindex and transient floats layer at `float_zindex` (host +
-10). The preset is required (without it the layout drops the preview window).
+the host sits at `opts.zindex` (default 41) and transient floats layer at
+`float_zindex` (host + 2). The preset is required (without it the layout drops the preview window).
 `build_commit_rows` is exposed as `M.build_commit_rows` so the picker (and its
 preview) share the commit-view renderer.
 
