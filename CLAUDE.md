@@ -89,6 +89,10 @@ All changes go through branches — never commit directly to `master` or
   asks. It is fine to suggest "should we commit this?" at a stopping point.
 - Merge with `git merge --no-ff` and a summary message describing *what* and
   *why*.
+- **A merged branch is finished.** Once a branch has been merged (into
+  `unstable` or `master`), never add commits to it or merge it again. Follow-up
+  work — a cleanup, a fix to it, a review change — goes on a **new** branch from
+  the current `master`. Continuing a merged branch makes the history graph messy.
 
 The shipped/default branch is `unstable` (what the Neovim config follows);
 `master` is the integration branch.
