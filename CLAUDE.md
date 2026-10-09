@@ -87,8 +87,16 @@ All changes go through branches — never commit directly to `master` or
 - Branch from `master`. Multiple commits per branch are fine.
 - Do **not** create commits automatically — only when the user explicitly
   asks. It is fine to suggest "should we commit this?" at a stopping point.
-- Merge with `git merge --no-ff` and a summary message describing *what* and
-  *why*.
+- **Every commit on `master` makes one meaningful change.** How a branch lands
+  there depends on its commits:
+  - **One commit** — fast-forward (rebase it onto `master` first if needed).
+  - **Several commits that are not each a meaningful step** (work in progress,
+    fixups, "address review") — squash them into one commit.
+  - **A real merge** (`git merge --no-ff`, with a summary message describing
+    *what* and *why*) — only when the branch's commits are carefully curated,
+    each a self-contained meaningful step. Curate them before merging.
+- Landing on `unstable` for test-driving is unaffected: it stays a
+  `git merge --no-ff` merge of the branch.
 - **A merged branch is finished.** Once a branch has been merged (into
   `unstable` or `master`), never add commits to it or merge it again. Follow-up
   work — a cleanup, a fix to it, a review change — goes on a **new** branch from
