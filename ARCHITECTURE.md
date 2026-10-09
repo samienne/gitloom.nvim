@@ -441,6 +441,9 @@ lua/gitloom/
   persist.lua     Persisted view state (§18): the JSON state file (lazy read,
                   re-read-merge-rename write), the {value, base} precedence rule,
                   the pin-list save/restore and Reset — pure core + thin I/O
+  progress.lua    Progress reporting (§19): the operation tracker (show
+                  delay, idempotent end, per-session sweep) + the fidget / notify
+                  providers — pure core over an injected timer and sink
   util.lua        Vendored helpers: make_future (promise), compose/highlight_text
                   (highlight builders), trim_ws
   git/            The git DATA LIBRARY (gitloom.git)
@@ -2078,6 +2081,86 @@ the three module cycle indices, restores the default anchors and re-sorts /
 re-lays out / refreshes. `nav.ctxs[root]` lets `:GitloomResetView` find the open
 graph from outside it.
 
+### Progress reporting (§19)
+
+`progress.lua` is a **standalone module**, not window glue: window.lua is at
+LuaJIT's 200-local chunk ceiling, so its call sites reach it with an inline
+`require("gitloom.progress")` (the `persist.lua` pattern) and keep the live
+operations on a `ctx` field (`ctx.progress`, the session's tracker) — no new
+window.lua locals. It never `require`s fidget at load time: `tracker:start`
+resolves the provider once per operation, doing `pcall(require, "fidget.progress")`
+for `"auto"` / `"fidget"` and degrading to the `notify` provider when that fails.
+Resolving at start (not at show) is what lets fetch / pull know up front whether to
+emit their own `Fetching…` notice (`op.fidget`, §19.3). No dependency on
+loomworks.
+
+Shape:
+
+- `progress.tracker(cfg, deps?)` — one per graph session. `deps` injects the
+  clock, the one-shot timer and the providers (tests pass fakes; production uses
+  `vim.uv` timers and the real providers).
+- `tracker:start(title, opts?) -> Op` — arms the show-delay timer and returns an
+  **Op**: `op:report(message)`, `op:finish(outcome, message?)` (idempotent; the
+  first call wins). Before the delay fires an Op only records its latest message;
+  when it fires, the provider's `start` is called with the current title + message
+  — unless the Op has already ended, in which case nothing is ever shown.
+  `opts.own_notices` marks an operation that has its own start/outcome notices
+  (fetch, pull, checkout, sync, examine, Return, resync), which is what lets the
+  notify provider avoid doubling them (§19.3).
+- `tracker:close()` — ends every live Op `cancelled` (and makes later starts
+  inert); called from the session's teardown — a `BufWipeout` on the graph buffer,
+  registered with the session's other autocmds in `open_graph`. A commit view has
+  no `ctx`: it holds its own tracker for its diff load, closed by the frame's
+  `BufWipeout`.
+- Every provider call is `pcall`ed: a broken provider costs that operation its
+  display, never the operation.
+
+The **fidget provider** maps an Op to
+`require("fidget.progress").handle.create{ title, message,
+lsp_client = { name = "gitloom" }, cancellable = false }` — the client name is
+what groups all entries under one `gitloom` heading. Every end goes through
+`handle:finish()` (after a `report{ message = "failed"|"cancelled" }` for those
+outcomes), never `handle:cancel()`: the handle is non-cancellable, and fidget's
+`cancel` raises on a non-cancellable handle. fidget's own `__gc` finalizer also
+finishes an abandoned handle, but gitloom does not rely on it.
+
+Call sites (start → every end):
+
+- **Open** — started at the `open` trace point (window.lua `on_controller`);
+  `report` at the `refs` / `batch` / `stream` / `sort` trace points; ended `done`
+  at the `done` trace point. The projection's `reflow_async` gains the Op: its
+  error branch ends it `failed`, its `reflow_gen` mismatch ends it `cancelled`.
+- **Resync** — `resync()`: both `if not ctx:win() then return end` exits end it
+  `cancelled`; the final callback ends it `done`.
+- **Fetch / pull** — `run_remote`: started where `vim.notify(cmd.running)` is
+  (which is skipped when the resolved provider is fidget); ended `done`/`failed`
+  in the job callback, before the resync.
+- **Branch sync** — `branch_sync`'s `exec` only; ended in its callback.
+- **Checkout** — the palette's `checkout(spec)`; ended in its callback.
+- **Examine / Return** — `examine`'s `go()` and `examine_return`; every branch of
+  their callbacks ends it. The running message comes from an optional `on_step`
+  callback on `fetch.examine_run` / `fetch.examine_return`, told each step as it
+  begins (`stashing` / `checking out`, `switching` / `restoring changes`).
+- **Sort** — `h_sort` around `apply_sort()` for a `rev` mode.
+- **Diff load** — `open_commit_view`'s `fetched` chain; ended in the final
+  `.next` (a non-zero range diff ends it `failed`).
+
+Tests (`tests/progress_spec.lua`): the pure tracker over a fake clock /
+timer and a recording sink — an Op ended before the delay calls no provider at
+all; one past it calls `start` once with the latest message, `report` after, and
+`finish` exactly once whatever the number of ends; `close()` ends every live Op
+`cancelled` and none twice; a throwing provider leaves the Op's caller unaffected;
+`"auto"` selects fidget iff the fake `fidget.progress` loads; the notify provider's
+start/end rules per `own_notices` × outcome (no start for an own-notice Op, no end
+for `failed`/`cancelled`, an end only after a shown start). The fidget adapter
+against the real fidget (from the lazy dir, `pending` when absent): the client
+name is `gitloom`, the handle is finished on `failed` and `cancelled` without
+raising. Per call site, an "always ended" check drives the glue's paths over a
+stub ctx where a spec can reach them (`window._internal.reflow_async`:
+supersession → `cancelled`, an error → `failed`, completion left to the caller;
+`window._internal.resync`'s closed-window exit → `cancelled`), the rest being
+window glue.
+
 ### Checkout & examine
 
 Checkout & examine (specification.md §10.4.2) splits three ways. The pure
@@ -2387,6 +2470,7 @@ gitloom.nvim/
 │   ├── init.lua           Thin facade (setup + :GitloomGraph)
 │   ├── window.lua         The window controller (gitloom.window): M.open
 │   ├── persist.lua        Persisted view state: toggles + per-repo pins (§18)
+│   ├── progress.lua       Progress reporting: operations + fidget/notify providers (§19)
 │   ├── util.lua           Vendored helpers (make_future/compose/highlight_text/trim_ws)
 │   ├── git/               The git data library (gitloom.git)
 │   │   ├── init.lua       Aggregator

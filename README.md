@@ -80,6 +80,9 @@ even though it ships as part of the same suite. See
 - *Optional:* [diffview.nvim](https://github.com/sindrets/diffview.nvim) (or any
   diff plugin) for the external diff (`D` / the commit view's action label); the
   provider is configurable, so diffview is not required
+- *Optional:* [fidget.nvim](https://github.com/j-hui/fidget.nvim) to show
+  long-running operations (opening a large repository, fetch / pull, checkout)
+  as progress entries; without it they are reported with `vim.notify` (§19)
 
 ## Installation
 
@@ -533,6 +536,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     pin_upstream = true,     -- pinning a local branch also pins its tracked upstream (§6.3/§10.6)
     persist = true,          -- remember the view toggles + pin lists across sessions (§18)
+    progress = {             -- long-running operations (§19); progress = false for none
+        provider = "auto",   -- "auto" (fidget if installed, else vim.notify) / "fidget" / "notify" / false / { start = fn }
+        delay = 300,         -- ms an operation must run before it is shown at all
+    },
     search = {               -- commit search (§15; <leader>gl or :GitloomSearch)
         snippet = 7,         -- graph rows shown around the commit in the preview
         layout = "vertical", -- preview arrangement (snippet above the detail)
@@ -655,6 +662,18 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   pin list (other repositories keep theirs) and restores your configuration live.
   A corrupt file is ignored with one warning. `persist = false` neither reads nor
   writes the file.
+- **`progress`** — how gitloom reports operations that take a while (§19):
+  opening the graph, `R`, fetch / pull, checkout, checkout & examine / Return,
+  the branch sync, a `rev` sort and a diff load. An operation is shown only once it
+  has run for `delay` ms, so fast ones produce nothing. With
+  [fidget.nvim](https://github.com/j-hui/fidget.nvim) installed (`provider =
+  "auto"`, the default) each appears as a fidget entry under **gitloom** (and
+  replaces the `Fetching…` / `Pulling…` notice); without it, an operation that has
+  no notice of its own (the open, a sort, a diff load) gets a `gitloom: <title>…`
+  notice and, when it succeeds, a `… — done (N s)` one — operations that already
+  notify (fetch, checkout, …) are not announced twice. Success and error notices
+  are kept under every provider. `provider = false` (or `progress = false`) turns
+  reporting off; a table `{ start = function(op) … end }` plugs in your own.
 - **`pick_key`** — the normal-mode mapping `setup()` installs for the repository
   picker (`:GitloomPick`, §2.1; default `<leader>wG`). Set to a string to remap,
   or `false` to install no mapping. A setup-level option, not a graph option.

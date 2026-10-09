@@ -1704,7 +1704,7 @@ status in the window footer.
 GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
                  message_min, label_mode, diff, working_tree, scrolloff, search,
-                 persist }
+                 persist, progress }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -1792,6 +1792,11 @@ Endpoint     = Commit | "index" | "worktree"
   (§18). **Default true.** Set false to neither read nor write the file. A
   persisted toggle yields to a `setup()` value changed since it was saved (§18.3);
   **Reset view settings** (`<C-Space>`, `:GitloomResetView`) clears it.
+- `progress` — how long-running operations are reported (§19): `provider` is
+  `"auto"` (**default** — fidget.nvim when installed, else `vim.notify`),
+  `"fidget"`, `"notify"`, `false`, or a custom provider table; `delay` is how long
+  (ms) an operation must run before it is shown at all (**default `300`**).
+  `progress = false` reports nothing, exactly as before §19. fidget is optional.
 - `search` — the commit-search picker (§15): `snippet` is the number of graph
   rows shown around the commit in the preview (**default `7`**, odd so the commit
   sits centered); `layout` is how the graph snippet and the commit detail are
@@ -3704,7 +3709,9 @@ except the `Fetching…` notice and the environment, which only the network comm
 need.
 
 - **Asynchronously** — the job runs in the background and the graph stays
-  usable; a `Fetching…` / `Pulling…` notice shows while it runs.
+  usable; a `Fetching…` / `Pulling…` notice shows while it runs — or, under the
+  fidget progress provider, a fidget entry instead of that notice (§19.3). Each
+  job is a reported operation (§19.1), ended on every path.
 - In the graph's **repository root** (§2.1), which may be a submodule — never
   implicitly Neovim's cwd.
 - With `GIT_TERMINAL_PROMPT=0` in the job's environment, so a credential
@@ -3829,3 +3836,153 @@ the `:GitloomResetView` command — asks for confirmation (Reset / Cancel), then
 repository at Neovim's cwd (its file entries are cleared even when no graph is
 open for it). Reset works with `persist = false` too: it then only restores the
 live session.
+
+## 19. Progress reporting
+
+Some of what gitloom does takes long enough that the user should be told it is
+happening: opening a large repository, a fetch or pull, a checkout that rewrites
+a big working tree. gitloom reports such an **operation** through a pluggable
+**progress provider**. [fidget.nvim](https://github.com/j-hui/fidget.nvim) is the
+default provider when it is installed; without it, operations are reported with
+`vim.notify`. fidget is **optional** — like diffview (§11.5), it is never a
+required dependency, and nothing else changes when it is absent. Progress is
+**display only**: it never changes what an operation does, and reporting can never
+fail an operation (a provider that errors is ignored for that operation).
+
+### 19.1 Operations
+
+An **operation** has a title, an optional message updated while it runs, and an
+**outcome** when it ends: `done`, `failed` or `cancelled`. Every operation that is
+started is **always ended** — on success, on every failure path, when it is
+superseded, and when its graph session closes (§19.4).
+
+Reported operations (titles are the user-visible strings):
+
+| Operation | Title | Message while running | Own notices today |
+|---|---|---|---|
+| Open: refs → commit stream → sort → working tree → first projection (§3.1, §10.5) | `Loading <repo>` | `refs`, `N commits` (per streamed batch), `sorting`, `laying out` | none |
+| Resync, `R` and every post-action resync (§3.4) | `Refreshing` | `refs`, `new commits`, `laying out` | `resynced` / the HEAD notice |
+| Fetch / per-remote fetch / pull (§17.3) | `Fetching` / `Fetching <remote>` / `Pulling` | — | `Fetching…`, then success / error |
+| Branch sync: fast-forward / reset (§17.2) — the git command only, not the probe or the prompt | `Fast-forwarding <branch>` / `Resetting <branch>` | — | success / error |
+| Checkout (§10.4.1) | `Checking out <ref>` | — | the HEAD notice / error |
+| Checkout & examine (§10.4.2) — from the confirmed stash / checkout, not the prompt | `Examining <short>` | `stashing`, `checking out` | the HEAD notice / error |
+| Return (§10.4.2) | `Returning to <ref>` | `switching`, `restoring changes` | the HEAD notice / error |
+| Sort by a `rev` mode, `S` (§3.1) | `Sorting by <mode>` | — | none |
+| Commit / range / working-tree view diff load (§11.1, §13.5) | `Loading diff` | — | error only |
+
+Not reported, deliberately:
+
+- **Keystroke-paced rebuilds** — the context-pane rebuild (§6.2, every scroll),
+  the reachability recompute (§12), the filter's live rebuild (§16.6). They run
+  constantly and are superseded constantly; a progress entry would flicker.
+- **Synchronous work** — a reflow driven by a toggle (`c`, `p`, `<Space>`, …;
+  §10.5) runs on the main loop and blocks it, so no progress display could paint
+  before it finished. Only work that yields to the event loop is reported.
+- **The repository picker's discovery** (§2.1) — the picker's own rows are its
+  progress, and it typically completes in well under the show delay.
+- **Probes** (`git status`, `sync_probe`, the examine probe) — tens of
+  milliseconds; they are folded into their operation, never reported alone.
+
+No operation reports a **percentage**: the commit stream does not know its total
+(`git log` reports none), and the other operations are single git commands. A
+provider shows them as indeterminate (fidget: a spinner). Reporting the stream
+against the previous open's commit count is deferred (§19.6).
+
+### 19.2 The show delay
+
+An operation is **shown only once it has run for `progress.delay` milliseconds**
+(default `300`). One that ends sooner is never shown — nothing appears, neither a
+start nor an end — so a fast checkout, a warm-cache open of a small repository or
+a quick resync produce no noise. The delay applies to every provider, including a
+custom one: a provider's `start` is called only once the delay has elapsed.
+
+### 19.3 Providers
+
+`progress.provider` selects how a shown operation is displayed:
+
+- **`"auto"`** (default) — fidget when `require("fidget.progress")` loads, else
+  `"notify"`. Checked once per operation, so installing or lazy-loading fidget
+  later is picked up.
+- **`"fidget"`** — a fidget progress entry. Every gitloom entry is grouped under
+  the name **`gitloom`** (fidget groups progress by its client name), titled by
+  the operation, with the message as the entry's message. The entry is created
+  **non-cancellable**: gitloom does not cancel a running git job from the
+  progress display (§19.4), and a fidget entry dismissed by the user only hides
+  it. When fidget cannot be loaded, behaves as `"notify"`.
+- **`"notify"`** — `vim.notify` notices (below).
+- **a table** `{ start = fun(op: ProgressStart): ProgressSink }` — a custom
+  provider. `start` receives `{ title, message? }` and returns a sink
+  `{ report = fun(message?), finish = fun(outcome, message?) }`. gitloom calls
+  `report` / `finish` only on a started sink and `finish` exactly once.
+- **`false`** — nothing is reported; behaviour is exactly as before this section.
+  `progress = false` is the same as `progress = { provider = false }`.
+
+**The `notify` provider** never repeats what an operation already says:
+
+- **Start** — after the delay, one INFO notice `gitloom: <title>…`, but **only
+  for an operation with no notice of its own** (the open, `S`, a diff load).
+  The other operations keep the notices they already emit and get no start
+  notice of the provider's: fetch / pull keep their immediate `Fetching…` /
+  `Pulling…` (§17.3), and a checkout, examine, Return, branch sync or resync is
+  named by its own outcome notice.
+- **End** — one INFO notice `gitloom: <title> — done (<seconds> s)`, only for
+  outcome `done`, only when the start notice was shown, and only for an operation
+  with no outcome notice of its own (so: a slow open, sort or diff load). A
+  `failed` end adds nothing — every failure path already notifies at ERROR — and a
+  `cancelled` end adds nothing either (a superseded or abandoned operation is not
+  news).
+- The running message (`N commits`, …) is not notified: notices are a log, not a
+  live display.
+
+**The `fidget` provider** owns the "running" display, so gitloom's own **start**
+notice for fetch / pull (`Fetching…` / `Pulling…`) is **not** emitted under it —
+the fidget entry replaces it (a fetch always outlives the delay, so it is shown).
+Every **outcome** notice (success, the HEAD notice, every ERROR) is kept under
+every provider: they carry content a progress entry does not (git's error line,
+where HEAD landed), and a fidget entry is transient. A failed operation's entry
+ends with the message `failed`; a cancelled one with `cancelled`.
+
+### 19.4 Ending, cancellation and supersession
+
+- **Every path ends the operation.** Each completion callback (success and every
+  failure branch) ends it with `done` / `failed`; ending is idempotent, so a path
+  that ends twice is harmless.
+- **Supersession ends it `cancelled`.** The open's projection is a `reflow_async`
+  (§10.5); a newer reflow supersedes it (`reflow_gen`), and the superseded
+  projection's operation is ended `cancelled` at that point rather than left
+  running. An operation is never kept alive by a newer one.
+- **The session closing ends it `cancelled`.** Every operation belongs to its
+  graph session; when the session is torn down (the graph buffer is wiped, §14.5)
+  every operation it still has running is ended `cancelled`. This is the backstop
+  for a path that never completes — the futures gitloom chains do not propagate
+  errors, so an error thrown mid-chain would otherwise leave the entry running
+  forever. The git job itself is not killed: a fetch finishing after the close
+  still completes, its resync is skipped (§17.3).
+- **gitloom never cancels work from the progress display.** No git job is
+  interrupted, so no provider is offered a cancel action.
+
+### 19.5 Configuration
+
+```
+Progress = false | {
+  provider: "auto" | "fidget" | "notify" | false | ProgressProvider,  -- default "auto"
+  delay:    integer,  -- ms before an operation is shown (default 300; 0 = at once)
+}
+ProgressProvider = { start: fun(op: { title: string, message: string? }): ProgressSink }
+ProgressSink     = { report: fun(message: string?),
+                     finish: fun(outcome: "done"|"failed"|"cancelled", message: string?) }
+```
+
+`progress` is a `GraphOptions` field (§8), merged over the defaults like the
+others; it is not a view toggle and is not persisted (§18).
+
+### 19.6 Open / deferred
+
+- **A percentage for the open's stream**, estimated from the commit count of the
+  previous open of the same repository (persisted, §18) — useful on very large
+  repositories, wrong after a big fetch; deferred until it is wanted.
+- **Cancel from the display** — interrupting a fetch from its fidget entry. It
+  needs gitloom to own the job handle end to end and to define what a half-done
+  fetch leaves behind; out of scope here.
+- **Synchronous reflows** become reportable only once they are chunked like the
+  open's projection (§10.5).

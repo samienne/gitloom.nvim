@@ -1201,11 +1201,15 @@ local function open_commit_view(opts, commit, range, root)
             close_ctx()
         end,
     })
+    -- This view's reported operation (§19.1, the diff load): ended when the diff
+    -- lands, or `cancelled` with the frame (§19.4).
+    local progress = require("gitloom.progress").tracker(opts.progress)
     vim.api.nvim_create_autocmd("BufWipeout", {
         group = ctx_group,
         buffer = buf,
         callback = function()
             close_ctx()
+            progress:close()
             pcall(vim.api.nvim_del_augroup_by_id, ctx_group)
         end,
     })
@@ -1297,6 +1301,7 @@ local function open_commit_view(opts, commit, range, root)
     -- arrives (§11.1). Range mode (§13.5) needs no metadata fetch — the commit
     -- list is supplied — so it fetches only the combined range diff.
     local fetched
+    local load_op = progress:start("Loading diff")
     if range then
         -- Resolves { code, out, err }: a failing `git diff` must not read as an
         -- empty patch (§13.5), so a non-zero exit becomes a visible error row +
@@ -1326,6 +1331,7 @@ local function open_commit_view(opts, commit, range, root)
         end)
     end
     fetched.next(function(res)
+        load_op:finish(diff_error and "failed" or "done")
         render(res.meta, res.diff)
         -- Submodule change graphs (§11.7): fetch each asynchronously (gated,
         -- never fetching) and re-render in place as they resolve, so a slow or
@@ -1407,6 +1413,7 @@ end
 ---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 ---@field persist? boolean  persist the view toggles + pin lists to stdpath("state")/gitloom.json (default true); §18
+---@field progress? ProgressConfig|false  how long-running operations are reported (default { provider = "auto", delay = 300 }); §19
 
 ---@class GraphAttach : ListViewAttach
 ---@field host_root string  the parent repo whose host window/session receives the frame (§14)
@@ -2484,13 +2491,19 @@ GRAPH_HELPERS.palette = function(ctx)
         return owners
     end
     local function checkout(spec)
+        -- §19.1: `Checking out <ref>` — the branch, or the short hash of a detach.
+        local target = spec.argv[#spec.argv]
+        if spec.argv[3] == "--detach" then target = target:sub(1, 7) end
+        local pop = ctx.progress:start("Checking out " .. target, { own_notices = true })
         git.run_checkout(spec.argv, repo.root).next(function(res)
             vim.schedule(function()
                 if res.code ~= 0 then
+                    pop:finish("failed")
                     vim.notify(git.format_git_error(table.concat(spec.argv, " ", 1, 2), res),
                         vim.log.levels.ERROR)
                     return
                 end
+                pop:finish("done")
                 ctx:resync(false, {}) -- land on HEAD and name it (§10.4.1)
             end)
         end)
@@ -2556,11 +2569,17 @@ GRAPH_HELPERS.run_remote = function(ctx, kind, remote)
         return
     end
     ctx.remote_busy = cmd.label
-    vim.notify(cmd.running)
+    -- A reported operation (§19.1): `Fetching` / `Fetching <remote>` / `Pulling`,
+    -- the running notice's own words. Under fidget its entry replaces that notice
+    -- (§19.3); the outcome notices below stay under every provider.
+    local op = ctx.progress:start(cmd.running:gsub("^gitloom: ", ""):gsub("…$", ""),
+        { own_notices = true })
+    if not op.fidget then vim.notify(cmd.running) end
     git.run_remote(cmd.argv, ctx.repo.root, cmd.env).next(function(res)
         vim.schedule(function()
             ctx.remote_busy = nil
             local ok = res.code == 0
+            op:finish(ok and "done" or "failed")
             if ok then
                 vim.notify(cmd.done, vim.log.levels.INFO)
             else
@@ -2597,12 +2616,18 @@ GRAPH_HELPERS.branch_sync = function(ctx, op, t)
         vim.notify(ctx:git_failure(label, res), vim.log.levels.ERROR)
     end
     local function exec(cmd, notice)
+        -- The git command alone is the reported operation (§19.1) — not the probe
+        -- or the prompt ahead of it.
+        local op = ctx.progress:start((reset and "Resetting " or "Fast-forwarding ") .. t.branch,
+            { own_notices = true })
         git.run_checkout(cmd.argv, root).next(function(res)
             vim.schedule(function()
                 if res.code ~= 0 then
+                    op:finish("failed")
                     fail(cmd.label, res)
                     return
                 end
+                op:finish("done")
                 done()
                 vim.notify(notice, vim.log.levels.INFO)
                 ctx:resync(false)
@@ -2695,9 +2720,13 @@ GRAPH_HELPERS.examine = function(ctx, newer, older)
             end
             local short = newer.hash:sub(1, 7)
             local function go()
-                git.examine_run(plan, root).next(function(r)
+                -- From the confirmed stash / checkout on, a reported operation
+                -- (§19.1) — not the probe or the prompt — ended on every branch.
+                local op = ctx.progress:start("Examining " .. short, { own_notices = true })
+                git.examine_run(plan, root, function(step) op:report(step) end).next(function(r)
                     vim.schedule(function()
                         done()
+                        op:finish(r.ok and "done" or "failed")
                         if r.ok then
                             local st = plan.state --[[@as ExamineState]]
                             if plan.stash then
@@ -2763,9 +2792,15 @@ GRAPH_HELPERS.examine_return = function(ctx)
     end
     local rp = git.return_plan(st)
     ctx.remote_busy = rp.label
-    git.examine_return(rp, root).next(function(r)
+    -- A reported operation (§19.1): `Returning to <ref>` (the branch, or the
+    -- short hash of a detached origin), ended on every branch below.
+    local back = rp.switch[#rp.switch]
+    if rp.switch[3] == "--detach" then back = back:sub(1, 7) end
+    local op = ctx.progress:start("Returning to " .. back, { own_notices = true })
+    git.examine_return(rp, root, function(step) op:report(step) end).next(function(r)
         vim.schedule(function()
             ctx.remote_busy = nil
+            op:finish(r.ok and "done" or "failed")
             if not r.ok and r.stage == "switch" then
                 vim.notify(ctx:git_failure(table.concat(rp.switch, " ", 1, 2), r.res), vim.log.levels.ERROR)
                 return -- HEAD did not move: keep the state so Return can be retried
@@ -2798,7 +2833,13 @@ local function h_sort(ctx)
     sort_mode_index = (sort_mode_index % #SORT_MODES) + 1
     ctx.opts.sort_mode = SORT_MODES[sort_mode_index].id
     ctx:save_pref("sort_mode")
+    -- A `rev` mode asks git for the order (async), a reported operation (§19.1);
+    -- the topo mode is synchronous and reports nothing.
+    local mode = SORT_MODES[sort_mode_index]
+    local op = mode.rev and ctx.progress:start("Sorting by " .. mode.label)
+        or require("gitloom.progress").null_op()
     ctx:apply_sort().next(function()
+        op:finish("done")
         ctx:reflow()
         ctx:update_footer()
         if keep then ctx:goto_hash(keep) end
@@ -3914,7 +3955,10 @@ GRAPH_HELPERS.refresh_worktree = refresh_worktree
 -- (`git.head_summary`), with `follow.note` appended when given.
 ---@param follow? { note?: string }
 local function resync(ctx, silent, follow)
-    if not ctx:win() then return end
+    -- A reported operation (§19.1), ended on every path below. Its outcome is
+    -- named by the resync's own notice, so the notify provider adds none (§19.3).
+    local op = ctx.progress:start("Refreshing", { message = "refs", own_notices = true })
+    if not ctx:win() then return op:finish("cancelled") end
     local repo = ctx.repo
     ctx:load_remotes() -- the palette's per-remote entries (§17.1)
 
@@ -3946,6 +3990,7 @@ local function resync(ctx, silent, follow)
         local new_list = {}
         for h in pairs(new_tips) do new_list[#new_list + 1] = h end
         for h in pairs(old_tips) do old_list[#old_list + 1] = h end
+        op:report("new commits")
         return fetch_new_commits(new_list, old_list)
     end).next(function(commits)
         for _, c in ipairs(commits) do ctx:integrate_commit(c) end
@@ -3955,7 +4000,8 @@ local function resync(ctx, silent, follow)
         if ctx.opts.working_tree == false then return nil end
         return fetch_worktree_state()
     end).next(function(state)
-        if not ctx:win() then return end
+        if not ctx:win() then return op:finish("cancelled") end
+        op:report("laying out")
         if state then ctx:apply_worktree(state) end
         -- Refs moved, so the owner TIPS may have moved with the owner and commit
         -- counts unchanged (a detached HEAD moving, a force-pushed ref) — which the
@@ -3977,6 +4023,7 @@ local function resync(ctx, silent, follow)
         ctx:update_cone()
         if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
         ctx:update_panes()
+        op:finish("done")
         if silent then return end
         local said = follow and git.head_summary(repo.head, head_hash)
         if said then
@@ -4155,6 +4202,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Pin the pair (§6.3/§10.6): pinning a local branch also pins its tracked
         -- upstream remote ref, so both lanes stay in full and a divergence is drawn.
         pin_upstream = true,
+        -- Progress reporting (§19): fidget.nvim when it loads, else vim.notify;
+        -- an operation is shown only once it has run for `delay` ms.
+        progress = { provider = "auto", delay = 300 },
         -- Commit search (§15): `snippet` graph rows shown around the commit in the
         -- preview (odd, so the commit is centered); `layout` is the preview
         -- arrangement (only "vertical" — snippet above detail — for now, §15.3).
@@ -4256,6 +4306,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     ---@field persist_config table<string, any>  configuration-resolved value of each persisted key: the save base + Reset target (§18.3/§18.5)
     ---@field persist_writable boolean  this session writes its repository's pin list (a root graph, not a drilled-in frame; §14.8/§18.4)
+    ---@field progress ProgressTracker  this session's long-running operations (§19); closed when the graph buffer is wiped
+    ---@field open_op? ProgressOp     the open's operation (§19.1), ended at the open's `done` / by its projection
     --- == debounce state (Phase B4) ==
     ---@field reflow_gen? integer  async-reflow generation (§10.5): a newer reflow
     ---                           bumps it and the in-flight one drops itself
@@ -4288,7 +4340,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field reflow_owners fun(self:GraphCtx, cm:boolean):table[]
     ---@field reflow_build fun(self:GraphCtx, yield?:fun(), on_signatures?:fun():boolean?):table
     ---@field reflow_apply fun(self:GraphCtx, display:table)
-    ---@field reflow_async fun(self:GraphCtx, done?:fun(), on_signatures?:fun():boolean?)
+    ---@field reflow_async fun(self:GraphCtx, done?:fun(), on_signatures?:(fun():boolean?), op?:ProgressOp)
     ---@field update_cone fun(self:GraphCtx)
     ---@field goto_hash fun(self:GraphCtx, hash:string?, record:boolean?):boolean
     ---@field place_cursor fun(self:GraphCtx)
@@ -4511,6 +4563,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- drilled-in frame, §14.8).
         persist_config = persist_config,
         persist_writable = attach == nil,
+        -- §19: the session's operations; ended `cancelled` on BufWipeout (below).
+        progress = require("gitloom.progress").tracker(opts.progress),
         win = gwin,
     }
     -- Attach the extracted module helpers so they dispatch as `ctx:name()` (one
@@ -4678,12 +4732,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- `vim.g.gitloom_open_trace` names a file; see util.open_trace.
             ctx.open_t0 = util.open_now()
             util.open_trace("open", { repo = repo.root })
+            -- The open as one reported operation (§19.1): its message follows the
+            -- trace points; ended at `done`, or by the projection (superseded /
+            -- failed), or by the session's teardown.
+            ctx.open_op = ctx.progress:start("Loading " .. vim.fn.fnamemodify(repo.root or "", ":t"),
+                { message = "refs" })
             fetch_refs(repo).next(function()
                 return fetch_head(repo)
             end).next(function()
                 local nrefs = 0
                 for _ in pairs(repo.refs) do nrefs = nrefs + 1 end
                 util.open_trace("refs", { n = nrefs, ms = util.open_ms(ctx.open_t0) })
+                ctx.open_op:report("0 commits")
                 ctx.open_tstream = util.open_now()
                 return fetch_commits({
                     branch = opts.branches or { "--all" },
@@ -4723,11 +4783,13 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                         ctx.open_nbatch = (ctx.open_nbatch or 0) + 1
                         util.open_trace("batch", { i = ctx.open_nbatch, n = #new_items,
                             rows = #repo.order, ms = util.open_ms(t_batch) })
+                        ctx.open_op:report(("%d commits"):format(#repo.order))
                     end,
                 })
             end).next(function()
                 util.open_trace("stream", { rows = #repo.order, batches = ctx.open_nbatch or 0,
                     ms = util.open_ms(ctx.open_tstream or ctx.open_t0 or 0) })
+                ctx.open_op:report("sorting")
                 ctx.open_tsort = util.open_now()
                 -- Stream closed: apply the active sort mode (§3.1) to establish the
                 -- authoritative row order before anything is projected or anchored.
@@ -4797,7 +4859,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     return revealed
                 end
                 local fut, promise = make_future()
-                ctx:reflow_async(function() promise.resolve() end, reveal_focus)
+                ctx.open_op:report("laying out")
+                ctx:reflow_async(function() promise.resolve() end, reveal_focus, ctx.open_op)
                 return fut
             end).next(function()
                 update_footer()
@@ -4821,6 +4884,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 if lv and lv.controller then lv.controller.refresh() end
                 update_panes()
                 util.open_trace("done", { rows = #repo.display, ms = util.open_ms(ctx.open_t0 or 0) })
+                ctx.open_op:finish("done")
             end)
         end,
     }
@@ -6120,6 +6184,16 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             buffer = buf,
             callback = function() close_panes() end,
         })
+        -- The session's teardown (§19.4): the graph buffer wiped ends every
+        -- operation still running `cancelled` — the backstop for a chain that
+        -- never completes (the futures do not propagate errors). The git job
+        -- itself is not killed.
+        vim.api.nvim_create_autocmd("BufWipeout", {
+            group = group,
+            buffer = buf,
+            once = true,
+            callback = function() ctx.progress:close() end,
+        })
 
         -- No initial cone/refresh here: the fetch is async, so no commits are
         -- loaded yet. Initial dimming happens once the stream completes (above).
@@ -6293,16 +6367,22 @@ GRAPH_HELPERS.reflow = reflow
 ---@param ctx GraphCtx
 ---@param done (fun())?                    called after the display is swapped in
 ---@param on_signatures (fun(): boolean?)? see reflow_build
-GRAPH_HELPERS.reflow_async = function(ctx, done, on_signatures)
+---@param op? ProgressOp                   the operation this projection belongs to (§19.4):
+---                                        ended `cancelled` when superseded, `failed` on an error
+GRAPH_HELPERS.reflow_async = function(ctx, done, on_signatures, op)
     ctx.reflow_gen = (ctx.reflow_gen or 0) + 1
     local gen = ctx.reflow_gen
     local co = coroutine.create(function()
         return ctx:reflow_build(coroutine.yield, on_signatures)
     end)
     local function drive()
-        if ctx.reflow_gen ~= gen then return end
+        if ctx.reflow_gen ~= gen then
+            if op then op:finish("cancelled") end
+            return
+        end
         local ok, res = coroutine.resume(co)
         if not ok then
+            if op then op:finish("failed") end
             vim.notify("gitloom: reflow failed: " .. tostring(res), vim.log.levels.ERROR)
             return
         end
@@ -6815,6 +6895,9 @@ M._internal = {
     build_display_index = build_display_index,
     open_diffview = open_diffview, -- the default diff provider (§11.5); diff_provider_spec
     keys = GRAPH_HELPERS.key_registry(), -- the key registry GRAPH_KEYS (§17.1); palette_spec
+    -- §19.4's "always ended" glue paths, driven over a stub ctx; progress_spec
+    reflow_async = GRAPH_HELPERS.reflow_async,
+    resync = GRAPH_HELPERS.resync,
 }
 
 return M

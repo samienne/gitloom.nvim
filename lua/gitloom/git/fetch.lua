@@ -1105,12 +1105,16 @@ end
 --- unchanged from before the push means nothing was stashed), then
 --- `git checkout --detach`. A failed push stops there; a failed checkout after a
 --- stash re-applies that stash by SHA at once and drops it only when the apply
---- was clean. Never forces.
+--- was clean. Never forces. `on_step` (optional) is told each step as it begins
+--- (`"stashing"`, `"checking out"`) — the progress message, §19.1.
 ---@param plan ExaminePlan
 ---@param root string?
+---@param on_step? fun(step: string)
 ---@return table  -- future resolving ExamineRunResult
-function M.examine_run(plan, root)
+function M.examine_run(plan, root, on_step)
+    local step = on_step or function() end
     local function checkout(stash)
+        step("checking out")
         return git_code(plan.checkout, root).next(function(cr)
             if cr.code == 0 then return { ok = true, stash = stash } end
             if not stash then return { ok = false, stage = "checkout", res = cr } end
@@ -1123,6 +1127,7 @@ function M.examine_run(plan, root)
         end)
     end
     if not plan.stash then return checkout(nil) end
+    step("stashing")
     return stash_top(root).next(function(before)
         return git_code(plan.stash.argv, root).next(function(pr)
             if pr.code ~= 0 then return { ok = false, stage = "stash", res = pr } end
@@ -1146,11 +1151,15 @@ end
 --- When git refuses to restore the index ("conflicts in index" — checked before
 --- anything is touched, `examine.index_refused`) it falls back to a plain apply
 --- and reports `unstaged`. The stash is dropped only after a clean apply. A failed
---- switch stops before the apply; a failed apply keeps the stash.
+--- switch stops before the apply; a failed apply keeps the stash. `on_step`
+--- (optional) is told each step as it begins (`"switching"`, `"restoring
+--- changes"`) — the progress message, §19.1.
 ---@param rp ReturnPlan
 ---@param root string?
+---@param on_step? fun(step: string)
 ---@return table  -- future resolving ExamineReturnResult
-function M.examine_return(rp, root)
+function M.examine_return(rp, root, on_step)
+    local step = on_step or function() end
     local function applied(ar, extra)
         if ar.code ~= 0 then
             return { ok = false, stage = "apply", res = ar,
@@ -1160,9 +1169,11 @@ function M.examine_return(rp, root)
             return { ok = true, drop_res = dr, unstaged = extra.unstaged, index_res = extra.index_res }
         end)
     end
+    step("switching")
     return git_code(rp.switch, root).next(function(sr)
         if sr.code ~= 0 then return { ok = false, stage = "switch", res = sr } end
         if not rp.apply then return { ok = true } end
+        step("restoring changes")
         -- LC_ALL=C: `index_refused` reads git's untranslated message.
         return git_code(rp.apply, root, { LC_ALL = "C" }).next(function(ar)
             local examine = require("gitloom.git.examine")

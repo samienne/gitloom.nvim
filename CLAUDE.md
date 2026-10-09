@@ -721,6 +721,25 @@ Coverage:
   every test run, so no test touches the real `stdpath("state")/gitloom.json`; the
   smoke test (`make smoke`) checks the toggles' saves, `save_pins` and the live
   reset end to end
+- `tests/progress_spec.lua` — progress reporting (`gitloom.progress`, §19): the
+  tracker over a fake clock / timer and a recording provider — an Op ended before
+  the show delay reaches no provider at all (default delay 300; `0` shows at once,
+  no timer), one past it calls `start` once with the LATEST message then `report`,
+  and `finish` exactly once however many ends (outcome defaulting to `done`);
+  `close()` ends every live Op `cancelled`, none twice, a timer firing after it
+  shows nothing and later starts are inert; a throwing `start` / sink leaves the
+  caller unaffected; `provider = false` / `progress = false` arm no timer and
+  notify nothing; `normalize`. Provider resolution: `"auto"` picks fidget iff
+  `fidget.progress` loads, re-checked per Op (`op.fidget`, which drops fetch /
+  pull's own start notice), `"fidget"` falling back to notify. The fidget adapter
+  over a stubbed handle (client `gitloom`, `cancellable = false`, `finish()` on
+  every outcome after naming `failed` / `cancelled`, never `cancel()`) and the REAL
+  fidget from the lazy dir (`pending` when absent). The notify provider: a start
+  notice + `done (N s)` only for an Op without notices of its own, nothing more for
+  `failed` / `cancelled`, nothing at all when it ended before the delay, the running
+  message never notified. Plus the glue paths reachable without a window
+  (`window._internal.reflow_async` superseded → `cancelled`, erroring → `failed`,
+  completing → left to the caller; `resync`'s closed-window exit → `cancelled`)
 - `tests/snippet_spec.lua` — `graph_snippet` (the commit-search graph snippet,
   §15.3): the `[focus±radius]` window + reported focus row, top/bottom clamping,
   the focus-row gutter marker, the per-row subject, the shared graph-column width
@@ -883,6 +902,7 @@ owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
 `checkout_spec` (checkout; §10.4/§10.4.1 — the row entries themselves are
 `require("gitloom.graph.palette").row_entries`).
 `window._internal` additionally exposes `keys` (the `GRAPH_KEYS` key registry, §17.1),
+`reflow_async` / `resync` (the §19.4 "always ended" glue paths, over a stub ctx),
 `effective_pins` / `effective_pinned`,
 `pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live
 graph session, recorded by `open_graph`. The headless smoke test reads the
@@ -1873,5 +1893,13 @@ Details not covered by the spec or architecture:
   `:GitloomResetView`) clears the toggles + THIS repository's pins only. All glue
   uses inline `require("gitloom.persist")` — no new window.lua locals. Tests must
   never hit the real file: `persist.set_path` (minimal_init does it).
+- **Progress reporting** (§19, `progress.lua`; see ARCHITECTURE "Progress
+  reporting"): `ctx.progress` is the session's tracker; each reported operation is
+  `ctx.progress:start(title, { message?, own_notices? })` → an Op ended on EVERY
+  path (`op:finish(outcome)`, idempotent), and the graph buffer's `BufWipeout`
+  sweeps the rest `cancelled`. fidget is only ever `pcall(require)`d, per Op; an
+  Op shorter than `progress.delay` reaches no provider. A new long-running async
+  operation gets an Op the same way; keystroke-paced or synchronous work does not
+  (§19.1). Glue uses inline `require("gitloom.progress")` — no window.lua locals.
 - **Neovim >= 0.10** — relies on the 4-arg `vim.str_byteindex` and the
   decoration-provider API.
