@@ -31,8 +31,13 @@ smoke-refjump:
 	nvim --headless -u $(INIT_FILE) -c "lua require('tests.smoke.ref_jump_smoke').run()"
 
 ## Run a single test file: make test-file FILE=tests/refs_spec.lua
+## Runs the spec in this nvim exactly as `make test` runs each spec in its child
+## (`--noplugin -u $(INIT_FILE)` + `plenary.busted.run`), which exits with the
+## spec's status. Not `PlenaryBustedFile`: it takes no options, so it imposed
+## plenary's 50 s deadline (the git-heavy specs failed it with no test named)
+## and started the child WITHOUT $(INIT_FILE) — loading the user's own config.
 test-file:
-	nvim --headless -u $(INIT_FILE) -c "PlenaryBustedFile $(FILE)"
+	nvim --headless --noplugin -u $(INIT_FILE) -c "lua require('plenary.busted').run('$(FILE)')"
 
 ## Type-check with lua-language-server (uses .luarc.json). Resolves the Neovim
 ## runtime from `nvim` so vim.* is known; override the binary with LUALS=...
