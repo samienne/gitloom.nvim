@@ -1,12 +1,19 @@
 TESTS_DIR := tests
 INIT_FILE := tests/minimal_init.lua
 LUALS ?= lua-language-server
+# Wall-clock budget (ms) for the WHOLE `make test` run. PlenaryBustedDirectory
+# starts every spec file at once and joins them all against ONE deadline whose
+# default is 50 s; a file still running at the deadline prints nothing and fails
+# the run with no failing test named. The git-heavy specs (examine_spec,
+# sync_spec: hundreds of real `git` spawns) finish last, at 45-49 s on a loaded
+# machine — so the default flaked. This is a hang guard, not a speed target.
+TEST_TIMEOUT ?= 300000
 
 .PHONY: test test-file lint smoke smoke-refjump
 
 ## Run all tests
 test:
-	nvim --headless -u $(INIT_FILE) -c "PlenaryBustedDirectory $(TESTS_DIR)/ {minimal_init = '$(INIT_FILE)'}"
+	nvim --headless -u $(INIT_FILE) -c "PlenaryBustedDirectory $(TESTS_DIR)/ {minimal_init = '$(INIT_FILE)', timeout = $(TEST_TIMEOUT)}"
 
 ## Headless window smoke-test (drives the real graph; needs snacks in the
 ## lazy install dir). Separate from `test` — it is not a busted spec and needs a
