@@ -28,7 +28,11 @@ gitloom never stages, commits or rewrites history by itself. The exceptions to
 an otherwise read-only view are actions the user explicitly picks: **checkout**
 (§10.4.1), which only moves HEAD and the working tree; **checkout & examine**
 (§10.4.2), which may also **stash** the uncommitted changes (after asking) and
-re-apply them on Return; and **fetch** / **pull** from the command palette (§17).
+re-apply them on Return; **fetch** / **pull** from the command palette (§17); and
+the palette's **branch sync** (§17.2): **fast-forward** a branch to its upstream,
+or **reset** it to its upstream. Reset is the one action gitloom offers that can
+**discard work** (local commits, uncommitted changes to tracked files), so it
+always asks first and says what would be lost.
 The view-transformation features in §10 are the direction this is built
 toward; the current non-graph surface (window, streaming fetch, rendering)
 exists primarily to exercise and validate the graph algorithm.
@@ -1646,7 +1650,8 @@ yet read from the options.)
 
 A local branch may **track an upstream** — a remote-tracking ref configured as
 its `@{upstream}` (`branch.<name>.remote` / `merge`). gitloom reads this
-relationship from git directly (`for-each-ref %(upstream:short)` and
+relationship from git directly (`for-each-ref %(upstream:short)`,
+`%(upstream)` — the full refname, which the branch sync runs against, §17.2 — and
 `%(upstream:track)`); it does **not** infer it from a shared short name (a branch
 named `x` and a remote `r/x` are not assumed to track unless git says so), which
 keeps it correct under mirrored/many-remote setups where short names collide.
@@ -1814,8 +1819,10 @@ gitloom is a **viewer**: it never stages, commits or rewrites history by itself.
 The exceptions are actions the user explicitly picks — **checkout** (§10.4.1),
 which only moves HEAD and the working tree; **checkout & examine** (§10.4.2),
 which additionally stashes uncommitted changes when the user confirms the prompt
-and re-applies them on Return; and **fetch** / **pull** from the command palette
-(§17). What is
+and re-applies them on Return; **fetch** / **pull** from the command palette
+(§17); and the palette's **branch sync** (§17.2) — fast-forward a branch to its
+upstream, or reset it to its upstream, the latter the one action that can discard
+work and therefore always confirmed with what would be lost. What is
 permanently out of scope is **implicit index or history mutation as a side
 effect of viewing** — gitloom never stages, unstages, commits, resets, or
 rewrites history silently while you browse.
@@ -2042,12 +2049,14 @@ commit the trunk reaches (the mainline) is not collapsible.
     **checkout & examine**. No branch actions.
   - **branch** — a ref selected with `h`/`l`, or a **collapsed head**:
     **checkout** of that branch (§10.4.1; a collapsed head detaches at its tip),
+    then the **branch sync** entries of a local branch tracking an upstream —
+    **fast-forward to `<upstream>`** and **reset to `<upstream>`…** (§17.2) —
     then **collapse** (`<Space>`) + **hide** of an expanded branch or **expand**
     (`<Space>`) + **hide** of a collapsed one. No commit open diff and no
     detached checkout & examine — those are the commit's, reached from its message.
   - **packed-marker line, a marker selected** (`h`/`l`) — that marker's actions
-    only: **checkout** of its tip, **expand**, **hide**. (The keys then follow the
-    branch context.)
+    only: **checkout** of its tip, its **branch sync** entries (§17.2), **expand**,
+    **hide**. (The keys then follow the branch context.)
   - **packed-marker line, no marker selected** — **expand** / **hide** per marker,
     by name. The palette is the overflow-proof way to reach any marker on a packed
     line even when not all labels fit.
@@ -3533,7 +3542,7 @@ There is no examine entry: `<CR>` examines directly (§11). Many terminals send
 | Context | When | Row entries (§10.4) |
 |---|---|---|
 | `commit` | a plain commit row, cursor on its message, no ref selected | open diff, checkout (detached), checkout & examine |
-| `branch` | a ref selected with `h`/`l`, or a collapsed head; also a packed line **with** a marker selected | checkout, collapse / expand, hide — of that branch (or that one marker) |
+| `branch` | a ref selected with `h`/`l`, or a collapsed head; also a packed line **with** a marker selected | checkout, branch sync (fast-forward / reset to upstream, §17.2), collapse / expand, hide — of that branch (or that one marker) |
 | `markers` | a packed line with **no** marker selected | expand / hide per marker |
 | `selection` | a §13 selection is active | the `selection` commands (below) |
 
@@ -3629,7 +3638,70 @@ detached — git refuses and its error is shown (§17.3); nothing is merged or
 rebased, and integrating a diverged branch is left to the user. Neither command
 ever forces.
 
-### 17.3 How fetch and pull run
+**Branch sync.** In the `branch` context (§17.1), a **local branch that tracks
+an upstream** gets up to two more entries, right after its checkout:
+
+| Entry | Offered when | Runs — branch not checked out here | Runs — the current branch |
+|---|---|---|---|
+| **Fast-forward `<b>` to `<upstream>`** | strictly **behind** (behind > 0, ahead = 0) | `git fetch --no-recurse-submodules . <upstream ref>:refs/heads/<b>` | `git merge --ff-only <upstream ref>` |
+| **Reset `<b>` to `<upstream>`…** | behind, ahead or diverged | `git branch -f <b> <upstream ref>` | `git reset --hard <upstream ref>` |
+
+`<upstream ref>` is the upstream's full refname (`refs/remotes/origin/main`, read
+from git with the tracking data, §6.3), so a branch name that happens to look like
+a remote's never makes it ambiguous. An upstream that is itself a **local branch**
+(`branch.<b>.remote = .`) works the same way, with `refs/heads/<upstream>`.
+
+**Which branch.** The branch selected with `h`/`l` — a remote branch, a tag or a
+worktree label gets no sync entry. On a collapsed head or a selected packed marker
+with no ref selected, the head's **only** local branch, when it carries exactly
+one; with several (or none) there is no sync entry — select one with `h`/`l`. The
+**current branch** is the one HEAD is attached to in the graph's repository (§2.1):
+its label is `(HEAD → <b> …)` (§6).
+
+**Visibility comes from cached state only.** The entries are decided from the
+tracking counts already read with the refs (§6.3) — the palette spawns no git to
+build them. In sync, `gone` (the upstream was deleted) or no upstream ⇒ neither
+entry. Since the counts are as of the last ref read, the commands re-check:
+
+- **Fast-forward** needs no network and never merges. git itself refuses anything
+  that is not a fast-forward (the `fetch .` refspec carries no `+`), refuses to
+  update a branch checked out in **another worktree**, and — for the current
+  branch — refuses when the move would overwrite uncommitted changes. There is no
+  confirmation: like checkout (§10.4.1), it loses nothing. Success notice:
+  `<b> → <upstream> (<short>)`.
+- **Reset** can discard work, so it **always asks**: a `vim.ui.select` whose
+  **first** (default) choice is **Cancel**, then **Reset**. Before asking gitloom
+  reads the repository afresh (the branch tip, the upstream tip, the ahead/behind
+  counts and, for the current branch only, `git status --porcelain`) and the prompt
+  says what is lost:
+
+  ```
+  Reset main to origin/main (def5678)?
+  discards 2 local commits
+  discards uncommitted changes to 3 files
+  the old tip abc1234 stays reachable in the reflog
+  ```
+
+  The commits line appears when the branch is ahead; the uncommitted line only for
+  the current branch with a dirty tree (`N` = changed paths, each counted once;
+  **untracked files are never touched** by `reset --hard` and do not count); the
+  reflog line whenever something is lost. When nothing is lost (strictly behind,
+  clean) the prompt is the first line alone. Immediately before running, gitloom
+  reads the same state again; if the branch tip, the upstream tip, which branch is
+  current, or the dirty count changed since the prompt, it **aborts** with a WARN
+  notice and runs nothing. git refuses `branch -f` for a branch checked out in
+  another worktree (and for the current branch, which takes the `reset --hard`
+  form instead). Success notice names the old tip:
+  `<b> reset to <upstream> — was <short>`.
+
+Neither entry touches the network, merges, rebases, commits or pushes; they run as
+§17.3 says.
+
+### 17.3 How fetch, pull and the branch sync run
+
+Everything below applies to the branch sync entries too (fast-forward, reset),
+except the `Fetching…` notice and the environment, which only the network commands
+need.
 
 - **Asynchronously** — the job runs in the background and the graph stays
   usable; a `Fetching…` / `Pulling…` notice shows while it runs.
@@ -3640,10 +3712,11 @@ ever forces.
   work.
 - A per-remote fetch runs exactly like **Fetch** (everything in this list
   applies to it).
-- **One at a time per graph session**: a second fetch or pull while one is
-  running is refused with a notice.
+- **One at a time per graph session**: a second fetch, pull or branch sync while
+  one is running (or a Checkout & examine, §10.4.2) is refused with a notice.
 - **On success**: an INFO notice, then the in-place resync (§3.4), so new remote
-  branches, moved tips and a pull's fast-forward appear without a reopen.
+  branches, moved tips, a pull's fast-forward and a synced branch appear without
+  a reopen. The cursor stays on the commit it was on (a plain `R`).
 - **On failure**: git's error as one line at ERROR level — its `fatal:` /
   `error:` line when there is one, not the progress and hints ahead of it (the same formatting as
   a failed checkout, §10.4.1). A failed **pull** still resyncs, because its

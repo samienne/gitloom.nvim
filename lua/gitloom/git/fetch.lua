@@ -323,11 +323,13 @@ local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s%x1f%d"
 -- §6.3). Space-separated like the original (for-each-ref does NOT interpret a
 -- `%x1f` hex escape — it would print it literally). The first four atoms never
 -- contain a space (object name, refname, annotated-tag deref, upstream short
--- name), so `%(upstream:track)` — the one field with spaces ("ahead N, behind M")
--- — is placed **last** and parsed as everything from field 5 on. The upstream
--- atoms populate only for a local branch that tracks an upstream.
+-- name, upstream full refname), so `%(upstream:track)` — the one field with
+-- spaces ("ahead N, behind M") — is placed **last** and parsed as everything
+-- from field 6 on. The upstream atoms populate only for a local branch that
+-- tracks an upstream; the full refname is what the branch sync runs against
+-- (§17.2), unambiguous where a short name might not be.
 local REF_FMT =
-    "%(objectname) %(refname) %(*objectname) %(upstream:short) %(upstream:track,nobracket)"
+    "%(objectname) %(refname) %(*objectname) %(upstream:short) %(upstream) %(upstream:track,nobracket)"
 
 -- Parse one REF_FMT line into `{ kind, name, hash, upstream? }`, or nil to skip
 -- (classify_ref returns nil — a remote HEAD symref, etc.). The upstream is set
@@ -339,17 +341,19 @@ local REF_FMT =
 local function parse_ref_line(line)
     local parts = vim.split(line, " ")
     local hash, refname, deref, up_short = parts[1], parts[2], parts[3], parts[4]
-    local track = table.concat(parts, " ", 5) -- field 5..end (may hold spaces); "" if none
+    local up_ref = (parts[5] and parts[5] ~= "") and parts[5] or nil
+    local track = table.concat(parts, " ", 6) -- field 6..end (may hold spaces); "" if none
     local kind, name = classify_ref(refname or "")
     if not (kind and name and hash) then return nil end
     local target = (deref and deref ~= "") and deref or hash
     local upstream = nil
     if up_short and up_short ~= "" then
         if track == "gone" then
-            upstream = { short = up_short, ahead = 0, behind = 0, gone = true }
+            upstream = { short = up_short, ref = up_ref, ahead = 0, behind = 0, gone = true }
         else
             upstream = {
                 short = up_short,
+                ref = up_ref,
                 gone = false,
                 ahead = tonumber((track or ""):match("ahead (%d+)")) or 0,
                 behind = tonumber((track or ""):match("behind (%d+)")) or 0,
@@ -1009,6 +1013,52 @@ function M.examine_probe(root)
                     err = sr.code ~= 0 and sr or nil }
             end)
         end)
+    end)
+end
+
+-- ── Branch sync (§17.2) — the git side. The decisions are the pure
+-- `gitloom.git.sync`; the commands run through `run_checkout`. ───────────────
+
+--- What a branch sync needs, read fresh in `root` (§17.2): the branch's and the
+--- upstream's commits, the branch HEAD is attached to, the ahead / behind counts
+--- (`git rev-list --left-right --count <branch>...<upstream>`) and — only when
+--- `t.branch` is the current branch — the changed tracked paths (`git status
+--- --porcelain` → `sync.tracked_changes`: each changed tracked path once; untracked
+--- files do not count, `reset --hard` never touches them). Resolves a `SyncProbe`; `err` set when a read
+--- that must succeed failed (a branch / upstream that does not resolve is not an
+--- error: its hash is nil).
+---@param t SyncTarget
+---@param root string?
+---@return table  -- future resolving SyncProbe
+function M.sync_probe(t, root)
+    local function hash_of(r)
+        if r.code ~= 0 then return nil end
+        local h = trim_ws(r.out)
+        return h ~= "" and h or nil
+    end
+    local bref = "refs/heads/" .. t.branch
+    return git_code({ "git", "rev-parse", "-q", "--verify", bref .. "^{commit}" }, root).next(function(tr)
+        return git_code({ "git", "rev-parse", "-q", "--verify", t.upstream_ref .. "^{commit}" }, root)
+            .next(function(ur)
+                return git_code({ "git", "symbolic-ref", "-q", "--short", "HEAD" }, root).next(function(hr)
+                    local p = { tip = hash_of(tr), up_tip = hash_of(ur) }
+                    local hb = hr.code == 0 and trim_ws(hr.out) or ""
+                    p.head_branch = hb ~= "" and hb or nil
+                    if not (p.tip and p.up_tip) then return p end
+                    return git_code({ "git", "rev-list", "--left-right", "--count",
+                        p.tip .. "..." .. p.up_tip }, root).next(function(cr)
+                        if cr.code ~= 0 then p.err = cr; return p end
+                        local a, b = trim_ws(cr.out):match("^(%d+)%s+(%d+)$")
+                        p.ahead, p.behind = tonumber(a), tonumber(b)
+                        if p.head_branch ~= t.branch then return p end
+                        return git_code({ "git", "status", "--porcelain" }, root).next(function(sr)
+                            if sr.code ~= 0 then p.err = sr; return p end
+                            p.dirty = require("gitloom.git.sync").tracked_changes(sr.out)
+                            return p
+                        end)
+                    end)
+                end)
+            end)
     end)
 end
 

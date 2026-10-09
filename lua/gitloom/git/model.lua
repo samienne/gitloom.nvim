@@ -6,6 +6,8 @@ local M = {}
 
 ---@class Upstream
 ---@field short string    the upstream remote-tracking ref's short name (e.g. "origin/master")
+---@field ref? string     its full refname (`refs/remotes/origin/master`, or `refs/heads/x` for a
+---                       local upstream) — what the branch sync runs against (§17.2)
 ---@field ahead integer   commits the local branch is ahead of the upstream (vs last fetch; §6.3)
 ---@field behind integer  commits the local branch is behind the upstream
 ---@field gone boolean     the upstream ref no longer exists (deleted + pruned)

@@ -187,8 +187,9 @@ commit's history — no ref needed, so they work for ref-less regions too
   actions on **what is selected** — a commit or a branch, never both. On the
   message (the commit): open diff, checkout (detached), checkout & examine. With
   a ref selected or on a collapsed head (the branch): checkout of that branch,
-  collapse / expand, **hide**. On a packed marker line with a marker selected:
-  that marker's checkout / expand / hide only; with none selected it lists expand
+  the **branch sync** entries (below), collapse / expand, **hide**. On a packed
+  marker line with a marker selected: that marker's checkout / sync / expand /
+  hide only; with none selected it lists expand
   / hide for every marker by name, so any branch is reachable even when labels
   overflow. After a checkout the cursor
   lands on the commit now checked out and the notice says where HEAD is
@@ -293,6 +294,27 @@ while one runs; a second one is refused until it finishes. On success the graph
 resyncs; on failure git's error is shown (a failed pull still resyncs, since its
 fetch half may have moved the remote-tracking branches). Nothing is ever forced
 (§17).
+
+**Branch sync.** On a local branch that tracks an upstream (selected with `h`/`l`,
+or a collapsed head / packed marker carrying exactly one local branch) the palette
+offers, based on its `⇡⇣` counts:
+
+- **Fast-forward `main` to `origin/main`** — only when strictly behind. Moves the
+  branch, nothing else: a branch that is not checked out is updated without
+  touching your files (`git fetch . origin/main:main`); the current branch runs
+  `git merge --ff-only`, which git refuses if it would overwrite uncommitted
+  changes. No network, no merge commit, no prompt.
+- **Reset `main` to `origin/main`…** — when behind, ahead or diverged. This **can
+  discard work**, so it always asks (**Cancel** is the first choice) and says what
+  is lost: `Reset main to origin/main (def5678)? discards 2 local commits; discards
+  uncommitted changes to 3 files; the old tip abc1234 stays reachable in the
+  reflog`. The current branch runs `git reset --hard` (untracked files are left
+  alone); another branch `git branch -f`. If the branch, its upstream or your
+  working tree changes while the prompt is open, the reset is cancelled.
+
+A branch checked out in another worktree is refused by git for both. They run like
+fetch / pull below (one at a time, then a resync); the counts are against the last
+fetch, so **Fetch** first to sync with the remote's current state.
 
 **Checkout & examine.** From the `<C-Space>` palette — a commit's entry (on its
 message) or, with a `V` selection active, the selection's: gitloom checks the newest

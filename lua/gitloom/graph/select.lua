@@ -479,6 +479,7 @@ end
 ---@field kind "local"|"remote"|"tag"|"worktree"
 ---@field name string    the ref's name (`foo`, `origin/foo`, `v1.0`, `wt:dir`)
 ---@field short? string  a remote branch's name without its remote (`foo`)
+---@field upstream? Upstream  a local branch's tracking data (§6.3), for the branch sync (§17.2)
 
 --- The ref a selected decoration (selection_state.index) names, for checkout
 --- (§10.4.1). A branch group stands for its **local** branch when it has one,
@@ -492,7 +493,7 @@ function M.selected_ref(commit, index)
     local g = git.group_refs(commit.refs)
     if index <= #g.branches then
         local b = g.branches[index]
-        if b.has_local then return { kind = "local", name = b.name } end
+        if b.has_local then return { kind = "local", name = b.name, upstream = b.track } end
         if b.remotes[1] then
             return { kind = "remote", name = b.remotes[1] .. "/" .. b.name, short = b.name }
         end
@@ -504,6 +505,24 @@ function M.selected_ref(commit, index)
     end
     local wt = g.worktrees[index - #g.branches - #g.tags]
     return wt and { kind = "worktree", name = wt } or nil
+end
+
+--- The one local branch `commit` carries, as a SelectedRef — what the branch
+--- sync (§17.2) acts on for a collapsed head or a selected packed marker when no
+--- ref is selected with h/l. nil when it carries none, or several (ambiguous —
+--- the user selects one). Pure.
+---@param commit { refs: Ref[] }?
+---@return SelectedRef?
+function M.sole_local_ref(commit)
+    if not commit then return nil end
+    local found
+    for i, b in ipairs(git.group_refs(commit.refs).branches) do
+        if b.has_local then
+            if found then return nil end
+            found = i
+        end
+    end
+    return found and M.selected_ref(commit, found) or nil
 end
 
 --- The commit HEAD points at (§2/§3.2): the current branch's commit, or the
