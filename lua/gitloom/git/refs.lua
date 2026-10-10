@@ -163,14 +163,29 @@ M.HEAD_ARROW = "HEAD → "
 --- What is checked out, in words (§10.4.1): `HEAD → <branch> (<short>)` on a
 --- branch, `HEAD detached at <short>` otherwise (`<short>` = 7 hex chars); nil
 --- when there is no HEAD commit. Pure — the post-checkout notice.
+---
+--- `upstream` — the branch's tracking data from the FRESH ref read (§6.3) —
+--- appends the behind notice: `— 12 behind origin/foo` when strictly behind,
+--- `— 3 ahead, 12 behind origin/foo` when diverged; nothing when ahead only, in
+--- sync, `gone`, without an upstream, or detached.
 ---@param branch string?
 ---@param hash string?
+---@param upstream Upstream?
 ---@return string?
-function M.head_summary(branch, hash)
+function M.head_summary(branch, hash, upstream)
     if not hash then return nil end
     local short = hash:sub(1, 7)
-    if branch then return ("HEAD → %s (%s)"):format(branch, short) end
-    return "HEAD detached at " .. short
+    if not branch then return "HEAD detached at " .. short end
+    local s = ("HEAD → %s (%s)"):format(branch, short)
+    local u = upstream
+    if u and not u.gone and (u.behind or 0) > 0 then
+        if (u.ahead or 0) > 0 then
+            s = s .. (" — %d ahead, %d behind %s"):format(u.ahead, u.behind, u.short)
+        else
+            s = s .. (" — %d behind %s"):format(u.behind, u.short)
+        end
+    end
+    return s
 end
 
 --- Push a ref name to the front of a session most-recently-used list, dropping

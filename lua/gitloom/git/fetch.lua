@@ -977,6 +977,36 @@ function M.run_checkout(argv, root)
     return git_code(argv, root)
 end
 
+--- Run a sequence of commands (`sync.checkout_commands`, §10.4.1) in `root`, in
+--- order, stopping at the first that exits non-zero. Resolves the last result
+--- `{ code, out, err }` plus `step` (the index of the last command run) and, on
+--- failure, `failed` (that command — its `label` names it in the error line).
+--- The commands already run are not undone: a fast-forward that succeeded
+--- before a refused switch stays, which loses nothing. `on_step` (optional) is
+--- told each command's index as it begins (the progress message, §19.1).
+---@param cmds { argv: string[], label: string }[]  at least one
+---@param root string?
+---@param on_step? fun(i: integer, cmd: { argv: string[], label: string })
+---@return table  -- future resolving { code, out, err, step: integer, failed?: table }
+function M.run_steps(cmds, root, on_step)
+    -- Never hand `next` an already-resolved future (a value read after the fact
+    -- would be the future itself): the last command's result is returned as is.
+    local function go(i)
+        local cmd = cmds[i]
+        if on_step then on_step(i, cmd) end
+        return git_code(cmd.argv, root).next(function(res)
+            res.step = i
+            if res.code ~= 0 then
+                res.failed = cmd
+                return res
+            end
+            if not cmds[i + 1] then return res end
+            return go(i + 1)
+        end)
+    end
+    return go(1)
+end
+
 --- Run a palette remote command (`remote_command`'s argv + env, §17.3) in the
 --- repository `root` — the graph's `repo.root`, never implicitly Neovim's cwd —
 --- with `env` (`GIT_TERMINAL_PROMPT=0`) added to the job's environment. Resolves

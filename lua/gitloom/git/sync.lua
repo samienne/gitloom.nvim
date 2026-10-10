@@ -93,6 +93,44 @@ function M.reset_command(t, current)
     return { argv = { "git", "branch", "-f", t.branch, t.upstream_ref }, label = "git branch -f" }
 end
 
+--- The labels of a remote branch's checkout when its local counterpart tracks it
+--- from another commit (§10.4.1): `Checkout foo and fast-forward to origin/foo`
+--- (strictly behind) / `Checkout foo and reset to origin/foo…` (ahead / diverged).
+---@param t SyncTarget
+---@return string ff, string reset
+function M.checkout_labels(t)
+    return ("Checkout %s and fast-forward to %s"):format(t.branch, t.upstream),
+        ("Checkout %s and reset to %s…"):format(t.branch, t.upstream)
+end
+
+--- What those entries run when the branch is NOT the current one (the probe
+--- decides; the current branch takes `ff_command` / `reset_command` instead,
+--- §10.4.1). Fast-forward: `ff_command(t, false)` (`git fetch . <up>:refs/heads/<b>`,
+--- no `+`), then `git switch <b>`. Reset: `git switch -C <b> <upstream ref>` —
+--- reset and switch in one atomic step; it carries uncommitted changes or git
+--- refuses, and git refuses a branch checked out in another worktree. Run in
+--- order, stopping at the first failure (`fetch.run_steps`). Pure.
+---@param t SyncTarget
+---@param reset boolean
+---@return SyncCommand[]
+function M.checkout_commands(t, reset)
+    if reset then
+        return { { argv = { "git", "switch", "-C", t.branch, t.upstream_ref }, label = "git switch -C" } }
+    end
+    return { M.ff_command(t, false), { argv = { "git", "switch", t.branch }, label = "git switch" } }
+end
+
+--- The note the follow-HEAD notice appends after such a checkout (§10.4.1):
+--- `fast-forwarded to origin/foo` / `reset to origin/foo, was abc1234`. Pure.
+---@param t SyncTarget
+---@param p SyncProbe  the probe taken before running
+---@param reset boolean
+---@return string
+function M.checkout_note(t, p, reset)
+    if reset then return ("reset to %s, was %s"):format(t.upstream, (p.tip or "?"):sub(1, 7)) end
+    return ("fast-forwarded to %s"):format(t.upstream)
+end
+
 ---@param n integer
 ---@param word string
 ---@return string
@@ -103,12 +141,17 @@ end
 --- The reset confirmation's lines (§17.2) from the fresh probe: the question,
 --- then what is lost — the local commits (when ahead), the uncommitted changes
 --- (the current branch only, when dirty) and where the old tip stays reachable.
---- Nothing lost ⇒ the question alone. Pure.
+--- Nothing lost ⇒ the question alone. `switching` — the §10.4.1 checkout and
+--- reset of a branch that is not the current one — asks `Check out <b> and reset
+--- it to <upstream> (<short>)?` instead (its uncommitted changes are carried over
+--- by `git switch -C`, or git refuses: never a loss). Pure.
 ---@param t SyncTarget
 ---@param p SyncProbe
+---@param switching boolean?
 ---@return string[]
-function M.reset_prompt(t, p)
-    local lines = { ("Reset %s to %s (%s)?"):format(t.branch, t.upstream, (p.up_tip or "?"):sub(1, 7)) }
+function M.reset_prompt(t, p, switching)
+    local q = switching and "Check out %s and reset it to %s (%s)?" or "Reset %s to %s (%s)?"
+    local lines = { q:format(t.branch, t.upstream, (p.up_tip or "?"):sub(1, 7)) }
     local current = p.head_branch == t.branch
     if (p.ahead or 0) > 0 then
         lines[#lines + 1] = ("discards %s"):format(plural(p.ahead, "local commit"))

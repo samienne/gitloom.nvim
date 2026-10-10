@@ -196,8 +196,14 @@ commit's history — no ref needed, so they work for ref-less regions too
   / hide for every marker by name, so any branch is reachable even when labels
   overflow. After a checkout the cursor
   lands on the commit now checked out and the notice says where HEAD is
-  (`HEAD → main (1a2b3c4)` or `HEAD detached at 1a2b3c4`); plain `R` keeps the
-  cursor where it was.
+  (`HEAD → main (1a2b3c4)` or `HEAD detached at 1a2b3c4`), adding how far the
+  branch is behind its upstream when it is (`— 12 behind origin/main`); plain
+  `R` keeps the cursor where it was. Selecting a remote branch `origin/foo`
+  whose local `foo` sits at another commit never silently switches to that
+  stale local branch: a tracking `foo` offers **Checkout foo and fast-forward to
+  origin/foo** (behind) or **Checkout foo and reset to origin/foo…** (ahead /
+  diverged, confirmed first), and every such case offers a detached checkout of
+  the selected commit.
 - **HEAD always reads as `HEAD`** and its label comes first on its row, so the
   `+N` overflow never hides it: `(HEAD → main …)` on a branch, a bare `HEAD` when
   detached. The window title shows the branch, or `detached @<short>`. In the

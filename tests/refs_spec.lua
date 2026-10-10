@@ -166,6 +166,23 @@ describe("head_summary (§10.4.1)", function()
     it("is nil with no HEAD commit", function()
         assert.is_nil(head_summary("main", nil))
     end)
+    it("appends how far behind the upstream a checked-out branch is", function()
+        local function u(a, b, gone)
+            return { short = "origin/main", ref = "refs/remotes/origin/main", ahead = a, behind = b,
+                gone = gone or false }
+        end
+        local h = "0123456789abcdef"
+        assert.equals("HEAD → main (0123456) — 12 behind origin/main", head_summary("main", h, u(0, 12)))
+        assert.equals("HEAD → main (0123456) — 3 ahead, 12 behind origin/main",
+            head_summary("main", h, u(3, 12)))
+        -- Ahead only, in sync, gone, no upstream: nothing appended.
+        for _, up in ipairs({ u(3, 0), u(0, 0), u(0, 12, true) }) do
+            assert.equals("HEAD → main (0123456)", head_summary("main", h, up))
+        end
+        assert.equals("HEAD → main (0123456)", head_summary("main", h, nil))
+        -- Detached: never (a stray upstream is ignored).
+        assert.equals("HEAD detached at 0123456", head_summary(nil, h, u(0, 12)))
+    end)
 end)
 
 describe("track_segments / track_label (§6.3)", function()

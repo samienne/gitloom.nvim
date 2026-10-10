@@ -139,7 +139,10 @@ end
 --- The sync entries (fast-forward / reset to upstream) are for a local branch
 --- with an upstream: the h/l-selected ref, else the sole local branch among the
 --- row's labels (`row.head`'s refs, else the commit's; `select.sole_local_ref`);
---- offered from the cached tracking counts only.
+--- offered from the cached tracking counts only. A selected remote branch whose
+--- local counterpart (`ref.counterpart`, §10.4.1) tracks it from another commit
+--- gets `checkout_ff` / `checkout_reset` (or, when that branch is current, its
+--- `fast_forward` / `reset_branch`) first, then the detached checkout.
 ---
 --- Open diff and checkout & examine need a diff provider (`has_diff`, §11.5); a
 --- §4.2 virtual commit gets neither checkout. Pure.
@@ -167,6 +170,33 @@ function M.row_entries(row, diff)
         if offers.ff then add({ id = "fast_forward", op = "fast_forward", label = ff_label, sync = t }) end
         if offers.reset then add({ id = "reset_branch", op = "reset_branch", label = reset_label, sync = t }) end
     end
+    -- §10.4.1: a remote branch `origin/foo` whose local `foo` sits at another
+    -- commit and tracks it — the explicit checkout-and-sync entry (or, when `foo`
+    -- is current, its plain §17.2 entries), ahead of the detached checkout that
+    -- `checkout_spec` gives such a ref. A non-tracking local: no branch entry.
+    local function counterpart_entries()
+        local ref = row.ref
+        if not ref or ref.kind ~= "remote" then return end
+        local cp = ref.counterpart
+        if not cp then return end
+        local up = cp.upstream
+        if not (up and up.ref == "refs/remotes/" .. ref.name) then return end
+        local t = sync.sync_target(cp)
+        local offers = sync.sync_offers(t)
+        if not t then return end
+        if cp.current then
+            local ff_label, reset_label = sync.sync_labels(t)
+            if offers.ff then add({ id = "fast_forward", op = "fast_forward", label = ff_label, sync = t }) end
+            if offers.reset then add({ id = "reset_branch", op = "reset_branch", label = reset_label, sync = t }) end
+            return
+        end
+        local ff_label, reset_label = sync.checkout_labels(t)
+        if offers.ff then
+            add({ id = "checkout_ff", op = "checkout_ff", label = ff_label, sync = t })
+        elseif offers.reset then
+            add({ id = "checkout_reset", op = "checkout_reset", label = reset_label, sync = t })
+        end
+    end
     local function marker(i, text)
         add({ id = "expand:" .. i, op = "expand", label = "Expand " .. text, marker = i })
         add({ id = "hide:" .. i, op = "hide", label = "Hide " .. text, marker = i })
@@ -189,6 +219,7 @@ function M.row_entries(row, diff)
             for i, text in ipairs(texts) do marker(i, text) end
         end
     elseif row.kind == "branch" then
+        counterpart_entries()
         checkout()
         sync_entries()
         if row.state == "expanded" then

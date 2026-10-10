@@ -2059,7 +2059,9 @@ commit the trunk reaches (the mainline) is not collapsible.
     ref selected): **open diff** (`D`), **checkout commit** (detached),
     **checkout & examine**. No branch actions.
   - **branch** — a ref selected with `h`/`l`, or a **collapsed head**:
-    **checkout** of that branch (§10.4.1; a collapsed head detaches at its tip),
+    **checkout** of that branch (§10.4.1; a collapsed head detaches at its tip;
+    a remote branch whose local counterpart sits elsewhere gets the explicit
+    checkout-and-sync / detached entries of §10.4.1 instead),
     then the **branch sync** entries of a local branch tracking an upstream —
     **fast-forward to `<upstream>`** and **reset to `<upstream>`…** (§17.2) —
     then **collapse** (`<Space>`) + **hide** of an expanded branch or **expand**
@@ -2095,12 +2097,15 @@ row selects, and the entry's label says which:
 | Selection | Command | Label |
 |---|---|---|
 | a local branch (`foo`) | `git switch foo` | `Checkout branch foo` |
-| a remote branch only (`origin/foo`) | `git switch foo` | `Checkout branch foo (from origin/foo)` |
+| a remote branch only (`origin/foo`), no local `foo` anywhere | `git switch foo` | `Checkout branch foo (from origin/foo)` |
+| a remote branch only (`origin/foo`), a local `foo` exists at another commit | see *A remote branch with a local counterpart* below | — |
 | a tag, a worktree label, or no ref (a bare commit, a collapsed head's tip, a selected packed marker's tip) | `git checkout --detach <hash>` | `Checkout commit <short> (detached)` |
 
 A branch group that has a local branch checks out the local one. The remote form
-relies on git's DWIM: it creates a local tracking branch `foo` when none exists,
-and switches to the existing local `foo` when one does. The attached HEAD label
+relies on git's DWIM: it creates a local tracking branch `foo` when none exists.
+It is offered **only** then — when a local `foo` exists elsewhere, git's DWIM
+would silently switch to that (possibly far-behind) local branch instead of the
+commit the user selected, so gitloom makes the choice explicit (below). The attached HEAD label
 `(HEAD → foo)` (§6) is the current branch's group, so it checks out `foo` (a
 no-op switch); a detached HEAD's bare `HEAD` label is not selectable, so a row
 whose only ref is a detached HEAD is a bare commit. A §4.2 working-tree
@@ -2119,6 +2124,68 @@ row**: the commit just checked out, which is always a visible row because HEAD i
 always an anchor (§10.6). The completion notice names the result instead of a
 bare "resynced": `HEAD → <branch> (<short>)` on a branch, `HEAD detached at
 <short>` otherwise (`<short>` = the 7-character hash).
+
+**Behind notice.** When the checkout lands on a branch that is **behind** its
+upstream, the notice says so, from the tracking counts of the ref read the resync
+just made (§6.3) — never the counts cached before the checkout:
+
+| The checked-out branch vs its upstream | Notice |
+|---|---|
+| strictly behind | `HEAD → foo (abc1234) — 12 behind origin/foo` |
+| diverged | `HEAD → foo (abc1234) — 3 ahead, 12 behind origin/foo` |
+| ahead only, in sync, `gone`, no upstream, detached | nothing appended |
+
+Ahead-only is not mentioned: nothing is missing locally, and an unpushed branch
+is the normal state of work in progress. This applies to every resync that
+follows HEAD — checkout, the entries below, and Return (§10.4.2).
+
+**A remote branch with a local counterpart.** When the selected ref is a remote
+branch `origin/foo` and a local branch `foo` exists at a **different** commit
+(were they on the same commit they would be one branch group, which checks out
+the local branch), `Checkout branch foo (from origin/foo)` is not offered. What is
+offered depends on whether the local `foo` **tracks** `origin/foo` — its upstream's
+full refname (§6.3) is `refs/remotes/origin/foo` — and, if so, on its cached
+tracking counts (§6.3; the palette spawns no git to decide):
+
+| Local `foo` | Entry | Runs |
+|---|---|---|
+| tracks `origin/foo`, strictly **behind** (behind > 0, ahead = 0) | `Checkout foo and fast-forward to origin/foo` | `git fetch --no-recurse-submodules . refs/remotes/origin/foo:refs/heads/foo`, then `git switch foo` — no prompt (nothing is lost) |
+| tracks `origin/foo`, **ahead** or **diverged** | `Checkout foo and reset to origin/foo…` | the §17.2 reset confirmation (Cancel first), then `git switch -C foo refs/remotes/origin/foo` |
+| tracks `origin/foo`, and **is the current branch** | the plain branch sync entries, `Fast-forward foo to origin/foo` / `Reset foo to origin/foo…` (§17.2, current-branch forms) | as §17.2 |
+| does not track `origin/foo` (another upstream, or none) | — (no branch entry) | — |
+| in every case above | `Checkout commit <short> (detached)` | `git checkout --detach <hash>` of `origin/foo`'s commit |
+
+The branch entry comes first, then the detached checkout. A tracking local branch
+cannot be in sync with, or have a `gone`, upstream it is not on the commit of; if
+the cached data says so anyway, only the detached checkout is offered.
+
+Which form runs is decided from a **fresh read** of the repository
+(`fetch.sync_probe`, as §17.2 does), never the cached decoration: if `foo` has
+meanwhile become the current branch, the entry runs the current-branch form
+(`git merge --ff-only` / `git reset --hard`, with §17.2's prompt) and switches
+nothing. Otherwise:
+
+- **Checkout and fast-forward** runs the two commands in order. git refuses a
+  non-fast-forward (the refspec carries no `+`) and a branch checked out in
+  another worktree; then nothing has changed. If the switch fails after the
+  fast-forward succeeded (a dirty file the switch would overwrite), git's error
+  is shown as one ERROR line and the graph resyncs without moving the cursor:
+  `foo` stays fast-forwarded, nothing is lost.
+- **Checkout and reset** asks first, exactly like §17.2's reset: the fresh read,
+  a prompt whose first (default) choice is Cancel —
+  `Check out foo and reset it to origin/foo (def5678)?` followed by what is lost
+  (`discards 2 local commits`, the reflog line) — then the same state is read again
+  right before running and the run is **aborted** with a WARN notice if the branch
+  tip, the upstream tip or the current branch changed. `git switch -C` resets and
+  switches in one atomic step. It never forces: uncommitted changes are carried
+  over, and if git refuses because a dirty file would be overwritten (or the
+  branch is checked out in another worktree), its error is shown and nothing
+  changes.
+
+Success runs the follow-HEAD resync like a checkout; the notice names HEAD and
+what happened to the branch: `HEAD → foo (def5678) — fast-forwarded to
+origin/foo` / `HEAD → foo (def5678) — reset to origin/foo, was abc1234`. These
+entries share the one-at-a-time rule of the branch sync (§17.3).
 
 #### 10.4.2 Checkout & examine
 
@@ -3676,7 +3743,11 @@ a remote's never makes it ambiguous. An upstream that is itself a **local branch
 (`branch.<b>.remote = .`) works the same way, with `refs/heads/<upstream>`.
 
 **Which branch.** The branch selected with `h`/`l` — a remote branch, a tag or a
-worktree label gets no sync entry. On a collapsed head or a selected packed marker
+worktree label gets no sync entry, with one exception: a remote branch
+`origin/foo` whose local `foo` tracks it from another commit offers that local
+branch's sync, folded into its checkout (`Checkout foo and fast-forward to
+origin/foo` / `Checkout foo and reset to origin/foo…`), or as the plain entries
+above when `foo` is the current branch (§10.4.1). On a collapsed head or a selected packed marker
 with no ref selected, the head's **only** local branch, when it carries exactly
 one; with several (or none) there is no sync entry — select one with `h`/`l`. The
 **current branch** is the one HEAD is attached to in the graph's repository (§2.1):
@@ -3884,6 +3955,7 @@ Reported operations (titles are the user-visible strings):
 | Fetch / per-remote fetch / pull (§17.3) | `Fetching` / `Fetching <remote>` / `Pulling` | — | `Fetching…`, then success / error |
 | Branch sync: fast-forward / reset (§17.2) — the git command only, not the probe or the prompt | `Fast-forwarding <branch>` / `Resetting <branch>` | — | success / error |
 | Checkout (§10.4.1) | `Checking out <ref>` | — | the HEAD notice / error |
+| Checkout and fast-forward / reset to `<remote>/<b>` (§10.4.1) — the git commands only, not the probe or the prompt | `Checking out <b>` | `fast-forwarding`, `switching` / `resetting` | the HEAD notice / error |
 | Checkout & examine (§10.4.2) — from the confirmed stash / checkout, not the prompt | `Examining <short>` | `stashing`, `checking out` | the HEAD notice / error |
 | Return (§10.4.2) | `Returning to <ref>` | `switching`, `restoring changes` | the HEAD notice / error |
 | Sort by a `rev` mode, `S` (§3.1) | `Sorting by <mode>` | — | none |

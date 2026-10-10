@@ -480,6 +480,13 @@ end
 ---@field name string    the ref's name (`foo`, `origin/foo`, `v1.0`, `wt:dir`)
 ---@field short? string  a remote branch's name without its remote (`foo`)
 ---@field upstream? Upstream  a local branch's tracking data (§6.3), for the branch sync (§17.2)
+---@field counterpart? LocalCounterpart  a remote branch: the local branch of its name at
+---                   another commit (§10.4.1; set by the window from the ref registry)
+---@field current? boolean  a counterpart: it is the current branch (the cached decoration —
+---                   labels only; what runs is decided from a fresh probe)
+
+---@class LocalCounterpart: SelectedRef
+---@field at? string  the remote branch's own commit — what its detached checkout checks out
 
 --- The ref a selected decoration (selection_state.index) names, for checkout
 --- (§10.4.1). A branch group stands for its **local** branch when it has one,
@@ -505,6 +512,25 @@ function M.selected_ref(commit, index)
     end
     local wt = g.worktrees[index - #g.branches - #g.tags]
     return wt and { kind = "worktree", name = wt } or nil
+end
+
+--- The local branch a selected **remote** branch `origin/foo` would collide with
+--- (§10.4.1): the local `foo` in the repo's ref registry, when it exists at a
+--- commit other than `origin/foo`'s. Returned as a local SelectedRef (its
+--- tracking data, `current` when it is `head`, `at` = the remote's commit). nil
+--- for any other ref, without a local `foo`, or when both are on one commit (then
+--- they are one branch group, which checks out the local branch anyway). Pure.
+---@param ref SelectedRef?
+---@param refs table<string, Ref>?  the repo's name → Ref registry
+---@param head string?  the current branch (`repo.head`); nil when detached
+---@return LocalCounterpart?
+function M.local_counterpart(ref, refs, head)
+    if not ref or ref.kind ~= "remote" or not ref.short or not refs then return nil end
+    local l, r = refs[ref.short], refs[ref.name]
+    if not l or l.kind ~= "local" or not l.commit then return nil end
+    local at = r and r.commit and r.commit.hash
+    if at and l.commit.hash == at then return nil end
+    return { kind = "local", name = l.name, upstream = l.upstream, current = head == l.name, at = at }
 end
 
 --- The one local branch `commit` carries, as a SelectedRef — what the branch
@@ -567,7 +593,10 @@ end
 
 --- What checking out `commit` with `ref` selected runs (§10.4.1): a local branch
 --- → `git switch <name>`; a remote branch → `git switch <short>` (git's DWIM
---- creates or reuses the local tracking branch); a tag, a worktree label, or no
+--- creates the local tracking branch) — unless a local branch of that name sits
+--- at another commit (`ref.counterpart`), when DWIM would silently switch to it:
+--- then the detached checkout of the remote's commit (the palette adds the
+--- explicit checkout-and-sync entry beside it); a tag, a worktree label, or no
 --- ref → `git checkout --detach <hash>`. nil for a §4.2 working-tree virtual
 --- commit (or no commit) — there is nothing to check out. Never forces. Pure.
 ---@param commit table?
@@ -578,6 +607,11 @@ function M.checkout_spec(commit, ref)
     if not c or c.virtual or not c.hash then return nil end
     if ref and ref.kind == "local" then
         return { argv = { "git", "switch", ref.name }, label = "Checkout branch " .. ref.name }
+    end
+    if ref and ref.kind == "remote" and ref.counterpart then
+        local h = ref.counterpart.at or c.hash
+        return { argv = { "git", "checkout", "--detach", h },
+            label = ("Checkout commit %s (detached)"):format(h:sub(1, 7)) }
     end
     if ref and ref.kind == "remote" then
         return { argv = { "git", "switch", ref.short },

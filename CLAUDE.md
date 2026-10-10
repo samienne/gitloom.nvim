@@ -152,7 +152,8 @@ Coverage:
   incl. carrying a tracked local branch's upstream onto its group; §6.3, and
   moving the branch HEAD is on — the head ref's `branch`, else the fallback — to
   the FRONT flagged `current`; none when detached), `head_summary` (the
-  post-checkout notice), `decoration_texts` / `pane_labels` drawing it first as
+  post-checkout notice, incl. §10.4.1's behind suffix — strictly behind /
+  diverged only, never ahead-only / gone / detached), `decoration_texts` / `pane_labels` drawing it first as
   `(HEAD → name …)` (§6),
   `track_segments` / `track_label` (the upstream divergence indicator's coloured
   segments + byte-identical plain label: ahead/behind/diverged/gone/in-sync),
@@ -477,6 +478,13 @@ Coverage:
   count / a failed read), the notices; and `palette.row_entries` reaching it (a
   selected local branch, a remote ref / tag / commit row getting none, a
   collapsed head's or selected marker's SOLE local branch, none when ambiguous).
+  Plus a **remote ref with a local counterpart elsewhere** (§10.4.1):
+  `select.local_counterpart` (none without a local namesake or on one commit) and
+  the entries it yields — behind → `checkout_ff`, ahead / diverged →
+  `checkout_reset`, a non-tracking / in-sync / gone local → detached only, a
+  current local → the plain `fast_forward` / `reset_branch`, always followed by
+  the detached checkout of the remote's commit — plus `checkout_commands` (never
+  forcing), the `switching` reset prompt and `checkout_note`.
   Then against REAL scratch repositories (`origin/main` a locally created
   remote-tracking ref — no network): the ref read carrying `upstream.ref`,
   `fetch.sync_probe`, a non-current fast-forward leaving the files untouched, a
@@ -484,7 +492,12 @@ Coverage:
   conflicting dirty file refused, reset of the current branch (ahead + dirty — an
   untracked file survives; strictly ahead), of another branch, both refused for a
   branch checked out in a linked worktree, the stale-tip / dirty abort decision,
-  and a LOCAL-branch upstream (`refs/heads/<x>`). The window glue is untested
+  and a LOCAL-branch upstream (`refs/heads/<x>`); and the §10.4.1 checkout +
+  sync through `fetch.run_steps`: ff + switch lands HEAD on the branch at the
+  upstream, a diverged ff refused at step 1 (nothing moved), a switch refused at
+  step 2 leaving the branch fast-forwarded, `switch -C` resetting a diverged
+  branch and checking it out (upstream kept, old tip in the reflog), and refusing
+  over a conflicting dirty file. The window glue is untested
 - `tests/examine_spec.lua` — Checkout & examine (§10.4.2). Pure:
   `range.examine_range` (ONE rev — the older end's first parent — `to =
   "worktree"`, `-C<root> <base>` as diffview args; a root older end → the empty

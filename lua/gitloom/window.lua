@@ -2479,8 +2479,10 @@ GRAPH_HELPERS.palette = function(ctx)
         elseif item then
             b = ctx:branch_under_cursor(line)
             if b then
-                row = { kind = "branch", state = b.state, commit = b.commit,
-                    ref = ref_selected and selectm.selected_ref(item.commit, st.index) or nil,
+                local ref = ref_selected and selectm.selected_ref(item.commit, st.index) or nil
+                -- A remote branch whose local namesake sits elsewhere (§10.4.1).
+                if ref then ref.counterpart = selectm.local_counterpart(ref, repo.refs, repo.head) end
+                row = { kind = "branch", state = b.state, commit = b.commit, ref = ref,
                     head = item.commit and item.commit.collapsed and item.commit or nil }
             end
         end
@@ -2528,7 +2530,8 @@ GRAPH_HELPERS.palette = function(ctx)
             checkout(e.checkout)
         elseif op == "checkout_examine" then
             ctx:examine(e.commit, e.commit)
-        elseif op == "fast_forward" or op == "reset_branch" then
+        elseif op == "fast_forward" or op == "reset_branch" or op == "checkout_ff"
+            or op == "checkout_reset" then
             ctx:branch_sync(op, e.sync)
         elseif e.marker then
             local u = units[e.marker]
@@ -2608,6 +2611,12 @@ end
 -- `reset --hard` at another branch. A reset asks (Cancel first) and re-reads
 -- right before running, aborting if anything it showed changed. Shares
 -- `ctx.remote_busy` with fetch / pull / examine; success → INFO + resync.
+-- `"checkout_ff"` / `"checkout_reset"` (§10.4.1: a remote branch whose local
+-- namesake tracks it from elsewhere) also check `t.branch` out: when the probe
+-- finds it is not current, `sync.checkout_commands` (fetch . + switch / switch -C)
+-- runs and success resyncs following HEAD; when it is current, they are the plain
+-- current-branch sync. A switch refused after the fast-forward: the error, then a
+-- silent resync (the branch did move).
 GRAPH_HELPERS.branch_sync = function(ctx, op, t)
     if not t then return end
     if ctx.remote_busy then
@@ -2615,27 +2624,36 @@ GRAPH_HELPERS.branch_sync = function(ctx, op, t)
         return
     end
     local root = ctx.repo.root
-    local reset = op == "reset_branch"
-    ctx.remote_busy = (reset and "reset of " or "fast-forward of ") .. t.branch
+    local checkout = op == "checkout_ff" or op == "checkout_reset"
+    local reset = op == "reset_branch" or op == "checkout_reset"
+    ctx.remote_busy = (checkout and "checkout of " or reset and "reset of " or "fast-forward of ") .. t.branch
     local function done() ctx.remote_busy = nil end
     local function fail(label, res)
         done()
         vim.notify(ctx:git_failure(label, res), vim.log.levels.ERROR)
     end
-    local function exec(cmd, notice)
-        -- The git command alone is the reported operation (§19.1) — not the probe
-        -- or the prompt ahead of it.
-        local op = ctx.progress:start((reset and "Resetting " or "Fast-forwarding ") .. t.branch,
-            { own_notices = true })
-        git.run_checkout(cmd.argv, root).next(function(res)
+    -- `cmds` run in order; `notice` (a plain sync) or `note` (a checkout's
+    -- follow-HEAD notice, §10.4.1) names the result.
+    local function exec(cmds, notice, note)
+        -- The git commands alone are the reported operation (§19.1) — not the
+        -- probe or the prompt ahead of them.
+        local title = (note and "Checking out " or reset and "Resetting " or "Fast-forwarding ") .. t.branch
+        local pop = ctx.progress:start(title, { own_notices = true,
+            message = note and (reset and "resetting" or "fast-forwarding") or nil })
+        git.run_steps(cmds, root, function(i)
+            if i == 2 then pop:report("switching") end -- the checkout's switch (§19.1)
+        end).next(function(res)
             vim.schedule(function()
                 if res.code ~= 0 then
-                    op:finish("failed")
-                    fail(cmd.label, res)
+                    pop:finish("failed")
+                    fail(res.failed and res.failed.label or "git", res)
+                    -- The fast-forward landed before the switch was refused.
+                    if note and (res.step or 1) > 1 then ctx:resync(true) end
                     return
                 end
-                op:finish("done")
+                pop:finish("done")
                 done()
+                if note then return ctx:resync(false, { note = note }) end
                 vim.notify(notice, vim.log.levels.INFO)
                 ctx:resync(false)
             end)
@@ -2651,11 +2669,17 @@ GRAPH_HELPERS.branch_sync = function(ctx, op, t)
                 return
             end
             local current = before.head_branch == t.branch
-            if not reset then
-                return exec(git.ff_command(t, current), git.ff_done(t, before))
+            local switching = checkout and not current
+            local function run_it()
+                if switching then
+                    return exec(git.checkout_commands(t, reset), nil, git.checkout_note(t, before, reset))
+                end
+                if reset then return exec({ git.reset_command(t, current) }, git.reset_done(t, before)) end
+                return exec({ git.ff_command(t, current) }, git.ff_done(t, before))
             end
+            if not reset then return run_it() end
             vim.ui.select({ "Cancel", "Reset" }, {
-                prompt = git.prompt_text(git.reset_prompt(t, before)),
+                prompt = git.prompt_text(git.reset_prompt(t, before, switching)),
             }, function(_, idx)
                 if idx ~= 2 then return done() end
                 git.sync_probe(t, root).next(function(after)
@@ -2666,7 +2690,7 @@ GRAPH_HELPERS.branch_sync = function(ctx, op, t)
                             vim.notify(stale, vim.log.levels.WARN)
                             return
                         end
-                        exec(git.reset_command(t, current), git.reset_done(t, before))
+                        run_it()
                     end)
                 end)
             end)
@@ -4032,7 +4056,10 @@ local function resync(ctx, silent, follow)
         ctx:update_panes()
         op:finish("done")
         if silent then return end
-        local said = follow and git.head_summary(repo.head, head_hash)
+        -- The branch's tracking counts from the ref read just made (§10.4.1's
+        -- behind notice), never the ones cached before the checkout.
+        local head_ref = repo.head and repo.refs[repo.head]
+        local said = follow and git.head_summary(repo.head, head_hash, head_ref and head_ref.upstream)
         if said then
             local note = follow and follow.note
             vim.notify("gitloom: " .. said .. (note and (" — " .. note) or ""), vim.log.levels.INFO)

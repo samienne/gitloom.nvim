@@ -236,6 +236,108 @@ describe("palette row entries for the branch sync (§17.1/§17.2)", function()
     end)
 end)
 
+describe("a remote branch with a local counterpart elsewhere (§10.4.1)", function()
+    local RHASH, LHASH = ("r"):rep(40), ("l"):rep(40)
+    local function fooup(ahead, behind, extra)
+        local u = { short = "origin/foo", ref = "refs/remotes/origin/foo", ahead = ahead, behind = behind,
+            gone = false }
+        for k, v in pairs(extra or {}) do u[k] = v end
+        return u
+    end
+    -- The palette row for `origin/foo` selected on its commit, with the repo's ref
+    -- registry holding a local `foo` at LHASH tracking `u` (nil: no local foo).
+    local function row_for(u, opts)
+        opts = opts or {}
+        local c = { hash = RHASH, parents = {}, refs = {} }
+        local rref = { name = "origin/foo", kind = "remote", commit = c }
+        c.refs[1] = rref
+        local refs = { ["origin/foo"] = rref }
+        if u ~= false then
+            local lc = { hash = opts.same and RHASH or LHASH, parents = {}, refs = {} }
+            refs.foo = { name = "foo", kind = "local", commit = lc, upstream = u }
+        end
+        local ref = selectm.selected_ref(c, 1)
+        ref.counterpart = selectm.local_counterpart(ref, refs, opts.head)
+        return { kind = "branch", state = "mainline", commit = c, ref = ref }
+    end
+
+    it("no local foo: the DWIM checkout as before", function()
+        local es = palette.row_entries(row_for(false), true)
+        assert.same({ "checkout" }, ids(es))
+        assert.equals("Checkout branch foo (from origin/foo)", es[1].label)
+        assert.same({ "git", "switch", "foo" }, es[1].checkout.argv)
+    end)
+
+    it("a local foo on the same commit is no counterpart", function()
+        assert.is_nil(row_for(fooup(0, 0), { same = true }).ref.counterpart)
+    end)
+
+    it("strictly behind: checkout + fast-forward, then the detached checkout", function()
+        local es = palette.row_entries(row_for(fooup(0, 12)), true)
+        assert.same({ "checkout_ff", "checkout" }, ids(es))
+        assert.equals("Checkout foo and fast-forward to origin/foo", es[1].label)
+        assert.equals("foo", es[1].sync.branch)
+        assert.equals("refs/remotes/origin/foo", es[1].sync.upstream_ref)
+        assert.equals("Checkout commit rrrrrrr (detached)", es[2].label)
+        assert.same({ "git", "checkout", "--detach", RHASH }, es[2].checkout.argv)
+    end)
+
+    it("ahead or diverged: checkout + reset (prompted), then the detached checkout", function()
+        for _, u in ipairs({ fooup(2, 0), fooup(2, 5) }) do
+            local es = palette.row_entries(row_for(u), true)
+            assert.same({ "checkout_reset", "checkout" }, ids(es))
+            assert.equals("Checkout foo and reset to origin/foo…", es[1].label)
+        end
+    end)
+
+    it("not tracking origin/foo (other upstream / none): the detached checkout only", function()
+        local other = fooup(0, 3, { short = "upstream/foo", ref = "refs/remotes/upstream/foo" })
+        for _, u in ipairs({ other, nil }) do
+            local es = palette.row_entries(row_for(u), true)
+            assert.same({ "checkout" }, ids(es))
+            assert.same({ "git", "checkout", "--detach", RHASH }, es[1].checkout.argv)
+        end
+    end)
+
+    it("in sync / gone (defensive): the detached checkout only", function()
+        for _, u in ipairs({ fooup(0, 0), fooup(0, 3, { gone = true }) }) do
+            assert.same({ "checkout" }, ids(palette.row_entries(row_for(u), true)))
+        end
+    end)
+
+    it("foo is the current branch: the plain §17.2 entries, then the detached checkout", function()
+        local es = palette.row_entries(row_for(fooup(0, 12), { head = "foo" }), true)
+        assert.same({ "fast_forward", "reset_branch", "checkout" }, ids(es))
+        assert.equals("Fast-forward foo to origin/foo", es[1].label)
+        assert.equals("Reset foo to origin/foo…", es[2].label)
+        es = palette.row_entries(row_for(fooup(1, 2), { head = "foo" }), true)
+        assert.same({ "reset_branch", "checkout" }, ids(es))
+    end)
+
+    it("the commands: fetch . then switch; switch -C; the prompt and the notes", function()
+        local t = T({ kind = "local", name = "foo", upstream = fooup(0, 12) })
+        local ff = sync.checkout_commands(t, false)
+        assert.same({ "git", "fetch", "--no-recurse-submodules", ".",
+            "refs/remotes/origin/foo:refs/heads/foo" }, ff[1].argv)
+        assert.same({ "git", "switch", "foo" }, ff[2].argv)
+        local rs = sync.checkout_commands(t, true)
+        assert.equals(1, #rs)
+        assert.same({ "git", "switch", "-C", "foo", "refs/remotes/origin/foo" }, rs[1].argv)
+        for _, cmds in ipairs({ ff, rs }) do
+            for _, c in ipairs(cmds) do
+                for _, a in ipairs(c.argv) do
+                    assert.is_true(not (a == "--force" or a == "-f" or a:match("^%+")), a)
+                end
+            end
+        end
+        local p = { tip = ("a"):rep(40), up_tip = ("d"):rep(40), head_branch = "main", ahead = 2, behind = 1 }
+        assert.same({ "Check out foo and reset it to origin/foo (ddddddd)?", "discards 2 local commits",
+            "the old tip aaaaaaa stays reachable in the reflog" }, sync.reset_prompt(t, p, true))
+        assert.equals("fast-forwarded to origin/foo", sync.checkout_note(t, p, false))
+        assert.equals("reset to origin/foo, was aaaaaaa", sync.checkout_note(t, p, true))
+    end)
+end)
+
 -- ── The git side against real scratch repositories ───────────────────────────
 
 ---@return any
@@ -424,6 +526,69 @@ describe("branch sync against a real repository (§17.2)", function()
         local before2 = probe(t, dir)
         write(dir .. "/f", "dirty\n")
         assert.matches("working tree changed", sync.sync_stale(t, before2, probe(t, dir)))
+    end)
+
+    -- §10.4.1: checking out `origin/main` when the local `main` sits elsewhere.
+    local function steps(cmds) return await(fetch.run_steps(cmds, dir)) end
+    local function head_branch() return sh(dir, "symbolic-ref", "--short", "HEAD") end
+
+    it("checkout + fast-forward: main fast-forwarded and checked out", function()
+        sh(dir, "switch", "-q", "-c", "other")
+        local res = steps(sync.checkout_commands(target("main"), false))
+        assert.equals(0, res.code, res.err)
+        assert.equals(upstream, tip(dir, "main"))
+        assert.equals("main", head_branch())
+        assert.equals("g\n", read(dir .. "/g"))
+    end)
+
+    it("checkout + fast-forward refuses a diverged branch: nothing changes", function()
+        local mine = commit_file(dir, "h", "h\n", "local")
+        sh(dir, "switch", "-q", "-c", "other")
+        local res = steps(sync.checkout_commands(target("main", 1), false))
+        assert.not_equal(0, res.code)
+        assert.equals(1, res.step)
+        assert.equals(mine, tip(dir, "main"))
+        assert.equals("other", head_branch())
+    end)
+
+    it("a switch refused after the fast-forward leaves main fast-forwarded", function()
+        sh(dir, "switch", "-q", "-c", "other")
+        write(dir .. "/f", "mine\n")
+        local res = steps(sync.checkout_commands(target("main"), false))
+        assert.not_equal(0, res.code)
+        assert.equals(2, res.step)
+        assert.equals("git switch", res.failed.label)
+        assert.equals(upstream, tip(dir, "main"))
+        assert.equals("other", head_branch())
+        assert.equals("mine\n", read(dir .. "/f"))
+    end)
+
+    it("checkout + reset: a diverged main reset and checked out in one step", function()
+        local mine = commit_file(dir, "h", "h\n", "local")
+        sh(dir, "switch", "-q", "-c", "other", base)
+        local t = target("main", 1)
+        local p = probe(t, dir)
+        assert.same({ 1, 2 }, { p.ahead, p.behind })
+        assert.equals(3, #sync.reset_prompt(t, p, true))
+        local res = steps(sync.checkout_commands(t, true))
+        assert.equals(0, res.code, res.err)
+        assert.equals(upstream, tip(dir, "main"))
+        assert.equals("main", head_branch())
+        assert.is_nil(read(dir .. "/h"))
+        assert.equals("refs/remotes/origin/main", sh(dir, "rev-parse", "--symbolic-full-name", "main@{upstream}"))
+        -- The old tip stays in the reflog.
+        assert.matches(mine:sub(1, 7), sh(dir, "reflog", "--format=%h", "main"))
+    end)
+
+    it("checkout + reset never forces over a conflicting dirty file", function()
+        local mine = commit_file(dir, "h", "h\n", "local")
+        sh(dir, "switch", "-q", "-c", "other", base)
+        write(dir .. "/f", "mine\n")
+        local res = steps(sync.checkout_commands(target("main", 1), true))
+        assert.not_equal(0, res.code)
+        assert.equals(mine, tip(dir, "main"))
+        assert.equals("other", head_branch())
+        assert.equals("mine\n", read(dir .. "/f"))
     end)
 
     it("a local-branch upstream works the same way (refs/heads/<upstream>)", function()

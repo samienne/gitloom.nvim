@@ -1847,7 +1847,20 @@ submodule graph checks out in the submodule. A non-zero exit is reported via
 (`ctx:resync(false, {})`, also used by checkout & examine and Return with a
 `note`): the cursor lands on HEAD's row instead of the remembered one, and the
 notice is `git.head_summary` — `HEAD → <branch> (<short>)` / `HEAD detached at
-<short>`. Every resync also drops the signature cache (`sig_cache.sig = nil`):
+<short>`, plus §10.4.1's behind notice from the head branch's `upstream` as the
+resync's own ref read left it (`head_summary`'s third argument). A selected
+**remote** ref gets `ref.counterpart = select.local_counterpart(ref, repo.refs,
+repo.head)` in the palette glue — the local namesake at another commit, from the
+ref registry — which turns `checkout_spec` into the detached checkout of the
+remote's commit and makes `row_entries` put `checkout_ff` / `checkout_reset`
+(`sync.checkout_labels`; or the plain `fast_forward` / `reset_branch` when the
+cached decoration says that branch is current) ahead of it, but only when its
+upstream's full refname is the remote's. Those ops run through
+`ctx:branch_sync`, which decides from the fresh probe: not current →
+`sync.checkout_commands` (`fetch .` + `switch`, or `switch -C`) through
+`fetch.run_steps` (in order, stopping at the first failure, `on_step` driving
+the progress message) and a follow-HEAD resync with `sync.checkout_note`; current
+→ the plain current-branch sync. Every resync also drops the signature cache (`sig_cache.sig = nil`):
 its key is the order and owner *counts*, which a moved ref tip — a detached HEAD
 moving, a force-pushed ref — leaves unchanged.
 
