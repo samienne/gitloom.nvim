@@ -538,7 +538,12 @@ Coverage:
   (staged → `--cached`/`to=index`, unstaged → `HEAD`/`to=worktree`, untracked →
   the same worktree range as unstaged, real commits unchanged; §11.5),
   `worktree_label` (the graph-row subject + pluralized counts) and
-  `format_worktree_detail` (the commit-view state header)
+  `format_worktree_detail` (the commit-view state header); plus the virtual row's
+  **rendered lane continuity**: with HEAD mid-graph (in-set descendants above it)
+  the unstaged node sits where lanes cross, and under `gutter` it owns a handover
+  line above its node line — `display_item` must hand every row's `above`/`merge`
+  lines to the listview (raw + focused × compact + gutter). Guards the regression
+  where the virtual branch dropped them, cutting every crossing lane at the ◌
 - `tests/reachability_spec.lua` — `reachable_cone` (spec §12.1: pivot/ancestors/
   descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
   attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and

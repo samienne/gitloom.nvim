@@ -894,6 +894,24 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         return highlight_text(result, "Comment")
     end
 
+    -- The row's stacked virtual lines (§5 Line): `above` (the split fan-in, plus any
+    -- `gutter` handover rows — topmost first) and `below` (the merge fan-out), as
+    -- DisplayElement rows. EVERY single-row branch below must return these: the
+    -- layout routes lanes through them (a `gutter` eviction/claim jogs the crossing
+    -- lanes there), so dropping them cuts every lane on the row and re-births it
+    -- below — and the §6.2 screen-row model counts them regardless.
+    -- `ids` adds the lane-id debug prefix in the message cell (commit rows only).
+    local function fan_lines(ids)
+        local above = {}
+        for _, line in ipairs(item.above or {}) do
+            above[#above + 1] = { "", "", M.get_column_chars(opts, line, emphasis), ids and get_columns(line) or "" }
+        end
+        local below
+        if item.merge then
+            below = { { "", "", M.get_column_chars(opts, item.merge, emphasis), ids and get_columns(item.merge) or "" } }
+        end
+        return #above > 0 and above or nil, below
+    end
 
 
     -- A packed marker-group (spec §10.4): several concurrent collapsed heads on
@@ -948,7 +966,8 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             parts[#parts + 1] = " "
         end
         parts[#parts + 1] = rh(("(%d)"):format(head.count or 0), "Comment")
-        return { line = { "", "", graph_item, compose(parts) } }
+        local above, below = fan_lines()
+        return { above = above, below = below, line = { "", "", graph_item, compose(parts) } }
     end
 
     -- A kept junction drawn as a marker (spec §10.4): the split/merge topology
@@ -957,21 +976,14 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- falls through to the full commit render below.
     if item.commit and item.commit.junction and opts.junction_markers ~= false then
         local graph_item = M.get_column_chars(opts, item.columns, emphasis)
-        local above = {}
-        for _, line in ipairs(item.above or {}) do
-            above[#above + 1] = { "", "", M.get_column_chars(opts, line, emphasis), "" }
-        end
-        local below
-        if item.merge then
-            below = { { "", "", M.get_column_chars(opts, item.merge, emphasis), "" } }
-        end
+        local above, below = fan_lines()
         local parts = {}
         for _, it in ipairs(get_ref_items(item.commit)) do
             parts[#parts + 1] = it
             parts[#parts + 1] = " "
         end
         return {
-            above = #above > 0 and above or nil,
+            above = above,
             below = below,
             line = { "", "", graph_item, compose(parts) },
         }
@@ -979,10 +991,16 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
 
     -- A working-tree virtual commit (§4.2): the ◌ node (get_column_chars) + a
     -- synthesized subject, with blank date/author columns (it carries no commit
-    -- metadata). No refs, no split/merge — it is a lone tip above HEAD.
+    -- metadata). No refs and no fan of its own — it is a lone tip above HEAD — but
+    -- it sits mid-graph whenever HEAD has descendants, so lanes cross its row and
+    -- the layout may still give it virtual lines (a `gutter` handover, §5.6).
+    -- Those carry the crossing lanes and must be drawn (fan_lines).
     if item.commit and item.commit.virtual then
         local graph_item = M.get_column_chars(opts, item.columns, emphasis)
+        local above, below = fan_lines()
         return {
+            above = above,
+            below = below,
             line = {
                 rh("", palette.date),
                 rh("", palette.author),
@@ -1020,17 +1038,10 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
 
         -- Stacked virtual rows above (the split fan-in, plus any `gutter` handover
         -- rows — §5 Line, topmost first) / below (merge fan-out).
-        local above = {}
-        for _, line in ipairs(item.above or {}) do
-            above[#above + 1] = { "", "", M.get_column_chars(opts, line, emphasis), get_columns(line) }
-        end
-        local below
-        if item.merge then
-            below = { { "", "", M.get_column_chars(opts, item.merge, emphasis), get_columns(item.merge) } }
-        end
+        local above, below = fan_lines(true)
 
         ---@type DisplayElement
-        local element = { above = #above > 0 and above or nil, below = below }
+        local element = { above = above, below = below }
 
         if M.dual_two_line(opts, item.commit) then
             -- Two real rows (§6.1): row 1 = graph (node) + labels; row 2 = the

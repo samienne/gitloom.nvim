@@ -181,3 +181,69 @@ describe("format_worktree_detail (§11.8)", function()
         assert.equal("1 file, shown as additions", rows[2])
     end)
 end)
+
+--- The virtual row's **rendered** lane continuity (§4.2/§5). A working-tree node
+--- spliced directly above a HEAD that has in-set descendants sits in the middle
+--- of the graph, so lanes cross its row — and under the `gutter` policy (§5.6) the
+--- node, a fresh tip whose lane owns the next subject row, takes the gutter on a
+--- handover row of its own (`item.above`). The layout is faithful; the bug was in
+--- `display_item`, whose virtual-commit branch drew only the node line and dropped
+--- the item's `above`/`merge` virtual lines, so every lane jogging on them looked
+--- cut above the row and re-born below it (HEAD's lane "beginning" at the ◌).
+describe("virtual commit row keeps its fan / handover lines (§4.2/§5)", function()
+    local h = require("tests.graph_helpers")
+    local view = require("gitloom.graph.view")
+
+    -- m → s1 → c(HEAD) → d, with the unstaged node directly above HEAD.
+    local function fixture()
+        local items = h.dag({ { "m", { "s1" } }, { "s1", { "c" } }, { "wt", { "c" } },
+            { "c", { "d" } }, { "d", {} } })
+        local by = {}
+        for _, it in ipairs(items) do by[it.commit.hash] = it.commit end
+        by.wt.virtual = "unstaged"
+        by.wt.wt = { changed = 1 }
+        return items, by
+    end
+
+    -- Every rendered line of every row (above…, the node line, the merge line) must
+    -- be handed to the listview.
+    local function assert_all_lines_drawn(opts, rows)
+        for _, r in ipairs(rows) do
+            local el = internal.display_item(opts, r, { index = nil }, nil, nil, nil, nil, nil)
+            local name = r.commit and r.commit.hash or r.type
+            assert.equals(#(r.above or {}), #(el.above or {}), ("row %s: above lines drawn"):format(name))
+            assert.equals(r.merge and 1 or 0, #(el.below or {}), ("row %s: merge line drawn"):format(name))
+        end
+    end
+
+    for _, policy in ipairs({ "compact", "gutter" }) do
+        for _, corpus in ipairs({ "raw", "focused" }) do
+            it(("draws every line of the virtual row (%s, %s)"):format(policy, corpus), function()
+                local items, by = fixture()
+                if corpus == "focused" then
+                    by.m.refs = { { name = "master", kind = "local" } }
+                    by.c.refs = { { name = "release", kind = "local" } }
+                    local ro = { { id = "master", tip = by.m, mode = "normal" },
+                        { id = "release", tip = by.c, mode = "normal" } }
+                    items = view.project(items, view.owners(items, ro,
+                        { master = true, release = true }, {}, true), nil).items
+                end
+                local opts = h.big_opts()
+                opts.layout_policy = policy
+                local errs, rows = h.check(opts, items)
+                assert.same({}, errs) -- the layout model itself is continuous
+                local vrow
+                for _, r in ipairs(rows) do
+                    if r.commit and r.commit.virtual then vrow = r end
+                end
+                assert.is_not_nil(vrow)
+                if policy == "gutter" then
+                    -- Precondition: the case that broke — the virtual row owns a
+                    -- handover line above its node line.
+                    assert.is_true(#(vrow.above or {}) > 0)
+                end
+                assert_all_lines_drawn(opts, rows)
+            end)
+        end
+    end
+end)
