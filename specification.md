@@ -1313,7 +1313,13 @@ Its body chain already satisfies the seam requirement — it moves no lane — s
 its own seam. For the other four the seam behaviour is shared.
 
 **The footer follows the policy; the header does not.** The footer is a seeded
-lane sweep, so its body rows obey the active policy like the main view. The
+lane sweep, so its body rows obey the active policy like the main view — with
+one exception: under `gutter` the footer is laid out **`straight`**. The gutter's
+column constraint exists to line nodes up beside the commit messages, and the
+pane draws no messages, so there it would only add handover rows (a turn whose
+sole purpose is moving a lane into the gutter column, e.g. the trunk above its
+root). `straight` is the gutter's own no-move base, so every seeded lane still
+keeps its seam column and the seam still reproduces the main view's. The
 **header** is built by the *direct seam-up grid* (§6.2) — a different layout
 routine that never runs the stage chain — so its rows are unaffected by the
 policy, and a `straight` graph keeps a `compact`-style header. This is correct
@@ -1514,7 +1520,9 @@ lane is preserved and terminated explicitly. This is the "wires must connect"
 grid invariant (§5.1) lifted to the window edge. It is also stronger than anything
 §5.1 asks of a body row — **every seeded lane must keep its seeded column**, or the
 seam jogs — so the seam row is laid out by the **no-move** placement regardless of
-the layout policy (§5.6) the body rows use.
+the layout policy (§5.6) the body rows use. The footer's body follows the main
+view's policy, except that under `gutter` it is laid out `straight` (§5.6): with
+no messages beside it, the gutter column would only add handover rows.
 
 **Panes do not honour dedicated columns.** A column **reserved** for a pinned
 branch (§10.6.2) is a main-view placement rule; neither pane applies it. The

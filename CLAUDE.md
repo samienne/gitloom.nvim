@@ -1210,8 +1210,11 @@ Details not covered by the spec or architecture:
   per keypress — deliberately per-window, since the point is comparing two
   windows at two policies. `ctx.pane_opts` (the panes' shallow copy of `opts`,
   frozen at window creation) is kept in step by the handler. The **footer** pane
-  follows the policy; the **header** does not (it is the direct seam-up grid,
-  never `columns.layout`).
+  follows the policy, except that `gutter` lays it out `straight`
+  (`pane.footer_policy`, applied inside `pane.footer`: the pane draws no
+  messages, so the gutter column would only add handover rows; the seam still
+  matches since `straight` moves no seeded lane); the **header** does not (it is
+  the direct seam-up grid, never `columns.layout`).
 - **Lane identity is independent of placement** (spec §5, `spawn_lanes`): a
   commit's first parent continues the identity of the incoming lane that
   represents the same line of history — prefer a lane whose child has this commit

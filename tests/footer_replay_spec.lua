@@ -255,3 +255,46 @@ describe("large real-world footer replay [" .. policy .. "] (§6.2)", function()
     end)
 end)
 end
+
+-- Under `gutter` the footer is laid out `straight` (§6.2): the gutter lines nodes up
+-- beside the messages and the pane draws none, so it would only add handover rows.
+-- The seam half of that is the `[gutter]` replay above (the gutter main view's seam
+-- against the straight-laid footer); this pins the mapping and the layout itself.
+describe("the footer under the gutter policy (§6.2)", function()
+    it("footer_policy maps gutter to straight and leaves every other policy alone", function()
+        assert.equals("straight", pane.footer_policy("gutter"))
+        for _, p in ipairs({ "compact", "survivors", "linear", "straight" }) do
+            assert.equals(p, pane.footer_policy(p))
+        end
+        assert.is_nil(pane.footer_policy(nil))
+    end)
+
+    it("lays out exactly the straight footer, with no handover rows", function()
+        local b = build("gutter")
+        local sopts = vim.tbl_extend("force", {}, b.opts, { layout_policy = "straight" })
+        local checked, gutter_handovers = 0, 0
+        for si = 1, #b.display - 1 do
+            local boundary = pane.boundary_of(b.main[si].columns)
+            if next(boundary) then
+                local cond = pane.continue(boundary, b.pinned, {}, function(n) return b.idx[n.hash] end)
+                if #cond.items > 0 then
+                    local g = pane.footer(b.opts, cond.items, boundary, cond.node_of_hash).rows
+                    local s = pane.footer(sopts, cond.items, boundary, cond.node_of_hash).rows
+                    assert.equals(#s, #g, "row count at si=" .. si)
+                    for i = 1, #g do
+                        assert.equals(h.row_sig(s[i]), h.row_sig(g[i]), ("si=%d row %d"):format(si, i))
+                        assert.is_true(g[i].above == nil or #g[i].above == 0, "a handover row above")
+                        assert.is_nil(g[i].virtual, "a handover row")
+                    end
+                    -- Teeth: the gutter policy itself WOULD emit handover rows here.
+                    for _, r in ipairs(columns.layout(b.opts, cond.items)) do
+                        gutter_handovers = gutter_handovers + #(r.above or {})
+                    end
+                    checked = checked + 1
+                end
+            end
+        end
+        assert.is_true(checked > 0)
+        assert.is_true(gutter_handovers > 0, "the corpus never exercised a gutter handover")
+    end)
+end)

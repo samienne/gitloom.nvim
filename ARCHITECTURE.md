@@ -1567,9 +1567,11 @@ panes hold a **shallow copy of `opts` frozen at window creation** and would
 otherwise keep the open-time policy while the main view changed. The toggle uses
 `reflow()` (not `refresh()`) since a different placement can change which markers
 pack, and re-anchors with `goto_hash` so the two renderings are comparable row for
-row. The **footer** therefore follows the policy; the **header** does not, since
-`pane.header` is the direct seam-up grid and never calls `columns.layout` (spec
-§5.6, §6.2).
+row. The **footer** therefore follows the policy — except that `pane.footer` maps
+it through `pane.footer_policy`, which lays the footer out `straight` under
+`gutter` (no messages in the pane, so the gutter column would only add handover
+rows) — and the **header** does not, since `pane.header` is the direct seam-up
+grid and never calls `columns.layout` (spec §5.6, §6.2).
 
 **`complete_check` is policy-free.** Every obligation it verifies — the node placed
 once and on the main line, each incoming lane drawn and terminated, each survivor

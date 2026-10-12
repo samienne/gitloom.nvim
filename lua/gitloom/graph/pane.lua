@@ -832,6 +832,10 @@ end
 ---@param node_of table<string, table>
 ---@return table  -- { rows = table[], terminate = table<integer, table> }
 function M.footer(opts, pane_items, boundary, node_of)
+    local policy = M.footer_policy(opts.layout_policy)
+    if policy ~= opts.layout_policy then
+        opts = vim.tbl_extend("force", {}, opts, { layout_policy = policy })
+    end
     -- A lane only seeds if its target node is in THIS slice; one that maps to a
     -- node outside the slice would never terminate and would run off the bottom,
     -- so it terminates at the seam instead.
@@ -1855,6 +1859,20 @@ function M.gate()
     end
 
     return st
+end
+
+--- The layout policy (§5.6) the **footer** is laid out with, given the main view's.
+--- `gutter` maps to `straight`: the gutter's column constraint exists to line nodes
+--- up beside the commit messages, and the pane draws none, so under it the footer
+--- would only gain handover rows (a turn just to move a lane into the gutter column).
+--- `straight` is the gutter's own no-move base and keeps every seeded lane in its
+--- seam column, so the seam still reproduces the main view's. Every other policy is
+--- returned unchanged (§6.2).
+---@param policy string?
+---@return string?
+function M.footer_policy(policy)
+    if policy == "gutter" then return "straight" end
+    return policy
 end
 
 return M
