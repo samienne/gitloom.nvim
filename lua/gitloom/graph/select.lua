@@ -379,6 +379,25 @@ function M.pin_rank(pins, refs, remotes, unpinned, counterparts)
     return rank
 end
 
+--- The **counterpart colours** layout input (spec §5.5, `opts.pin_counterpart`):
+--- every implicit remote counterpart's ref id → its local's rank — exactly the keys
+--- `pin_rank` adds with counterparts on, at the rank it gives them. A ref that is
+--- itself an entry (an explicitly pinned remote) is not a counterpart; an explicitly
+--- unpinned one is dropped. Pure.
+---@param pins PinEntry[]?
+---@param refs table<string, Ref>?
+---@param remotes string[]?
+---@param unpinned table<string, boolean>?
+---@return table<string, integer>
+function M.pin_counterpart_rank(pins, refs, remotes, unpinned)
+    local entries = M.pin_rank(pins, refs, remotes, unpinned, false)
+    local out = {}
+    for id, r in pairs(M.pin_rank(pins, refs, remotes, unpinned, true)) do
+        if entries[id] == nil then out[id] = r end
+    end
+    return out
+end
+
 --- Move the entry at `index` by `delta` places (spec §10.6.1, `<C-j>`/`<C-k>`),
 --- clamped at the ends — an out-of-range move is a no-op, so the key is safely
 --- repeatable. Returns the new list and the entry's new index.

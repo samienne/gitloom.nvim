@@ -238,7 +238,9 @@ so their lanes stay in full and a divergence is drawn rather than a remote
 collapsing. Each pinned branch also keeps a **fixed colour**: the pin at
 position `k` in the list draws in the `k`-th palette colour, which no other
 branch takes until the pinned branch's lane ends (pins past the palette size
-draw an ordinary colour). Remote counterparts have no pinned colour. They are not separate dialog rows; `P` on one
+draw an ordinary colour). A remote counterpart that is ahead of or diverged
+from its local draws in the local's colour, lightly dimmed
+(`palette.counterpart_dim`), brightening to full where it reaches the local. They are not separate dialog rows; `P` on one
 unpins just that ref, and `pin_upstream = false` turns them off. Every pinned
 branch's label carries a pin icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except
 HEAD's own label (`icons.pin`; `""` turns it off).
@@ -522,6 +524,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         selected = "Visual",     -- the h/l-selected ref decoration
         action = "Special",      -- the commit-view diff action label (§11.5)
         dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
+        counterpart_dim = 0.25,  -- lighter blend for a remote counterpart's lane (§5.5)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
         -- submodule change view (§11.7): added / removed / common-ancestor marker
