@@ -133,6 +133,18 @@ local function rank_better(a, b)
     return a ~= nil and (b == nil or a < b)
 end
 
+--- A lane's **counterpart rank** (§5 tier 0, §5.5 "Counterpart colours"): `k` for a
+--- counterpart lane, whose colour is slot `k`'s counterpart variant `-k`; nil for any
+--- other lane. Read off the colour, which every continuation (and a footer seed,
+--- §6.2) carries unchanged, so it needs no field of its own.
+---@param lane table
+---@return integer?
+local function cp_rank(lane)
+    local c = lane.color
+    return (c and c < 0) and -c or nil
+end
+M.cp_rank = cp_rank
+
 --- Does this incoming Lane arrive as its child's FIRST-parent edge (§5 tier 1)?
 ---@param lane table
 ---@param C table  the commit it terminates at
@@ -548,18 +560,24 @@ function M.session(opts, seed)
     -- more holder (`in_use[k] + 1`, so `free_color` returns the slot only when the
     -- last holder ends) and its colour is `-k` — slot k in its counterpart variant,
     -- the mark every copy of the colour carries. Nothing else may take a held slot.
-    -- The best (smallest) such rank at the commit wins; nil when none applies, and
-    -- the caller then takes an ordinary free-list colour.
-    local function take_counterpart(C)
+    -- The best (smallest) such rank at the commit wins (`counterpart_at`; nil when
+    -- none applies, and the caller then takes an ordinary free-list colour). That
+    -- rank is also what decides a COUNTERPART BIRTH (§5, in `spawn_lanes`): a held
+    -- slot is exactly when the birth has a colour to give, so no birth churns lanes
+    -- for an ordinary colour.
+    local function counterpart_at(C)
         if not pin_cp then return nil end
         local best
         for _, ref in ipairs(C.refs or {}) do
             local k = pin_cp[ref_id(ref)]
             if k and held[k] and (not best or k < best) then best = k end
         end
-        if not best then return nil end
-        in_use[best] = in_use[best] + 1
-        return -best
+        return best
+    end
+    local function take_counterpart(k)
+        if not k then return nil end
+        in_use[k] = in_use[k] + 1
+        return -k
     end
 
     -- Release a still-withheld pinned colour whose branch start was found without a
@@ -713,6 +731,15 @@ function M.session(opts, seed)
     -- nothing. With no `pin_rank` every rank is nil, tier 0 always ties and no commit
     -- is pinned, so this is exactly the old two-tier choice.
     --
+    -- Tier 0 continues below the ranks: among UNRANKED lanes a COUNTERPART lane
+    -- (colour `-k`, `cp_rank`) beats a plain one, the smaller `k` first. And BIRTH AT
+    -- A COUNTERPART TIP is the same overrule one step down: at a commit with no ranked
+    -- ref, carrying an implicit remote counterpart of rank `k` whose slot is still
+    -- held, when `k` strictly beats every incoming lane (none ranked, none a
+    -- counterpart lane of rank <= k), every incoming lane ends and a counterpart lane
+    -- is born (fresh id, unranked, colour `-k`). Both births set `state.pin_birth`, so
+    -- the gutter treats them alike (no claim row, no parent swap).
+    --
     -- PINNED COLOURS: a lane born with rank `r` takes slot `r` while it is withheld
     -- (`take_pin`). After the ended lanes return, every rank at this commit whose slot
     -- is STILL withheld is released (`release_pin`, slot order): the branch's start is
@@ -733,7 +760,12 @@ function M.session(opts, seed)
                 trunk = l
             elseif rank_better(l.rank, trunk.rank) then
                 trunk = l
-            elseif not rank_better(trunk.rank, l.rank) then
+            elseif rank_better(trunk.rank, l.rank) then
+                -- `trunk` outranks `l`: keep it.
+            elseif rank_better(cp_rank(l), cp_rank(trunk)) then
+                -- Tied ranks (both unranked): the better COUNTERPART lane wins (§5 tier 0).
+                trunk = l
+            elseif not rank_better(cp_rank(trunk), cp_rank(l)) then
                 local lf, tf = continues_into(l, C), continues_into(trunk, C)
                 if (lf and not tf) or (lf == tf and l.id < trunk.id) then trunk = l end
             end
@@ -747,6 +779,14 @@ function M.session(opts, seed)
             trunk, rank = nil, crank
             state.pin_birth = true
         end
+        -- BIRTH AT A COUNTERPART TIP (§5): no ranked ref here, its slot `k` still held,
+        -- and `k` strictly beats every incoming lane — none ranked, none a counterpart
+        -- lane of rank <= k. The ranked rule wins wherever a ranked ref points (`crank`).
+        local ck = (not crank) and counterpart_at(C) or nil
+        if ck and trunk and trunk.rank == nil and rank_better(ck, cp_rank(trunk)) then
+            trunk, rank = nil, nil
+            state.pin_birth = true
+        end
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
             local id, color, r
@@ -756,7 +796,7 @@ function M.session(opts, seed)
                 -- An unranked birth at a remote counterpart's tip shares its local's
                 -- slot (§5.5, colour only); otherwise the pinned / free-list colour.
                 id, r = new_id(), rank
-                color = (rank == nil and take_counterpart(C)) or take_pin(rank)
+                color = (rank == nil and take_counterpart(ck)) or take_pin(rank)
             else
                 -- A merge's extra-parent edge: born unranked.
                 id, color = new_id(), alloc_color()

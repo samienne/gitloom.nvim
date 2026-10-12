@@ -692,6 +692,8 @@ end
 -- the pinned lane is born at the node, so the spine changes lane by definition — under
 -- every policy and in any column. Read off the rows: the wire below is the first parent,
 -- it carries a rank, and every arriving Lane has another id and a strictly worse rank.
+-- A COUNTERPART BIRTH (§5) is licensed alike: the wire below is a counterpart lane
+-- (colour `-k`) and every arriving Lane is unranked and no counterpart lane of rank <= k.
 --
 -- Returns the errors, the number of LICENSED breaks (so a test can prove the gate fires
 -- rather than passing vacuously), and a per-kind breakdown.
@@ -750,10 +752,21 @@ local function check_spine(rows, opts)
             -- parent's Lane, it carries a pin rank strictly better than every arriving
             -- Lane's, and none of them shares its id — so no arriving lane continued and
             -- the spine changes lane by definition, wherever the node sits.
-            local born = pl[1] and pl[1].id == e.d and pl[1].rank ~= nil
+            -- A COUNTERPART BIRTH is the same licence one step down: the wire below is a
+            -- counterpart lane (colour `-k`) and every arriving Lane is unranked and no
+            -- counterpart lane of rank <= k.
+            local function cpk(l) return (l.color and l.color < 0) and -l.color or nil end
+            local function beats(a, b)
+                if a.rank ~= nil or b.rank ~= nil then
+                    return a.rank ~= nil and (b.rank == nil or a.rank < b.rank)
+                end
+                local x, y = cpk(a), cpk(b)
+                return x ~= nil and (y == nil or x < y)
+            end
+            local born = pl[1] and pl[1].id == e.d and (pl[1].rank ~= nil or cpk(pl[1]) ~= nil)
             if born then
                 for _, l in ipairs(cl) do
-                    if l.id == pl[1].id or (l.rank ~= nil and l.rank <= pl[1].rank) then born = false end
+                    if l.id == pl[1].id or not beats(pl[1], l) then born = false end
                 end
             end
             if born then

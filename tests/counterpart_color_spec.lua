@@ -123,6 +123,106 @@ describe("counterpart colours (§5.5)", function()
         end
     end)
 
+    -- §5 "Birth at a counterpart tip": the shape reported on a real repository — the
+    -- pinned `dev` with `origin/dev` one commit ahead, `origin/dev`'s commit carrying
+    -- other remote refs too AND a child of its own (another branch built on top). A
+    -- lane arrives at the counterpart tip, so it used to continue there and the remote's
+    -- commit read in that other branch's colour.
+    describe("birth at a counterpart tip (§5)", function()
+        local function shape(extra)
+            local items = h.dag({ { "t", { "ox" } }, { "ox", { "x" } }, { "x", { "b" } }, { "b", {} } })
+            ref(items, "t", "topic")
+            ref(items, "ox", "origin/HEAD", "remote")
+            ref(items, "ox", "origin/x", "remote")
+            ref(items, "ox", "origin/other", "remote")
+            ref(items, "x", "x")
+            if extra then extra(items) end
+            return items
+        end
+        local CP = { ["origin/x"] = 1 }
+
+        it("an arriving unranked lane ends; the counterpart lane is born in -k", function()
+            for _, st in ipairs(STYLES) do
+                for _, pol in ipairs(POLICIES) do
+                    local o = opts(st.s, pol, { x = 1 }, CP)
+                    local rows = columns.layout(o, shape())
+                    local t, ox, x = lane(rows, "t"), lane(rows, "ox"), lane(rows, "x")
+                    local w = st.name .. "/" .. pol
+                    assert.equals(-1, ox.color, w)
+                    assert.is_true(ox.id ~= t.id, w)
+                    assert.is_true(math.abs(t.color) ~= 1, w)
+                    assert.is_nil(ox.rank, w) -- a counterpart is never ranked
+                    assert.equals(1, x.color, w)
+                    assert.is_true(x.id ~= ox.id, w)
+                    if pol == "gutter" then
+                        local errors, _, kinds = h.check_spine(rows, o)
+                        assert.equals(0, #errors, table.concat(errors, "\n"))
+                        assert.is_true(kinds.birth >= 1, w)
+                        -- a fan-less birth pays no claim Line
+                        assert.equals(0, #(row_of(rows, "ox").above or {}), w)
+                    end
+                end
+            end
+        end)
+
+        it("a ranked incoming lane still continues through the counterpart tip", function()
+            for _, pol in ipairs(POLICIES) do
+                local rows = columns.layout(opts(STYLES[1].s, pol, { x = 1, topic = 2 }, CP), shape())
+                local t, ox = lane(rows, "t"), lane(rows, "ox")
+                assert.equals(t.id, ox.id, pol)
+                assert.equals(2, ox.color, pol)
+                assert.equals(2, ox.rank, pol)
+            end
+        end)
+
+        it("a ranked ref on the counterpart tip wins: the pinned birth, not the counterpart's", function()
+            local items = shape(function(it) ref(it, "ox", "z") end)
+            for _, pol in ipairs(POLICIES) do
+                local rows = columns.layout(opts(STYLES[1].s, pol, { x = 1, z = 2 }, CP), items)
+                local ox = lane(rows, "ox")
+                assert.equals(2, ox.color, pol)
+                assert.equals(2, ox.rank, pol)
+                assert.is_true(ox.id ~= lane(rows, "t").id, pol)
+            end
+        end)
+
+        it("a counterpart lane of the same pin continues; a worse pin's counterpart lane ends", function()
+            -- t is itself a counterpart: of x (same pin) -> continues; of w (rank 2) -> ends.
+            for _, case in ipairs({
+                { cp = { ["origin/x"] = 1, ["up/x"] = 1 }, name = "up/x", same = true },
+                { cp = { ["origin/x"] = 1, ["origin/w"] = 2 }, name = "origin/w", same = false },
+            }) do
+                local items = shape(function(it)
+                    ref(it, "t", case.name, "remote")
+                    ref(it, "b", "w")
+                end)
+                for _, pol in ipairs(POLICIES) do
+                    local o = opts(STYLES[1].s, pol, { x = 1, w = 2 }, case.cp)
+                    local rows = columns.layout(o, items)
+                    local t, ox = lane(rows, "t"), lane(rows, "ox")
+                    assert.equals(case.same and -1 or -2, t.color, pol)
+                    assert.equals(-1, ox.color, pol)
+                    assert.equals(case.same, t.id == ox.id, pol)
+                    if pol == "gutter" then
+                        local errors = h.check_spine(rows, o)
+                        assert.equals(0, #errors, table.concat(errors, "\n"))
+                    end
+                end
+            end
+        end)
+
+        it("a counterpart whose slot is no longer held births nothing", function()
+            -- x's lane ended (root b) before the counterpart is reached: slot 1 is free
+            -- again, so there is no counterpart colour to give and t's lane continues.
+            local items = h.dag({ { "x", { "b" } }, { "b", {} }, { "t", { "ox" } }, { "ox", { "c" } }, { "c", {} } })
+            ref(items, "x", "x")
+            ref(items, "ox", "origin/x", "remote")
+            local rows = columns.layout(opts(STYLES[1].s, "compact", { x = 1 }, CP), items)
+            assert.equals(lane(rows, "t").id, lane(rows, "ox").id)
+            assert.is_true(lane(rows, "ox").color > 0)
+        end)
+    end)
+
     it("a diverged counterpart shares slot k with the concurrent pinned lane; nothing else takes it", function()
         local items = h.dag({
             { "x", { "a" } }, { "ox", { "b" } }, { "y", { "b" } }, { "a", { "b" } }, { "b", {} },
@@ -201,8 +301,12 @@ describe("counterpart colours (§5.5)", function()
         assert.is_true(cps > 0, "no counterpart lane was born")
     end)
 
-    it("moves no glyph and no lane id; nil and empty maps are byte-identical", function()
-        local bad, cps = {}, 0
+    -- §5 "Birth at a counterpart tip" changes lane ids (and so colours) under every
+    -- policy, but GLYPHS only under `gutter`, whose stages read the continuing lane;
+    -- there every invariant must hold and the births must be seen (and licensed).
+    it("moves no glyph under the lane-column policies; gutter keeps every invariant; nil/empty maps identical", function()
+        local bad, errs, cps, births = {}, {}, 0, 0
+        local moved, rows_n = { fuzz = 0, topo = 0 }, { fuzz = 0, topo = 0 }
         local sets = corpus(40)
         sets[#sets + 1] = { seed = 0, items = h.dag(fix.dag) }
         sets[#sets + 1] = { seed = -1, items = h.focused(h.dag(fix.dag)) }
@@ -213,24 +317,43 @@ describe("counterpart colours (§5.5)", function()
                     local base = columns.layout(opts(st.s, pol, rank, nil), set.items)
                     local empty = columns.layout(opts(st.s, pol, rank, {}), set.items)
                     local o = opts(st.s, pol, rank, cp)
-                    local got = columns.layout(o, set.items)
+                    local errors, got = h.check(o, set.items)
+                    for _, e in ipairs(errors) do
+                        if #errs < 3 then errs[#errs + 1] = ("seed=%d %s/%s: %s"):format(set.seed, st.name, pol, e) end
+                    end
                     for i = 1, #base do
                         if h.row_sig(base[i]) ~= h.row_sig(empty[i]) and #bad < 3 then
                             bad[#bad + 1] = ("seed=%d %s/%s row %d: empty map differs"):format(set.seed, st.name, pol, i)
                         end
-                        if (geometry(o, base[i]) ~= geometry(o, got[i]) or ids(base[i]) ~= ids(got[i]))
-                            and #bad < 3 then
-                            bad[#bad + 1] = ("seed=%d %s/%s row %d: geometry/identity moved"):format(set.seed, st.name, pol, i)
+                        if pol == "gutter" then
+                            local b = set.seed > 0 and "fuzz" or "topo"
+                            rows_n[b] = rows_n[b] + 1
+                            if geometry(o, base[i]) ~= geometry(o, got[i]) then moved[b] = moved[b] + 1 end
+                        elseif geometry(o, base[i]) ~= geometry(o, got[i]) and #bad < 3 then
+                            bad[#bad + 1] = ("seed=%d %s/%s row %d: geometry moved"):format(set.seed, st.name, pol, i)
                         end
                         for _, l in ipairs(got[i].parent_lanes or {}) do
                             if l.color < 0 then cps = cps + 1 end
                         end
                     end
+                    if pol == "gutter" then
+                        local se, _, kinds = h.check_spine(got, o)
+                        births = births + kinds.birth
+                        for _, e in ipairs(se) do
+                            if #errs < 3 then errs[#errs + 1] = ("seed=%d %s spine: %s"):format(set.seed, st.name, e) end
+                        end
+                    end
                 end
             end
         end
+        assert.equals(0, #errs, table.concat(errs, "\n"))
         assert.equals(0, #bad, table.concat(bad, "\n"))
         assert.is_true(cps > 0, "no counterpart lane was born")
+        assert.is_true(births > 0, "no licensed birth under gutter")
+        if os.getenv("GITLOOM_CP_MEASURE") then
+            print(("gutter rows changed: fuzz %d of %d, large_topo %d of %d; births %d"):format(
+                moved.fuzz, rows_n.fuzz, moved.topo, rows_n.topo, births))
+        end
     end)
 
     it("streaming equals one-shot with counterparts, and a map change re-lays the stream", function()
@@ -360,13 +483,47 @@ describe("counterpart colours (§5.5)", function()
             assert.equals("C1", render.slot_hl(o(), -1))
         end)
 
-        it("the cone dim composes on top: dim_hl of the counterpart group blends it again", function()
+        -- §12.2: out of the cone a counterpart lane is NOT composed (cp then dim) but
+        -- blended from its slot colour by `counterpart_dim_out` (default 0.75 * dim), so
+        -- it reads brighter than every other dimmed lane, its own pinned lane's included.
+        it("out of the cone a counterpart is brighter than every dimmed lane (0.75 * dim)", function()
             local cpg = render.slot_hl(o(), -1)
             local d = render.dim_hl(o(), cpg)
-            -- 150 * 0.55 = 82.5 → 83; 75 * 0.55 = 41.25 → 41
-            assert.equals(83 * 65536 + 41 * 256, fg(d))
-            -- lighter than the counterpart colour, and still distinct from the dimmed pinned lane
-            assert.is_true(fg(d) ~= fg(render.dim_hl(o(), "C1")))
+            -- factor 0.3375: 200 * 0.6625 = 132.5 -> 133; 100 * 0.6625 = 66.25 -> 66
+            assert.equals(133 * 65536 + 66 * 256, fg(d))
+            -- the pinned lane dimmed: 200 * 0.55 = 110, 100 * 0.55 = 55
+            local pd = fg(render.dim_hl(o(), "C1"))
+            assert.equals(110 * 65536 + 55 * 256, pd)
+            local function ch(c) return math.floor(c / 65536) % 256, math.floor(c / 256) % 256 end
+            local r1, g1 = ch(fg(d))
+            local r2, g2 = ch(pd)
+            assert.is_true(r1 > r2 and g1 > g2, "brighter than the dimmed pinned lane")
+            -- and still dimmer than the in-cone counterpart colour (150, 75)
+            assert.is_true(r1 < 150 and g1 < 75)
+            -- the out-of-cone factor follows `dim` and is configurable
+            assert.equals(140 * 65536 + 70 * 256, fg(render.dim_hl(o({ counterpart_dim_out = 0.3 }), cpg)))
+            local d2 = render.dim_hl(o({ dim = 0.6 }), cpg)
+            -- 0.45: 200 * 0.55 = 110
+            assert.equals(110 * 65536 + 55 * 256, fg(d2))
+        end)
+
+        it("an out-of-cone counterpart label takes the same brighter dim", function()
+            local c = { parents = { {} }, children = { {} }, message = "m",
+                refs = { { kind = "remote", name = "origin/x" } } }
+            local cells = { {
+                connectivity = { up = true, down = true },
+                lanes = { { connectivity = { up = true, down = true }, id = 1, color = -1, edges = {} } },
+                has_commit = true, commit = c,
+            } }
+            local x = o()
+            x.icons = {}
+            -- a cone that does not hold this commit: the row and its lane are dimmed
+            local el = render.display_item(x, { type = "commit", commit = c, columns = cells }, {}, {})
+            local want = render.dim_hl(x, render.slot_hl(x, -1))
+            local hls = {}
+            for _, hh in ipairs(el.line_right[1].highlight) do hls[hh.hl] = true end
+            assert.is_true(hls[want], "label drawn in the out-of-cone counterpart colour")
+            assert.equals(133 * 65536 + 66 * 256, fg(want))
         end)
 
         it("a counterpart's label takes the light-dim lane colour", function()

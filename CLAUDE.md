@@ -880,13 +880,24 @@ Coverage:
   with the concurrent pinned lane while an unrelated lane never gets it, the slot
   returns only after the pinned lane AND every counterpart lane ended (a 2-slot
   fixture with teeth: without the map, x's end releases it), a fuzz sweep that no
-  ordinary lane holds slot k while a holder does, 0 glyph / lane-id changes vs no
-  map over fuzz + `large_topo` × 4 styles × 5 policies (empty map byte-identical),
+  ordinary lane holds slot k while a holder does; the **birth at a counterpart
+  tip** (§5) on the reported real-repo shape (pinned `x`, `origin/x` one ahead
+  carrying two more remote refs AND a child branch on top: the child's lane ends,
+  `-1` is born, every style × policy, a licensed `check_spine` birth with no claim
+  Line under gutter), a ranked incoming lane continuing through, a ranked ref on the
+  tip winning (pinned birth), a same-pin counterpart lane continuing vs a worse
+  pin's ending, and no birth once the slot is released; 0 glyph changes vs no map
+  under the four lane-column policies over fuzz + `large_topo` × 4 styles, gutter
+  holding every `h.check` invariant + `check_spine` with births seen (measured
+  rows changed with `GITLOOM_CP_MEASURE=1`; empty map byte-identical),
   streaming == one-shot incl. a map change re-laying, a footer seed carrying `-k`
   as one more holder, `select.pin_counterpart_rank` + `pin_upstream = false` →
   `{}` (`window._internal.pin_counterpart`), and rendering: `slot_hl(-k)` = the
-  `counterpart_dim` blend (0.25; configurable; plain without truecolor), `dim_hl`
-  composing on top, and a counterpart's label in the light-dim colour
+  `counterpart_dim` blend (0.25; configurable; plain without truecolor), out of the
+  cone `dim_hl` giving the slot colour's `counterpart_dim_out` blend (default
+  `0.75 * dim`, configurable, following `dim`) — brighter than the dimmed pinned
+  lane, dimmer than in-cone — and a counterpart's label in the light-dim colour
+  in the cone and the same brighter dim out of it
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -1424,12 +1435,18 @@ Details not covered by the spec or architecture:
   `avoid`, so its colour de-collision never hands out a pinned slot.
   **Counterpart colours** (§5.5): `ctx:pin_counterpart()` (`select.pin_counterpart_rank`
   — counterpart id → its local's rank, `{}` with `pin_upstream` off) is published
-  beside the ranks as `opts.pin_counterpart` (in the fingerprint). A lane born
-  unranked at such a ref takes the local's slot k while it is `held`, as colour
+  beside the ranks as `opts.pin_counterpart` (in the fingerprint). Where no ranked
+  ref points and slot k is `held`, a counterpart tip is a **birth** (§5) when k
+  strictly beats every incoming lane (none ranked, none a counterpart lane — read
+  back from the colour, `columns.cp_rank` — of rank ≤ k); it sets `state.pin_birth`,
+  so the gutter + `check_spine` rules for a pinned birth cover it. The lane born
+  there takes the local's slot k, as colour
   **`-k`** (one more `in_use` holder; `free_color` takes `|c|`), so the mark rides
   every colour copy (Segments, footer seeds, the header, which keeps a negative pref
   as is); `render.slot_hl(-k)` = `counterpart_hl(tracks[k])`, the cached
-  `palette.counterpart_dim` blend, with the cone `dim_hl` composing on top.
+  `palette.counterpart_dim` blend; out of the cone `dim_hl` maps that group back to
+  its slot (`cp_source`) and blends by `counterpart_dim_out` (default `0.75 * dim`),
+  brighter than every other dimmed lane — the dims do not compose.
   `ctx:sync_pin_rank()` publishes the table as the layout input `opts.pin_rank`
   (on `ctx.opts` and `ctx.pane_opts`) at the top of every `reflow_build` and
   before the open stream — every pin change reflows, so that is the refresh.
