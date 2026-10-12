@@ -1434,6 +1434,7 @@ end
 ---@field track? { ahead?: string, behind?: string, gone?: string }  upstream divergence indicator tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
 ---@field counterpart_dim? number  lighter blend factor toward bg for a remote counterpart's lane colour (§5.5)
+---@field counterpart_dim_out? number  a counterpart lane's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
 ---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
 ---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
 ---@field generate? boolean  generate overflow OKLCH colours when truecolor (§5.5)

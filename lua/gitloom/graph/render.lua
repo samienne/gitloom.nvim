@@ -25,6 +25,9 @@ local M = {}
 local DIM_FALLBACK = "NonText"
 M.DIM_FALLBACK = DIM_FALLBACK
 local dim_cache = {}
+-- Counterpart-variant group name → the slot group it was blended from (§5.5). Names
+-- are deterministic (group + factor), so this survives a ColorScheme reset intact.
+local cp_source = {}
 
 ---@param fg integer
 ---@param bg integer
@@ -50,6 +53,16 @@ function M.dim_hl(opts, group)
     if not group then return nil end
     if not vim.o.termguicolors then return DIM_FALLBACK end
     local factor = (opts.palette and type(opts.palette.dim) == "number") and opts.palette.dim or 0.45
+    -- A COUNTERPART lane's colour out of the cone (§12.2): not the cone dim on top of
+    -- its light dim, but ITS SLOT COLOUR blended by the out-of-cone counterpart factor
+    -- — `palette.counterpart_dim_out`, default `0.75 * dim` — so it reads a shade
+    -- BRIGHTER than every other dimmed lane, its own pinned lane's included.
+    local src_group = cp_source[group]
+    if src_group then
+        local out = (opts.palette and type(opts.palette.counterpart_dim_out) == "number")
+            and opts.palette.counterpart_dim_out or 0.75 * factor
+        return M.counterpart_hl(opts, src_group, out, "GitloomCpDim_")
+    end
     local key = group .. "\x1f" .. tostring(factor)
     if dim_cache[key] then return dim_cache[key] end
 
@@ -72,16 +85,23 @@ end
 --- colours"): the same hue blended lightly toward the Normal background by
 --- `palette.counterpart_dim` (default 0.25 — much lighter than the §12 cone dim).
 --- Cached in the dim cache (so the ColorScheme reset clears it too). Without
---- truecolor it is `group` itself. The cone dim composes on top: `dim_hl` of this
---- group blends ITS colour again, a total of `1 - (1 - cp)(1 - dim)`.
+--- truecolor it is `group` itself. Out of the cone `dim_hl` of this group does NOT
+--- compose: it blends the slot colour by `counterpart_dim_out` (default
+--- `0.75 * dim`), lighter than the cone dim every other lane gets (§12.2).
+---
+--- `factor` / `prefix` override the blend and the group-name prefix: `dim_hl` uses
+--- them for the same lane OUT of the cone (§12.2), which is not a composition.
 ---@param opts GraphOptions
 ---@param group string|nil
+---@param factor? number
+---@param prefix? string
 ---@return string|nil
-function M.counterpart_hl(opts, group)
+function M.counterpart_hl(opts, group, factor, prefix)
     if not group or not vim.o.termguicolors then return group end
-    local factor = (opts.palette and type(opts.palette.counterpart_dim) == "number")
-        and opts.palette.counterpart_dim or 0.25
-    local key = "cp:" .. group .. ":" .. tostring(factor)
+    factor = factor or ((opts.palette and type(opts.palette.counterpart_dim) == "number")
+        and opts.palette.counterpart_dim or 0.25)
+    prefix = prefix or "GitloomCp_"
+    local key = "cp:" .. prefix .. group .. ":" .. tostring(factor)
     if dim_cache[key] then return dim_cache[key] end
     local ok_src, src = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
     local ok_norm, normal = pcall(vim.api.nvim_get_hl, 0, { name = "Normal", link = false })
@@ -89,9 +109,10 @@ function M.counterpart_hl(opts, group)
     local fg = ok_src and src and src.fg
     if not fg then return group end
     local bg = normal.bg or ((vim.o.background == "light") and 0xffffff or 0x000000)
-    local name = "GitloomCp_" .. group:gsub("%W", "_") .. "_" .. tostring(math.floor(factor * 100))
+    local name = prefix .. group:gsub("%W", "_") .. "_" .. tostring(math.floor(factor * 100))
     pcall(vim.api.nvim_set_hl, 0, name, { fg = blend_color(fg, bg, factor) })
     dim_cache[key] = name
+    if prefix == "GitloomCp_" then cp_source[name] = group end
     return name
 end
 

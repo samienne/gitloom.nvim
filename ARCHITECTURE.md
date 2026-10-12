@@ -1093,8 +1093,8 @@ the current row. For each commit `C`:
    `pane.header`'s `avoid` so its de-collision never hands one out.
    **Counterpart colours** (spec §5.5): `opts.pin_counterpart` (ref id → its
    local's rank, `select.pin_counterpart_rank`, empty with `pin_upstream` off) is
-   read only at an UNRANKED birth (no trunk, no ranked ref): the best counterpart
-   rank `k` whose slot is still `held` gives the lane colour **`-k`** — the
+   read where no ranked ref points: the best counterpart rank `k` whose slot is
+   still `held` (`counterpart_at`) gives a lane born there the colour **`-k`** — the
    encoding of "slot `k`, counterpart variant", so the mark rides every copy of a
    lane's `color` (Segments, footer seeds, the header's `lane_of`/de-collision)
    without a field of its own. `in_use[k]` counts it as one more holder;
@@ -1103,9 +1103,19 @@ the current row. For each commit `C`:
    carrying `-k` adds a holder and never takes the reservation over. Phase 2's
    `render.slot_hl` maps `-k` to `counterpart_hl(tracks[k])` — a cached
    `GitloomCp_*` blend toward the background by `palette.counterpart_dim`, cleared
-   with the dim cache on ColorScheme (plain `tracks[k]` without truecolor); the
-   cone dim then blends that group again (`dim_hl`), so the two compose. Identity
-   reads no colour, so no glyph moves.
+   with the dim cache on ColorScheme (plain `tracks[k]` without truecolor). Out of
+   the cone `dim_hl` recognises a `GitloomCp_*` group (its `cp_source`) and blends
+   the SLOT colour by `palette.counterpart_dim_out` (default `0.75 * dim`) into a
+   `GitloomCpDim_*` group, so an out-of-cone counterpart stays brighter than every
+   other dimmed lane — the two dims do not compose.
+   **Birth at a counterpart tip** (spec §5): identity reads the colour back as the
+   **counterpart rank** (`columns.cp_rank`: `-k` ⇒ `k`). Tier 0 prefers, among
+   unranked lanes, the better counterpart rank; and where `k` (no ranked ref here,
+   slot held) strictly beats every incoming lane — none ranked, none a counterpart
+   lane of rank `≤ k` — every incoming lane ends and the counterpart lane is born.
+   It sets the same `state.pin_birth` flag, so the gutter's pinned-birth rules
+   (no claim row, no parent swap) and `check_spine`'s birth licence cover it with no
+   code of their own. Glyphs move only under `gutter`.
 4. **Compaction** (under the `compact` / `survivors` layout policies, §5.6; the
    others hold every survivor in its column): each survivor shifts left through
    the run of *row-start* gaps
