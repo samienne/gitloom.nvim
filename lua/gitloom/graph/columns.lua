@@ -47,6 +47,12 @@
 --- (the split fan, plus `gutter`'s handover rows), topmost first (§5 Line).
 local M = {}
 
+--- **For tests only** — not configuration and not part of the API.
+--- `handover_column = false` disables §5.6's handover column, so a test can compare
+--- the `gutter` layout with and without it (the fixture's eviction column, and the
+--- claim that it leaves the focused projection and every other policy untouched).
+M._internal = { handover_column = true }
+
 --- The `gutter` policy's fixed node column (spec §5.6). Model column 1 is the
 --- gutter: the **lane** that owns the current subject row lives there, so its
 --- commits' nodes sit on it. Under `opts.mirror` (the default, §5.4) column 1
@@ -1032,6 +1038,33 @@ function M.session(opts, seed)
     -- the §5.2 `allow_merge_on_split` colour handoff, un-sanctioned. `place_commit`
     -- reserves the same columns for the same reason; the trunk reusing its own
     -- child's column is exempt because it keeps that lane's id and colour.
+    --
+    -- THE HANDOVER COLUMN (§5.6). The lane that holds the gutter after this row is
+    -- evicted before it next owns a subject row whenever its parent is not the next
+    -- subject row — the prepass knows both. Left alone, a lane born meanwhile (a
+    -- collapsed head, typically) takes `GUTTER + 1`, and the eviction lands beyond
+    -- every such lane, crossing each of them. So `GUTTER + 1` is kept for it:
+    -- `state.reserve` names the column and `state.reserve_end` the occupant's end
+    -- row, and a lane placed on this row skips the column if it ends no earlier.
+    -- A lane ending SOONER may still take it — it nests inside the occupant, so
+    -- neither crosses the other — which is what keeps the rule free of new Lines and
+    -- width. Both fields are set only when `state.next_subject` is, i.e. only under
+    -- `gutter` (the one policy with a prepass), so every other policy is untouched;
+    -- `state` is per row, so the reservation never outlives the row it was made on.
+    local function lane_end(state, lane)
+        local p = lane and lane.parent
+        return (p and state.pre.row[p.hash]) or math.huge
+    end
+    local function reserve_handover(state, occ)
+        if not state.next_subject or state.reserve or not M._internal.handover_column then return end
+        if not occ or not occ.parent or occ.parent.hash == state.next_subject then return end
+        state.reserve, state.reserve_end = GUTTER + 1, lane_end(state, occ)
+    end
+    local function skip_reserved(state, c, lane)
+        if c ~= state.reserve or not lane then return false end
+        return lane_end(state, lane) >= state.reserve_end
+    end
+
     local function place_gutter(state)
         local g, incoming, outgoing = state.g, state.incoming, state.outgoing
         state.gutter = true
@@ -1044,7 +1077,8 @@ function M.session(opts, seed)
 
         local function free_lane_col()
             local c = GUTTER + 1
-            while grid_taken(g, c) do c = c + 1 end
+            local L = outgoing[1] and outgoing[1].lane
+            while grid_taken(g, c) or skip_reserved(state, c, L) do c = c + 1 end
             return c
         end
 
@@ -1061,6 +1095,10 @@ function M.session(opts, seed)
         -- keeps the spine one colour through the node on a root-blocked row (§5.1) and
         -- on a pane seam row, the two cases that legitimately land here.
         local own = state.trunk_entry or incoming[1]
+        -- THE HANDOVER COLUMN, for a survivor passing through the gutter.
+        for _, sv in ipairs(state.survivors) do
+            if sv.col == GUTTER then reserve_handover(state, sv.lane); break end
+        end
         local cc
         if state.subject and not held and not blocked[GUTTER] then
             cc = GUTTER
@@ -1081,6 +1119,12 @@ function M.session(opts, seed)
         -- colour. Everywhere else the handover pays for itself on its own rows
         -- (`evict_gutter` / `claim_gutter`).
         gutter_swap(state, cc)
+        -- THE HANDOVER COLUMN, when the lane holding the gutter after this row is
+        -- this commit's own continuation (whichever parent `gutter_swap` chose).
+        if not state.reserve and cc == GUTTER then
+            local L = outgoing[state.cont or 1]
+            reserve_handover(state, L and L.lane)
+        end
 
         -- Whichever parent continues, it continues HERE, so reserve the node's own
         -- column: no other lane may lay a horizontal through it on this row.
@@ -1267,8 +1311,10 @@ function M.session(opts, seed)
                 -- `gutter` (§5.6) additionally holds the gutter itself for the lane
                 -- owning the next subject row, never a fan-out reclaiming a freed
                 -- column. That hold is an `occ0` reservation — the one `freed`
-                -- overrides by design — so it is stated apart from the `used` ledger.
-                if not g.used[c] and not (state.gutter and c == GUTTER) then
+                -- overrides by design — so it is stated apart from the `used` ledger,
+                -- and so is the handover column beside it (`state.reserve`).
+                if not g.used[c] and not (state.gutter and c == GUTTER)
+                    and not (state.reserve == c) then
                     freed[#freed + 1] = c
                 end
             end
@@ -1291,7 +1337,7 @@ function M.session(opts, seed)
                     k = freed[fi]; fi = fi + 1
                 else
                     k = 1
-                    while grid_taken(g, k) do k = k + 1 end
+                    while grid_taken(g, k) or skip_reserved(state, k, outgoing[i].lane) do k = k + 1 end
                 end
                 outgoing[i].out = k
                 g.used[k] = true

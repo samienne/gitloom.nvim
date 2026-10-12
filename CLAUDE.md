@@ -617,6 +617,13 @@ Coverage:
   two trunk commits must cost no handover), and no pass-through lane ever drawing a
   horizontal (the no-move rule; stated on survivors, since with a separate merge
   Line the first parent legitimately spans two Lines through the hub);
+  plus a **gutter handover column** block (§5.6): the reported shape (trunk in the
+  gutter, three collapsed heads, an expanded branch, then `dev`) evicts into column 2
+  instead of 5; a lane outliving the occupant skips the column while one ending sooner
+  takes it; no reservation when the occupant's parent is the next subject row; and,
+  cell for cell with vs without it (`columns._internal.handover_column`), the
+  §10.7 focused projection under `gutter` and all four other policies (raw + focused)
+  are byte-identical, while the raw corpus under `gutter` differs (the teeth);
   plus track-id reuse (a straight chain is one id;
   a new id only at a branch head or an extra merge parent); plus free-list
   colouring (spec §5.5): each lane keeps one colour for life, concurrent lanes
@@ -1161,10 +1168,11 @@ Details not covered by the spec or architecture:
   `place_gutter`) plus a `prepass` (`gutter_prepass`) and two pure decisions — the
   merge-side `gutter_swap` inside `place_gutter` (gated by the extracted predicate
   `merge_swap_index`) and the split-side `split_swap` inside `evict_gutter` — and
-  touches the shared ones only through three
+  touches the shared ones only through four
   `state` fields — `state.gutter`, `state.cont` (the index of the outgoing entry that
   continues at the node column; every reader spells `state.cont or 1`, so `1` is the
-  un-swapped path by construction) and `state.own_lane_up`. (`state.split_swap` /
+  un-swapped path by construction), `state.own_lane_up` and `state.reserve` (the
+  handover column, below). (`state.split_swap` /
   `state.up_foreign` are two more, read only by the gutter's own stages.) All are nil,
   and therefore inert, under every other policy — verified cell-for-cell against the
   baseline over glyphs, highlight groups AND every Segment's
@@ -1234,6 +1242,17 @@ Details not covered by the spec or architecture:
   Both swaps leave the FOCUSED view BYTE-IDENTICAL (0 differing over ~20,600 signature
   Lines): §3.1 keeps consecutive subject rows on one lane and a `◍` head claims no
   gutter, so the gutter at a kept fork is already the trunk's.
+  **The handover column** (§5.6) decides where an eviction lands: on a row where the
+  lane holding the gutter afterwards has a parent that is not `state.next_subject`,
+  `place_gutter` sets `state.reserve = GUTTER + 1` + `state.reserve_end` (that lane's
+  end row, the prepass's `pre.row`), and `free_lane_col` / `fan_out` keep the column
+  from any lane ending no earlier (a lane ending sooner nests inside and may take it),
+  so the eviction lands beside the gutter instead of past every collapsed head born
+  meanwhile. Measured: reactive mixed crossings 262 → 242, fuzz mixed 35389 → 34792,
+  `large_topo` mixed 60 → 58; Lines, handover Lines, width, node-in-gutter and
+  stability unchanged; the default focused view byte-identical; other policies
+  untouched (`next_subject` is nil without the prepass). `columns._internal.
+  handover_column = false` is the tests' with/without switch, not configuration.
   `tests/graph_helpers.check_spine` is the invariant —
   at a node cell, the wire above and the wire below carry one lane id — and it now
   **prices** each swap instead of exempting it, with ONE LICENCE PER SWAP. Merge: the

@@ -1021,3 +1021,147 @@ describe("columns.layout boundary seed (§6.2)", function()
         end
     end)
 end)
+
+describe("columns.layout gutter handover column (§5.6)", function()
+    local view = require("gitloom.graph.view")
+    local internal = columns._internal
+    after_each(function() internal.handover_column = true end)
+
+    -- Lay `items` out with the handover column on or off (the test-only switch).
+    local function lay(o, items, on)
+        internal.handover_column = on
+        local rows = columns.layout(o, items)
+        internal.handover_column = true
+        return rows
+    end
+
+    -- The reported shape: a trunk lane holds the gutter, collapsed heads are born
+    -- beside it, then an expanded branch claims the gutter and the trunk returns at
+    -- the fork. The evicted trunk must land beside the gutter, not past the heads.
+    local function reported()
+        local items = h.dag({
+            { "A", { "D" } }, { "M1", { "D" } }, { "M2", { "D1" } }, { "M3", { "D1" } },
+            { "P1", { "P2" } }, { "P2", { "P3" } }, { "P3", { "P4" } }, { "P4", { "D" } },
+            { "D", { "D1" } }, { "D1", { "D2" } }, { "D2", {} },
+        })
+        local by, ro = {}, {}
+        for _, it in ipairs(items) do by[it.commit.hash] = it.commit end
+        for _, n in ipairs({ "A", "M1", "M2", "M3", "P1", "D" }) do
+            by[n].refs = { { name = n, kind = "local" } }
+            ro[#ro + 1] = { id = n, tip = by[n] }
+        end
+        local disp = view.project(items,
+            view.owners(items, ro, { A = true, D = true }, { P1 = "normal" }, true), nil).items
+        local o = h.big_opts({ split_on_separate_line = true })
+        o.layout_policy, o.junction_markers = "gutter", true
+        return o, disp
+    end
+    -- The eviction run's end column: the evicting Line is the one where a Segment
+    -- LEAVES the gutter sideways (up + right, no down — a fan hub always continues
+    -- down), and the same lane turns down where the run ends.
+    local function evict_col(rows)
+        for _, r in ipairs(rows) do
+            for _, a in ipairs(r.above or {}) do
+                for _, sg in ipairs(a[1] and a[1].lanes or {}) do
+                    local c = sg.connectivity
+                    if c.up and c.right and not c.down then
+                        for j, col in ipairs(a) do
+                            for _, s2 in ipairs(col.lanes or {}) do
+                                local c2 = s2.connectivity
+                                if s2.id == sg.id and c2.down and c2.left then return j end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    it("evicts the occupant into the column beside the gutter", function()
+        local o, disp = reported()
+        assert.equals(5, evict_col(lay(o, disp, false)), "the shape no longer evicts past the heads")
+        local rows = lay(o, disp, true)
+        assert.equals(2, evict_col(rows))
+        assert.same({}, check(o, rows))
+        h.check(o, disp)
+    end)
+
+    -- Row 1 is a merge T whose first parent keeps the gutter but is not the next
+    -- subject row (B), so the occupant is pending eviction; where does the second
+    -- parent S's lane turn down?
+    local function s_col(spec, ms, on)
+        local o = h.big_opts(ms)
+        o.layout_policy = "gutter"
+        local items = h.dag(spec)
+        local rows = lay(o, items, on)
+        for _, ln in ipairs(h.row_lines(rows[1])) do
+            for j, col in ipairs(ln.line) do
+                for _, sg in ipairs(col.lanes or {}) do
+                    local c = sg.connectivity
+                    if sg.parent and sg.parent.hash == "S" and c.down and not c.up then
+                        assert.same({}, check(o, rows))
+                        h.check(o, items)
+                        return j
+                    end
+                end
+            end
+        end
+    end
+    local MS = { { merge_on_separate_line = false }, { merge_on_separate_line = true } }
+    it("keeps the column from a lane that outlives the occupant", function()
+        local spec = { { "T", { "P", "S" } }, { "B", { "S" } }, { "P", { "S" } }, { "S", {} } }
+        for _, ms in ipairs(MS) do
+            assert.equals(2, s_col(spec, ms, false))
+            assert.equals(3, s_col(spec, ms, true))
+        end
+    end)
+    it("lets a lane that ends sooner take it (it nests inside the occupant)", function()
+        local spec = { { "T", { "P", "S" } }, { "B", { "P" } }, { "S", { "P" } }, { "P", {} } }
+        for _, ms in ipairs(MS) do assert.equals(2, s_col(spec, ms, true)) end
+    end)
+    it("reserves nothing when the occupant's parent is the next subject row", function()
+        local spec = { { "T", { "P", "S" } }, { "P", { "S" } }, { "S", {} } }
+        for _, ms in ipairs(MS) do assert.equals(2, s_col(spec, ms, true)) end
+    end)
+
+    -- Cell-for-cell, with and without the column: the focused projection under
+    -- `gutter` (§3.1 keeps consecutive subject rows on one lane, so no occupant is
+    -- ever pending there) and every other policy (no prepass, so no `next_subject`)
+    -- are untouched; the raw corpus under `gutter` is where it acts — the teeth.
+    local STY = {
+        { split_on_separate_line = true, merge_on_separate_line = false },
+        { split_on_separate_line = false, merge_on_separate_line = true },
+        { split_on_separate_line = true, merge_on_separate_line = true },
+        { split_on_separate_line = false, merge_on_separate_line = false },
+    }
+    local function diff(policy, focus)
+        local d, n = 0, 0
+        for _, ms in ipairs(STY) do
+            for seed = 1, 60 do
+                local items = h.dag(h.random_dag(8 + seed % 20, seed))
+                if focus then items = h.focused(items) end
+                local o = h.big_opts(ms)
+                o.layout_policy, o.junction_markers = policy, true
+                local a, b = lay(o, items, false), lay(o, items, true)
+                for i = 1, #a do
+                    n = n + 1
+                    if h.row_sig(a[i]) ~= h.row_sig(b[i]) then d = d + 1 end
+                end
+            end
+        end
+        return d, n
+    end
+    it("leaves the focused projection byte-identical under gutter", function()
+        local d, n = diff("gutter", true)
+        assert.equals(0, d)
+        assert.is_true(n > 1000)
+    end)
+    it("leaves every other policy byte-identical", function()
+        for _, pol in ipairs({ "compact", "survivors", "linear", "straight" }) do
+            assert.equals(0, (diff(pol, false)), pol)
+            assert.equals(0, (diff(pol, true)), pol .. " focused")
+        end
+    end)
+    it("acts on the expanded corpus under gutter", function()
+        assert.is_true((diff("gutter", false)) > 0)
+    end)
+end)
