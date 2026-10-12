@@ -29,13 +29,155 @@ function M.worktree_label(commit)
     return "Unstaged changes · " .. files
 end
 
+--- The commit view's message indent (§11.2) and the wrap-width cap (§11.2.1).
+local MESSAGE_INDENT = "    "
+M.MESSAGE_MAX_WIDTH = 100
+
+--- The wrap width for a window `avail` display cells wide (its text area): the
+--- cap applied. nil stays nil (no wrapping). Pure.
+---@param avail? integer
+---@return integer?
+function M.message_width(avail)
+    if not avail then return nil end
+    return math.min(avail, M.MESSAGE_MAX_WIDTH)
+end
+
+local dw = vim.fn.strdisplaywidth
+
+--- Greedy word wrap: `words` filled into lines of at most `width` cells, the
+--- first line prefixed by `first`, the rest by `hang`. A word wider than the
+--- room is never broken — it takes a line of its own and overflows (§11.2.1).
+---@param words string[]
+---@param width integer
+---@param first string
+---@param hang string
+---@param out string[]
+local function fill(words, width, first, hang, out)
+    local line, used, prefix = nil, 0, first
+    for _, w in ipairs(words) do
+        local ww = dw(w)
+        if line == nil then
+            line, used = prefix .. w, dw(prefix) + ww
+        elseif used + 1 + ww <= width then
+            line, used = line .. " " .. w, used + 1 + ww
+        else
+            out[#out + 1] = line
+            prefix = hang
+            line, used = prefix .. w, dw(prefix) + ww
+        end
+    end
+    if line then out[#out + 1] = line end
+end
+
+local function words_of(s)
+    local ws = {}
+    for w in s:gmatch("%S+") do ws[#ws + 1] = w end
+    return ws
+end
+
+local function leading(s)
+    local lead = s:match("^[ \t]*")
+    return lead, lead:find("\t", 1, true) ~= nil
+end
+
+--- A list item's marker: (indent .. marker .. space, the item text), or nil.
+--- Only indents of fewer than four spaces count (deeper is code; §11.2.1).
+local function list_item(s)
+    local pre, text = s:match("^( ? ? ?[-*+] +)(%S.*)$")
+    if not pre then pre, text = s:match("^( ? ? ?%d+[.)] +)(%S.*)$") end
+    return pre, text
+end
+
+local function is_fence(s) return s:match("^%s*```") ~= nil end
+local function is_url_only(s)
+    return s:match("^%s*<?%a[%w+.-]*://%S+%s*$") ~= nil
+        or s:match("^%s*%[[^%]]+%]:%s+%a[%w+.-]*://%S+%s*$") ~= nil
+end
+local function is_trailer(s) return s:match("^[%w][%w-]*:%s+%S") ~= nil end
+
+--- Hard-wrap + reflow a commit message (specification.md §11.2.1). `message` is
+--- the full message (subject first); `width` the text width each returned line
+--- must fit (the caller's indent excluded). The subject wraps on its own; the
+--- body's paragraphs and list items are joined and re-wrapped; blank lines,
+--- lines indented ≥2 spaces or a tab (not an item continuation), fenced blocks,
+--- URL-only lines and trailer lines in the final paragraph are kept verbatim.
+--- Returns the message's lines. Pure.
+---@param message string
+---@param width integer
+---@return string[]
+function M.wrap_message(message, width)
+    width = math.max(width, 1)
+    local src = vim.split(message or "", "\n", { plain = true })
+    local out = {}
+
+    -- Subject: wrapped on its own, continuation at the subject's column.
+    local subject = src[1] or ""
+    if subject:match("%S") then
+        local lead = subject:match("^%s*")
+        fill(words_of(subject), width, lead, lead, out)
+    else
+        out[#out + 1] = subject
+    end
+
+    -- The final paragraph's range (for trailers): the last run of non-blank lines.
+    local last_hi = #src
+    while last_hi > 1 and not src[last_hi]:match("%S") do last_hi = last_hi - 1 end
+    local last_lo = last_hi
+    while last_lo > 2 and src[last_lo - 1]:match("%S") do last_lo = last_lo - 1 end
+
+    -- The block being reflowed: { words, first, hang } (a paragraph has "" / "").
+    local cur = nil
+    local function flush()
+        if cur then fill(cur.words, width, cur.first, cur.hang, out) end
+        cur = nil
+    end
+    local function verbatim(s)
+        flush()
+        out[#out + 1] = s
+    end
+
+    local in_fence = false
+    for i = 2, #src do
+        local s = src[i]
+        if in_fence then
+            out[#out + 1] = s
+            if is_fence(s) then in_fence = false end
+        elseif is_fence(s) then
+            verbatim(s)
+            in_fence = true
+        elseif not s:match("%S") then
+            verbatim(s)
+        elseif is_url_only(s) or (i >= last_lo and i <= last_hi and is_trailer(s)) then
+            verbatim(s)
+        else
+            local pre, text = list_item(s)
+            local lead, tab = leading(s)
+            if pre then
+                flush()
+                cur = { words = words_of(text), first = pre, hang = string.rep(" ", dw(pre)) }
+            elseif cur and not tab and (#lead <= #cur.hang or #lead < 2) then
+                -- A continuation of the open paragraph / item (lazy or aligned).
+                for _, w in ipairs(words_of(s)) do cur.words[#cur.words + 1] = w end
+            elseif tab or #lead >= 2 then
+                verbatim(s)
+            else
+                flush()
+                cur = { words = words_of(s), first = "", hang = "" }
+            end
+        end
+    end
+    flush()
+    return out
+end
+
 --- Render a CommitDetail into the commit view's display lines (one compose-style
 --- `{ text, highlight }` per buffer line). The committer block is shown only
 --- when it differs from the author (the common case is omitted). `opts` carries
---- the row's `decorations` (refs, reused from the model; §6) and the `palette`
---- for highlights. Pure; exposed for testing.
+--- the row's `decorations` (refs, reused from the model; §6), the `palette`
+--- for highlights and the `width` the message is wrapped to (§11.2.1; nil = as
+--- is). Pure; exposed for testing.
 ---@param detail CommitDetail
----@param opts? { decorations?: string[], palette?: GraphPalette }
+---@param opts? { decorations?: string[], palette?: GraphPalette, width?: integer }
 ---@return table[]
 function M.format_commit_detail(detail, opts)
     opts = opts or {}
@@ -76,8 +218,13 @@ function M.format_commit_detail(detail, opts)
     end
 
     add({ highlight_text("") })
-    for _, l in ipairs(vim.split(detail.body or "", "\n")) do
-        add({ highlight_text("    " .. l, palette.message) })
+    -- The message, hard-wrapped + reflowed to `opts.width` (§11.2.1; the indent
+    -- counts against it), else as is.
+    local msg = opts.width
+        and M.wrap_message(detail.body or "", opts.width - #MESSAGE_INDENT)
+        or vim.split(detail.body or "", "\n")
+    for _, l in ipairs(msg) do
+        add({ highlight_text(MESSAGE_INDENT .. l, palette.message) })
     end
 
     return lines

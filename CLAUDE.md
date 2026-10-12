@@ -407,7 +407,17 @@ Coverage:
   `format_diff` (add/delete vs `+++`/`---`, hunk + file headers, context),
   `diffstat_files` (per-file counts, `start` offsets, rename, binary),
   `format_diffstat` (summary totals, per-file rows), and `commit_range`
-  (single-commit `DiffRange`: `^!`, empty-tree for roots, `from` = first parent)
+  (single-commit `DiffRange`: `^!`, empty-tree for roots, `from` = first parent),
+  plus the **message wrap** (§11.2.1): `message_width` (the 100-cell cap),
+  `wrap_message` (paragraph join + re-wrap, blank lines kept, indented / tab /
+  fenced lines untouched, final-paragraph trailers and URL-only lines verbatim
+  while a `Key: value` line elsewhere reflows, list items with a hanging indent
+  joining aligned and lazy continuations, an overlong word left whole, display-
+  width (double-width) measuring, the subject wrapped on its own),
+  `format_commit_detail`'s `width` (indent counted; nil = as is), and
+  `window.build_commit_rows` with a wrapped body: `meta_end`, `diff_start`, the
+  diffstat `file_jumps` and the diff_start-relative context-header mapping all
+  shift by exactly the body's extra lines
 - `tests/commit_selection_spec.lua` — the commit-selection (range) pure helpers
   (spec §13): `range_endpoints` (single-commit `^!`, span `<older>^..<newer>`,
   empty-tree when the older end is a root, plus the **working-tree newer end**
@@ -978,6 +988,7 @@ topological row sort that replaced `git log --topo-order`; §3.1),
 `diff_ref_tips` / `reachable_hashes` (the resync ref-diff + orphan-prune pure
 helpers; §3.4), `parse_timestamp`,
 `format_absolute`, `format_relative`, `parse_show`, `format_commit_detail`,
+`wrap_message` / `message_width` (the §11.2.1 message wrap),
 `format_diff`, `diffstat_files`, `format_diffstat`, `commit_range`,
 `range_endpoints` / `sel_ascend_children` / `sel_step` / `sel_switch` /
 `format_range_detail` (the commit-selection range + path-walking + range-view
