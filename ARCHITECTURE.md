@@ -1710,7 +1710,13 @@ itself is a behaviour-preserving refactor within the current spec.
   graph column is `passthrough_columns(item.columns, "down")` — a vertical-only
   projection of the commit's lanes that continues every down-going lane as a `│`
   (no node), carrying the same edges so §12 dimming still applies. A `dual` commit
-  with no labels stays a single row. `B` cycles the mode.
+  with no labels stays a single row. `B` cycles the mode. A label's colour is
+  its node's lane colour (spec §6 "Label colour"), read by `node_lane_hl` — the
+  SAME `top_lane` + `seg_color` + slot lookup `get_column_chars` colours the node
+  glyph with, minus the HEAD-node override — so a label can never disagree with its
+  node; `label_hl` picks it over the per-kind group (`lane_label_colors`) and dims
+  it with `dim_hl`. A packed marker row resolves it per marker (the cell whose
+  `commit` is that marker); the panes call the same helper on their own rows.
 - `passthrough_columns(columns, dir)` — builds a vertical-only `GraphColumn` per
   input column (`dir = "up"` keeps lanes entering from above, `"down"` lanes
   leaving below; the rest blank), reused through `get_column_chars` for
