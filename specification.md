@@ -542,29 +542,84 @@ a "top" strategy that prefers a highlighted Lane (§12).
 
 #### Lane identity — which chain continues
 
-A commit's first parent continues the identity of the incoming Lane whose child
-**has this commit as its FIRST parent** — the child that genuinely continues *into*
-it — so a first-parent chain reads as one `id` and one `color` end to end. The
-choice is **semantic**, made from the DAG and the row order alone:
+A lane's identity is its `id`, its `color` and its **pin rank**. The rank is the
+position, in the resolved pin list (§10.6), of the best-ranked pinned ref at the
+commit where the lane was **born** — 1 is the highest priority, and a pinned local
+branch's implicit remote counterparts (§10.6) share their local's rank. A lane born
+where no pinned ref points is **unranked**, which is worse than every rank. A
+continuation carries its lane's rank unchanged, exactly as it carries the `id` and
+the `color`. Which lane continues is decided **semantically**, from the DAG, the row
+order and the pin ranks alone.
 
-- **Several children qualify** (a fork where more than one child's first parent is
-  this commit): the **most senior** wins — the smallest `id`. Ids are minted in row
-  order and carried along a whole first-parent chain, so the smallest id is the
-  chain that started highest; a topic forking off a trunk is always junior to it.
-- **No child qualifies** (every child reached this commit through a merge, as a
-  second-or-later parent): no incoming wire is a continuation, so the first parent
-  **starts a new chain** — a fresh `id` and a fresh free-list `color` (§5.5). It is
-  a distinct line of history and says so.
+**Which lane a commit's first parent continues.** Among the incoming Lanes, in
+tiers — each tier decides only between the lanes the previous one left tied:
 
-A fresh `id` and `color` are therefore taken where a lane is born: a branch head, a
-merge's second-and-later parent, and a first parent with nothing continuing into it.
+0. **Pin rank.** The best-ranked incoming lane wins.
+1. **First parent.** A lane whose child **has this commit as its FIRST parent** —
+   the child that genuinely continues *into* it — beats one arriving as a merge's
+   second-or-later parent edge.
+2. **Seniority.** The **most senior** lane wins — the smallest `id`. Ids are minted
+   in row order and carried along a whole first-parent chain, so the smallest id is
+   the chain that started highest; a topic forking off a trunk is always junior to
+   it.
+
+So a first-parent chain reads as one `id` and one `color` end to end, and a lane
+arriving only as a merge's extra-parent edge still continues when nothing better
+arrives — that edge *is* the merged-in branch, and minting afresh there would
+recolour every merged-in branch tip. Every incoming lane that does not continue
+**ends** at this commit, and its colour returns to the free list (§5.5).
+
+**Birth at a pinned tip.** The tiers are overruled at a commit a pinned ref points
+at, when that ref's rank (the best one at the commit) **strictly beats** every
+incoming lane's rank — which includes every incoming lane being unranked:
+
+- If one of the incoming lanes is a merge's **extra-parent edge** — born, unranked,
+  at a merge that has this commit as a second-or-later parent — that edge lane
+  continues and **adopts** the pinned rank, keeping its `id` and `color`. So a pinned
+  branch that has been merged (`master` merged `dev`, and `dev` still points at the
+  merged commit) keeps the colour of the wire that merged it rather than changing
+  colour at its own tip. Several such edges: the most senior.
+- Otherwise every incoming lane **ends** here and the pinned branch's own lane is
+  **born**: a fresh `id`, a fresh free-list `color`, and the pinned rank.
+
+So a lower-priority or unpinned branch's colour never runs down a higher-priority
+branch's history. With `dev` pinned and `feature1` branched off `dev`'s newest
+commit, `feature1`'s lane ends at `dev`'s tip and the history below it is drawn in
+`dev`'s own colour — where `feature1`'s colour used to continue down it. An **equal**
+rank triggers no birth: a local branch and its counterpart `origin/x` share a rank,
+so the line running from one tip to the other stays one lane and one colour. A
+pinned lane in turn **ends** where it converges into a better-ranked lane (tier 0),
+as any lane does.
+
+A fresh `id` and `color` are therefore taken where a lane is born: a branch head (a
+commit nothing arrives at), a merge's second-and-later parents (born unranked), and a
+pinned tip that outranks everything arriving at it. Pin priority reserves **no**
+colour: a pinned lane draws from the free list (§5.5) like any other.
 
 **Identity never depends on placement.** No column, and no ordering by column, may
-influence an `id`, a `color`, or the order in which colours are returned to the free
-list. This is what makes lane identity **invariant across layout policies** (§5.6):
-the same commits in the same row order produce the same lane ids and colours under
-every policy, which differ only in *where* the lanes are drawn. Switching policy
-with `C` moves the graph; it never recolours it.
+influence an `id`, a `color`, a rank, or the order in which colours are returned to
+the free list. This is what makes lane identity **invariant across layout policies**
+(§5.6): the same commits in the same row order under the same pin ranks produce the
+same lane ids and colours under every policy, which differ only in *where* the lanes
+are drawn. Switching policy with `C` moves the graph; it never recolours it.
+
+**The pin ranks are a layout input.** They are part of the layout fingerprint — the
+resumable sweep of §3.1 and the reflow of §10.5 — so a pin, an unpin or a reorder in
+the dialog (§10.6.1) re-lays the layout instead of continuing one laid out under
+other ranks. They are not part of any signature (§10.2), so the signature cache stays
+valid across pin changes. The footer's seeded sweep (§6.2) uses the same ranks, each
+seeded lane carrying its main-view rank, so a lane born inside the pane obeys the
+same rule as one born in the main view.
+
+> **Implementation risk — `gutter`.** Under the four lane-column policies the
+> continuing lane decides colour only. Under `gutter` (§5.6) several stages *read* it
+> — `claim_gutter` turns the continuing lane into the gutter, and the split and parent
+> swaps decide from it (the parent swap's clause 3 relies on the handed lane winning
+> identity uncontested at its parent) — so a rank that changes which lane continues,
+> or a pinned tip that ends its incoming lanes, can move geometry there. The claim
+> "identity changes colour only" must be re-measured cell for cell under every policy
+> when this is implemented, and then either restricted to the policies where it holds
+> or documented here as the `gutter` exception, with its measured cost.
 
 > The rule was previously "reuse the **leftmost** incoming lane's id and colour" — a
 > positional proxy for "the trunk", sound only while the trunk happened to sit
@@ -867,10 +922,14 @@ it returns only when its last holder ends; a lane is never recoloured, since tha
 would break its colour continuity).
 
 A first-parent continuation keeps the continued chain's slot (one colour per
-first-parent chain, §5). Allocation happens at the three places a lane is born: a
-branch head, a merge's extra parent, and a first parent with **no** incoming child
-that continues into it (§5 lane identity) — the last of these returns every incoming
-colour and takes a fresh one, since nothing it inherits would be truthful.
+first-parent chain, §5). Allocation happens at the three places a lane is born (§5
+lane identity): a branch head, a merge's extra parent, and a **pinned tip that
+outranks every lane arriving at it** — the last of these returns every incoming
+colour and takes a fresh one, so a lower-priority branch's colour never runs down a
+higher-priority branch's history. (A merge's extra-parent edge arriving at such a tip
+is the exception: it adopts the pinned rank and keeps its colour.) Pin priority
+decides *which lanes end and are born*; it never reserves a colour — the pinned lane
+takes whatever the free list hands it.
 
 **The free list is order-sensitive, so the return order is fixed by identity too.**
 A returned slot goes to the back of the FIFO, so *which* colour a later lane receives
@@ -1408,11 +1467,14 @@ remote-only. A local branch with no matching remotes is just `(name)`. This
 keeps the common case (a branch plus its remote-tracking copies all at one
 commit) from repeating the name per remote. A label whose ref is a **pinned
 anchor** (§10.6 — the effective pin set, so the default anchors `master` / `main`
-/ `dev` and an auto-pinned upstream count too) opens with the **pin icon**
+/ `dev` and a pinned local branch's implicit remote counterparts count too) opens
+with the **pin icon**
 (`icons.pin`, default `⚲`, §8) inside its bracket: `(⚲dev)`,
 `(⚲release/2.1 ↑origin)`, `[⚲v1.0]`, `{⚲wt:review}`. A branch group is marked
 when any ref in it is pinned (its local branch, or one of the listed
-`remote/name` refs). **HEAD's label never carries it** — neither
+`remote/name` refs — so a remote-only group is marked when its refs are the
+implicit counterparts of a pinned local branch at another commit). **HEAD's
+label never carries it** — neither
 `(HEAD → name …)` nor a detached `HEAD` — although HEAD (or its branch) is always
 an anchor: HEAD is already marked by its first place and colour. The icon is part
 of the label's text, so the width budget, the `+N` windowing, the `h`/`l`
@@ -1710,8 +1772,10 @@ of your last `git fetch`*, not the live remote. gitloom never fetches on its own
 (§17, which resyncs when it finishes), or a `git fetch` outside gitloom followed
 by `R` (resync, §3.4), refreshes it.
 
-The same tracking data drives **pin-the-pair** (§10.6) and a current-branch
-status in the window footer.
+The same tracking data drives a current-branch status in the window footer. (It
+no longer alone decides which remote refs a pinned branch pins implicitly: those
+are its **counterparts** — every remote branch of the same short name, plus the
+tracked upstream when its short name differs — §10.6.)
 
 ## 7. Rendering behavior
 
@@ -1814,9 +1878,12 @@ Endpoint     = Commit | "index" | "worktree"
   `10`**). Set explicitly so the windows don't inherit the global value. Note: a
   non-zero value interacts with the context-pane overlays (§6.2); set `0` to
   restore the prior always-zero behaviour if the panes' scrolling misbehaves.
-- `pin_upstream` — when pinning a local branch, also pin its tracked upstream
-  remote-tracking ref as an anchor (§6.3, §10.6). **Default true.** Set false to
-  pin only the local branch.
+- `pin_upstream` — when a local branch is pinned, also pin its **remote
+  counterparts** implicitly — every remote branch of the same short name, plus its
+  tracked upstream (§6.3) — at the local's priority (§10.6). **Default true.** Set
+  false to pin only the local branch. (The name predates the generalisation from
+  "the tracked upstream" to "the counterparts"; it is kept so existing
+  configurations keep working.)
 - `persist` — remember the view toggles (`m C M B d H S c p F i`) and each
   repository's pin list across Neovim sessions in `stdpath("state")/gitloom.json`
   (§18). **Default true.** Set false to neither read nor write the file. A
@@ -2387,9 +2454,9 @@ so the checked-out commit is always a normal, visible row — never folded into 
   branch the `HEAD` ref is not an owner (it duplicates the branch's), so an entry
   for it is not part of the resolved list then.
 
-Every pinned ref's label shows the **pin icon** (`⚲`, `icons.pin`; §6), so the
-anchor set is visible on the graph itself — except HEAD's label, which is
-already singled out.
+Every pinned ref's label — an implicit remote counterpart's (below) included —
+shows the **pin icon** (`⚲`, `icons.pin`; §6), so the anchor set is visible on
+the graph itself — except HEAD's label, which is already singled out.
 
 **The pinned branches are an ordered list, not a set.** Each entry is a ref
 owner id plus one flag, **reserved** (§10.6.2) — so the state is *one* list:
@@ -2402,32 +2469,57 @@ pins     = PinEntry[]        -- priority order, highest first
 Two consequences are structural rather than remembered rules: `reserved` ⊆
 `pinned` by construction (the flag has nowhere else to live), and **unpinning
 implies unreserving** (the flag leaves with its entry). The order is the
-**anchor priority**: first entry wins wherever one anchor has to be named.
+**anchor priority**: first entry wins wherever one anchor has to be named. An
+entry's **rank** is its 1-based position in the resolved list.
 
-Order is **meaningful only among reserved entries** (§10.6.2 — they take
-dedicated columns left to right in list order, skipping unreserved ones).
-An unreserved entry's position is **latent**: it changes nothing today and
-becomes meaningful the moment that entry is reserved. Moving an unreserved
-entry is therefore a no-op on the rendered graph, which the dialog makes
-visible rather than hiding (§10.6.1).
+**Order matters for every entry.** The rank drives lane identity (§5): where two
+lanes meet, the better-ranked one continues, and a pinned tip that outranks every
+lane arriving at it starts its own lane and colour. So moving any entry — reserved
+or not — can change which lanes continue and how they are coloured. Among
+**reserved** entries the order additionally decides the dedicated columns
+(§10.6.2 — left to right in list order, skipping unreserved ones).
 
-The list is **resolved**, not stored whole: the defaults above are appended, in
-that order (HEAD, `master`, `main`, `dev`), to whatever the user has explicitly
-ordered, and an explicitly **unpinned** ref suppresses its default. An entry
-naming a ref that no longer exists is dropped. So the list is deterministic for
-a repository the user has never touched, and stable once they have.
+The list is **resolved**, not stored whole. The defaults are, in this order: the
+common trunks `master`, `main`, `dev` and the seeded pointer marks (§11.7.6), then
+HEAD's anchor (its branch, or the `HEAD` ref when detached) — HEAD comes **last**
+among the defaults, as the most recently "pinned" one. The resolved list is the
+defaults the user has not explicitly placed, in that order, **followed by** what
+the user has explicitly ordered; an explicitly **unpinned** ref suppresses its
+default, and an entry naming a ref that no longer exists is dropped. A **newly
+pinned** ref (`P`, "Pin new branch…" in the dialog) always goes to the **bottom**
+of the list, below every default and every earlier pin; the dialog (§10.6.1) is
+how it is moved up. So the list is deterministic for a repository the user has
+never touched, and stable once they have.
 
-**Pin the pair.** Pinning a local branch that **tracks an upstream** (§6.3) also
-pins that upstream remote-tracking ref as an anchor (config `pin_upstream`,
-default on). A logical branch is the local *and* where the remote thinks it is,
-so anchoring the pair keeps **both** lanes in full under focus — and when they
-have diverged the fork between them is drawn instead of the upstream collapsing
-to a `◍` head. The upstream is resolved from git's tracking config (not a shared
-short name), so it pins the *correct* remote ref even when branch names collide
-across remotes (§6.3). Unpinning the local branch drops the auto-pinned upstream
-too (an explicit pin/unpin on the upstream ref itself still wins).
+This order is **not** the order labels are drawn in. HEAD's label is drawn first
+on its row, as `(HEAD → x …)` or a bare `HEAD` (§6), whatever HEAD's rank — that
+is a rendering rule about "you are here", unchanged by pin priority.
 
-Anchors drive two things — and, deliberately, nothing more:
+**Implicit remote counterparts.** Pinning a local branch also pins its **remote
+counterparts** implicitly (config `pin_upstream`, default on): every remote branch
+with the same short name — the same members, in the same order, that the `%`
+local ⇄ remote cycle steps through (§2: the remotes in `git remote` order, then any
+remote not listed there, by name) — plus the branch's **tracked upstream** (§6.3)
+when its short name differs. A logical branch is the local *and* where each remote
+thinks it is, so anchoring them together keeps every one of those lanes in full
+under focus — and where they have diverged the fork between them is drawn instead
+of a remote collapsing to a `◍` head. The counterparts:
+
+- are pinned at the **same priority** as their local — they share its rank (§5), so
+  the line from a remote tip to the local tip is one lane and one colour;
+- are **not listed** in the pinned-branches dialog (§10.6.1) — they are not entries
+  of their own, they follow their local's;
+- carry the **pin icon** like any pinned ref (§6);
+- are dropped when the local is unpinned (or `pin_upstream` is false).
+
+An explicit choice on a counterpart still wins. `P` on a counterpart while it is
+implicitly pinned records an explicit **unpinned** override for that one ref: it
+loses its pin (icon, focus default, rank) while its local and the other
+counterparts keep theirs. Pinning a remote branch **explicitly** (`P` on an
+unpinned one, or "Pin new branch…") gives it its own row in the dialog, at its own
+priority, which is then its rank — not its local's.
+
+Anchors drive three things — and, deliberately, nothing more:
 
 - **The focus default (§10.7).** Pinned owners default **normal**; every other
   owner defaults **collapsed**. So naming the anchors *is* choosing what stays
@@ -2438,15 +2530,24 @@ Anchors drive two things — and, deliberately, nothing more:
   is drawn only until it merges into an anchor, and otherwise terminated
   minimally. The boundary lane-continuity invariant and pane sizing are
   specified in §6.
-- **Nothing else.** In particular pin does **not** touch lane geometry: a pinned
-  branch is laid out by exactly the same rules as any other. A **dedicated
-  column** is a separate, explicitly-set flag (§10.6.2), never a consequence of
-  pinning. This is deliberate and load-bearing — a typical repository pins up to
-  four branches by default (HEAD plus the trunks, and their upstreams), so
-  "pin ⇒ held column" would silently hold several columns open for a user who
-  asked for none.
+- **Lane identity (§5).** The pin ranks decide which lane continues where lanes
+  meet, and where a pinned branch's own lane is born — so a pinned branch's history
+  is drawn in its own colour rather than in the colour of whatever branched off its
+  tip. This changes ids and colours only; colours still come from the free list
+  (§5.5), and no colour is reserved for a pin as such (only a **dedicated
+  column**, §10.6.2, holds a slot). (Under `gutter` the continuing lane
+  also steers placement — see the implementation risk noted in §5.)
+- **Nothing else.** In particular pin does **not** claim columns: a pinned branch
+  is placed by exactly the same rules as any other. A **dedicated column** is a
+  separate, explicitly-set flag (§10.6.2), never a consequence of pinning. This is
+  deliberate and load-bearing — a typical repository pins up to four branches by
+  default (the trunks and HEAD, plus their remote counterparts), so "pin ⇒ held
+  column" would silently hold several columns open for a user who asked for none.
 
-Pin is part of the view state; changing it reflows the projection (§10.5).
+Pin is part of the view state; changing it — pinning, unpinning, or reordering —
+reflows the projection and re-lays the layout (§10.5), since the ranks are a layout
+input (§5). The signature cache stays valid: a pin changes only default modes and
+ranks, neither of which enters a signature (§10.2).
 
 #### 10.6.1 The pinned-branches dialog (`L`)
 
@@ -2466,16 +2567,20 @@ Pinned branches                    ◆ = dedicated lane
 
 - Each row is one entry: its **priority number**, the **`◆` marker** when the
   entry is reserved (§10.6.2) and blank when it is not, and the ref name. The
-  marker column is what makes "order matters only among reserved entries"
-  visible — the numbering runs over the whole list, the `◆` picks out the
-  subsequence that actually claims columns.
+  numbering runs over the whole list — it is every entry's rank, which drives
+  lane identity (§5) — while the `◆` picks out the subsequence that also claims
+  columns. A pinned local branch's implicit remote counterparts (§10.6) have **no**
+  rows: they share their local's row and rank. An explicitly pinned remote branch
+  has a row of its own.
 - `<C-j>` / `<C-k>` move the entry under the cursor **down / up**, clamped at
   the ends; the cursor follows it so a move is repeatable.
 - `<Space>` toggles the entry's reserve flag.
 - `D` unpins the entry — it leaves the list, taking its reserve flag with it.
 - The last row, **`+ Pin new branch…`**, opens the existing ref picker (§2,
-  `<leader>b`); the chosen ref is appended to the list, pinned and **not**
-  reserved. Refs already on the list are omitted from that picker, and so is
+  `<leader>b`); the chosen ref is appended to the **bottom** of the list, pinned
+  and **not** reserved. Refs already on the list are omitted from that picker (an
+  implicit counterpart is not on it, so it is offered — picking it pins it
+  explicitly, with a row and rank of its own), and so is
   `HEAD` while it is on a branch (its branch is the owner); a **detached** `HEAD`
   is offered, so it can be pinned back after an unpin.
 - `<CR>` on an entry closes the dialog and **jumps the graph to that branch**,
@@ -2487,7 +2592,8 @@ Every edit is applied immediately: the view state changes, the projection
 reflows (§10.5), and the graph cursor is restored to the commit it was on. The
 dialog's keys are buffer-local, so they do not collide with the graph's own
 bindings. `P` (§10.6) remains the in-graph shortcut for pin/unpin of the branch
-under the cursor; it appends to the end of the list, unreserved.
+under the cursor; it appends to the bottom of the list, unreserved (on an
+implicitly pinned counterpart it unpins that one ref instead, §10.6).
 
 **Honesty about unimplemented effect.** The reserve flag is recorded and
 displayed before the layout honours it (§10.6.2 is staged). While that is true,
@@ -2527,8 +2633,8 @@ reserved**.
 - **Attribution tie-break.** A commit's signature is a *set* of owners (§10.2),
   so a commit may belong to several reserved branches at once. The column is
   chosen deterministically: the **highest-priority reserved owner in the
-  signature** — the earliest such entry in the pin list. This is the one place
-  pin-list order changes what is drawn, and it is why the list is ordered.
+  signature** — the earliest such entry in the pin list. This is where pin-list
+  order decides *placement*; lane identity (§5) is where it decides colour.
 - **The context panes are exempt.** Neither the footer nor the header honours
   reservations. The footer is a *seeded* sweep whose seam row must reproduce the
   main view's boundary columns exactly (§6.2), and the header is a direct
@@ -3929,11 +4035,16 @@ explicitly **unpinned** ids. Written whenever the list changes (`P`, every
 action of the `L` dialog, §10.6.1); read when a graph session for that root is
 created. The saved list omits what the open-time resolution re-derives anyway:
 an **unreserved** entry that is a **default anchor** at the time of saving
-(HEAD's branch, `master` / `main` / `dev`, a seeded mark) and an unreserved
-auto-pinned upstream (§6.3). So pinning a branch while on `feature/x` does not
-make `feature/x` an anchor forever after the user checks out something else;
-an unpinned default stays unpinned, and a reserved entry keeps its flag and
-place.
+(`master` / `main` / `dev`, a seeded mark, HEAD's branch) **and still sits in its
+default place** — in the leading run of defaults, above every explicitly placed
+entry, where the resolution (§10.6) puts it back. Implicit remote counterparts
+(§10.6) are never entries, so they are never saved. So pinning a branch while on
+`feature/x` does not make `feature/x` an anchor forever after the user checks out
+something else; an unpinned default stays unpinned, and a reserved entry keeps
+its flag and place. Because the order of every entry now matters (it is the lane
+identity rank, §5), a default the user has **moved** below an explicitly placed
+entry is saved with its place rather than omitted — and so stays pinned, at that
+place, even once it is no longer a default.
 
 ### 18.3 Precedence
 
