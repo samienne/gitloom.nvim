@@ -340,3 +340,183 @@ describe("commit_range", function()
         assert.is_nil(r.from)
     end)
 end)
+
+describe("wrap_message (§11.2.1)", function()
+    local wrap_message = internal.wrap_message
+    local message_width = internal.message_width
+    local W = vim.fn.strdisplaywidth
+
+    local function fits(lines, width)
+        for _, l in ipairs(lines) do
+            assert.is_true(W(l) <= width, ("%q is wider than %d"):format(l, width))
+        end
+    end
+
+    it("caps the window width at 100 cells, nil stays nil", function()
+        assert.equals(60, message_width(60))
+        assert.equals(100, message_width(250))
+        assert.is_nil(message_width(nil))
+    end)
+
+    it("joins a paragraph and re-wraps it at word boundaries", function()
+        local out = wrap_message(
+            "Subject\n\nthe quick brown\nfox jumps over the\nlazy dog again", 16)
+        assert.same({ "Subject", "", "the quick brown", "fox jumps over", "the lazy dog", "again" }, out)
+        fits(out, 16)
+    end)
+
+    it("keeps blank lines and separates paragraphs", function()
+        local out = wrap_message("S\n\na b\n\n\nc d", 40)
+        assert.same({ "S", "", "a b", "", "", "c d" }, out)
+    end)
+
+    it("leaves indented lines and fenced blocks untouched", function()
+        local long = "    " .. string.rep("x ", 30)
+        local msg = table.concat({
+            "S", "", "intro text", long, "\tтаб line with a tab",
+            "```", "fenced line that is quite long indeed and must stay", "not joined", "```",
+            "after",
+        }, "\n")
+        local out = wrap_message(msg, 20)
+        assert.same({
+            "S", "", "intro text", long, "\tтаб line with a tab",
+            "```", "fenced line that is quite long indeed and must stay", "not joined", "```",
+            "after",
+        }, out)
+    end)
+
+    it("keeps trailers in the final paragraph and URL-only lines verbatim", function()
+        local url = "https://example.com/a/very/long/path/that/overflows/the/width"
+        local msg = table.concat({
+            "S", "", "see", url, "[1]: " .. url, "",
+            "Signed-off-by: Somebody With A Long Name <somebody@example.com>",
+            "Co-Authored-By: Another Person <another.person@example.com>",
+        }, "\n")
+        local out = wrap_message(msg, 30)
+        assert.same({
+            "S", "", "see", url, "[1]: " .. url, "",
+            "Signed-off-by: Somebody With A Long Name <somebody@example.com>",
+            "Co-Authored-By: Another Person <another.person@example.com>",
+        }, out)
+    end)
+
+    it("does not treat a Key: value line outside the final paragraph as a trailer", function()
+        local out = wrap_message("S\n\nNote: this sentence is long enough to wrap\n\nend", 20)
+        assert.same({ "S", "", "Note: this sentence", "is long enough to", "wrap", "", "end" }, out)
+    end)
+
+    it("wraps list items with a hanging indent and joins their continuations", function()
+        local msg = table.concat({
+            "S", "",
+            "- first item that runs",
+            "  on to an aligned continuation",
+            "* lazy",
+            "continuation",
+            "1. numbered item wraps here",
+            "2) other",
+        }, "\n")
+        local out = wrap_message(msg, 18)
+        assert.same({
+            "S", "",
+            "- first item that", "  runs on to an", "  aligned", "  continuation",
+            "* lazy", "  continuation",
+            "1. numbered item", "   wraps here",
+            "2) other",
+        }, out)
+        fits(out, 18)
+    end)
+
+    it("never breaks a word wider than the width", function()
+        local big = string.rep("a", 30)
+        local out = wrap_message("S\n\nshort " .. big .. " tail", 10)
+        assert.same({ "S", "", "short", big, "tail" }, out)
+    end)
+
+    it("measures display width, so double-width text wraps correctly", function()
+        -- Each 漢字 is 4 cells; 3 of them plus 2 spaces = 14 cells.
+        local out = wrap_message("S\n\n漢字 漢字 漢字 漢字", 14)
+        assert.same({ "S", "", "漢字 漢字 漢字", "漢字" }, out)
+        fits(out, 14)
+    end)
+
+    it("wraps the subject on its own, not joined with the body", function()
+        local out = wrap_message("a long subject line here\nbody", 10)
+        assert.same({ "a long", "subject", "line here", "body" }, out)
+    end)
+end)
+
+describe("format_commit_detail with a wrap width (§11.2.1)", function()
+    local detail = {
+        hash = "abc1234", author_name = "A", author_email = "a@x", author_date = "d",
+        committer_name = "A", committer_email = "a@x", committer_date = "d",
+        parents = {},
+        body = "Subject\n\none two three four five six seven eight nine ten",
+    }
+
+    it("wraps the indented message to the width, indent included", function()
+        local lines = texts(format_commit_detail(detail, { width = 24 }))
+        local msg = {}
+        for i = 5, #lines do msg[#msg + 1] = lines[i] end
+        assert.same({ "    Subject", "    ", "    one two three four", "    five six seven eight",
+            "    nine ten" }, msg)
+        for _, l in ipairs(msg) do assert.is_true(#l <= 24) end
+    end)
+
+    it("leaves the message as is without a width", function()
+        local lines = texts(format_commit_detail(detail))
+        assert.equals("    one two three four five six seven eight nine ten", lines[#lines])
+    end)
+end)
+
+describe("build_commit_rows offsets after a wrapped body (§11.2.1/§11.4/§11.6)", function()
+    local window = require("gitloom.window")
+    local patch = table.concat({
+        "diff --git a/f.txt b/f.txt",
+        "index 1111111..2222222 100644",
+        "--- a/f.txt",
+        "+++ b/f.txt",
+        "@@ -1 +1 @@",
+        "-old",
+        "+new",
+        "diff --git a/g.txt b/g.txt",
+        "index 3333333..4444444 100644",
+        "--- a/g.txt",
+        "+++ b/g.txt",
+        "@@ -1 +1 @@",
+        "-a",
+        "+b",
+    }, "\n")
+    local meta = show_output({ body = "Subject\n\n" .. string.rep("word ", 60) })
+    local opts = { palette = {} }
+    local commit = { hash = "abc1234", refs = {} }
+
+    local function build(width)
+        return window.build_commit_rows(opts, {
+            commit = commit, meta = meta, diff = patch, action = false, width = width,
+        })
+    end
+
+    it("the file jumps and the diff start follow the wrapped body", function()
+        local plain_rows, plain = build(nil)
+        local rows, info = build(30)
+        local delta = info.meta_end - plain.meta_end
+        assert.is_true(delta > 0)
+        assert.equals(#plain_rows + delta, #rows)
+        assert.equals(plain.diff_start + delta, info.diff_start)
+        assert.equals("diff --git a/f.txt b/f.txt", rows[info.diff_start].text)
+        local jumps = 0
+        for stat_row, target in pairs(info.file_jumps) do
+            jumps = jumps + 1
+            local file = rows[stat_row].text:match("([fg]%.txt)")
+            assert.is_not_nil(file)
+            assert.equals("diff --git a/" .. file .. " b/" .. file, rows[target].text)
+        end
+        assert.equals(2, jumps)
+        -- The context-header lookup is relative to diff_start: the patch line
+        -- at diff_start + k - 1 is still patch line k.
+        local plines = vim.split(patch, "\n")
+        for k, l in ipairs(plines) do
+            assert.equals(l, rows[info.diff_start + k - 1].text)
+        end
+    end)
+end)

@@ -431,6 +431,9 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
 Pressing `<CR>` on a commit row opens the **commit view** — a read-only
 view of that commit's full details (hash, refs, author, committer when it
 differs, parents, the full message, a diffstat, and the diff), fetched on demand.
+Long messages are wrapped to the window (at most 100 columns) and their
+paragraphs reflowed; code blocks, indented lines, URLs and trailers are left as
+written.
 It opens **in the host window** as a navigation step, not a separate float: `q`
 hides the window and `<C-o>` returns to the graph. The diff is colored
 line-by-line (added / removed / hunk / file headers). The diffstat lists the

@@ -856,7 +856,14 @@ the filesystem reads and the async picker orchestration are I/O and window glue
   commit view's display lines (compose-style `{text, highlight}` rows). The
   committer block is emitted only when it differs from the author; `opts`
   carries the row's `decorations` (refs, reused from the model) and the
-  `palette`. Pure; the window glue (`open_commit_view`) just writes its output.
+  `palette`, plus an optional `width` (the wrap width, §11.2.1; nil = the message
+  as is). Pure; the window glue (`open_commit_view`) just writes its output, and
+  re-renders in place when the window's width changes.
+- `wrap_message(message, width)` — the §11.2.1 hard wrap + body reflow: the
+  subject wrapped on its own, paragraphs and list items (hanging indent)
+  reflowed, blank / indented / fenced / URL-only / trailer lines verbatim, an
+  overlong word left whole. Widths via `strdisplaywidth`. `message_width(avail)`
+  applies the 100-cell cap. Pure.
 - `format_diff(patch, palette)` — classifies each patch line by role (added,
   removed, hunk header `@@`, file header `diff --git`/`index`/`---`/`+++`/mode/
   rename/new-file; context uncolored) and returns one compose-style row per

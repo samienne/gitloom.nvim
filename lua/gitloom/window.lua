@@ -769,6 +769,19 @@ end
 
 local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 
+--- The §11.2.1 message wrap width for window `win`: its text area (the width
+--- minus the sign / number / fold columns), capped by `git.message_width`. nil
+--- for no valid window, which renders the message as is. A field on M, not a
+--- module local (window.lua is at LuaJIT's 200-local ceiling).
+---@param win? integer
+---@return integer?
+function M.commit_wrap_width(win)
+    if not (win and vim.api.nvim_win_is_valid(win)) then return nil end
+    local info = vim.fn.getwininfo(win)[1]
+    if not info then return nil end
+    return git.message_width(info.width - info.textoff)
+end
+
 --- Build the commit-view content rows (spec §11.2) — the list of compose
 --- `{ text, highlight }` rows plus the per-render index maps — for a single
 --- commit, a working-tree commit, or a range, **independent of any window or
@@ -786,10 +799,11 @@ local commit_view_ns = vim.api.nvim_create_namespace("gitloom.commit_view")
 ---   sub_results?  table    per-path submodule change results (§11.7), or {}
 ---   root?         string   parent repo root; enables submodule commit links
 ---   action?       boolean  include the diff action label (§11.5); default true
+---   width?        integer  the message wrap width (§11.2.1); nil = as is
 ---@param opts GraphOptions
 ---@param spec table
 ---@return table[] rows
----@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch? }
+---@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch?, meta_end }
 local function build_commit_rows(opts, spec)
     local commit, range, root = spec.commit, spec.range, spec.root
     local sub_results = spec.sub_results or {}
@@ -817,11 +831,14 @@ local function build_commit_rows(opts, spec)
         meta_rows = format_commit_detail(parse_show(spec.meta), {
             decorations = decoration_texts(commit),
             palette = opts.palette,
+            width = spec.width, -- the message wrap width (§11.2.1)
         })
     end
     for _, r in ipairs(meta_rows) do
         rows[#rows + 1] = r
     end
+    -- The last metadata row: a re-wrap (§11.2.1) shifts only what lies below it.
+    local meta_end = #rows
 
     -- A git failure the fetch reported (§13.5): say so where the patch would be,
     -- so an empty diff region is never mistaken for "no changes in this range".
@@ -902,6 +919,7 @@ local function build_commit_rows(opts, spec)
         diff_ctx = diff_ctx,
         diff_start = diff_start,
         diff_buf_to_patch = diff_buf_to_patch,
+        meta_end = meta_end,
     }
 end
 -- Exposed on the module so the search picker (§15.3) can reach it directly.
@@ -1184,14 +1202,28 @@ local function open_commit_view(opts, commit, range, root)
     -- a later return); BufWipeout (the frame dropped from the stack) drops the
     -- group entirely.
     local ctx_group = vim.api.nvim_create_augroup("GitloomCommitCtx_" .. buf, { clear = true })
+    -- Re-wrap the message when the window's width changed (§11.2.1); defined
+    -- once render() exists, below.
+    local rewrap = function() end
     vim.api.nvim_create_autocmd({ "WinScrolled", "WinResized" }, {
         group = ctx_group,
         callback = function()
             -- Global (it must catch scrolls in the host window); when the host is
             -- not showing this frame, vwin() is nil and update_ctx closes the
             -- overlay instead of touching the wrong window.
-            if vwin() then update_ctx() else close_ctx() end
+            if vwin() then
+                rewrap()
+                update_ctx()
+            else
+                close_ctx()
+            end
         end,
+    })
+    -- A resized editor resizes the host float in snacks' own VimResized handler;
+    -- re-wrap after it (§11.2.1).
+    vim.api.nvim_create_autocmd("VimResized", {
+        group = ctx_group,
+        callback = function() vim.schedule(function() rewrap() end) end,
     })
     vim.api.nvim_create_autocmd("BufWinEnter", {
         group = ctx_group,
@@ -1236,6 +1268,8 @@ local function open_commit_view(opts, commit, range, root)
         elseif action_line then
             pcall(vim.api.nvim_win_set_cursor, vw, { action_line, 0 })
         end
+        -- The width may have changed while another frame was shown (§11.2.1).
+        rewrap()
         update_ctx()
     end
 
@@ -1253,6 +1287,9 @@ local function open_commit_view(opts, commit, range, root)
     -- + namespaced extmarks (the diff is highlighted this way, not via
     -- filetype=diff, so the metadata header stays clean §11.3). While laying out
     -- the rows, record each diffstat file row -> its diff section line (§11.4).
+    -- The last render's inputs + wrap width + metadata end, for a re-wrap.
+    ---@type { meta: string?, diff: string?, width: integer?, meta_end: integer }?
+    local last_render = nil
     local function render(meta_output, diff_output, keep_view)
         if not vim.api.nvim_buf_is_valid(buf) then return end
         local vw = vwin()
@@ -1263,11 +1300,22 @@ local function open_commit_view(opts, commit, range, root)
         -- Build the content rows + index maps (shared with the search preview,
         -- §15.3), then bind the window-specific upvalues the keymaps/context
         -- header read. Row indices are buffer lines here (we write at line 0).
+        local width = M.commit_wrap_width(vw)
         local rows, info = build_commit_rows(opts, {
             commit = commit, range = range, root = root,
             meta = meta_output, diff = diff_output, diff_error = diff_error,
-            sub_results = sub_results,
+            sub_results = sub_results, width = width,
         })
+        -- A re-wrap moves everything below the message by the change in its line
+        -- count: keep the user on the same content (§11.2.1).
+        local prev_end = last_render and last_render.meta_end
+        local delta = prev_end and (info.meta_end - prev_end) or 0
+        if saved_view and prev_end and delta ~= 0 then
+            local edge = prev_end
+            if saved_view.lnum > edge then saved_view.lnum = saved_view.lnum + delta end
+            if saved_view.topline > edge then saved_view.topline = saved_view.topline + delta end
+        end
+        last_render = { meta = meta_output, diff = diff_output, width = width, meta_end = info.meta_end }
         action_line = info.action_line
         file_jumps = info.file_jumps
         sub_jumps = info.sub_jumps
@@ -1336,6 +1384,13 @@ local function open_commit_view(opts, commit, range, root)
             end)
         end)
     end
+    rewrap = function()
+        if not last_render then return end
+        local vw = vwin()
+        if not vw or M.commit_wrap_width(vw) == last_render.width then return end
+        render(last_render.meta, last_render.diff, true)
+    end
+
     fetched.next(function(res)
         load_op:finish(diff_error and "failed" or "done")
         render(res.meta, res.diff)
@@ -3173,6 +3228,7 @@ local function h_commit_search(ctx)
             for _, r in ipairs(build_commit_rows(opts, {
                 commit = commit, meta = cached.meta, diff = cached.diff,
                 action = false, -- not actionable in a preview
+                width = M.commit_wrap_width(prev.win and prev.win.win), -- §11.2.1
             })) do
                 rows[#rows + 1] = r
             end
