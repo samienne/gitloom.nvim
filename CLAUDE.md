@@ -761,8 +761,9 @@ Coverage:
   resolved over the built-in), `overlay` (a stored value wins only while its
   `base` equals today's configuration-resolved value; a wrong-typed / value-less
   entry is ignored), `set_pref` (stores `{ value, base }`, prunes other stale
-  entries), `pins_for_save` (unreserved defaults + auto upstreams dropped, order
-  and reserve flags kept), `set_repo` / `repo_state` (per-root round trip, junk
+  entries), `pins_for_save` (only the leading run of unreserved defaults still in
+  default order dropped — a default moved below an explicit entry, or reserved,
+  is kept with its place; order and reserve flags kept), `set_repo` / `repo_state` (per-root round trip, junk
   sanitised, an empty state removes the entry); and against a scratch file: round
   trip, rename-over-existing leaving no temp files, **two writers with different
   keys both surviving** (re-read before write), a corrupt / non-object file ignored
@@ -803,21 +804,30 @@ Coverage:
   collapse; junctions preserved; a kept match is never a node-less junction; nil
   keep = the plain collapse)
 - `tests/pin_spec.lua` — the ordered pin list (§10.6) + the dialog (§10.6.1):
-  `pin_resolve` (stored entries first then the defaults, unpinned suppressed,
+  `pin_resolve` (the unplaced defaults first — HEAD's anchor last among them —
+  then the stored entries, a new pin at the bottom; unpinned suppressed,
   stale refs dropped, defaults never reserved), `pin_move` (clamped at both ends,
   reports the new index, carries the flag), `pin_toggle_reserved`, `pin_remove`
   (**unpin implies unreserve** — re-adding comes back unreserved), `pin_add`
-  (idempotent), `pin_ids`, `reserved_order` (reserved-only, in list order; an
-  **unreserved entry's position is latent** — moving it changes nothing, reserving
-  it makes that position bite), and `pin_dialog_lines` (numbering, `◆` on reserved
+  (idempotent), `pin_ids`, `reserved_order` (reserved-only, in list order — the
+  order's meaning for *columns*; for lane identity every entry's place is its
+  rank, `pin_rank`), and `pin_dialog_lines` (numbering, `◆` on reserved
   rows only, the key help, the add row, the row map, the aligned help column, the
   "not honoured yet" note). Plus a **windowed smoke** block driving the real
   dialog in a real float over a stub ctx (open/`<Space>`/`<C-j>`/`D`/`q`) — the
   keymaps, re-render and focus handoff, which the pure tests cannot reach.
-  `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`
-  (default order, nothing reserved by default, pin-the-pair adjacency, the
-  auto-upstream dropping with its local, and a detached HEAD pinning the `HEAD`
-  ref first / unpinnable / dropped once attached), and `reconcile_refs` stamping
+  Plus the **implicit remote counterparts** (§10.6): `pin_counterparts` (same
+  short name in `git remote` order, unlisted remotes by name, then a differently
+  named upstream; none for a remote / tag) and `pin_rank` (the layout's
+  `opts.pin_rank`: rank = place, a counterpart sharing its local's, an explicitly
+  unpinned counterpart excluded, an explicitly pinned remote keeping its own,
+  none with `pin_upstream` off) and dialog lines without counterpart rows.
+  `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`/
+  `pin_rank`/`sync_pin_rank` (default order with HEAD's anchor last, nothing
+  reserved by default, counterparts implicit at the local's rank and never rows,
+  dropped with their local or by an explicit unpin, the ranks published on
+  `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
+  unpinnable / dropped once attached), and `reconcile_refs` stamping
   the head ref's `branch` (nil when detached).
 - `tests/pin_rank_spec.lua` — pin priority in lane identity (§5): `commit_rank`
   (best rank, `HEAD` keying), nil / empty / non-matching `pin_rank` byte-identical
@@ -1341,22 +1351,30 @@ Details not covered by the spec or architecture:
   set). It is stored as **one ordered list**, `view_state.pins` (`PinEntry` =
   `{ id, reserved }`, priority order) plus `view_state.unpinned` (ids explicitly
   removed, which suppress the HEAD / `master` / `main` / `dev` / seeded-mark
-  defaults; HEAD is its branch when attached, the `HEAD` ref itself when detached). `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`)
-  and applies the pin-the-pair upstream rule — an auto entry carries
-  `auto = <local id>` and is re-derived each resolve, so unpinning the local drops
-  it; `ctx:effective_pinned()` is that list reduced to ids and is still what
-  `view.owners`/`collapse_owners` consume, so no pin consumer changed.
-  Pinning changes only the default *mode* (anchors normal, rest collapsed), not
-  `fp_only` or the owner tips, so it does **not** invalidate the signature cache
+  defaults; HEAD is its branch when attached, the `HEAD` ref itself when detached).
+  `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`: unplaced
+  defaults — trunks, seeds, HEAD's anchor last — then the stored entries) into
+  exactly the dialog's rows. **Implicit remote counterparts** (`pin_upstream`) are
+  NOT entries: `select.pin_rank` (via `ctx:pin_rank()`) maps every effective
+  anchor to its rank (1 = highest), a local's `select.pin_counterparts` sharing its
+  rank unless explicitly unpinned; `ctx:effective_pinned()` is its key set and is
+  still what `view.owners`/`collapse_owners`/the pin icon consume.
+  `ctx:sync_pin_rank()` publishes the table as the layout input `opts.pin_rank`
+  (on `ctx.opts` and `ctx.pane_opts`) at the top of every `reflow_build` and
+  before the open stream — every pin change reflows, so that is the refresh.
+  Pinning changes only the default *mode* and the ranks, not `fp_only` or the
+  owner tips, so it does **not** invalidate the signature cache
   (like a mode toggle). `P` uses `branch_under_cursor`, pins only real refs (drops
   anonymous merge owners), appends to the list, reflows, and repositions the
   cursor. Anchors are the foundation for the context panes (spec §6.2).
 - **Dedicated lanes + the pinned-branches dialog** (spec §10.6.1/§10.6.2, `L`):
   "holds a reserved graph column" is a **flag on the pin entry**, not a second
   list — so `reserved ⊆ pinned` and *unpin implies unreserve* are structural, and
-  **pinning alone claims no column** (up to four are pinned by default). Order
-  is meaningful only among reserved entries (`select.reserved_order`); an
-  unreserved entry's position is latent. `L` opens a `float_zindex` float rendered
+  **pinning alone claims no column** (up to four are pinned by default). Every
+  entry's place is its lane-identity rank (§5, `opts.pin_rank`); among reserved
+  entries it also orders the columns (`select.reserved_order`). Implicit remote
+  counterparts have no rows; `P` on one records an explicit unpin of just that
+  ref. `L` opens a `float_zindex` float rendered
   by the pure `select.pin_dialog_lines` (lines + a line → entry-index row map);
   its buffer-local keys `<C-j>`/`<C-k>`/`<Space>`/`D`/`<CR>`/`q` each write
   `view_state.pins`, reflow, and restore the graph cursor by hash like `P`.

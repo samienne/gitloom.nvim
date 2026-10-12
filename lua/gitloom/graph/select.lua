@@ -261,8 +261,10 @@ end
 -- (§10.6.2) is a per-entry FLAG on it — not a second list. Two properties then
 -- hold by construction instead of by discipline: `reserved` ⊆ `pinned`, and
 -- **unpinning implies unreserving** (the flag leaves with its entry). Order is
--- the anchor priority; it is *meaningful only among reserved entries*, so an
--- unreserved entry's position is latent until it is reserved.
+-- the anchor priority, and it matters for EVERY entry: an entry's 1-based place is
+-- its **rank**, which drives lane identity (§5); among reserved entries it also
+-- decides the dedicated columns (§10.6.2). A pinned local branch's implicit remote
+-- counterparts are not entries — they share their local's rank (`pin_rank`).
 --
 -- All of these are pure: they copy in and copy out, never mutating the input
 -- (like `bump_recent`), so the window glue assigns the result back.
@@ -271,24 +273,24 @@ end
 ---@class PinEntry
 ---@field id string        -- the ref-owner id (a ref name; §10)
 ---@field reserved boolean -- holds a dedicated graph column (§10.6.2)
----@field auto? string     -- pinned as the pair of this local branch (§6.3 pin-the-pair);
----                       -- the entry is dropped when its source leaves the list
 
 ---@param pins PinEntry[]?
 ---@return PinEntry[]
 local function pin_copy(pins)
     local out = {}
     for i, e in ipairs(pins or {}) do
-        out[i] = { id = e.id, reserved = e.reserved and true or false, auto = e.auto }
+        out[i] = { id = e.id, reserved = e.reserved and true or false }
     end
     return out
 end
 
---- Resolve the effective pin list (spec §10.6): the user's explicitly ordered
---- entries first, in their order, then the built-in default anchors that are not
---- already on it. An **unpinned** id is suppressed wherever it would come from,
---- and an entry naming a ref that no longer exists is dropped — so the list is
---- deterministic for an untouched repository and stable once edited.
+--- Resolve the effective pin list (spec §10.6): the built-in default anchors the
+--- user has **not** explicitly placed come first, in default order, followed by
+--- the user's explicitly ordered entries in their order. An **unpinned** id is
+--- suppressed wherever it would come from, and an entry naming a ref that no
+--- longer exists is dropped — so the list is deterministic for an untouched
+--- repository and stable once edited. A newly pinned ref is appended to the
+--- stored entries (`pin_add`), so it lands at the bottom.
 ---@param pins PinEntry[]?                     -- the stored, user-ordered entries
 ---@param unpinned table<string, boolean>?     -- ids explicitly removed (suppress defaults)
 ---@param defaults string[]?                   -- default anchor ids, in default order
@@ -296,16 +298,82 @@ end
 ---@return PinEntry[]
 function M.pin_resolve(pins, unpinned, defaults, exists)
     unpinned = unpinned or {}
-    local out, seen = {}, {}
-    local function push(id, reserved, auto)
+    local out, seen, placed = {}, {}, {}
+    for _, e in ipairs(pins or {}) do placed[e.id] = true end
+    local function push(id, reserved)
         if not id or seen[id] or unpinned[id] then return end
         if exists and exists[id] == nil then return end
         seen[id] = true
-        out[#out + 1] = { id = id, reserved = reserved and true or false, auto = auto }
+        out[#out + 1] = { id = id, reserved = reserved and true or false }
     end
-    for _, e in ipairs(pins or {}) do push(e.id, e.reserved, e.auto) end
-    for _, id in ipairs(defaults or {}) do push(id, false) end
+    for _, id in ipairs(defaults or {}) do
+        if not placed[id] then push(id, false) end
+    end
+    for _, e in ipairs(pins or {}) do push(e.id, e.reserved) end
     return out
+end
+
+--- A pinned local branch's **implicit remote counterparts** (spec §10.6): every
+--- remote branch with the same short name — the remotes in `git remote` order
+--- (`remotes`), then any other remote's `*/<id>` the registry holds, by name (the
+--- `%` cycle's members and order, §2) — then the branch's tracked upstream when
+--- its short name differs. Only refs that exist; none for a non-local ref. Pure.
+---@param refs table<string, Ref>?  the repo's name → Ref registry
+---@param remotes string[]?         remote names in `git remote` order
+---@param id string                 the pinned ref id
+---@return string[]
+function M.pin_counterparts(refs, remotes, id)
+    local out = {}
+    if not refs then return out end
+    local reg = refs ---@type table<string, Ref>
+    local r = reg[id]
+    if not r or r.kind ~= "local" then return out end
+    local seen = { [id] = true }
+    local function add(name, kind)
+        local x = reg[name]
+        if seen[name] or not x or (kind and x.kind ~= kind) then return end
+        seen[name] = true
+        out[#out + 1] = name
+    end
+    for _, remote in ipairs(remotes or {}) do add(remote .. "/" .. id, "remote") end
+    local rest = {}
+    for name, x in pairs(reg) do
+        if x.kind == "remote" and not seen[name] and name:match("^[^/]+/(.+)$") == id then
+            rest[#rest + 1] = name
+        end
+    end
+    table.sort(rest)
+    for _, name in ipairs(rest) do add(name, "remote") end
+    if r.upstream and r.upstream.short then add(r.upstream.short) end
+    return out
+end
+
+--- The **pin rank** of every effectively pinned ref (spec §5/§10.6): ref id →
+--- its 1-based place in the resolved list `pins` (1 = highest priority). With
+--- `counterparts` on (`pin_upstream`), a local entry's implicit remote
+--- counterparts (`pin_counterparts`) take its rank, unless explicitly `unpinned`
+--- or already ranked — an explicitly pinned remote keeps its own place, and a
+--- counterpart shared by two locals takes the better one. The keys are exactly
+--- the effective anchor set; this table is the layout's `opts.pin_rank`. Pure.
+---@param pins PinEntry[]?                  the resolved pin list (`pin_resolve`)
+---@param refs table<string, Ref>?
+---@param remotes string[]?
+---@param unpinned table<string, boolean>?
+---@param counterparts boolean?             false = no implicit counterparts
+---@return table<string, integer>
+function M.pin_rank(pins, refs, remotes, unpinned, counterparts)
+    unpinned = unpinned or {}
+    local rank = {}
+    for i, e in ipairs(pins or {}) do
+        if rank[e.id] == nil then rank[e.id] = i end
+    end
+    if counterparts == false then return rank end
+    for i, e in ipairs(pins or {}) do
+        for _, cid in ipairs(M.pin_counterparts(refs, remotes, e.id)) do
+            if rank[cid] == nil and not unpinned[cid] then rank[cid] = i end
+        end
+    end
+    return rank
 end
 
 --- Move the entry at `index` by `delta` places (spec §10.6.1, `<C-j>`/`<C-k>`),
@@ -369,8 +437,7 @@ end
 
 --- The **reserved** ids in pin-list order (spec §10.6.2): the branches that get
 --- a dedicated column, left to right, skipping the unreserved entries between
---- them. This is the whole of what the list's order means to the layout, so
---- moving an unreserved entry leaves it unchanged.
+--- them. (The order also ranks every entry for lane identity — `pin_rank`.)
 ---@param pins PinEntry[]?
 ---@return string[]
 function M.reserved_order(pins)
@@ -382,9 +449,10 @@ function M.reserved_order(pins)
 end
 
 --- The pinned-branches dialog's buffer lines (spec §10.6.1). Pure so the layout
---- is testable without a window: the entry rows carry the priority number, the
---- `◆` marker for a reserved entry (blank otherwise — which is what makes
---- "order matters only among the reserved" visible), and the ref name; the
+--- is testable without a window: the entry rows carry the priority number (every
+--- entry's rank, §5), the `◆` marker for a reserved entry (blank otherwise — the
+--- subsequence that also claims columns), and the ref name. Implicit remote
+--- counterparts are not entries, so they have no rows. The
 --- static key help runs down the right; the last selectable row adds a branch.
 ---
 --- The closing note is deliberate: the reserve flag is recorded before the

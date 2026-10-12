@@ -70,9 +70,12 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.is_nil(p.feature) -- not a default anchor
     end)
 
-    it("defaults resolve in a deterministic order — HEAD first, then the trunks", function()
+    it("defaults resolve in a deterministic order — the trunks, then HEAD's anchor last", function()
         local list = internal.effective_pins(new_ctx(repo_with_branches()))
-        assert.same({ "main", "master", "dev" }, ids(list))
+        assert.same({ "master", "main", "dev" }, ids(list)) -- HEAD is `main`, already a trunk
+        local repo = repo_with_branches()
+        repo.head = "feature"
+        assert.same({ "master", "main", "dev", "feature" }, ids(internal.effective_pins(new_ctx(repo))))
     end)
 
     it("no anchor is reserved by default (pinning alone claims no column, §10.6.2)", function()
@@ -81,32 +84,49 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         end
     end)
 
-    it("the user's ordered entries come first and keep their reserve flags", function()
+    it("unplaced defaults come first, then the user's ordered entries with their flags", function()
         local ctx = new_ctx(repo_with_branches(),
             { view_state = vs({ { id = "dev", reserved = true }, { id = "feature", reserved = false } }) })
         local list = internal.effective_pins(ctx)
-        assert.same({ "dev", "feature", "origin/feature", "main", "master" }, ids(list))
-        assert.is_true(list[1].reserved)
+        -- No auto entry: implicit counterparts are not rows (§10.6.1).
+        assert.same({ "master", "main", "dev", "feature" }, ids(list))
+        assert.is_true(list[3].reserved)
     end)
 
-    it("honours an explicit pin and pins the tracked upstream too (pin-the-pair)", function()
+    it("pins the remote counterparts implicitly, at the local's rank (§10.6)", function()
         local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
         assert.is_true(p.feature)
-        assert.is_true(p["origin/feature"]) -- carried by the upstream pairing
-        -- and it sits directly after its local branch, so the pair reads together.
-        assert.same({ "feature", "origin/feature" }, { ids(internal.effective_pins(ctx))[1],
-            ids(internal.effective_pins(ctx))[2] })
+        assert.is_true(p["origin/feature"]) -- implicit counterpart
+        local rank = internal.pin_rank(ctx)
+        assert.equal(rank.feature, rank["origin/feature"])
+        assert.equal(4, rank.feature) -- below the three defaults
+        for _, e in ipairs(internal.effective_pins(ctx)) do assert.not_equal("origin/feature", e.id) end
     end)
 
-    it("dropping the local branch drops its auto-pinned upstream with it", function()
-        local ctx = new_ctx(repo_with_branches(),
-            { view_state = vs({ { id = "feature" }, { id = "origin/feature", auto = "feature" } }) })
+    it("unpinning the local drops its counterparts with it", function()
+        local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
         assert.is_true(internal.effective_pinned(ctx)["origin/feature"])
-        -- Unpin the local: the auto entry is re-derived away, not left orphaned.
-        ctx.view_state.pins = { { id = "origin/feature", auto = "feature" } }
+        ctx.view_state.pins = {}
         ctx.view_state.unpinned = { feature = true }
         assert.is_nil(internal.effective_pinned(ctx)["origin/feature"])
+    end)
+
+    it("an explicit unpin of a counterpart removes just that ref", function()
+        local ctx = new_ctx(repo_with_branches(),
+            { view_state = vs({ { id = "feature" } }, { ["origin/feature"] = true }) })
+        local p = internal.effective_pinned(ctx)
+        assert.is_true(p.feature)
+        assert.is_nil(p["origin/feature"])
+    end)
+
+    it("sync_pin_rank publishes the ranks on opts and the panes' copy", function()
+        local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
+        ctx.pane_opts = {}
+        local rank = internal.sync_pin_rank(ctx)
+        assert.equal(rank, ctx.opts.pin_rank)
+        assert.equal(rank, ctx.pane_opts.pin_rank)
+        assert.same({ master = 1, main = 2, dev = 3, feature = 4, ["origin/feature"] = 4 }, rank)
     end)
 
     it("honours an explicit unpin of a default anchor", function()
@@ -114,7 +134,7 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.is_nil(internal.effective_pinned(ctx).main)
     end)
 
-    it("does not pair the upstream when pin_upstream is off", function()
+    it("pins no counterpart when pin_upstream is off", function()
         local ctx = new_ctx(repo_with_branches(),
             { opts = { pin_upstream = false }, view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
@@ -129,7 +149,7 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
     end)
 
     -- A detached HEAD (§10.6): no branch to pin, so the `HEAD` ref itself is the
-    -- default anchor — first, like the attached case.
+    -- default anchor — last among the defaults, like the attached case.
     local function detached_repo()
         local repo = repo_with_branches()
         repo.head = nil
@@ -137,8 +157,8 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         return repo
     end
 
-    it("pins the HEAD ref itself first when HEAD is detached", function()
-        assert.same({ "HEAD", "master", "main", "dev" }, ids(internal.effective_pins(new_ctx(detached_repo()))))
+    it("pins the HEAD ref itself, last, when HEAD is detached", function()
+        assert.same({ "master", "main", "dev", "HEAD" }, ids(internal.effective_pins(new_ctx(detached_repo()))))
     end)
 
     it("an explicit unpin of HEAD suppresses the detached default", function()
@@ -150,7 +170,7 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         local repo = repo_with_branches()
         git.add_ref(repo, "HEAD", "head", "h_main").branch = "main"
         local ctx = new_ctx(repo, { view_state = vs({ { id = "HEAD", reserved = false } }) })
-        assert.same({ "main", "master", "dev" }, ids(internal.effective_pins(ctx)))
+        assert.same({ "master", "main", "dev" }, ids(internal.effective_pins(ctx)))
     end)
 end)
 

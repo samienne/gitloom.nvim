@@ -1415,7 +1415,7 @@ end
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
----@field pin_upstream? boolean  pinning a local branch also pins its tracked upstream (default true); §6.3/§10.6
+---@field pin_upstream? boolean  a pinned local branch also pins its remote counterparts implicitly (default true); §10.6
 ---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 ---@field zindex? integer  the host window's zindex (default 41); overlays at +1, gitloom's transient floats at +2; §8/§14
@@ -1501,24 +1501,28 @@ local function reorder_by_hashes(ctx, hashlist)
     repo.order = new_order
 end
 
--- The default anchors (§10.6), in order: HEAD (its branch when attached, the `HEAD`
--- ref when detached), then `master` / `main` / `dev` and the seeded marks
--- (§11.7.6) — each only when the ref exists. Shared by effective_pins and the
--- §18 pin save, which leaves an unreserved default out of the stored list.
+-- The default anchors (§10.6), in order: `master` / `main` / `dev` and the seeded
+-- marks (§11.7.6), then HEAD's anchor LAST (its branch when attached, the `HEAD`
+-- ref when detached) — each only when the ref exists. Shared by effective_pins and
+-- the §18 pin save, which leaves the leading run of unreserved defaults out of the
+-- stored list.
 ---@return string[]
 GRAPH_HELPERS.pin_defaults = function(ctx)
     local repo = ctx.repo
-    local defaults = {}
+    local defaults, seen = {}, {}
     local function def(name)
-        if repo.refs[name] then defaults[#defaults + 1] = name end
+        if repo.refs[name] and not seen[name] then
+            seen[name] = true
+            defaults[#defaults + 1] = name
+        end
     end
-    if repo.head then def(repo.head) else def("HEAD") end
     for _, name in ipairs({ "master", "main", "dev" }) do def(name) end
     -- Seeded pointer marks (§11.7.6) come from a set; sort so the list is stable.
     local seeds = {}
     for name in pairs(ctx.seed_pin_names or {}) do seeds[#seeds + 1] = name end
     table.sort(seeds)
     for _, name in ipairs(seeds) do def(name) end
+    if repo.head then def(repo.head) else def("HEAD") end
     return defaults
 end
 
@@ -1590,20 +1594,20 @@ GRAPH_HELPERS.reset_view_now = function(ctx)
     end)
 end
 
--- The effective **pin list** (§10.6): an ORDERED list of `{ id, reserved }`. The
--- user's explicitly ordered entries (`view_state.pins`) come first, then the
--- default anchors — HEAD, master/main/dev, the seeded marks — that are not
--- already on it. HEAD is an anchor attached OR detached: on a branch it is that
--- branch's owner; detached it is the `HEAD` ref itself (an owner only then —
--- owners_from_refs), so a `HEAD` entry is dropped while HEAD is on a branch; `view_state.unpinned` suppresses a default. `pin_resolve` is the
--- pure core; the pin-the-pair upstream rule (§6.3) is applied here because it
--- needs the ref registry, and the auto-pinned upstream is inserted **right after**
--- its local branch so the pair reads together in the dialog (§10.6.1).
+-- The effective **pin list** (§10.6): an ORDERED list of `{ id, reserved }` —
+-- exactly the dialog's rows. The default anchors (master/main/dev, the seeded
+-- marks, then HEAD's) the user has not explicitly placed come first, then the
+-- user's ordered entries (`view_state.pins`); a newly pinned ref is appended to
+-- those, so it lands at the bottom. HEAD is an anchor attached OR detached: on a
+-- branch it is that branch's owner; detached it is the `HEAD` ref itself (an owner
+-- only then — owners_from_refs), so a `HEAD` entry is dropped while HEAD is on a
+-- branch; `view_state.unpinned` suppresses a default. `pin_resolve` is the pure
+-- core. Implicit remote counterparts are NOT entries (see `pin_rank`).
 --- (A GRAPH_HELPERS field rather than a module local — window.lua sits near
 --- LuaJIT's 200-local chunk limit, which is what these tables exist to dodge.)
 ---@return PinEntry[]
 GRAPH_HELPERS.effective_pins = function(ctx)
-    local repo, view_state, opts = ctx.repo, ctx.view_state, ctx.opts
+    local repo, view_state = ctx.repo, ctx.view_state
     local pins = selectm.pin_resolve(view_state.pins, view_state.unpinned, GRAPH_HELPERS.pin_defaults(ctx), repo.refs)
     if repo.head then
         -- Attached: the `HEAD` ref is not an owner (its branch is), so an entry the
@@ -1614,44 +1618,44 @@ GRAPH_HELPERS.effective_pins = function(ctx)
         end
         pins = kept
     end
-    -- Pin-the-pair (§6.3): an entry auto-pinned as a local branch's upstream carries
-    -- `auto = <local id>`. It is re-derived on every resolve — dropped when its
-    -- source leaves the list (so unpinning the local drops it too) and re-inserted
-    -- right after its source otherwise, keeping the pair adjacent in the dialog.
-    local drop_auto = opts.pin_upstream == false
-    local on, kept = selectm.pin_ids(pins), {}
-    for _, e in ipairs(pins) do
-        if not e.auto or (not drop_auto and on[e.auto]) then kept[#kept + 1] = e end
-    end
-    pins = kept
-    if not drop_auto then
-        on = selectm.pin_ids(pins)
-        local i = 1
-        while i <= #pins do
-            local e = pins[i]
-            local ref = not e.auto and repo.refs[e.id]
-            local up = ref and ref.upstream and ref.upstream.short
-            if up and repo.refs[up] and not on[up] and not view_state.unpinned[up] then
-                on[up] = true
-                table.insert(pins, i + 1, { id = up, reserved = false, auto = e.id })
-                i = i + 1 -- skip the one just inserted
-            end
-            i = i + 1
-        end
-    end
     return pins
 end
 
--- The effective anchor **set** — `effective_pins` reduced to ids. This is what
--- `view.owners` / `collapse_owners` consume; order matters only to §10.6.2.
+-- The **pin rank** of every effective anchor (§5/§10.6): ref id → its place in
+-- the resolved list, 1 = highest priority, a pinned local branch's implicit remote
+-- counterparts (§10.6, `pin_upstream`) sharing its rank unless explicitly unpinned.
+-- Its keys ARE the effective anchor set. This is the layout input `opts.pin_rank`.
+---@return table<string, integer>
+GRAPH_HELPERS.pin_rank = function(ctx)
+    return selectm.pin_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
+        ctx.view_state.unpinned, ctx.opts.pin_upstream ~= false)
+end
+
+-- Publish the current pin ranks on the layout options (`opts.pin_rank`, §5) — the
+-- main view's `ctx.opts` and the panes' frozen copy `ctx.pane_opts` — so the next
+-- layout reads them. Run at the top of every reflow (which every pin change, the
+-- reset, a resync and a HEAD move go through) and before the open-time stream.
+GRAPH_HELPERS.sync_pin_rank = function(ctx)
+    local rank = GRAPH_HELPERS.pin_rank(ctx)
+    ctx.opts.pin_rank = rank
+    if ctx.pane_opts then ctx.pane_opts.pin_rank = rank end
+    return rank
+end
+
+-- The effective anchor **set** — the pinned entries plus their implicit remote
+-- counterparts (`pin_rank`'s keys). This is what `view.owners` / `collapse_owners`
+-- and the pin icon consume.
 local function effective_pinned(ctx)
-    return selectm.pin_ids(ctx:effective_pins())
+    local set = {}
+    for id in pairs(GRAPH_HELPERS.pin_rank(ctx)) do set[id] = true end
+    return set
 end
 GRAPH_HELPERS.effective_pinned = effective_pinned
 
--- The pin set the label renderers are handed (§6/§10.6): the effective anchors +
--- `icons.pin`. Resolved fresh on every call (it is a handful of entries), so a
--- label can never show a stale pin after `P`, the dialog, or a resync.
+-- The pin set the label renderers are handed (§6/§10.6): the effective anchors
+-- (implicit counterparts included) + `icons.pin`. Resolved fresh on every call (it
+-- is a handful of entries), so a label can never show a stale pin after `P`, the
+-- dialog, or a resync.
 ---@return PinMarks
 GRAPH_HELPERS.pin_marks = function(ctx)
     return { set = effective_pinned(ctx), icon = ctx.opts.icons and ctx.opts.icons.pin }
@@ -4441,6 +4445,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field open_nbatch? integer   streamed batches seen so far
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
+    ---@field pin_rank fun(self:GraphCtx):table<string,integer>  ref id → pin rank, counterparts included (§5/§10.6)
+    ---@field sync_pin_rank fun(self:GraphCtx):table<string,integer>  publish `pin_rank` on opts + pane_opts
     ---@field pin_marks fun(self:GraphCtx):PinMarks
     ---@field build_display_index fun(self:GraphCtx)
     ---@field order_at fun(self:GraphCtx, line:integer):table?,integer,integer
@@ -4865,6 +4871,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 util.open_trace("refs", { n = nrefs, ms = util.open_ms(ctx.open_t0) })
                 ctx.open_op:report("0 commits")
                 ctx.open_tstream = util.open_now()
+                ctx:sync_pin_rank() -- the streamed sweep lays out under the pin ranks (§5)
                 return fetch_commits({
                     branch = opts.branches or { "--all" },
                     -- One batch of streamed commits (spec §3): link each into the
@@ -6404,6 +6411,7 @@ end
 ---@return table display  -- the new repo.display
 GRAPH_HELPERS.reflow_build = function(ctx, yield, on_signatures)
     local viewbuilder = require("gitloom.graph.view")
+    GRAPH_HELPERS.sync_pin_rank(ctx) -- pins are a layout input (§5): publish the ranks
     local cm = ctx.opts.collapse_merged ~= false
     local t = util.open_now()
     local owners = ctx:reflow_owners(cm)
@@ -7005,6 +7013,8 @@ M._internal = {
     ctx = nil, -- set by open_graph; the live session (diagnostics / smoke test)
     effective_pins = GRAPH_HELPERS.effective_pins,
     effective_pinned = effective_pinned,
+    pin_rank = GRAPH_HELPERS.pin_rank,
+    sync_pin_rank = GRAPH_HELPERS.sync_pin_rank,
     pin_dialog = GRAPH_HELPERS.pin_dialog, -- §10.6.1; windowed smoke test seam
     reconcile_refs = reconcile_refs,
     prune_to_reachable = prune_to_reachable,

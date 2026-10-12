@@ -1768,11 +1768,10 @@ commit selection build on.
 §10.6.1). The anchor set is stored as **one ordered list** of `PinEntry`
 (`{ id, reserved }`), not a set: `view_state.pins` holds the user's explicitly
 ordered entries and `view_state.unpinned` the ids they removed (which suppress
-the built-in defaults). `select.lua` owns the pure core — `pin_resolve` (today:
-stored entries first, then the defaults HEAD / `master` / `main` / `dev` / seeded
-marks, minus the unpinned and minus refs that no longer exist — **spec §10.6 now
-reverses this**: the unplaced defaults `master` / `main` / `dev` / seeded marks /
-HEAD's anchor first, then the stored entries, a new pin always at the bottom),
+the built-in defaults). `select.lua` owns the pure core — `pin_resolve` (the
+unplaced defaults `master` / `main` / `dev` / seeded marks / HEAD's anchor first,
+then the stored entries, minus the unpinned and minus refs that no longer exist;
+a new pin always lands at the bottom), `pin_counterparts` / `pin_rank` (below),
 `pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add`, and the two readers
 `pin_ids` (the membership set) and `reserved_order` (the reserved ids in priority
 order — the ordering's meaning for *columns*; its meaning for lane identity is
@@ -1785,17 +1784,19 @@ remembered: the flag has nowhere to survive its entry. Pinning alone claims **no
 column** — the flag is set only in the dialog — but per spec §5 it does feed lane
 identity through the ranks.
 
-`ctx:effective_pins()` resolves the live list and applies the **pin-the-pair**
-upstream rule (§6.3), which needs the ref registry: an auto-pinned upstream
-carries `auto = <local id>`, is re-derived on every resolve, and is inserted
-directly after its source — so unpinning the local drops it, exactly as before,
-while an explicit pin/unpin of the upstream still wins. *(Superseded by spec
-§10.6's implicit remote counterparts: every same-short-name remote branch plus
-the tracked upstream, sharing the local's rank and NOT listed as dialog entries —
-so they should come from a separate resolve step beside the list, not `auto`
-entries inside it.)* `ctx:effective_pinned()`
-is that list reduced to ids and remains what `view.owners` / `collapse_owners`
-consume, so **every existing pin consumer is unchanged**.
+`ctx:effective_pins()` resolves the live list — exactly the dialog's rows. The
+**implicit remote counterparts** (spec §10.6: every same-short-name remote branch,
+in `git remote` order then unlisted remotes by name — the `%` cycle's members —
+plus the tracked upstream when its short name differs; `select.pin_counterparts`)
+are NOT entries: `select.pin_rank` resolves them beside the list, giving each the
+rank of its local unless it is explicitly unpinned or already ranked (an
+explicitly pinned remote keeps its own place). `ctx:pin_rank()` is that table —
+ref id → rank, 1 = highest — and `ctx:effective_pinned()` is its key set, which
+remains what `view.owners` / `collapse_owners` and the pin icon consume, so **every existing pin consumer is unchanged**. `ctx:sync_pin_rank()` publishes the
+ranks as the layout input `opts.pin_rank` on both `ctx.opts` and the panes' frozen
+copy `ctx.pane_opts`; it runs at the top of every `reflow_build` (which `P`, every
+dialog key, the reset, a resync and a HEAD move all go through) and before the
+open-time stream.
 
 `L` opens the dialog (`GRAPH_HELPERS.pin_dialog`): a `float_zindex` float over
 the graph, with `select.pin_dialog_lines` producing the buffer lines and a
@@ -2115,11 +2116,10 @@ way the renderer reads it — `x ~= false` keys as booleans, a merge style
 deep-extended over the built-in one); `overlay` applies a stored `{ value, base }`
 only while `base` equals that resolved value (a changed `setup()` wins);
 `set_pref` records one key and prunes every other stale entry; `pins_for_save`
-drops what the open-time resolution re-derives (an unreserved default anchor or
-auto-pinned upstream), so a then-current HEAD branch does not become a permanent
-pin. *(Spec §18.2 now narrows this: an unreserved default is dropped only while it
-sits in its default place, the leading run of defaults; one moved below an
-explicit entry is saved with its place, since order is the identity rank.)* The I/O half reads lazily once (`load`) for opens and, for every change,
+drops what the open-time resolution re-derives — the leading run of unreserved
+default anchors still in default order (§18.2), so a then-current HEAD branch does
+not become a permanent pin, while a default moved below an explicit entry is saved
+with its place (order is the identity rank). The I/O half reads lazily once (`load`) for opens and, for every change,
 re-reads → merges the one key → writes a temp file → `fs_rename`s it over the
 original (unlinking first where rename cannot replace), so concurrent instances
 keep each other's keys. A corrupt file is `{}` with one WARN. `set_path` redirects

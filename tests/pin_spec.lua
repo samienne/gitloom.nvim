@@ -57,10 +57,18 @@ describe("pin_resolve (§10.6)", function()
         assert.same({}, reserved_order(out))
     end)
 
-    it("stored entries keep their order and flags; defaults are appended after", function()
+    it("unplaced defaults come first; stored entries keep their order and flags after", function()
         local out = pin_resolve(pins("topic1*", "master"), {}, { "master", "main" },
             registry("master", "main", "topic1"))
-        assert.same({ "topic1*", "master", "main" }, shorthand(out))
+        assert.same({ "main", "topic1*", "master" }, shorthand(out))
+    end)
+
+    it("defaults keep their order with HEAD's anchor last, a new pin at the bottom", function()
+        -- pin_defaults order: trunks, seeds, then HEAD's anchor (`feat`).
+        local stored = pin_add({}, "topic")
+        local out = pin_resolve(stored, {}, { "master", "dev", "feat" },
+            registry("master", "dev", "feat", "topic"))
+        assert.same({ "master", "dev", "feat", "topic" }, ids(out))
     end)
 
     it("does not duplicate a default already on the stored list", function()
@@ -378,5 +386,85 @@ describe("pinned-branches dialog (§10.6.1) — windowed smoke", function()
         assert.same({}, reserved_order(ctx:effective_pins()))
         assert.is_true(ctx.view_state.unpinned.master) -- the default anchor stays gone
         feed("q")
+    end)
+end)
+
+describe("pin_counterparts / pin_rank (§10.6 implicit remote counterparts)", function()
+    local selectm = require("gitloom.graph.select")
+    -- dev tracks `up/dev-renamed`; origin, fork and a remote missing from the
+    -- `git remote` list (zz) all carry a `dev`.
+    local function refs()
+        local r = {
+            master = { name = "master", kind = "local" },
+            dev = { name = "dev", kind = "local", upstream = { short = "up/dev-renamed" } },
+            topic = { name = "topic", kind = "local" },
+            ["origin/dev"] = { name = "origin/dev", kind = "remote" },
+            ["fork/dev"] = { name = "fork/dev", kind = "remote" },
+            ["zz/dev"] = { name = "zz/dev", kind = "remote" },
+            ["up/dev-renamed"] = { name = "up/dev-renamed", kind = "remote" },
+            ["origin/topic"] = { name = "origin/topic", kind = "remote" },
+            ["origin/master"] = { name = "origin/master", kind = "remote" },
+            v1 = { name = "v1", kind = "tag" },
+        }
+        return r
+    end
+
+    it("lists same-short-name remotes in `git remote` order, the rest by name, then the upstream", function()
+        assert.same({ "fork/dev", "origin/dev", "zz/dev", "up/dev-renamed" },
+            selectm.pin_counterparts(refs(), { "fork", "origin" }, "dev"))
+        -- Before the remote list loads: every remote by name.
+        assert.same({ "fork/dev", "origin/dev", "zz/dev", "up/dev-renamed" },
+            selectm.pin_counterparts(refs(), nil, "dev"))
+    end)
+
+    it("does not repeat an upstream that already shares the short name", function()
+        local r = refs()
+        r.topic.upstream = { short = "origin/topic" }
+        assert.same({ "origin/topic" }, selectm.pin_counterparts(r, { "origin" }, "topic"))
+    end)
+
+    it("has none for a remote, a tag or an unknown ref", function()
+        assert.same({}, selectm.pin_counterparts(refs(), { "origin" }, "origin/dev"))
+        assert.same({}, selectm.pin_counterparts(refs(), { "origin" }, "v1"))
+        assert.same({}, selectm.pin_counterparts(refs(), { "origin" }, "nope"))
+    end)
+
+    it("ranks entries by place, a counterpart sharing its local's rank", function()
+        local rank = selectm.pin_rank(pins("master", "dev"), refs(), { "origin" }, {})
+        assert.same({
+            master = 1, ["origin/master"] = 1,
+            dev = 2, ["origin/dev"] = 2, ["fork/dev"] = 2, ["zz/dev"] = 2, ["up/dev-renamed"] = 2,
+        }, rank)
+    end)
+
+    it("excludes an explicitly unpinned counterpart, keeping the others", function()
+        local rank = selectm.pin_rank(pins("dev"), refs(), { "origin" }, { ["origin/dev"] = true })
+        assert.is_nil(rank["origin/dev"])
+        assert.equal(1, rank["fork/dev"])
+        assert.equal(1, rank.dev)
+    end)
+
+    it("an explicitly pinned remote keeps its own rank", function()
+        local rank = selectm.pin_rank(pins("origin/dev", "master", "dev"), refs(), { "origin" }, {})
+        assert.equal(1, rank["origin/dev"])
+        assert.equal(3, rank.dev)
+        assert.equal(3, rank["fork/dev"])
+        -- …and below its local, it still has its own (worse) rank.
+        rank = selectm.pin_rank(pins("dev", "master", "origin/dev"), refs(), { "origin" }, {})
+        assert.equal(3, rank["origin/dev"])
+        assert.equal(1, rank["fork/dev"])
+    end)
+
+    it("pins no counterpart with counterparts off (pin_upstream = false)", function()
+        assert.same({ dev = 1 }, selectm.pin_rank(pins("dev"), refs(), { "origin" }, {}, false))
+    end)
+
+    it("the dialog lists the entries only — counterparts have no rows", function()
+        local list = pin_resolve(pins("dev"), {}, { "master" }, refs())
+        local lines, rows = pin_dialog_lines(list)
+        local n = 0
+        for _, v in pairs(rows) do if type(v) == "number" then n = n + 1 end end
+        assert.equal(2, n)
+        for _, l in ipairs(lines) do assert.is_nil(l:find("origin/dev", 1, true)) end
     end)
 end)

@@ -150,19 +150,28 @@ function M.repo_state(data, root)
 end
 
 --- The pin list as saved (§18.2): drop what the open-time resolution re-derives —
---- an unreserved default anchor and an unreserved auto-pinned upstream. Order and
---- the reserve flag of everything kept are preserved.
+--- the **leading run** of unreserved default anchors that still sit in their
+--- default order, above every explicitly placed entry, where `pin_resolve` puts
+--- them back. A default the user moved below an explicit entry (or out of default
+--- order) is kept with its place, as is every reserved entry. Implicit remote
+--- counterparts are never entries, so there is nothing to drop for them.
 ---@param pins PinEntry[]
----@param defaults string[]?  the default anchor ids at save time
+---@param defaults string[]?  the default anchor ids at save time, in default order
 ---@return PinEntry[]
 function M.pins_for_save(pins, defaults)
-    local is_default = {}
-    for _, id in ipairs(defaults or {}) do is_default[id] = true end
+    local pos = {}
+    for i, id in ipairs(defaults or {}) do pos[id] = pos[id] or i end
+    pins = pins or {}
+    local skip, last = 0, 0
+    for _, e in ipairs(pins) do
+        local p = pos[e.id]
+        if e.reserved or not p or p < last then break end
+        skip, last = skip + 1, p
+    end
     local out = {}
-    for _, e in ipairs(pins or {}) do
-        if e.reserved or not (e.auto or is_default[e.id]) then
-            out[#out + 1] = { id = e.id, reserved = e.reserved and true or false }
-        end
+    for i = skip + 1, #pins do
+        local e = pins[i]
+        out[#out + 1] = { id = e.id, reserved = e.reserved and true or false }
     end
     return out
 end
