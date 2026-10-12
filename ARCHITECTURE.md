@@ -1037,19 +1037,19 @@ the current row. For each commit `C`:
    roots simply alternate columns.
 3. **Outgoing** = one Lane per parent. The first parent **continues the identity
    of the chain that runs into this commit** (spec §5): the best **pin rank**
-   first (each lane carries the rank of the best pinned ref at its birth tip,
-   counterparts sharing their local's; unranked otherwise), then prefer an incoming
+   first (each lane carries the rank of the best pinned ref at its birth tip —
+   pin-list entries only, never an implicit counterpart; unranked otherwise), then
+   prefer an incoming
    lane whose child has this commit as its FIRST parent, else any incoming lane (a
    merge's second-parent edge is still that branch continuing), and among the
    candidates take the most SENIOR — the smallest id. Ids are minted in row order
    and carried along a chain, so the smallest is the chain that started highest.
-   At a pinned tip whose rank strictly beats every incoming lane's, a merge's
-   extra-parent edge lane arriving there adopts the rank and continues; with none,
-   every incoming lane ends and a new ranked lane is born (`state.pin_birth`). The
-   ranks arrive as `opts.pin_rank` (ref id → rank; `columns.commit_rank` reads a
-   commit's best), each Lane carries `rank` and an extra-parent edge `extra` (the
-   adopt test — a flag, so a footer seed carries it across the seam), and the map
-   is part of the layout fingerprint `graph.extend_columns` checks. Under `gutter`
+   At a pinned tip whose rank strictly beats every incoming lane's, every incoming
+   lane ends (a merge's extra-parent edge included) and a new ranked lane is born
+   (`state.pin_birth`) in its **pinned colour** (below). The ranks arrive as
+   `opts.pin_rank` (ref id → rank; `columns.commit_rank` reads a commit's best),
+   each Lane carries `rank`, and the map is part of the layout fingerprint
+   `graph.extend_columns` checks. Under `gutter`
    a birth claims nothing when a fan has a Line of its own, and declines the parent
    swap, so the node reads in the newborn lane's colour.
    The choice reads the DAG, the row order and the ranks only, **never a column**,
@@ -1072,6 +1072,18 @@ the current row. For each commit `C`:
    calmed graph drifts back to the curated palette.
    Without generation (no truecolor), exhaustion instead **shares** a curated
    slot, reference-counted so it returns only when its last holder ends.
+   **Pinned colours** (spec §5.5): rank `k <= #tracks` owns curated slot `k`
+   (`columns.pinned_slots`, a pure function of the ranks). The session withholds
+   those slots from the FIFO before the first row (`pin_wait`/`held`, `in_use` 1);
+   a lane born with rank `r` takes the reservation over (`take_pin`), and the slot
+   returns via the ordinary `free_color` when that lane ends — or via `release_pin`
+   at the tip, after the ended lanes and in slot order, when no lane of its own is
+   born there. The share path skips held slots (all of them held → share among all),
+   and generated-slot retirement measures "comfortably full" against the slots not
+   held. A footer seed carrying a still-withheld slot is that pinned lane continuing,
+   so it takes the reservation over instead of counting it twice. Known up front,
+   so the streaming prefix property holds; the header pane passes the same slots as
+   `pane.header`'s `avoid` so its de-collision never hands one out.
 4. **Compaction** (under the `compact` / `survivors` layout policies, §5.6; the
    others hold every survivor in its column): each survivor shifts left through
    the run of *row-start* gaps
@@ -1794,11 +1806,13 @@ identity through the ranks.
 **implicit remote counterparts** (spec §10.6: every same-short-name remote branch,
 in `git remote` order then unlisted remotes by name — the `%` cycle's members —
 plus the tracked upstream when its short name differs; `select.pin_counterparts`)
-are NOT entries: `select.pin_rank` resolves them beside the list, giving each the
-rank of its local unless it is explicitly unpinned or already ranked (an
-explicitly pinned remote keeps its own place). `ctx:pin_rank()` is that table —
-ref id → rank, 1 = highest — and `ctx:effective_pinned()` is its key set, which
-remains what `view.owners` / `collapse_owners` and the pin icon consume, so **every existing pin consumer is unchanged**. `ctx:sync_pin_rank()` publishes the
+are NOT entries: `select.pin_rank` with counterparts on resolves them beside the
+list (each at its local's place unless explicitly unpinned or already ranked; an
+explicitly pinned remote keeps its own), and `ctx:effective_pinned()` is that
+table's key set — what `view.owners` / `collapse_owners` and the pin icon consume.
+`ctx:pin_rank()` is the same call with counterparts OFF — ref id → rank of each
+entry, 1 = highest — because counterparts take no rank and no pinned colour
+(spec §5.5/§10.6). `ctx:sync_pin_rank()` publishes the
 ranks as the layout input `opts.pin_rank` on both `ctx.opts` and the panes' frozen
 copy `ctx.pane_opts`; it runs at the top of every `reflow_build` (which `P`, every
 dialog key, the reset, a resync and a HEAD move all go through) and before the

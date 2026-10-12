@@ -689,14 +689,12 @@ function M.boundary_of(line, up)
                 -- take it from the edge carrying the Segment's own id (a fan hub's
                 -- shared wire lists several edges), so a footer seeded from this map
                 -- continues the lane under the rank the main view gave it.
-                -- `extra` likewise: whether it is a merge's extra-parent edge, which
-                -- the birth rule's adopt case reads.
-                local rank, extra
+                local rank
                 for _, e in ipairs(s.edges or {}) do
-                    if e.id == s.id then rank, extra = e.rank, e.extra break end
+                    if e.id == s.id then rank = e.rank break end
                 end
                 out[col] = { id = s.id, color = s.color, parent = s.parent,
-                    begin = s.begin, highlighted = false, edges = s.edges, rank = rank, extra = extra }
+                    begin = s.begin, highlighted = false, edges = s.edges, rank = rank }
             end
         end
     end
@@ -855,7 +853,7 @@ function M.footer(opts, pane_items, boundary, node_of)
     for col, lane in pairs(boundary) do
         local target = lane.parent and node_of[lane.parent.hash]
         if target and present[target] then
-            seed[col] = { id = lane.id, color = lane.color, rank = lane.rank, extra = lane.extra,
+            seed[col] = { id = lane.id, color = lane.color, rank = lane.rank,
                 begin = lane.begin,
                 parent = target, highlighted = false }
         else
@@ -1417,9 +1415,13 @@ end
 ---@param node_of table<string, table>?  -- hash → condensed node (continue_up's node_of_hash)
 ---@param lane_of (fun(node: table): table?)?  -- node → its branch's main-view { id, color }
 ---@param col_of (fun(node: table): integer?)?  -- node → its main-view column (left-right order)
+---@param avoid table<integer, any>?  -- palette slots a de-collided lane must not be handed:
+---   the pinned colours (§5.5, `columns.pinned_slots`). A lane may still KEEP one as its
+---   own main-view colour; only a replacement colour skips them.
 ---@return table  -- { rows = table[] }
-function M.header(items, boundary, node_of, lane_of, col_of)
+function M.header(items, boundary, node_of, lane_of, col_of, avoid)
     node_of = node_of or {}
+    avoid = avoid or {}
     -- The main-view lane id/colour for a node's branch, so each branch keeps its OWN
     -- distinct colour (matching the graph). Falls back to a given default.
     local function lane(node, def)
@@ -1466,10 +1468,12 @@ function M.header(items, boundary, node_of, lane_of, col_of)
         used_ids[id] = true
         return id
     end
+    -- A replacement colour never lands on a pinned colour (§5.5/§6.2): that slot reads
+    -- as its pinned branch, in the pane as in the graph.
     local function free_color(used, prefer)
         if prefer and not used[prefer] then return prefer end
         local c = 1
-        while used[c] do c = c + 1 end
+        while used[c] or avoid[c] do c = c + 1 end
         return c
     end
 

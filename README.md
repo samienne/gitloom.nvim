@@ -234,8 +234,11 @@ a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
 (§10.6). Pinning a local branch also pins its **remote counterparts**
 implicitly — every remote branch of the same name, plus its tracked upstream —
-at the same priority, so their lanes stay in full and a divergence is drawn
-rather than a remote collapsing. They are not separate dialog rows; `P` on one
+so their lanes stay in full and a divergence is drawn rather than a remote
+collapsing. Each pinned branch also keeps a **fixed colour**: the pin at
+position `k` in the list draws in the `k`-th palette colour, which no other
+branch takes until the pinned branch's lane ends (pins past the palette size
+draw an ordinary colour). Remote counterparts have no pinned colour. They are not separate dialog rows; `P` on one
 unpins just that ref, and `pin_upstream = false` turns them off. Every pinned
 branch's label carries a pin icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except
 HEAD's own label (`icons.pin`; `""` turns it off).

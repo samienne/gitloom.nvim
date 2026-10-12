@@ -93,14 +93,15 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.is_true(list[3].reserved)
     end)
 
-    it("pins the remote counterparts implicitly, at the local's rank (§10.6)", function()
+    it("pins the remote counterparts implicitly, as anchors only — no rank (§10.6)", function()
         local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
         assert.is_true(p.feature)
-        assert.is_true(p["origin/feature"]) -- implicit counterpart
+        assert.is_true(p["origin/feature"]) -- implicit counterpart: in the anchor set
         local rank = internal.pin_rank(ctx)
-        assert.equal(rank.feature, rank["origin/feature"])
+        assert.is_nil(rank["origin/feature"]) -- ...but not in the layout's rank map (§5/§5.5)
         assert.equal(4, rank.feature) -- below the three defaults
+        for id in pairs(rank) do assert.is_true(p[id]) end -- ranks ⊆ anchors
         for _, e in ipairs(internal.effective_pins(ctx)) do assert.not_equal("origin/feature", e.id) end
     end)
 
@@ -126,7 +127,7 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         local rank = internal.sync_pin_rank(ctx)
         assert.equal(rank, ctx.opts.pin_rank)
         assert.equal(rank, ctx.pane_opts.pin_rank)
-        assert.same({ master = 1, main = 2, dev = 3, feature = 4, ["origin/feature"] = 4 }, rank)
+        assert.same({ master = 1, main = 2, dev = 3, feature = 4 }, rank)
     end)
 
     it("honours an explicit unpin of a default anchor", function()

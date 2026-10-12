@@ -353,8 +353,11 @@ end
 --- `counterparts` on (`pin_upstream`), a local entry's implicit remote
 --- counterparts (`pin_counterparts`) take its rank, unless explicitly `unpinned`
 --- or already ranked — an explicitly pinned remote keeps its own place, and a
---- counterpart shared by two locals takes the better one. The keys are exactly
---- the effective anchor set; this table is the layout's `opts.pin_rank`. Pure.
+--- counterpart shared by two locals takes the better one. With `counterparts` on,
+--- the keys are exactly the effective anchor set (the focus default and the pin
+--- icon). With it `false` the table holds the list's entries only — that is the
+--- layout's `opts.pin_rank` (§5 identity, §5.5 pinned colours), since counterparts
+--- take no rank and no pinned colour (§10.6). Pure.
 ---@param pins PinEntry[]?                  the resolved pin list (`pin_resolve`)
 ---@param refs table<string, Ref>?
 ---@param remotes string[]?
