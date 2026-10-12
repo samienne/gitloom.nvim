@@ -181,6 +181,18 @@ Coverage:
   node keeps `◌`; a collapsed head holding HEAD keeps `◍` in the HEAD colour; an
   out-of-cone HEAD node dims; `icons.head` honoured and `""` turns it off; and a
   laid-out graph marks exactly HEAD's row, mirrored or not
+- `tests/label_color_spec.lua` — ref labels take their node's lane colour (§6
+  "Label colour", §12.2) through the real `display_item`: a plain row's labels
+  (branch group incl. `↑remote`, tag) equal the node glyph's `get_column_chars`
+  colour; a `gutter` `own_lane_up` node colours them from the up wire (unflagged:
+  the down wire); a collapsed `◍` head; each marker of a packed row its OWN node
+  colour; the attached label's `HEAD → ` prefix and a detached `HEAD` keep
+  `palette.head`, the h/l-selected label `palette.selected`, a pointer mark its
+  `hl`; out of cone the label is `dim_hl` of the lane colour (a packed marker per
+  marker), in cone / no pivot undimmed; `lane_label_colors = false` restores the
+  per-kind groups. Panes: `pane_labels`'s `arrow` span and `node_lane_hl` on a
+  header-style (segment-level `highlighted`) row matching the glyph. The pane
+  window glue (`render_pane`) is untested
 - `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
   `bump_recent` (the session MRU list — newest first, deduped, input not mutated),
   `ref_picker_items` (name → Ref registry → ordered picker entries: session-

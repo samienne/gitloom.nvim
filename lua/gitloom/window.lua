@@ -1412,6 +1412,7 @@ end
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
+---@field lane_label_colors? boolean  ref labels in their node's lane colour (default true); §6
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
@@ -4302,6 +4303,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Ref label placement (§6.1): "right" (default), "inline", or "dual".
         -- Cycle live with B.
         label_mode = "right",
+        lane_label_colors = true, -- ref labels take their node's lane colour (§6)
         -- External diff provider (§11.5): open is called with a DiffRange; the
         -- default opens diffview. Override open/label to use another diff plugin,
         -- or set open = nil to disable (no action label, D is a no-op).
@@ -5413,16 +5415,29 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local text = glyph_line(row.columns)
                 local c = row.commit
                 local lit = node_lit(c)
-                -- Ref labels in the SAME colours as the main view (HEAD, branches, tags);
+                -- Ref labels coloured as in the main view: the pane row's node lane
+                -- colour (§6 "Label colour"), HEAD's marker in the HEAD colour;
                 -- dimmed toward the background on an out-of-cone row (§6.2).
+                local lane = c and render.node_lane_hl(opts, row.columns, emphasis, c)
+                local function mark(s0, e0, g)
+                    if g and e0 > s0 then
+                        marks[#marks + 1] = { li, s0, e0, lit and g or render.dim_hl(opts, g) }
+                    end
+                end
                 for _, seg in ipairs(c and pane_labels(c, repo.head, pins) or {}) do
                     text = text .. " "
                     local s = #text
                     text = text .. seg.text
-                    -- A pointer mark (§11.7.6) carries its own colour; else by kind.
-                    local g = seg.hl or label_hl[seg.kind]
-                    if g then
-                        marks[#marks + 1] = { li, s, #text, lit and g or render.dim_hl(opts, g) }
+                    -- A pointer mark (§11.7.6) carries its own colour; a detached
+                    -- `HEAD` the HEAD colour; else the lane colour (or by kind).
+                    local g = seg.hl or ((seg.kind == "head" and not seg.arrow) and pal.head)
+                        or render.label_hl(opts, lane, label_hl[seg.kind])
+                    if seg.arrow and g ~= pal.head then
+                        mark(s, s + seg.arrow[1] - 1, g)
+                        mark(s + seg.arrow[1] - 1, s + seg.arrow[2], pal.head)
+                        mark(s + seg.arrow[2], #text, g)
+                    else
+                        mark(s, #text, g)
                     end
                 end
                 if c and c.collapsed and c.count then
