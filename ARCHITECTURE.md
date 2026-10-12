@@ -1790,8 +1790,12 @@ itself is a behaviour-preserving refactor within the current spec.
   labels left-aligned in the flex column, the second is a **message row** whose
   graph column is `passthrough_columns(item.columns, "down")` — a vertical-only
   projection of the commit's lanes that continues every down-going lane as a `│`
-  (no node), carrying the same edges so §12 dimming still applies. A `dual` commit
-  with no labels stays a single row. `B` cycles the mode. The label OWNING a node's
+  (no node), carrying the same edges so §12 dimming still applies, and whose
+  message is indented `render.DUAL_INDENT` (2) cells by leading spaces inside the
+  flex column — excluded from the shared widths, so no other row moves; mirrored,
+  the message still follows the graph, so the indent is on the graph side there
+  too — with `place_cursor` adding the indent to the flex offset to park on the
+  message. A `dual` commit with no labels stays a single row. `B` cycles the mode. The label OWNING a node's
   lane takes the node's lane colour (spec §6 "Label colour"), read by `node_lane_hl`
   — the SAME `top_lane` + `seg_color` + slot lookup `get_column_chars` colours the
   node glyph with, minus the HEAD-node override — so a label can never disagree with

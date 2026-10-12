@@ -1696,7 +1696,14 @@ selectable order (branch groups then tags; the current branch coloured as HEAD,
   carries the graph (with the commit's node) and the **ref labels** left-aligned
   after it; the **second row**, directly below, carries the commit **message**,
   with the graph's lanes continued downward as vertical wires (the same lane
-  layout, with **no node placed** on that row). Only commits that actually have
+  layout, with **no node placed** on that row). The message on the second row is
+  **indented by 2 cells** from the graph edge, so it reads as belonging to the
+  labelled row above rather than as a commit of its own; the indent sits inside
+  the message (flex) column, so the date / author / graph columns of every other
+  row keep their widths and alignment. The indent is on the graph side in both
+  orientations — under mirroring (§5.4) the message is still drawn after the
+  right-aligned graph, so indenting away from the graph nests it under the labels
+  just as in the unmirrored layout. Only commits that actually have
   ref decorations get the second row; a commit without labels stays a single row
   (node + message, as in `right` without the right-pin). Both rows are real buffer
   lines and belong to the same commit: navigation (§2) treats them as two rows of

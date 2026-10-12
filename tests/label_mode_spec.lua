@@ -129,3 +129,70 @@ describe("branch-line rendering", function()
         assert.is_true(found, "the │ should take the lane's palette slot")
     end)
 end)
+
+-- The dual message row's indent (spec §6.1): a labelled commit's message, on the
+-- second row, sits 2 cells further from the graph than an unlabelled commit's —
+-- inside the flex column, so no fixed column changes. Through the real display_item.
+describe("dual message row indent (§6.1)", function()
+    local function o(mode, mirror)
+        local base = helpers.opts()
+        base.palette.search = "Search"
+        base.label_mode, base.highlight, base.mirror = mode, false, mirror
+        return base
+    end
+    local function commit(refs)
+        return { hash = "h", message = "fix the thing", author = "ann", date = 0,
+            parents = {}, refs = refs or {} }
+    end
+    local function labelled() return commit({ { kind = "local", name = "alpha" } }) end
+    local function item(c)
+        return { type = "commit", commit = c,
+            columns = { col({ up = true, down = true }, 1), col({ up = true, down = true }, 2) } }
+    end
+    local function render(opts, c, match)
+        return g.display_item(opts, item(c), {}, nil, nil, nil, match)
+    end
+    local function same(a, b) assert.same(a, b) end
+
+    for _, mirror in ipairs({ false, true }) do
+        local tag = mirror and " (mirrored)" or ""
+
+        it("indents row 2's message by 2 cells vs an unlabelled commit" .. tag, function()
+            local two = render(o("dual", mirror), labelled())
+            local one = render(o("dual", mirror), commit())
+            assert.equals(2, #two.lines)
+            assert.equals("fix the thing", one.line[4].text)
+            assert.equals("  fix the thing", two.lines[2][4].text)
+            -- The fixed columns (date / author / graph) are untouched by the indent.
+            assert.equals("", two.lines[2][1])
+            assert.equals("", two.lines[2][2])
+            assert.equals(two.lines[1][3].text:len(), two.lines[2][3].text:len())
+        end)
+
+        it("leaves row 1 (graph + labels) unindented" .. tag, function()
+            local two = render(o("dual", mirror), labelled())
+            assert.equals("(alpha)", two.lines[1][4].text)
+        end)
+
+        it("shifts the filter match highlight with the indent" .. tag, function()
+            local two = render(o("dual", mirror), labelled(), { query = "thing" })
+            local f = two.lines[2][4]
+            local hit
+            for _, hl in ipairs(f.highlight) do
+                if hl.hl == "Search" then hit = hl end
+            end
+            assert.is_not_nil(hit)
+            assert.equals("thing", f.text:sub(hit.start_pos + 1, hit.end_pos))
+        end)
+
+        it("leaves one-line dual and the other modes byte-identical" .. tag, function()
+            -- A labelless dual commit renders exactly as in `right` mode.
+            same(render(o("right", mirror), commit()).line, render(o("dual", mirror), commit()).line)
+            for _, mode in ipairs({ "right", "inline" }) do
+                local el = render(o(mode, mirror), labelled())
+                assert.is_nil(el.lines)
+                assert.is_nil(el.line[4].text:find("^ "), mode)
+            end
+        end)
+    end
+end)
