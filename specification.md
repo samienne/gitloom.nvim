@@ -562,10 +562,13 @@ tiers — each tier decides only between the lanes the previous one left tied:
 1. **First parent.** A lane whose child **has this commit as its FIRST parent** —
    the child that genuinely continues *into* it — beats one arriving as a merge's
    second-or-later parent edge.
-2. **Seniority.** The **most senior** lane wins — the smallest `id`. Ids are minted
-   in row order and carried along a whole first-parent chain, so the smallest id is
-   the chain that started highest; a topic forking off a trunk is always junior to
-   it.
+2. **Newest.** The **newest** lane wins — the largest `id`. Ids are minted in row
+   order and carried along a whole first-parent chain, so the largest id is the
+   chain that started **lowest** — nearest this commit. Where nothing pinned and no
+   first-parent edge decides, the branch the reader has just followed down into the
+   junction carries on, and the older chain ends there. The trunk keeps its colour
+   through such a junction by being **pinned** (tier 0) — `master` / `main` / `dev`
+   and HEAD are pinned by default (§10.6) — not by having started first.
 
 So a first-parent chain reads as one `id` and one `color` end to end, and a lane
 arriving only as a merge's extra-parent edge still continues when nothing better
@@ -1195,8 +1198,9 @@ identical to not having the rule at all.
 
 Clause 3 makes the saving **provable** rather than likely. Clause 2 says the next
 subject row is that parent; it does not say that row will *continue* on the Lane it
-was handed. If another, more senior Lane also arrives there — another child of that
-parent, laid out earlier, so a smaller `id` — that Lane is the one continued (§5),
+was handed. If another Lane also arrives there — another child of that parent — and
+wins §5 identity over the handed one (a better rank, a first-parent edge, or a
+larger `id`), that Lane is the one continued,
 the handed Lane is evicted after all, and the row pays its handover anyway *on top
 of* a spine break that bought nothing. "Its only in-set child is this merge" removes
 the contest: one candidate, so it wins by construction. Measured, clause 3 declines
@@ -1582,30 +1586,56 @@ follows the pin set live (`P`, the dialog §10.6.1, a resync), and
 upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
 §6.3.
 
-**Label colour.** A ref label is drawn in the colour of the **lane its commit's
-node is drawn in** — exactly the colour the node glyph gets (§5, §12.2): the cell's
-top Segment's palette slot, including a `gutter` parent-swapped node that takes its
-colour from the wire arriving from above (§5.6), and a collapsed `◍` head's or a
-labelled junction's `◍` colour. The whole label takes it — brackets, the pin icon,
-the name and the `↑remote,…` list — so a label reads as belonging to its lane. A
-remote counterpart's label on a counterpart lane (§5.5) therefore shows its local's
-colour lightly dimmed (out of the cone, the brighter counterpart dim of §12.2);
-one in sync with its local sits on the pinned lane, in full colour.
-Three things keep their own highlight: the **HEAD marker** (a detached `HEAD`
-label, and the `HEAD → ` prefix of the current branch's label) stays in
-`palette.head`, even though HEAD's node glyph is itself drawn in `palette.head`
-(§5.3) — the branch name after the arrow takes the lane colour; the upstream
-divergence tokens keep `palette.track` (§6.3); and a ref carrying its own colour
-(a submodule pointer mark, §11.7.6) keeps it. The `h`/`l`-**selected** label (§2)
-still draws in `palette.selected`, over the lane colour. On a **packed marker
-row** (§10.4) each marker's labels take *that marker's* node colour; in the
-**context panes** (§6.2) a label takes its pane row's node colour. The ref
-**kind** is carried by the bracket — `( )` branch, `[ ]` tag, `{ }` worktree — and
-`↑` for remotes; what colour no longer shows is whether a branch group has a
-local branch or is remote-only. `lane_label_colors = false` (§8) restores the
-per-kind groups (`palette.branch` / `remote` / `tags` / `worktree`, the current
-branch's whole label in `palette.head`). Out-of-cone labels dim like their lane
-(§12.2).
+**Label colour.** A node's **lane colour** — exactly the colour its node glyph gets
+(§5, §12.2): the cell's top Segment's palette slot, including a `gutter`
+parent-swapped node that takes its colour from the wire arriving from above (§5.6),
+and a collapsed `◍` head's or a labelled junction's `◍` colour — goes to **one**
+label on the node: the label of the ref that **owns** the lane. Every other label on
+the node is drawn in its **per-kind** colour (`palette.branch` / `remote` / `tags` /
+`worktree`, the current branch's whole label in `palette.head` — what
+`lane_label_colors = false` gives), so a label only reads as belonging to a lane
+when the lane is its own.
+
+The **owner** is decided per node, in two steps:
+
+1. **The ref the lane was born for.** If the node's lane colour is the **pinned
+   colour** (§5.5) of a pinned ref pointing at this node — rank `k`, slot `k` — or
+   the **counterpart colour** `-k` of an implicit remote counterpart pointing at it,
+   that ref's label owns the lane. A pinned colour is withheld until its ref's tip
+   (§5.5), and only a counterpart lane carries `-k`, so this is exactly "the lane
+   was born here for that ref" (a birth at a pinned or a counterpart tip, §5, or a
+   pinned branch's own tip lane) — read off the colour, so the panes, which carry
+   the main view's colours (§6.2), agree without any layout data. A pin past the
+   curated palette has no pinned colour, and falls to step 2.
+2. **Otherwise the first label** in logical order: the current branch's group (the
+   `(HEAD → x …)` label), then the other branch groups, then tags, then worktree
+   labels. A detached HEAD's bare `HEAD` marker is never an owner candidate (it is
+   always `palette.head`) — but when the lane was born for a pinned detached `HEAD`
+   (step 1), HEAD owns it and every other label is per-kind.
+
+A **branch group** (a local and its `↑remote,…` list) is **one** label: it owns when
+any of its refs does, and then the whole label takes the lane colour — brackets, the
+pin icon, the name and the remote list. A remote's default-branch symref
+(`origin/HEAD`) is never a label (§3.2), so it can never take ownership from the
+branch it points at. So on a commit carrying `origin/dev` (the counterpart of a
+pinned `dev`, whose counterpart lane is born there), `origin/HEAD` and
+`origin/feature`, only `(dev ↑origin)` shows `dev`'s dimmed counterpart colour;
+`(feature ↑origin)` is in the remote colour. A counterpart in sync with its local
+sits on the pinned lane, in its local's group, in full colour.
+
+Three things keep their own highlight on every label: the **HEAD marker** (a
+detached `HEAD` label, and the `HEAD → ` prefix of the current branch's label) stays
+in `palette.head`, even though HEAD's node glyph is itself drawn in `palette.head`
+(§5.3) — the branch name after the arrow takes the lane colour when it owns; the
+upstream divergence tokens keep `palette.track` (§6.3); and a ref carrying its own
+colour (a submodule pointer mark, §11.7.6) keeps it. The `h`/`l`-**selected** label
+(§2) still draws in `palette.selected`. On a **packed marker row** (§10.4) each
+marker is its own node, with its own owner among its labels and *that marker's* node
+colour (a non-owner marker label is `palette.branch`); in the **context panes**
+(§6.2) a pane row's node colour goes to its owner the same way. The ref **kind** is
+carried by the bracket — `( )` branch, `[ ]` tag, `{ }` worktree — and `↑` for
+remotes. `lane_label_colors = false` (§8) gives every label its per-kind colour.
+Out-of-cone labels dim like their lane (§12.2), owner or not.
 
 **Ref width budget.** The refs use the row's free width: they may take
 everything the message does not need — its natural width, but never reserving
@@ -1693,8 +1723,8 @@ branch, folding toward the checked-out commit.
 **What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
 labels only — no date, author, or message. The labels read as in the main view
 (§6): HEAD's label — `(HEAD → <branch>)` or the detached `HEAD` — first, its
-HEAD marker in the HEAD colour, and every label in its pane row's node lane
-colour (§6 "Label colour"). Off-screen topology is folded onto
+HEAD marker in the HEAD colour, and the label owning its pane row's node lane in
+that lane's colour, the others per-kind (§6 "Label colour"). Off-screen topology is folded onto
 the **pinned anchors** (§10.6): an anchor's line is drawn; everything else is
 contracted.
 
@@ -1969,9 +1999,9 @@ Endpoint     = Commit | "index" | "worktree"
   counterpart lane is drawn in the plain slot colour. `counterpart_dim_out` is a
   counterpart lane's blend **out of the cone** (§12.2; default `0.75 × dim`, so
   it stays brighter than every other dimmed lane).
-- `lane_label_colors` — draw each ref label in its commit node's lane colour
-  (§6 "Label colour"). **Default true.** `false` restores the per-kind palette
-  groups. No toggle key.
+- `lane_label_colors` — draw the label of the ref that owns a node's lane in the
+  node's lane colour (§6 "Label colour"; the other labels stay per-kind). **Default
+  true.** `false` restores the per-kind palette groups for every label. No toggle key.
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
