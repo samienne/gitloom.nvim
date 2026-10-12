@@ -328,7 +328,7 @@ describe("the real key registry (window.lua GRAPH_KEYS, §17.1)", function()
                 seen[lhs] = true
             end
         end
-        for _, lhs in ipairs({ "R", "?", "<C-Space>", "<C-@>", "V", "D", "P", "<leader>b", "j", "q" }) do
+        for _, lhs in ipairs({ "R", "?", "<C-Space>", "<C-@>", "V", "D", "P", "<leader>b", "%", "j", "q" }) do
             assert.is_true(seen[lhs], lhs)
         end
     end)
@@ -372,6 +372,30 @@ describe("the real key registry (window.lua GRAPH_KEYS, §17.1)", function()
             if e.key == "<Space>" then n = n + 1 end
         end
         assert.equals(1, n)
+    end)
+
+    it("offers % (the local / remote cycle) in the commit and branch contexts only", function()
+        local H = ("a"):rep(40)
+        local function cycles(row)
+            local n = 0
+            for _, e in ipairs(palette.palette_entries({ keys = keys, row = row })) do
+                if e.key == "%" then n = n + 1 end
+            end
+            return n
+        end
+        local plain = { kind = "plain", commit = { hash = H, refs = {} } }
+        local branch = { kind = "branch", state = "expanded", commit = { hash = H, refs = {} } }
+        local packed = { kind = "markers", markers = { "a", "b" }, commit = { hash = H, refs = {} } }
+        assert.equals("commit", palette.row_context(plain))
+        assert.equals("branch", palette.row_context(branch))
+        assert.equals(1, cycles(plain))
+        assert.equals(1, cycles(branch))
+        assert.equals(0, cycles(packed)) -- markers context, no marker selected
+        local n = 0
+        for _, e in ipairs(palette.palette_entries({ keys = keys, selection = true })) do
+            if e.key == "%" then n = n + 1 end
+        end
+        assert.equals(0, n)
     end)
 
     it("the help lists every bound key", function()

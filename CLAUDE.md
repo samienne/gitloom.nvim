@@ -189,6 +189,21 @@ Coverage:
   `ref_decoration_index` (picked ref → its decoration index for pre-selection:
   local/remote → branch group by short name, tag → after the branches, HEAD/absent
   → nil)
+- `tests/ref_cycle_spec.lua` — the `%` local ⇄ remote branch cycle (spec §2):
+  `ref_cycle_members` (local first, then remotes in `git remote` order, then any
+  unlisted remote by name — the fallback before `ctx.remotes` loads; only existing
+  refs; same-commit members included), `ref_cycle_next` (the step + wrap-around,
+  starting from a remote, a remote-only branch, `alone` with the short name for no
+  counterpart, `none` for a tag / worktree / HEAD / unknown ref; stepping past a
+  member whose commit is not in the `visible` set — wrapping round, `hidden` with
+  the short name when no other member is visible), `visible_hashes` (the jumpable
+  set: row commits, collapsed regions, packed markers + their regions — what
+  `goto_hash` finds) and `cycle_source`
+  (the h/l-selected decoration, else the first branch label with HEAD's first; nil
+  on a tag- / worktree- / detached-HEAD-only or ref-less row). The window glue —
+  the jump and the `ctx.ref_cycle_last` grouped-member memory — is untested.
+  `tests/palette_spec.lua` asserts the real registry offers `%` in the commit and
+  branch contexts (not markers / selection)
 - `tests/view_spec.lua` — the view builder `view.project` (spec §10) — incl.
   **HEAD is always an anchor** (§10.6/§10.7: a detached HEAD's commit stays a
   normal row, never folded into a `◍`; an attached HEAD is no owner of its own); monotone
@@ -930,7 +945,8 @@ marker-packing pass; §10.4), `collapse_owners` (the region's collapsible
 owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
 `pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
 `reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), `smartcase_match` /
-`filter_keep` (the filter-search matcher + keep-set; §16.2), and `selected_ref` /
+`filter_keep` (the filter-search matcher + keep-set; §16.2), `ref_cycle_members` / `ref_cycle_next` / `cycle_source` / `visible_hashes` (the `%` local ⇄ remote
+cycle; §2), and `selected_ref` /
 `checkout_spec` (checkout; §10.4/§10.4.1 — the row entries themselves are
 `require("gitloom.graph.palette").row_entries`).
 `window._internal` additionally exposes `keys` (the `GRAPH_KEYS` key registry, §17.1),

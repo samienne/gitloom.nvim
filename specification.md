@@ -104,6 +104,28 @@ persistent view.
   it; §6), so `<CR>` / the palette's row actions act on that branch with no further
   navigation. Picking HEAD — whose label is its branch's, or the unselectable detached `HEAD` — just centers, cursor at the
   message.
+  `%` **cycles a branch between its local and remote counterparts**. The source
+  is the ref selected with `h`/`l`, else the row's first branch label (HEAD's
+  branch first on the HEAD row; on a packed-marker line, the selected — else the
+  first — marker's). For the branch's short name `x` the cycle is the local `x`,
+  then `<remote>/x` for each remote in `git remote` order (any other remote
+  holding an `x` after them, by name), then back to `x` — matched by **name**,
+  never by upstream configuration, and only refs that exist; a remote-only branch
+  cycles among its remotes. A member whose commit cannot be jumped to — not in
+  the current projection (a `hidden` branch, §10; filtered out, §16) — is
+  **stepped past**, decided up front so the cycle never sticks on it; when no
+  other member is visible, `%` stays put with one notice `no other visible ref
+  for x`. Each step is a `<leader>b` jump to the next member
+  (same row resolution, collapsed-region landing, label pre-selection and
+  `<C-o>`/`<C-i>` history). Members on the **same commit are not skipped**: since
+  a local branch and its same-named remotes on one commit share one label
+  (`dev ↑origin`, §6.3) and one selection, gitloom remembers which member `%` last
+  landed on for as long as that selection stands (any `h`/`l`, row move or reflow
+  ends it), so repeated `%` steps through the grouped members; whenever the
+  cursor stays on its row a short notice names the ref now current with its
+  position (`origin/dev (2/3)`). A row with no branch label (tag-, worktree- or
+  detached-HEAD-only, or ref-less), or a selected tag / worktree, does nothing
+  but say so; a branch with no counterpart anywhere notices `no other ref for x`.
   `?` opens a float listing **every** graph key, grouped, generated from the same
   **key registry** the palette reads (§17.1), so it cannot drift from what is
   bound; every graph key is also bound with a `desc` (`Gitloom: …`), so
@@ -3699,7 +3721,7 @@ from (§2) and the palette's third section is drawn from. Each entry has:
   help but **never** in the palette;
 - the **contexts** it applies to — none means everywhere (the view toggles,
   `<leader>b`, `L`, `/`, `<leader>gl`, `R`, `?`); `P` and `<Space>` only in the
-  `branch` context; `D`, `<CR>` and `V` in `commit` and `selection`; `K` in
+  `branch` context; `D`, `<CR>` and `V` in `commit` and `selection`; `K` and `%` in
   `commit` and `branch`;
 - optionally a **condition** on the same session state (`D` needs a diff
   provider; `<Space>` is not offered on a mainline row, where there is nothing to

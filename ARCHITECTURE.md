@@ -1783,6 +1783,17 @@ restores the graph cursor by hash — the same sequence `P` uses. `<CR>` and the
 uses (`ctx:ref_picker_format`, `ctx:jump_to_ref`, `ref_picker_items`), extracted
 so there is one ref picker, not two.
 
+`%` (`GRAPH_HELPERS.ref_cycle`, §2) is a third `jump_to_ref` caller: the pure
+`select.cycle_source` picks the row's source ref and `select.ref_cycle_next` /
+`ref_cycle_members` the next local / remote namesake (remotes in `ctx.remotes`
+order), skipping members outside `select.visible_hashes(repo.display)` — the set
+`goto_hash` can land on — so a hidden ref is stepped past up front instead of
+`jump_to_ref`'s "not visible" notice sticking the cycle on it. Because `group_refs` folds a local branch and its same-commit remotes
+into one label — one selection index — the window keeps `ctx.ref_cycle_last`
+(the ref landed on + the `selection_state` it left) and continues from it while
+the selection is unchanged, so grouped members are stepped through rather than
+skipped.
+
 Note these four helpers are **`GRAPH_HELPERS` fields, not module locals**:
 window.lua sits at LuaJIT's **200-local chunk limit** (a second ceiling beyond
 the 60-upvalue one the tables were introduced for), and adding four locals

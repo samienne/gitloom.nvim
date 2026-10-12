@@ -621,4 +621,114 @@ function M.checkout_spec(commit, ref)
         label = ("Checkout commit %s (detached)"):format(c.hash:sub(1, 7)) }
 end
 
+---@class RefCycleMember
+---@field name string   the ref's name (`dev`, `origin/dev`)
+---@field kind "local"|"remote"
+---@field hash string   the commit it points at
+
+--- The local ⇄ remote cycle of the branch short name `short` (§2, `%`): the local
+--- branch `short` first, then `<remote>/short` for each remote in `remotes` order
+--- (`git remote`), then any other remote's `*/short` the registry holds, sorted
+--- (covers a remote list that has not loaded yet). Only refs that exist and point
+--- at a commit. Matched by name, never by upstream configuration; members on the
+--- same commit are all included. Pure.
+---@param refs table<string, Ref>?  the repo's name → Ref registry
+---@param remotes string[]?  remote names in `git remote` order
+---@param short string?
+---@return RefCycleMember[]
+function M.ref_cycle_members(refs, remotes, short)
+    local out, seen = {}, {}
+    if not refs or not short then return out end
+    local function add(name, kind)
+        local r = refs[name]
+        if seen[name] or not r or r.kind ~= kind or not r.commit then return end
+        seen[name] = true
+        out[#out + 1] = { name = name, kind = kind, hash = r.commit.hash }
+    end
+    add(short, "local")
+    for _, remote in ipairs(remotes or {}) do add(remote .. "/" .. short, "remote") end
+    local rest = {}
+    for name, r in pairs(refs) do
+        if r.kind == "remote" and not seen[name] and name:match("^[^/]+/(.+)$") == short then
+            rest[#rest + 1] = name
+        end
+    end
+    table.sort(rest)
+    for _, name in ipairs(rest) do add(name, "remote") end
+    return out
+end
+
+--- The ref `%` starts from on a row (§2): the decoration selected with `h`/`l`
+--- (`index`), else the row's first branch label — HEAD's branch first on the HEAD
+--- row, as `group_refs` orders it. A branch group stands for its local branch
+--- (as `selected_ref`). nil when nothing qualifies: no selection and no branch
+--- label (a tag- / worktree- / detached-HEAD-only or ref-less row). A selected tag
+--- or worktree is returned as is — `ref_cycle_next` refuses it. Pure.
+---@param commit { refs: Ref[] }?
+---@param index integer?
+---@return SelectedRef?
+function M.cycle_source(commit, index)
+    if not commit then return nil end
+    if index then return M.selected_ref(commit, index) end
+    if #git.group_refs(commit.refs).branches == 0 then return nil end
+    return M.selected_ref(commit, 1)
+end
+
+--- The set of commit hashes a jump can land on in the projection `display` (§2):
+--- every row's commit, every hash a collapsed head's region folds in, and every
+--- packed marker with its region — exactly what the window's `goto_hash` finds.
+--- A hash outside it is hidden (a `hidden` branch, or filtered out). Pure.
+---@param display OrderItem[]?
+---@return table<string, boolean>
+function M.visible_hashes(display)
+    local out = {}
+    for _, it in ipairs(display or {}) do
+        local c = it.commit
+        if c and c.hash then out[c.hash] = true end
+        if c and c.collapsed then
+            for _, h in ipairs(c.region or {}) do out[h] = true end
+        end
+        if it.type == "markers" then
+            for _, m in ipairs(it.markers or {}) do
+                if m.hash then out[m.hash] = true end
+                for _, h in ipairs(m.region or {}) do out[h] = true end
+            end
+        end
+    end
+    return out
+end
+
+--- The ref `%` moves to from `current` (a local or remote branch name; §2): the
+--- member after it in `ref_cycle_members`, wrapping round, skipping any member
+--- whose commit is not in `visible` (a `visible_hashes` set; nil = all visible),
+--- so the cycle steps past a hidden ref instead of sticking on it. On failure
+--- returns nil and the reason: `"none"` when `current` is not a local / remote
+--- branch in `refs` (a tag, a worktree, HEAD, unknown), `"alone"` (plus the short
+--- name) when the cycle has no other member, `"hidden"` (plus the short name) when
+--- it has others but none is visible. Pure.
+---@param refs table<string, Ref>?
+---@param remotes string[]?
+---@param current string?
+---@param visible table<string, boolean>?
+---@return RefCycleMember? next
+---@return RefCycleMember[]|"none"|"alone"|"hidden" members_or_reason
+---@return string? short  the branch's short name
+function M.ref_cycle_next(refs, remotes, current, visible)
+    local r = refs and current and refs[current]
+    if not r or (r.kind ~= "local" and r.kind ~= "remote") then return nil, "none" end
+    local short = current --[[@as string]]
+    if r.kind == "remote" then short = short:match("^[^/]+/(.+)$") or short end
+    local members = M.ref_cycle_members(refs, remotes, short)
+    if #members < 2 then return nil, "alone", short end
+    local at = 0
+    for i, m in ipairs(members) do
+        if m.name == current then at = i; break end
+    end
+    for k = 1, #members do
+        local m = members[(at + k - 1) % #members + 1]
+        if m.name ~= current and (not visible or visible[m.hash]) then return m, members, short end
+    end
+    return nil, "hidden", short
+end
+
 return M

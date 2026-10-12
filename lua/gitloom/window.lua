@@ -2977,6 +2977,69 @@ GRAPH_HELPERS.jump_to_ref = function(ctx, gwin, name, kind, hash)
     local h = ctx:cursor_hash(ctx.last_line)
     if h then saved_positions[ctx.repo_key] = h end
     ctx:update_panes()
+    return true
+end
+
+-- %: cycle the row's branch between its local and remote counterparts (§2). The
+-- source is the h/l-selected ref, else the row's first branch label; the target
+-- is the next member of `selectm.ref_cycle_next`, jumped to like `<leader>b`.
+-- A local branch and its same-named remotes on one commit share ONE label (one
+-- selection index), so the selection alone cannot say which member is current:
+-- `ctx.ref_cycle_last` remembers the ref `%` landed on and the selection it left,
+-- and while the selection is still exactly that one (same row object, same index
+-- — any h/l, row move or reflow invalidates it) the cycle continues from it. When
+-- the cursor stays on its row, a notice names the new ref (`origin/dev (2/3)`).
+GRAPH_HELPERS.ref_cycle = function(ctx)
+    local w = ctx:win()
+    if not w or ctx.sel.active then return end
+    local line = vim.api.nvim_win_get_cursor(w)[1]
+    local item = ctx:order_at(line)
+    if not item then return end
+    local st = ctx.selection_state
+    local commit, index
+    if item.type == "markers" then
+        -- A packed line: the selected marker (else the first), its first branch.
+        local units = marker_units(item)
+        local u = units[(st.commit == item and st.index) or 1]
+        commit = u and u.marker
+    else
+        commit = item.commit
+        index = (commit and st.commit == commit) and st.index or nil
+    end
+    local src = selectm.cycle_source(commit, index)
+    if not src or (src.kind ~= "local" and src.kind ~= "remote") then
+        vim.notify("gitloom: no branch on this row to cycle", vim.log.levels.INFO)
+        return
+    end
+    local current, refs = src.name, ctx.repo.refs
+    local last = ctx.ref_cycle_last
+    if last and st.index and last.sel == st.commit and last.index == st.index then
+        local lr = refs[last.name]
+        local short = src.short or src.name
+        local lshort = lr and (lr.kind == "remote" and last.name:match("^[^/]+/(.+)$") or last.name)
+        if lshort == short then current = last.name end
+    end
+    local visible = selectm.visible_hashes(ctx.repo.display)
+    local nxt, members, short = selectm.ref_cycle_next(refs, ctx.remotes, current, visible)
+    if not nxt then
+        if members == "alone" then
+            vim.notify(("gitloom: no other ref for %s"):format(short), vim.log.levels.INFO)
+        elseif members == "hidden" then
+            vim.notify(("gitloom: no other visible ref for %s"):format(short), vim.log.levels.INFO)
+        else
+            vim.notify("gitloom: no branch on this row to cycle", vim.log.levels.INFO)
+        end
+        return
+    end
+    if not ctx:jump_to_ref(w, nxt.name, nxt.kind, nxt.hash) then return end
+    ctx.ref_cycle_last = { name = nxt.name, sel = st.commit, index = st.index }
+    if vim.api.nvim_win_get_cursor(w)[1] == line then
+        local pos = 1
+        for i, m in ipairs(members --[[@as RefCycleMember[] ]]) do
+            if m.name == nxt.name then pos = i end
+        end
+        vim.notify(("gitloom: %s (%d/%d)"):format(nxt.name, pos, #members), vim.log.levels.INFO)
+    end
 end
 
 -- <leader>b: jump to a branch / ref via snacks.picker (§2).
@@ -3765,6 +3828,9 @@ local GRAPH_KEYS = {
     -- Branches, refs & search
     { key = "<leader>b", run = h_refpick, group = "refs", desc = "Jump to branch / ref…",
         help = "Jump to a branch / ref (picker; recent first)" },
+    { key = "%", run = function(ctx) ctx:ref_cycle() end, group = "refs", contexts = { "commit", "branch" },
+        desc = "Cycle local / remote branch",
+        help = "Cycle the branch between its local and remote counterparts (x → origin/x → … → x)" },
     { key = "P", run = h_pin, group = "refs", contexts = { "branch" }, desc = "Pin / unpin branch",
         help = "Pin / unpin the branch under the cursor as an anchor" },
     { key = "<Space>", run = h_space, group = "refs", contexts = { "branch" },
@@ -4354,6 +4420,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field filter? { query: string, keep: table<string,boolean>, current?: string }  in-graph filter-search (§16); nil = none
     ---@field filter_gen integer     filter live-rebuild debounce generation (§16.4)
     ---@field remotes? string[]     `git remote` names for the palette (§17.1); nil until the first read lands
+    ---@field ref_cycle_last? { name: string, sel: any, index: integer? }  the ref `%` last landed on + the selection it left (§2), so a grouped label's members can be stepped through
     ---@field remote_busy? string   the palette fetch / pull, branch sync, examine or Return running now (its label), nil when idle (§17.3, §10.4.2)
     ---@field base_view { modes: table, pins: PinEntry[], unpinned: table<string,boolean> }  base view-state tables restored on filter exit (§16.1)
     ---@field persist_config table<string, any>  configuration-resolved value of each persisted key: the save base + Reset target (§18.3/§18.5)
