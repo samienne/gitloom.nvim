@@ -638,7 +638,9 @@ Coverage:
   a large real-world topology (every cutoff, 0 problems) during verification, the
   header `cap`
   (`keep_first`: keep the tip + seam-nearest rows, report the elided `+N above`
-  count), the pure **whole-commit seam** functions — both in **screen-row space** on the
+  count) and the footer `cap` (keep the root together with the `virtual` lines drawn
+  directly above it), `drawn_lines` (a row's above / commit / merge lines flattened, one
+  entry each), the pure **whole-commit seam** functions — both in **screen-row space** on the
   `screen_lines` model, exact mirrors: `header_seam(sm, ts, cover)` walks **down** from the
   top visible **screen row** `ts` to the first block **start** leaving ≥ cover rows above
   (seam = that item's **split** fan else columns; the header butts its top edge), and
@@ -683,7 +685,12 @@ Coverage:
   (empty `terminate`), and lane **id-continuity** down every row. Guards the footer-layout
   stage against a mishandled virtual-line seam (the class the header's `header_seam` fixed).
   The seam-**picking** itself is the pure `pane.footer_seam` (below), unit-tested in
-  `pane_spec` alongside `header_seam`
+  `pane_spec` alongside `header_seam`. Plus the footer **as drawn**, under every layout
+  policy with the pane's OWN inline merge style: `pane.footer`'s `rows` are drawn lines
+  (one screen row each, `pane.drawn_lines`), so consecutive entries must wire together —
+  same column, same lane id. Guards the `gutter` regression where the window drew only
+  each row's commit line and dropped the policy's handover rows (§5.6), leaving a
+  floating turn and an orphaned root
 - `tests/screen_window_spec.lua` — the **FAITHFUL** screen-coordinate test: renders a buffer
   with `virt_lines` in a **real nvim window** EXACTLY as gitloom does (split →
   `virt_lines_above=true`, merge → below) and checks against nvim's ACTUAL rendering

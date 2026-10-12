@@ -138,6 +138,70 @@ local function check_seam(b, seam_line, ctx, bad)
     if cp then bad[#bad + 1] = cp end
 end
 
+-- The pane's OWN merge style (window.lua's `pane_opts`): every fan inline, so the
+-- only lines a footer row can render besides its commit line are a policy's
+-- virtual rows — the `gutter` handovers (§5.6).
+local PANE_STYLE = { allow_merge_on_split = false, merge_on_separate_line = false,
+    split_on_separate_line = false }
+
+-- The footer AS DRAWN: the window renders one screen line per `res.rows` entry,
+-- from its `.columns` alone (a row's `above`/`merge` would never reach the screen).
+-- So consecutive entries must wire together exactly: a wire leaving a cell
+-- downward lands in a cell entering from above, in the same column, and vice versa.
+-- A dropped handover row is precisely a wire with nothing on the other side — the
+-- floating `╭` stub and the orphaned root the gutter footer drew on a real repo.
+local function drawn_problem(rows, ctx)
+    for i = 1, #rows - 1 do
+        local a, b = rows[i].columns or {}, rows[i + 1].columns or {}
+        for col = 1, math.max(#a, #b) do
+            local down = a[col] and a[col].connectivity.down or false
+            local up = b[col] and b[col].connectivity.up or false
+            if down ~= up then
+                return ("%s: drawn lines %d/%d col %d — %s"):format(ctx, i, i + 1, col,
+                    down and "a wire leaves downward into nothing" or "a wire enters from above out of nothing")
+            end
+            -- ...and it is the SAME lane on both sides (a handover moves lanes
+            -- sideways, so a dropped one can also leave two unrelated wires abutting).
+            if down then
+                local function id(cell, dir)
+                    for _, s in ipairs(cell.lanes or {}) do if s.connectivity[dir] then return s.id end end
+                end
+                local d, u = id(a[col], "down"), id(b[col], "up")
+                if d ~= u then
+                    return ("%s: drawn lines %d/%d col %d — lane %s continues as lane %s"):format(
+                        ctx, i, i + 1, col, tostring(d), tostring(u))
+                end
+            end
+        end
+    end
+end
+
+for _, policy in ipairs({ "compact", "survivors", "linear", "straight", "gutter" }) do
+describe("large real-world footer replay, as drawn with the pane style [" .. policy .. "] (§6.2)", function()
+    it("every drawn footer line connects to the next", function()
+        local b = build(policy)
+        local popts = vim.tbl_extend("force", {}, b.opts)
+        popts.merge_style = PANE_STYLE
+        local bad = {}
+        for si = 1, #b.display - 1 do
+            local row = b.main[si]
+            local seam_line = row.merge or row.columns
+            local boundary = pane.boundary_of(seam_line)
+            if next(boundary) then
+                local cond = pane.continue(boundary, b.pinned, {}, function(n) return b.idx[n.hash] end)
+                if #cond.items > 0 then
+                    local res = pane.footer(popts, cond.items, boundary, cond.node_of_hash)
+                    local p = drawn_problem(res.rows, ("si=%d"):format(si))
+                    if p then bad[#bad + 1] = p end
+                end
+            end
+        end
+        assert.equals(0, #bad,
+            #bad .. " footer(s) drawn with broken wires:\n  " .. table.concat(bad, "\n  ", 1, math.min(#bad, 10)))
+    end)
+end)
+end
+
 -- The footer threads ONE shared `opts` into both `columns.layout` (the main view)
 -- and `pane.footer` (the seeded pane), so it picks the layout policy (§5.6) up for
 -- free. The seam CONTRACT is policy-independent — every seeded lane keeps its

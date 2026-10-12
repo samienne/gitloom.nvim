@@ -324,7 +324,7 @@ end
 --- every lane in two at the gap: no head, no junction, a dangling stub. That is the
 --- continuity bug this avoids.) A **footer** (`keep_first` off) runs seam→root (seam
 --- at the top): it keeps the seam-nearest rows and the final **root** (it is small
---- and the root anchors it). Returns the kept rows and the number elided.
+--- and the root anchors it) together with any virtual lines drawn right above it. Returns the kept rows and the number elided.
 --- A capped **header** also reports the **names of the pinned anchors it elided** (the
 --- tips it dropped), so the `+N above` marker can name them — the off-screen anchors stay
 --- visible-by-name even when the header can't draw their ◍ heads (spec §6.2). Order is
@@ -354,8 +354,13 @@ function M.cap(rows, max, keep_first)
             end
         end
     else
-        for i = 1, max - 1 do out[i] = rows[i] end
-        out[max] = rows[#rows] -- the root, always
+        -- The root, always — with the virtual lines drawn directly above it (a
+        -- `gutter` handover onto the root, `drawn_lines`), or its node would sit
+        -- under a lane that never turns into it.
+        local tail = #rows
+        while tail > 1 and rows[tail - 1].virtual and (#rows - tail + 1) < max do tail = tail - 1 end
+        for i = 1, max - (#rows - tail + 1) do out[#out + 1] = rows[i] end
+        for i = tail, #rows do out[#out + 1] = rows[i] end
     end
     return out, #rows - max, names
 end
@@ -723,6 +728,35 @@ function M.mark_pane_cone(seeds, dir)
     return incone
 end
 
+--- Flatten laid-out rows into the lines a pane **draws**, top to bottom: a row's
+--- virtual lines above (`above`, in order), its commit line, then its `merge` line
+--- below. Each becomes its own entry `{ columns = line }`; only the commit line
+--- keeps the row's fields (its `commit`, labels and count), the virtual ones carry
+--- `virtual = true` and nothing else. A pane renders one screen row per entry, so
+--- an entry count is a screen-row count (the overlay sizing and `cap` rely on it).
+---
+--- The pane's own merge style is fully inline, so a footer row has no fan line —
+--- but the layout POLICY still emits virtual rows: `gutter` hands the gutter over on
+--- two rows of its own (§5.6) and the footer follows the policy (§6.2). Drawing only
+--- each row's commit line dropped those rows, leaving a turn with nothing above it
+--- and a node below a lane that never reached it.
+---@param rows table[]  -- columns.layout output
+---@return table[]
+function M.drawn_lines(rows)
+    local out = {}
+    for _, row in ipairs(rows) do
+        for _, l in ipairs(row.above or {}) do out[#out + 1] = { columns = l, virtual = true } end
+        -- A shallow copy without its virtual lines, so each entry is ONE line (the
+        -- Line/Segment objects are shared, so a cone repaint still reaches them).
+        local own = {}
+        for k, v in pairs(row) do own[k] = v end
+        own.above, own.merge = nil, nil
+        out[#out + 1] = own
+        if row.merge then out[#out + 1] = { columns = row.merge, virtual = true } end
+    end
+    return out
+end
+
 --- Build the **footer** pane below the main view (spec §6.2). `pane_items` is the
 --- pane projection of the off-screen-older commits (newest-first, ending at the
 --- roots); `boundary` is the main view's bottom seam (`boundary_below`);
@@ -732,9 +766,9 @@ end
 --- commit, or the collapsed lane it was folded into) so the seed terminates at
 --- the right place and the seam matches exactly.
 ---
---- Returns `{ rows, terminate }`: the laid-out pane rows and the seam map of
---- lanes that do not continue (to be rendered as arrow-caps — the terminator
---- glyphs are Phase 2 / still to wire, §6.2).
+--- Returns `{ rows, terminate }`: the pane's **drawn lines**, one per screen row
+--- (see `drawn_lines`), and the seam map of lanes that do not continue (to be
+--- rendered as arrow-caps — the terminator glyphs are Phase 2 / still to wire, §6.2).
 ---@param opts table
 ---@param pane_items table[]
 ---@param boundary table<integer, table>
@@ -756,7 +790,7 @@ function M.footer(opts, pane_items, boundary, node_of)
             term[col] = lane
         end
     end
-    return { rows = columns.layout(opts, pane_items, seed), terminate = term }
+    return { rows = M.drawn_lines(columns.layout(opts, pane_items, seed)), terminate = term }
 end
 
 --- Build the **minimal connecting sub-DAG** for the header (spec §6.2): the smallest

@@ -1733,6 +1733,33 @@ describe("pane.cap — root always visible (§6.2)", function()
         assert.equals(10, capped[4].n)  -- the root (last) always kept
     end)
 
+    -- A footer's entries are DRAWN lines (`drawn_lines`): under `gutter` the root can
+    -- carry handover rows drawn right above it (§5.6). Keeping the root alone would
+    -- leave its node under a lane that never turns into it.
+    it("keeps the virtual lines drawn above the root with it", function()
+        local rows = {}
+        for i = 1, 10 do rows[i] = { columns = {}, n = i } end
+        rows[8].virtual, rows[9].virtual = true, true -- two handover lines onto root 10
+        local capped, elided = pane.cap(rows, 5)
+        assert.equals(5, #capped)
+        assert.equals(5, elided)
+        assert.same({ 1, 2, 8, 9, 10 }, vim.tbl_map(function(r) return r.n end, capped))
+        -- never more than the cap, even when the root's block alone exceeds it
+        local tight = pane.cap(rows, 2)
+        assert.same({ 9, 10 }, vim.tbl_map(function(r) return r.n end, tight))
+    end)
+
+    it("drawn_lines flattens a row's virtual lines around its commit line", function()
+        local a1, a2, c, m = { "a1" }, { "a2" }, { "c" }, { "m" }
+        local out = pane.drawn_lines({ { above = { a1, a2 }, columns = c, merge = m, commit = { hash = "x" } } })
+        assert.equals(4, #out)
+        assert.equals(a1, out[1].columns); assert.is_true(out[1].virtual)
+        assert.equals(a2, out[2].columns); assert.is_true(out[2].virtual)
+        assert.equals(c, out[3].columns); assert.equals("x", out[3].commit.hash)
+        assert.is_nil(out[3].virtual); assert.is_nil(out[3].above); assert.is_nil(out[3].merge)
+        assert.equals(m, out[4].columns); assert.is_true(out[4].virtual)
+    end)
+
     it("returns the rows unchanged when within the cap", function()
         local rows = { { columns = {}, n = 1 }, { columns = {}, n = 2 } }
         local capped = pane.cap(rows, 5)
