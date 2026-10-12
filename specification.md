@@ -862,7 +862,7 @@ node-less junction, §10.4). Commit markers:
 | `●`    | the commit **HEAD** points at, attached or detached (`icons.head`), in the HEAD colour |
 
 **HEAD's node** is drawn `●` (`icons.head`, §8) in the **HEAD colour**
-(`palette.head`, the colour of HEAD's label, §6) instead of the marker its shape
+(`palette.head`, the colour of HEAD's label marker, §6) instead of the marker its shape
 would pick (`○`, `◉`, `◎` or the merge icon) — "you are here" in the graph
 itself, not only in the labels. The renderer recognises HEAD's commit by the
 `head` ref it carries (§3.2), so a resync or checkout (§3.4, §10.4.1) moves the
@@ -1453,8 +1453,9 @@ labels as `{wt:<dir>}` (§4.1). The bracket carries the kind, as it already does
 for branches and tags; the `wt:` prefix keeps the label self-describing without
 colour. **HEAD always reads as `HEAD`, and its label comes first.** On a
 branch, the **current branch's** group is drawn as one label
-`(HEAD → name …)` in the **HEAD colour** (`palette.head`) instead of the normal
-branch colour, and it is moved to the **front** of the row's labels; on a
+`(HEAD → name …)` — the `HEAD → ` prefix in the **HEAD colour**
+(`palette.head`), the rest in the label colour (below) — and it is moved to the
+**front** of the row's labels; on a
 **detached HEAD** (no current branch, §3.2) the checked-out commit carries a bare
 `HEAD` label, also first. Being first, HEAD is the label the `+N` overflow
 (below) never hides while no ref is selected — "you are here" is always on
@@ -1463,9 +1464,7 @@ branch (its owners, §10.4; its checkout, §10.4.1). The detached `HEAD` label i
 not selectable (there is no ref behind it to act on). Branch refs (local +
 remote) that share a **short name** collapse into one group: the name is shown
 once, followed by the remotes that also point at this commit, as
-`(name ↑remote1,remote2)`. The name is highlighted when a local branch exists
-(the HEAD colour when it is the current branch) and dimmed when the group is
-remote-only. A local branch with no matching remotes is just `(name)`. This
+`(name ↑remote1,remote2)`. A local branch with no matching remotes is just `(name)`. This
 keeps the common case (a branch plus its remote-tracking copies all at one
 commit) from repeating the name per remote. A label whose ref is a **pinned
 anchor** (§10.6 — the effective pin set, so the default anchors `master` / `main`
@@ -1486,6 +1485,28 @@ follows the pin set live (`P`, the dialog §10.6.1, a resync), and
 `icons.pin = ""` turns it off. A local branch that **tracks an
 upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
 §6.3.
+
+**Label colour.** A ref label is drawn in the colour of the **lane its commit's
+node is drawn in** — exactly the colour the node glyph gets (§5, §12.2): the cell's
+top Segment's palette slot, including a `gutter` parent-swapped node that takes its
+colour from the wire arriving from above (§5.6), and a collapsed `◍` head's or a
+labelled junction's `◍` colour. The whole label takes it — brackets, the pin icon,
+the name and the `↑remote,…` list — so a label reads as belonging to its lane.
+Three things keep their own highlight: the **HEAD marker** (a detached `HEAD`
+label, and the `HEAD → ` prefix of the current branch's label) stays in
+`palette.head`, even though HEAD's node glyph is itself drawn in `palette.head`
+(§5.3) — the branch name after the arrow takes the lane colour; the upstream
+divergence tokens keep `palette.track` (§6.3); and a ref carrying its own colour
+(a submodule pointer mark, §11.7.6) keeps it. The `h`/`l`-**selected** label (§2)
+still draws in `palette.selected`, over the lane colour. On a **packed marker
+row** (§10.4) each marker's labels take *that marker's* node colour; in the
+**context panes** (§6.2) a label takes its pane row's node colour. The ref
+**kind** is carried by the bracket — `( )` branch, `[ ]` tag, `{ }` worktree — and
+`↑` for remotes; what colour no longer shows is whether a branch group has a
+local branch or is remote-only. `lane_label_colors = false` (§8) restores the
+per-kind groups (`palette.branch` / `remote` / `tags` / `worktree`, the current
+branch's whole label in `palette.head`). Out-of-cone labels dim like their lane
+(§12.2).
 
 **Ref width budget.** The refs use the row's free width: they may take
 everything the message does not need — its natural width, but never reserving
@@ -1572,8 +1593,9 @@ branch, folding toward the checked-out commit.
 
 **What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
 labels only — no date, author, or message. The labels read as in the main view
-(§6): HEAD's label — `(HEAD → <branch>)` or the detached `HEAD` — first and in
-the HEAD colour. Off-screen topology is folded onto
+(§6): HEAD's label — `(HEAD → <branch>)` or the detached `HEAD` — first, its
+HEAD marker in the HEAD colour, and every label in its pane row's node lane
+colour (§6 "Label colour"). Off-screen topology is folded onto
 the **pinned anchors** (§10.6): an anchor's line is drawn; everything else is
 contracted.
 
@@ -1800,7 +1822,7 @@ tracked upstream when its short name differs — §10.6.)
 GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
                  message_min, label_mode, diff, working_tree, scrolloff, search,
-                 persist, progress, zindex }
+                 persist, progress, zindex, lane_label_colors }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -1836,6 +1858,9 @@ Endpoint     = Commit | "index" | "worktree"
   out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
   terminals without true colour, dimming falls back to a flat `NonText`
   highlight instead.
+- `lane_label_colors` — draw each ref label in its commit node's lane colour
+  (§6 "Label colour"). **Default true.** `false` restores the per-kind palette
+  groups. No toggle key.
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
@@ -3149,7 +3174,10 @@ Content **outside** the cone is rendered **dimmed**; the cone keeps full colour:
 
 - a commit **row** — its date, author, message, refs, and commit marker — dims
   when that commit is not in the cone (not a `begin`/`end` of any highlighted
-  Lane);
+  Lane). Its ref labels, drawn in their node's lane colour (§6), dim as that
+  lane does: the same hue-preserving blend of the lane colour (the flat
+  fallback without true colour), not a generic dim group; a packed marker's
+  labels dim with that marker, a pane label with its pane row;
 - a **Segment** dims unless a Lane it carries is highlighted. Because a Segment
   carries the exact edge(s) it draws (§5.1), a cone wire stays lit through every
   split and merge it passes — including the shared descent/ascent Segment at a
