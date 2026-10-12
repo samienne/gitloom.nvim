@@ -1402,7 +1402,7 @@ one (`state.kt`, published by `place_gutter` and read as `state.kt or cc`), from
 version where a merge's node could sit off its lane; it was provably equal to `cc`
 and has been removed.
 
-What `gutter` writes into the shared stages is three `state` fields, all `nil` under
+What `gutter` writes into the shared stages is four `state` fields, all `nil` under
 every other policy, which is why adding the policy is **provably** inert for the
 other four rather than merely measured so:
 
@@ -1413,6 +1413,8 @@ other four rather than merely measured so:
   order, so the un-swapped path is unchanged by construction;
 - `state.own_lane_up` — carried by `finalize` onto the node's `GraphColumn`, telling
   the renderer to take that cell's colour from its **up** wire.
+- `state.reserve` — the handover column (below): `fan_out` neither reuses it as a
+  freed column nor places a lane outliving the gutter's occupant in it.
 
 (`state.split_swap` and `state.up_foreign` are two more `gutter`-only fields, but no
 *shared* stage reads them — only `claim_gutter` and the two swap gates do — so the list
@@ -1475,6 +1477,23 @@ that commit's own fan — which is why the §5.1 no-crossings corollary holds un
 `gutter` with counts identical to `straight`'s. The cost is rows: up to two extra
 virtual rows per handover, on 0.3–17.6 handovers per 100 rendered rows (spec §5.6
 measures it). No new glyph, and no swap cell.
+
+**The handover column** (spec §5.6) decides *where* an eviction lands. Without it,
+`evict_gutter`'s "nearest free column to the right" is past every lane born since the
+occupant took the gutter — typically a run of collapsed heads beside a trunk — so the
+eviction crosses each of them. `place_gutter` therefore records, on any row where the
+lane holding the gutter afterwards (a survivor passing through it, or this commit's
+own continuation, whichever parent `gutter_swap` chose) has a parent that is **not**
+`state.next_subject`, a reservation: `state.reserve = GUTTER + 1` and
+`state.reserve_end`, that lane's end row from the prepass (`pre.row[parent]`). A lane
+placed on that row (`free_lane_col`, and `fan_out`'s generic placement) skips the
+column if it ends no earlier than the occupant, and `fan_out` does not hand the column
+out as a freed one. A lane that ends sooner may still take it: it nests inside the
+occupant and neither crosses the other, which is why the rule costs no Line and no
+width. `state` is per row, so a reservation never outlives its row. The prepass is
+`gutter`'s alone, so `next_subject` — and with it the reservation — is nil under every
+other policy. `columns._internal.handover_column` (tests only) turns it off for the
+with/without comparisons.
 
 `above` being a **list** is what makes this expressible — it is why `OrderItem.split`
 became `OrderItem.above`. Before, a row whose own split fan occupied the single

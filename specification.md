@@ -1071,6 +1071,15 @@ already in place). The lane that claims is the one whose **chain the commit
 continues** (§5 lane identity), so the gutter cell's wire above the node and its
 wire below it are one Lane, one id, one colour.
 
+**The handover column.** While the gutter's lane will be evicted before it next
+owns a subject row (its parent is not the next subject row, known from the
+prepass), the column beside the gutter is kept free for it: a lane placed on such
+a row skips that column if it ends no earlier than the occupant. A lane that ends
+sooner may still take it, since it nests inside the occupant and neither crosses
+the other. So the eviction lands beside the gutter instead of beyond every lane
+born in the meantime, typically collapsed heads (§10.4). It costs no Lines and
+moves no existing lane.
+
 **The occupant is whoever is in the column** — a pass-through survivor, or one of
 this commit's *own* converging children. The second case is the frequent one and
 the easy one to miss: a run of commits on lane L holds the gutter, and where that
