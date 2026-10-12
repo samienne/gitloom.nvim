@@ -429,7 +429,8 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   don't fit.
 - **inline** — left-aligned right after the graph, before the message.
 - **dual** — a labelled commit spans two rows: the graph + node + labels on the
-  first, the message on the second (only for commits that have labels). Both are
+  first, the message on the second, indented by two cells (only for commits that
+  have labels). Both are
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
