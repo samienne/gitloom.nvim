@@ -2863,6 +2863,43 @@ The author and committer dates are shown as `git show` renders them
 (`--date=iso`); the structured `Timestamp` formatting of §6 applies to the graph
 date column, not here.
 
+#### 11.2.1 Message wrapping
+
+The commit message is **hard-wrapped** into real buffer lines — not soft-wrapped
+with `'wrap'` — so every row below it (the diffstat, the diff, and the file-jump
+and context-header bookkeeping of §11.4 / §11.6, which count buffer lines) stays
+line-exact. Each message line, its 4-cell indent included, fits in the **wrap
+width**: the view window's text width (the window width minus its sign / number /
+fold columns), **capped at 100 display cells**, so a very wide window still gives
+a readable measure. Widths are display cells (`strdisplaywidth`), so multibyte and
+double-width text wraps correctly.
+
+- The **subject** (the message's first line) wraps on its own at word boundaries,
+  each continuation line at the subject's own column. It is never joined with the
+  body.
+- The **body** is **reflowed**: a paragraph — a run of consecutive non-blank
+  lines — is joined with single spaces and re-wrapped at word boundaries.
+- **List items** (`- `, `* `, `+ `, `1. `, `1) `, indented by fewer than four
+  spaces) each start a new item. An item reflows like a paragraph, its
+  continuation lines hanging-indented to the item's text; a following line
+  indented no further than that text (a continuation, lazy or aligned) joins the
+  item.
+- **Kept verbatim** — never joined, never wrapped: blank lines; lines indented by
+  two or more spaces or a tab (code, quoted output) that are not an item's
+  continuation; a fenced block, from a ```` ``` ```` line through its closing
+  fence; a line that is only a URL (or a `[n]: <url>` link reference); and git
+  **trailer** lines (`Key: value`, `Key-Word: value` — `Signed-off-by:`,
+  `Co-Authored-By:` …) in the final paragraph.
+- A single word wider than the wrap width is **not broken**; it sits on its own
+  line and overflows.
+
+The wrap width is measured when the view renders, and the message is re-wrapped
+in place when the window's width changes (`WinResized` / `VimResized` while the
+view is shown) — the cursor and scroll are kept, shifted by the change in the
+message's line count when they sit below it. The commit-search preview (§15.3)
+wraps to its own window's width the same way. The range view (§13.5) shows no
+message bodies — one subject per selected commit — and does not wrap.
+
 ### 11.3 Diff
 
 The commit view shows the commit's diff below the diffstat (§11.4). Highlighting is
