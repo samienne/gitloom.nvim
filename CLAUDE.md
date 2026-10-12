@@ -893,7 +893,12 @@ Coverage:
   pinned slot (`pane.header`'s `avoid`), and keeps a counterpart lane's `-k`
 - `tests/counterpart_color_spec.lua` — **counterpart colours** (§5.5,
   `opts.pin_counterpart`): a counterpart ahead of its local draws `-k` above the
-  local's tip (still unranked) and full `k` from it, a diverged one shares slot k
+  local's tip (still unranked) and full `k` from it, the **birth at a counterpart
+  tip** (an arriving unranked lane ends; a lane of a pin ranked as well or better
+  continues; the **lumeeditor HEAD shape** — a lane of a pin ranked WORSE than k,
+  HEAD's branch above `origin/dev`, ends there, its own commits keeping its colour,
+  every style × policy, `check_spine` under `gutter`, and only `(dev ↑origin)` takes
+  `-1` at Y), a diverged one shares slot k
   with the concurrent pinned lane while an unrelated lane never gets it, the slot
   returns only after the pinned lane AND every counterpart lane ended (a 2-slot
   fixture with teeth: without the map, x's end releases it), a fuzz sweep that no
@@ -1477,8 +1482,9 @@ Details not covered by the spec or architecture:
   — counterpart id → its local's rank, `{}` with `pin_upstream` off) is published
   beside the ranks as `opts.pin_counterpart` (in the fingerprint). Where no ranked
   ref points and slot k is `held`, a counterpart tip is a **birth** (§5) when k
-  strictly beats every incoming lane (none ranked, none a counterpart lane — read
-  back from the colour, `columns.cp_rank` — of rank ≤ k); it sets `state.pin_birth`,
+  strictly beats every incoming lane (none ranked ≤ k, none a counterpart lane — read
+  back from the colour, `columns.cp_rank` — of rank ≤ k; a lane of a pin ranked
+  WORSE than k, e.g. HEAD's branch, is beaten and ends there); it sets `state.pin_birth`,
   so the gutter + `check_spine` rules for a pinned birth cover it. The lane born
   there takes the local's slot k, as colour
   **`-k`** (one more `in_use` holder; `free_color` takes `|c|`), so the mark rides

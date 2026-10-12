@@ -745,9 +745,11 @@ function M.session(opts, seed)
     -- (colour `-k`, `cp_rank`) beats a plain one, the smaller `k` first. And BIRTH AT
     -- A COUNTERPART TIP is the same overrule one step down: at a commit with no ranked
     -- ref, carrying an implicit remote counterpart of rank `k` whose slot is still
-    -- held, when `k` strictly beats every incoming lane (none ranked, none a
-    -- counterpart lane of rank <= k), every incoming lane ends and a counterpart lane
-    -- is born (fresh id, unranked, colour `-k`). Both births set `state.pin_birth`, so
+    -- held, when `k` strictly beats every incoming lane (none ranked <= k, none a
+    -- counterpart lane of rank <= k — compared by RANK, so a lane of a pin ranked
+    -- worse than `k`, e.g. HEAD's branch below the trunks, is beaten and ends here),
+    -- every incoming lane ends and a counterpart lane is born (fresh id, unranked,
+    -- colour `-k`). Both births set `state.pin_birth`, so
     -- the gutter treats them alike (no claim row, no parent swap).
     --
     -- PINNED COLOURS: a lane born with rank `r` takes slot `r` while it is withheld
@@ -790,12 +792,23 @@ function M.session(opts, seed)
             state.pin_birth = true
         end
         -- BIRTH AT A COUNTERPART TIP (§5): no ranked ref here, its slot `k` still held,
-        -- and `k` strictly beats every incoming lane — none ranked, none a counterpart
-        -- lane of rank <= k. The ranked rule wins wherever a ranked ref points (`crank`).
+        -- and `k` strictly beats every incoming lane — none ranked <= k, none a
+        -- counterpart lane of rank <= k. A lane of a pin ranked WORSE than `k` is beaten
+        -- like an unranked one. Every incoming lane is checked, not just `trunk`: tier 0
+        -- prefers any ranked lane to a counterpart lane, so a counterpart lane of rank
+        -- <= k may arrive beside a worse-ranked `trunk`, and it still blocks the birth.
+        -- The ranked rule wins wherever a ranked ref points (`crank`).
         local ck = (not crank) and counterpart_at(C) or nil
-        if ck and trunk and trunk.rank == nil and rank_better(ck, cp_rank(trunk)) then
-            trunk, rank = nil, nil
-            state.pin_birth = true
+        if ck and trunk then
+            local beaten = true
+            for _, e in ipairs(incoming) do
+                local l = e.lane
+                if not rank_better(ck, l.rank or cp_rank(l)) then beaten = false; break end
+            end
+            if beaten then
+                trunk, rank = nil, nil
+                state.pin_birth = true
+            end
         end
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do

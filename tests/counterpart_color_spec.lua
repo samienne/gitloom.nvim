@@ -165,13 +165,62 @@ describe("counterpart colours (§5.5)", function()
             end
         end)
 
-        it("a ranked incoming lane still continues through the counterpart tip", function()
+        it("an incoming lane of a pin ranked as well or better continues through the counterpart tip", function()
+            -- topic outranks x (1 < 2): the counterpart (k = 2) loses to it.
             for _, pol in ipairs(POLICIES) do
-                local rows = columns.layout(opts(STYLES[1].s, pol, { x = 1, topic = 2 }, CP), shape())
+                local rows = columns.layout(opts(STYLES[1].s, pol, { x = 2, topic = 1 },
+                    { ["origin/x"] = 2 }), shape())
                 local t, ox = lane(rows, "t"), lane(rows, "ox")
                 assert.equals(t.id, ox.id, pol)
-                assert.equals(2, ox.color, pol)
-                assert.equals(2, ox.rank, pol)
+                assert.equals(1, ox.color, pol)
+                assert.equals(1, ox.rank, pol)
+            end
+        end)
+
+        -- The lumeeditor HEAD shape: `dev` pinned (rank 1) at X; its counterpart
+        -- `origin/dev`, with another remote branch, on X's child Y; a chain above Y up
+        -- to HEAD's branch tip `enne`, a default pin ranked AFTER the trunk (rank 2).
+        -- k = 1 beats rank 2, so enne's lane ends at Y (its own commits above keep its
+        -- colour) and the counterpart lane is born there in -1.
+        it("an incoming lane of a WORSE-ranked pin ends at the counterpart tip", function()
+            local function items()
+                local it = h.dag({
+                    { "H", { "A2" } }, { "A2", { "A1" } }, { "A1", { "Y" } },
+                    { "Y", { "X" } }, { "X", { "W" } }, { "W", {} },
+                })
+                ref(it, "H", "enne")
+                ref(it, "Y", "origin/leppanen/validation", "remote")
+                ref(it, "Y", "origin/dev", "remote")
+                ref(it, "X", "dev")
+                return it
+            end
+            for _, st in ipairs(STYLES) do
+                for _, pol in ipairs(POLICIES) do
+                    local o = opts(st.s, pol, { dev = 1, enne = 2 }, { ["origin/dev"] = 1 })
+                    local rows = columns.layout(o, items())
+                    local w = st.name .. "/" .. pol
+                    local hl, a1, y, x = lane(rows, "H"), lane(rows, "A1"), lane(rows, "Y"), lane(rows, "X")
+                    assert.equals(2, hl.color, w)
+                    assert.equals(hl.id, a1.id, w) -- enne's own commits keep its lane
+                    assert.equals(2, a1.color, w)
+                    assert.equals(-1, y.color, w) -- the counterpart lane is born at Y
+                    assert.is_true(y.id ~= a1.id, w)
+                    assert.is_nil(y.rank, w)
+                    assert.equals(1, x.color, w) -- dev's pinned lane is born at X
+                    if pol == "gutter" then
+                        local errors = h.check_spine(rows, o)
+                        assert.equals(0, #errors, table.concat(errors, "\n"))
+                    end
+                    -- and only (dev ↑origin) takes the counterpart colour at Y (§6)
+                    if pol == "compact" and st.name == "split-line" then
+                        local o2 = vim.tbl_extend("force", o, { palette = vim.tbl_extend("force", o.palette,
+                            { remote = "RemoteHl", branch = "BranchHl" }) })
+                        local el = render.display_item(o2, row_of(rows, "Y"), {}, nil)
+                        assert.same({ { "(leppanen/validation ↑origin)", "RemoteHl" } },
+                            { { el.line_right[1].text, el.line_right[1].highlight[1].hl } })
+                        assert.equals(render.slot_hl(o2, -1), el.line_right[2].highlight[1].hl)
+                    end
+                end
             end
         end)
 

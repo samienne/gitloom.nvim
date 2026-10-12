@@ -693,7 +693,8 @@ end
 -- every policy and in any column. Read off the rows: the wire below is the first parent,
 -- it carries a rank, and every arriving Lane has another id and a strictly worse rank.
 -- A COUNTERPART BIRTH (§5) is licensed alike: the wire below is a counterpart lane
--- (colour `-k`) and every arriving Lane is unranked and no counterpart lane of rank <= k.
+-- (colour `-k`) and every arriving Lane is ranked worse than `k` (rank > k), or
+-- unranked and no counterpart lane of rank <= k.
 --
 -- Returns the errors, the number of LICENSED breaks (so a test can prove the gate fires
 -- rather than passing vacuously), and a per-kind breakdown.
@@ -753,15 +754,17 @@ local function check_spine(rows, opts)
             -- Lane's, and none of them shares its id — so no arriving lane continued and
             -- the spine changes lane by definition, wherever the node sits.
             -- A COUNTERPART BIRTH is the same licence one step down: the wire below is a
-            -- counterpart lane (colour `-k`) and every arriving Lane is unranked and no
-            -- counterpart lane of rank <= k.
+            -- counterpart lane (colour `-k`) and every arriving Lane is ranked worse than
+            -- `k` (rank > k — compared by rank, §5), or unranked and no counterpart lane
+            -- of rank <= k.
             local function cpk(l) return (l.color and l.color < 0) and -l.color or nil end
             local function beats(a, b)
-                if a.rank ~= nil or b.rank ~= nil then
-                    return a.rank ~= nil and (b.rank == nil or a.rank < b.rank)
-                end
-                local x, y = cpk(a), cpk(b)
-                return x ~= nil and (y == nil or x < y)
+                if a.rank ~= nil then return b.rank == nil or a.rank < b.rank end
+                local x = cpk(a)
+                if not x then return false end
+                if b.rank ~= nil then return b.rank > x end
+                local y = cpk(b)
+                return y == nil or x < y
             end
             local born = pl[1] and pl[1].id == e.d and (pl[1].rank ~= nil or cpk(pl[1]) ~= nil)
             if born then

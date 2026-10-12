@@ -1122,8 +1122,11 @@ the current row. For each commit `C`:
    **Birth at a counterpart tip** (spec §5): identity reads the colour back as the
    **counterpart rank** (`columns.cp_rank`: `-k` ⇒ `k`). Tier 0 prefers, among
    unranked lanes, the better counterpart rank; and where `k` (no ranked ref here,
-   slot held) strictly beats every incoming lane — none ranked, none a counterpart
-   lane of rank `≤ k` — every incoming lane ends and the counterpart lane is born.
+   slot held) strictly beats every incoming lane — none ranked `≤ k`, none a
+   counterpart lane of rank `≤ k`; a lane of a pin ranked WORSE than `k` (HEAD's
+   branch, ranked after the trunks) is beaten like an unranked one — every incoming
+   lane ends and the counterpart lane is born. Every incoming lane is checked, not
+   just the tier-0 winner, since tier 0 prefers any ranked lane to a counterpart lane.
    It sets the same `state.pin_birth` flag, so the gutter's pinned-birth rules
    (no claim row, no parent swap) and `check_spine`'s birth licence cover it with no
    code of their own. Glyphs move only under `gutter`.
