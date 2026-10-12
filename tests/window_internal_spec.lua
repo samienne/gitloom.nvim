@@ -411,3 +411,84 @@ describe("window._internal.integrate_commit (§3/§3.1)", function()
         assert.equals(1, #repo.order)
     end)
 end)
+
+-- The CursorMoved pre-selection (§2/§6.1/§10.4): landing on a packed marker row,
+-- or on a labelled commit's label row in dual mode, selects the FIRST label —
+-- logical 1, mirrored or not (§5.4: mirroring keeps the logical label order).
+-- Driven over a stub ctx in a real scratch window.
+describe("window._internal.on_cursor_moved default selection (§2/§5.4)", function()
+    local buf, win
+    before_each(function()
+        buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "a", "b" })
+        vim.api.nvim_set_current_buf(buf)
+        win = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_cursor(win, { 1, 0 })
+    end)
+    after_each(function()
+        pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end)
+
+    local function run(item, sub, opts)
+        local ctx = {
+            opts = opts,
+            sel = { active = false },
+            selection_state = {},
+            repo_key = "/r",
+            win = function() return win end,
+            cursor_hash = function() return nil end,
+            order_at = function() return item, 1, sub end,
+            place_cursor = function() end,
+            schedule_cone_update = function() end,
+        }
+        internal.on_cursor_moved(ctx)
+        return ctx
+    end
+
+    local function markers_item()
+        local m = {}
+        for _, n in ipairs({ "a1", "b2", "c3" }) do
+            m[#m + 1] = { hash = n, collapsed = true, count = 1,
+                refs = { { name = n, kind = "local" } } }
+        end
+        return { type = "markers", columns = {}, markers = m }
+    end
+    local function labelled()
+        return { type = "commit", commit = { hash = "c", refs = {
+            { name = "x", kind = "local" }, { name = "y", kind = "local" }, { name = "t", kind = "tag" } } } }
+    end
+
+    it("a packed marker row selects the first marker, mirrored or not", function()
+        local item = markers_item()
+        assert.equals(1, run(item, 0, {}).selection_state.index)
+        local ctx = run(item, 0, { mirror = true })
+        assert.equals(1, ctx.selection_state.index)
+        assert.is_true(ctx.selection_visible)
+    end)
+
+    it("a dual-mode label row selects the first label, mirrored or not", function()
+        local item = labelled()
+        assert.equals(1, run(item, 0, { label_mode = "dual" }).selection_state.index)
+        local ctx = run(item, 0, { label_mode = "dual", mirror = true })
+        assert.equals(1, ctx.selection_state.index)
+        assert.is_true(ctx.selection_visible)
+    end)
+
+    it("with none selected, a packed line's commit is the first marker's tip", function()
+        local item = markers_item()
+        for _, m in ipairs(item.markers) do m.tip = { hash = "tip_" .. m.hash } end
+        local function hash(opts)
+            local ctx = { opts = opts, selection_state = {},
+                order_at = function() return item end }
+            return internal.cursor_hash_at(ctx, 1)
+        end
+        assert.equals("tip_a1", hash({}))
+        assert.equals("tip_a1", hash({ mirror = true }))
+    end)
+
+    it("other rows and modes stay on the message", function()
+        local item = labelled()
+        assert.is_nil(run(item, 1, { label_mode = "dual", mirror = true }).selection_state.index)
+        assert.is_nil(run(item, 0, { label_mode = "right", mirror = true }).selection_state.index)
+    end)
+end)

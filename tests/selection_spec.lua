@@ -66,6 +66,72 @@ describe("ref_byte_col", function()
     it("returns nil when the decoration is absent", function()
         assert.is_nil(ref_byte_col("xx hello world", "(nope)"))
     end)
+
+    it("finds the nth occurrence, the last one past the end", function()
+        local line = "(3) (dev) (3) (3)"
+        assert.equals(0, ref_byte_col(line, "(3)", 1))
+        assert.equals(10, ref_byte_col(line, "(3)", 2))
+        assert.equals(14, ref_byte_col(line, "(3)", 3))
+        assert.equals(14, ref_byte_col(line, "(3)", 9))
+        assert.is_nil(ref_byte_col(line, "(x)", 2))
+    end)
+end)
+
+describe("label_occurrence", function()
+    local label_occurrence = internal.label_occurrence
+    it("counts the same-text labels drawn before it", function()
+        local t = { "(3)", "(dev)", "(3)", "(3)" }
+        assert.equals(1, label_occurrence(t, 1))
+        assert.equals(2, label_occurrence(t, 3))
+        assert.equals(3, label_occurrence(t, 4))
+        assert.equals(1, label_occurrence(t, 2))
+    end)
+end)
+
+-- Mirroring does NOT flip the label order (§5.4): reading order carries the
+-- labels' priority in every mode, mirrored or not. The pure display_item output,
+-- without a window.
+describe("display_item label order under mirroring", function()
+    local PAL = { branch = "B", remote = "R", tags = "T", head = "H", selected = "S",
+        date = "D", author = "A" }
+    local function opts(mode, mirror)
+        return { palette = PAL, label_mode = mode, highlight = false, mirror = mirror }
+    end
+    local function commit()
+        return { hash = "h", message = "msg", author = "", parents = {}, refs = {
+            { kind = "local", name = "alpha" }, { kind = "local", name = "beta" },
+            { kind = "tag", name = "v1" }, { kind = "head", name = "HEAD", branch = "alpha" } } }
+    end
+    local function order(text)
+        local a, b, t = text:find("(HEAD → alpha)", 1, true), text:find("(beta)", 1, true),
+            text:find("[v1]", 1, true)
+        assert.is_true(a ~= nil and b ~= nil and t ~= nil, text)
+        return (a < b and b < t) and "logical" or "other"
+    end
+    local function flex(el) return (el.lines and el.lines[1] or el.line)[4].text end
+    local function right(el)
+        local parts = {}
+        for _, it in ipairs(el.line_right) do parts[#parts + 1] = it.text end
+        return table.concat(parts, " ")
+    end
+
+    for _, case in ipairs({
+        { "inline", flex }, { "dual", flex }, { "right", right },
+    }) do
+        it(case[1] .. " mode keeps the logical order", function()
+            local item = { type = "commit", commit = commit(), columns = {} }
+            for _, mirror in ipairs({ false, true }) do
+                assert.equals("logical", order(case[2](internal.display_item(opts(case[1], mirror), item, {}))))
+            end
+        end)
+    end
+
+    it("a selected label keeps its logical index", function()
+        local c = commit()
+        local item = { type = "commit", commit = c, columns = {} }
+        local el = internal.display_item(opts("right", true), item, { commit = c, index = 2 })
+        assert.equals("(beta)", el.line_right[el.line_right_sel].text)
+    end)
 end)
 
 describe("pack_right", function()

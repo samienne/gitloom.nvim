@@ -219,15 +219,39 @@ function M.sel_switch(st, delta)
     return false
 end
 
+--- Which occurrence the `index`-th of `texts` is among the labels with the same
+--- text (1 = the leftmost such). Packed marker labels can repeat (two ref-less
+--- markers of one size both read `(3)`), and the cursor target search
+--- (`ref_byte_col`) must skip the earlier copies.
+---@param texts string[]  the labels in drawn order
+---@param index integer
+---@return integer
+function M.label_occurrence(texts, index)
+    local t, nth = texts[index], 1
+    for i = 1, index - 1 do
+        if texts[i] == t then nth = nth + 1 end
+    end
+    return nth
+end
+
 --- Byte column (0-based) of `deco`'s first occurrence in a rendered row, or nil
 --- if absent. Used to park the cursor on the selected ref (which the listview
 --- pins to the right edge); message parking uses the listview column offset.
+--- `nth` (default 1) picks a later occurrence — for repeated labels, see
+--- `label_occurrence`; past the last occurrence the last one is returned (an
+--- earlier copy may be hidden in a `+N` overflow).
 ---@param line_text string
 ---@param deco string
+---@param nth? integer
 ---@return integer|nil
-function M.ref_byte_col(line_text, deco)
-    local s = line_text:find(deco, 1, true)
-    return s and (s - 1) or nil
+function M.ref_byte_col(line_text, deco, nth)
+    local found, from = nil, 1
+    for _ = 1, math.max(1, nth or 1) do
+        local s = line_text:find(deco, from, true)
+        if not s then break end
+        found, from = s, s + 1
+    end
+    return found and (found - 1) or nil
 end
 
 --- The owner ids whose collapse turns the region containing a shown commit into

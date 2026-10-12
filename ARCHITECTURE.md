@@ -1777,6 +1777,9 @@ itself is a behaviour-preserving refactor within the current spec.
   the column `align = "right"` so the listview right-aligns it (padding on the
   left) — keeping vertical wires column-aligned across rows of differing lane
   counts. Render-only; the model rows are untouched (specification.md §5.4).
+  It mirrors the **graph column only**: the ref labels are never reordered
+  (§5.4) — every label path in `display_item`, the listview's `+N` overflow and
+  the selection / default-selection helpers are identical mirrored or not.
 - `display_item(opts, item)` — assembles a `DisplayElement`: the commit's real
   line(s) plus optional `above`/`below` virtual rows for separate split/merge
   lines. How the ref decorations are placed depends on `opts.label_mode`
@@ -1836,7 +1839,9 @@ index through the listview (`controller.item_at`) and remembers which sub-row th
 cursor is on; `place_cursor` parks on the selected ref on the label row (now a
 real line, so the cursor sits physically on it) and on the message on the message
 row. The `CursorMoved` handler pre-selects index `1` when it lands on a labelled
-commit's label row.
+commit's label row (or a packed marker line), mirrored or not. Repeated marker
+labels (`(3)`) are told apart for cursor parking by `select.label_occurrence` +
+`ref_byte_col`'s `nth`.
 
 `decoration_texts(commit, head_branch, pins)` is the single source for the
 decoration strings (branch groups then tags), so `display_item` (rendering + the
