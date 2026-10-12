@@ -685,8 +685,18 @@ function M.boundary_of(line, up)
                 -- pane repaint can read the crossing lane's current cone state
                 -- (`highlighted`, set by the main view's reachability walk) without
                 -- rebuilding the pane (spec §6.2 reachability emphasis).
+                -- The lane's pin rank (§5) rides on its Lane objects, not the Segment:
+                -- take it from the edge carrying the Segment's own id (a fan hub's
+                -- shared wire lists several edges), so a footer seeded from this map
+                -- continues the lane under the rank the main view gave it.
+                -- `extra` likewise: whether it is a merge's extra-parent edge, which
+                -- the birth rule's adopt case reads.
+                local rank, extra
+                for _, e in ipairs(s.edges or {}) do
+                    if e.id == s.id then rank, extra = e.rank, e.extra break end
+                end
                 out[col] = { id = s.id, color = s.color, parent = s.parent,
-                    begin = s.begin, highlighted = false, edges = s.edges }
+                    begin = s.begin, highlighted = false, edges = s.edges, rank = rank, extra = extra }
             end
         end
     end
@@ -845,7 +855,8 @@ function M.footer(opts, pane_items, boundary, node_of)
     for col, lane in pairs(boundary) do
         local target = lane.parent and node_of[lane.parent.hash]
         if target and present[target] then
-            seed[col] = { id = lane.id, color = lane.color, begin = lane.begin,
+            seed[col] = { id = lane.id, color = lane.color, rank = lane.rank, extra = lane.extra,
+                begin = lane.begin,
                 parent = target, highlighted = false }
         else
             term[col] = lane

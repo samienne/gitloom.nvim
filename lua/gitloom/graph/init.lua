@@ -36,6 +36,22 @@ local M = {}
 ---@field begin Commit
 ---@field parent Commit
 ---@field highlighted boolean
+---@field rank? integer  pin rank (§5 tier 0): the best pinned ref's rank where the lane
+---                      was born (or adopted one); nil = unranked, worse than any rank
+---@field extra? boolean a merge's extra-parent edge (born unranked at the merge; the
+---                      §5 birth rule's adopt case reads it)
+
+--- The layout's pin-priority input (spec §5 "Lane identity", §10.6). Declared here,
+--- beside the engine that reads it, as a partial of the `GraphOptions` class
+--- (window.lua holds the rest).
+---@class GraphOptions
+---@field pin_rank? table<string, integer>  ref id → pin rank, 1 = highest priority.
+---   A ref id is its key in `repo.refs` (`git.add_ref`): the ref's `name`
+---   (`main`, `origin/main`, `v1.0`, `wt:<dir>`), except the `head` ref, keyed
+---   `HEAD`. Keyed by exactly the ids the resolved pin list holds, implicit remote
+---   counterparts included at their local's rank. A commit's rank is the best over
+---   its refs (`columns.commit_rank`). nil or empty ⇒ every lane unranked ⇒ the
+---   layout is exactly the unpinned one. Part of the layout fingerprint (§3.1).
 
 --- A **Segment** is one wire within a `GraphColumn`: its connectivity plus the
 --- Lane(s) it draws (a list — usually one, but a shared fan bus carries the set
@@ -104,6 +120,11 @@ local function build_graph(opts, items, yield)
 end
 M.build_graph = build_graph
 
+--- A commit's pin rank under `opts.pin_rank` (spec §5): the best rank among its refs,
+--- nil when none is pinned. The layout's own reading, re-exported so a caller can
+--- check its map against what the layout will see.
+M.commit_rank = columns.commit_rank
+
 --- Copy one freshly-swept row's lines/lanes onto the OrderItem the view holds.
 ---@param item OrderItem
 ---@param r OrderItem
@@ -128,9 +149,21 @@ local function refresh_columns(opts, order, yield)
 end
 M.refresh_columns = refresh_columns
 
+--- `opts.pin_rank` as a comparable string: sorted `id=rank` pairs, so the result
+--- does not depend on `pairs` order; nil and an empty map both give "".
+---@param pin_rank table<string, integer>?
+---@return string
+local function pin_rank_key(pin_rank)
+    local ranks = {}
+    for id, r in pairs(pin_rank or {}) do ranks[#ranks + 1] = id .. "=" .. tostring(r) end
+    table.sort(ranks)
+    return table.concat(ranks, "\n")
+end
+
 --- The layout-relevant part of `opts`, as a comparable string. A streaming
 --- session may only be continued while these hold still; anything that changes
---- them (`m`, `C`, a palette change) goes through a reflow anyway, so this is a
+--- them (`m`, `C`, a palette change, a pin change — the
+--- ranks decide lane identity, §5) goes through a reflow anyway, so this is a
 --- safety net rather than a hot path.
 ---@param opts GraphOptions
 ---@return string
@@ -142,6 +175,7 @@ local function layout_fingerprint(opts)
         tostring(ms.allow_merge_on_split), tostring(ms.merge_on_separate_line),
         tostring(ms.split_on_separate_line),
         tostring(p.tracks and #p.tracks or 0), tostring(p.generate), tostring(p.buffer),
+        pin_rank_key(opts.pin_rank),
     }, "")
 end
 

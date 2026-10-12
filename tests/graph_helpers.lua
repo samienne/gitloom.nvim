@@ -687,11 +687,17 @@ end
 -- `gutter` only, as it was before this licence existed. It is not a new exemption: the
 -- four policies were never asserted.
 --
+-- A THIRD LICENCE, NOT A SWAP: a PINNED BIRTH (§5 "Birth at a pinned tip"). Where a
+-- commit's pin rank strictly beats every arriving lane's, no arriving lane continues and
+-- the pinned lane is born at the node, so the spine changes lane by definition — under
+-- every policy and in any column. Read off the rows: the wire below is the first parent,
+-- it carries a rank, and every arriving Lane has another id and a strictly worse rank.
+--
 -- Returns the errors, the number of LICENSED breaks (so a test can prove the gate fires
 -- rather than passing vacuously), and a per-kind breakdown.
 ---@param rows table[]
 ---@param opts table?  -- needed to classify subject rows (§5.6); defaults to markers on
----@return string[] errors, integer licensed, table kinds  -- { merge = n, split = n }
+---@return string[] errors, integer licensed, table kinds  -- { merge, split, birth = n }
 local function check_spine(rows, opts)
     local errors = {}
     local o = opts or {}
@@ -725,7 +731,7 @@ local function check_spine(rows, opts)
         end
     end
 
-    local licensed, kinds = 0, { merge = 0, split = 0 }
+    local licensed, kinds = 0, { merge = 0, split = 0, birth = 0 }
     for ri, row in ipairs(rows) do
         local e = node[ri]
         if e and e.u and e.d and e.u ~= e.d then
@@ -740,7 +746,19 @@ local function check_spine(rows, opts)
             for _, l in ipairs(cl) do
                 if l.id == e.u and l.id ~= first then foreign = l end
             end
-            if e.col ~= 1 then
+            -- A PINNED BIRTH (§5 "Birth at a pinned tip"): the wire below is the first
+            -- parent's Lane, it carries a pin rank strictly better than every arriving
+            -- Lane's, and none of them shares its id — so no arriving lane continued and
+            -- the spine changes lane by definition, wherever the node sits.
+            local born = pl[1] and pl[1].id == e.d and pl[1].rank ~= nil
+            if born then
+                for _, l in ipairs(cl) do
+                    if l.id == pl[1].id or (l.rank ~= nil and l.rank <= pl[1].rank) then born = false end
+                end
+            end
+            if born then
+                kind = "birth"
+            elseif e.col ~= 1 then
                 why = "not in the gutter column"
             elseif swapped then
                 kind = "merge"

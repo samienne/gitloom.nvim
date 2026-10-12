@@ -701,7 +701,7 @@ describe("pin icon on pinned labels (§6/§10.6)", function()
         assert.same({ "(dev ↑origin)", "(feat)", "[v1]", "[v2]", "{wt:rev}" }, decoration_texts(commit))
     end)
 
-    it("marks a group when only one of its remote refs is pinned (auto-pinned upstream)", function()
+    it("marks a group when only one of its remote refs is pinned (an implicit counterpart)", function()
         local commit = { refs = { ref("local", "rel"), ref("remote", "origin/rel") } }
         assert.same({ "(⚲rel ↑origin)" }, decoration_texts(commit, nil, PINS))
         -- A remote-only group is marked by its remote ref, never by a same-named local elsewhere.

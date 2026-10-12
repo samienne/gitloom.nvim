@@ -141,7 +141,7 @@ end
 
 --- The pin set a label render is given (§6/§10.6): the **effective** pinned ref
 --- ids (ref names, as `repo.refs` keys them — so the default anchors and an
---- auto-pinned upstream are in it) and the icon to prefix a pinned label with.
+--- implicit remote counterparts of a pinned local branch are in it) and the icon to prefix a pinned label with.
 --- Passed in by the caller so the renderer stays pure; nil = no pin icons.
 ---@class PinMarks
 ---@field set table<string, boolean>  pinned ref ids

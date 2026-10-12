@@ -104,16 +104,33 @@ describe("persist precedence (§18.3)", function()
 end)
 
 describe("persist pin state (§18.2)", function()
-    it("pins_for_save drops unreserved defaults and auto upstreams, keeps the rest in order", function()
+    it("pins_for_save drops the leading run of unreserved defaults in default order", function()
+        local defaults = { "master", "main", "dev", "feature/x" } -- HEAD's branch last
         local pins = {
-            { id = "feature/x", reserved = false },           -- HEAD's branch: a default → dropped
-            { id = "master", reserved = true },                -- reserved default → kept
-            { id = "origin/master", reserved = false, auto = "master" }, -- auto → dropped
-            { id = "release", reserved = false },              -- explicit → kept
-            { id = "dev", reserved = false },                  -- unreserved default → dropped
+            { id = "master", reserved = false },    -- leading default → dropped
+            { id = "dev", reserved = false },       -- still in default order → dropped
+            { id = "feature/x", reserved = false }, -- HEAD's branch, in place → dropped
+            { id = "release", reserved = false },   -- explicit → kept
+            { id = "main", reserved = false },      -- default MOVED below an explicit entry → kept
         }
-        assert.same({ { id = "master", reserved = true }, { id = "release", reserved = false } },
-            persist.pins_for_save(pins, { "feature/x", "master", "dev" }))
+        assert.same({ { id = "release", reserved = false }, { id = "main", reserved = false } },
+            persist.pins_for_save(pins, defaults))
+    end)
+
+    it("pins_for_save keeps a reserved default and everything after it", function()
+        local pins = {
+            { id = "master", reserved = true },
+            { id = "dev", reserved = false },
+        }
+        assert.same({ { id = "master", reserved = true }, { id = "dev", reserved = false } },
+            persist.pins_for_save(pins, { "master", "dev" }))
+    end)
+
+    it("pins_for_save keeps defaults the user reordered out of default order", function()
+        local pins = { { id = "dev", reserved = false }, { id = "master", reserved = false } }
+        -- `dev` alone still resolves back to the top; `master` below it does not.
+        assert.same({ { id = "master", reserved = false } },
+            persist.pins_for_save(pins, { "master", "dev" }))
     end)
 
     it("set_repo / repo_state round-trip per root; an empty state removes the entry", function()

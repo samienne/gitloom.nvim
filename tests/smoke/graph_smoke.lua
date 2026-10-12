@@ -197,12 +197,14 @@ function M.run()
             end
             step("reset-view")
             -- The pin writer (P / the L dialog): an explicit pin is stored for this
-            -- root, an unreserved default anchor is not (§18.2).
+            -- root, an unreserved default anchor in its default place (the leading
+            -- run, in default order) is not (§18.2).
             local defaults = sess:pin_defaults()
-            sess.view_state.pins = { { id = "smoke/explicit", reserved = true } }
+            sess.view_state.pins = {}
             for _, id in ipairs(defaults) do
                 table.insert(sess.view_state.pins, { id = id, reserved = false })
             end
+            table.insert(sess.view_state.pins, { id = "smoke/explicit", reserved = true })
             sess:save_pins()
             local saved = persist.repo_state(persist.read(), sess.repo.root)
             if not (#saved == 1 and saved[1].id == "smoke/explicit" and saved[1].reserved) then

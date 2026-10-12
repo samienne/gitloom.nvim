@@ -232,14 +232,19 @@ so it is never folded into a `◍`) plus the common trunks `master` / `main` /
 pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
 a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
-(§10.6). Pinning a local branch also pins its **tracked upstream** (so both lanes
-stay in full and a divergence is drawn rather than the remote collapsing);
-disable with `pin_upstream = false`. Every pinned branch's label carries a pin
-icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except HEAD's own label
-(`icons.pin`; `""` turns it off).
+(§10.6). Pinning a local branch also pins its **remote counterparts**
+implicitly — every remote branch of the same name, plus its tracked upstream —
+at the same priority, so their lanes stay in full and a divergence is drawn
+rather than a remote collapsing. They are not separate dialog rows; `P` on one
+unpins just that ref, and `pin_upstream = false` turns them off. Every pinned
+branch's label carries a pin icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except
+HEAD's own label (`icons.pin`; `""` turns it off).
 
 Press `L` for the **pinned-branches dialog** — the anchors in priority order,
-where they are managed together:
+where they are managed together. The defaults come first (the trunks, then
+HEAD's branch), and a newly pinned branch goes to the bottom. Order matters for
+every entry: where lanes meet, the higher-priority branch keeps its lane and
+colour (§5), so reordering re-lays the graph.
 
 ```
 Pinned branches                    ◆ = dedicated lane
@@ -547,7 +552,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
-    pin_upstream = true,     -- pinning a local branch also pins its tracked upstream (§6.3/§10.6)
+    pin_upstream = true,     -- a pinned local branch also pins its remote counterparts implicitly (§10.6)
     persist = true,          -- remember the view toggles + pin lists across sessions (§18)
     progress = {             -- long-running operations (§19); progress = false for none
         provider = "auto",   -- "auto" (fidget if installed, else vim.notify) / "fidget" / "notify" / false / { start = fn }

@@ -1036,15 +1036,28 @@ the current row. For each commit `C`:
    "root column break" invariant). The block lasts one row, so consecutive stacked
    roots simply alternate columns.
 3. **Outgoing** = one Lane per parent. The first parent **continues the identity
-   of the chain that runs into this commit** (spec §5): prefer an incoming lane
-   whose child has this commit as its FIRST parent, else any incoming lane (a
+   of the chain that runs into this commit** (spec §5): the best **pin rank**
+   first (each lane carries the rank of the best pinned ref at its birth tip,
+   counterparts sharing their local's; unranked otherwise), then prefer an incoming
+   lane whose child has this commit as its FIRST parent, else any incoming lane (a
    merge's second-parent edge is still that branch continuing), and among the
    candidates take the most SENIOR — the smallest id. Ids are minted in row order
    and carried along a chain, so the smallest is the chain that started highest.
-   The choice reads the DAG and the row order only, **never a column**, which is
-   what makes lane identity identical under every layout policy. A fresh id and a
-   free-list colour slot are taken only where a lane is born — a branch head (a
-   tip's first parent) and every extra parent of a merge. The ended lanes' colours
+   At a pinned tip whose rank strictly beats every incoming lane's, a merge's
+   extra-parent edge lane arriving there adopts the rank and continues; with none,
+   every incoming lane ends and a new ranked lane is born (`state.pin_birth`). The
+   ranks arrive as `opts.pin_rank` (ref id → rank; `columns.commit_rank` reads a
+   commit's best), each Lane carries `rank` and an extra-parent edge `extra` (the
+   adopt test — a flag, so a footer seed carries it across the seam), and the map
+   is part of the layout fingerprint `graph.extend_columns` checks. Under `gutter`
+   a birth claims nothing when a fan has a Line of its own, and declines the parent
+   swap, so the node reads in the newborn lane's colour.
+   The choice reads the DAG, the row order and the ranks only, **never a column**,
+   which is what makes lane identity identical under every layout policy (but see
+   spec §5's `gutter` risk: `claim_gutter` and the swaps read `state.trunk_in`). A
+   fresh id and a free-list colour slot are taken only where a lane is born — a
+   branch head (a tip's first parent), every extra parent of a merge, and an
+   outranking pinned tip. The ended lanes' colours
    are returned in **id order** too: `free_color` appends to a FIFO, so the return
    order decides which colour a later lane receives, and taking it from columns
    would let placement reach colour through the back door. Colours come from a
@@ -1755,26 +1768,35 @@ commit selection build on.
 §10.6.1). The anchor set is stored as **one ordered list** of `PinEntry`
 (`{ id, reserved }`), not a set: `view_state.pins` holds the user's explicitly
 ordered entries and `view_state.unpinned` the ids they removed (which suppress
-the built-in defaults). `select.lua` owns the pure core — `pin_resolve` (stored
-entries first, then the defaults HEAD / `master` / `main` / `dev` / seeded marks,
-minus the unpinned and minus refs that no longer exist), `pin_move` /
-`pin_toggle_reserved` / `pin_remove` / `pin_add`, and the two readers `pin_ids`
-(the membership set) and `reserved_order` (the reserved ids in priority order —
-the whole of what the ordering means to the layout). All are copy-in/copy-out, so
-the glue assigns the result back.
+the built-in defaults). `select.lua` owns the pure core — `pin_resolve` (the
+unplaced defaults `master` / `main` / `dev` / seeded marks / HEAD's anchor first,
+then the stored entries, minus the unpinned and minus refs that no longer exist;
+a new pin always lands at the bottom), `pin_counterparts` / `pin_rank` (below),
+`pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add`, and the two readers
+`pin_ids` (the membership set) and `reserved_order` (the reserved ids in priority
+order — the ordering's meaning for *columns*; its meaning for lane identity is
+the per-ref rank, spec §5). All are copy-in/copy-out, so the glue assigns the
+result back.
 
 Putting `reserved` **on** the entry rather than in a second list is what makes
 `reserved ⊆ pinned` and "unpin implies unreserve" structural instead of
-remembered: the flag has nowhere to survive its entry. Pinning alone still
-changes **no geometry** — the flag is set only in the dialog.
+remembered: the flag has nowhere to survive its entry. Pinning alone claims **no
+column** — the flag is set only in the dialog — but per spec §5 it does feed lane
+identity through the ranks.
 
-`ctx:effective_pins()` resolves the live list and applies the **pin-the-pair**
-upstream rule (§6.3), which needs the ref registry: an auto-pinned upstream
-carries `auto = <local id>`, is re-derived on every resolve, and is inserted
-directly after its source — so unpinning the local drops it, exactly as before,
-while an explicit pin/unpin of the upstream still wins. `ctx:effective_pinned()`
-is that list reduced to ids and remains what `view.owners` / `collapse_owners`
-consume, so **every existing pin consumer is unchanged**.
+`ctx:effective_pins()` resolves the live list — exactly the dialog's rows. The
+**implicit remote counterparts** (spec §10.6: every same-short-name remote branch,
+in `git remote` order then unlisted remotes by name — the `%` cycle's members —
+plus the tracked upstream when its short name differs; `select.pin_counterparts`)
+are NOT entries: `select.pin_rank` resolves them beside the list, giving each the
+rank of its local unless it is explicitly unpinned or already ranked (an
+explicitly pinned remote keeps its own place). `ctx:pin_rank()` is that table —
+ref id → rank, 1 = highest — and `ctx:effective_pinned()` is its key set, which
+remains what `view.owners` / `collapse_owners` and the pin icon consume, so **every existing pin consumer is unchanged**. `ctx:sync_pin_rank()` publishes the
+ranks as the layout input `opts.pin_rank` on both `ctx.opts` and the panes' frozen
+copy `ctx.pane_opts`; it runs at the top of every `reflow_build` (which `P`, every
+dialog key, the reset, a resync and a HEAD move all go through) and before the
+open-time stream.
 
 `L` opens the dialog (`GRAPH_HELPERS.pin_dialog`): a `float_zindex` float over
 the graph, with `select.pin_dialog_lines` producing the buffer lines and a
@@ -2094,9 +2116,10 @@ way the renderer reads it — `x ~= false` keys as booleans, a merge style
 deep-extended over the built-in one); `overlay` applies a stored `{ value, base }`
 only while `base` equals that resolved value (a changed `setup()` wins);
 `set_pref` records one key and prunes every other stale entry; `pins_for_save`
-drops what the open-time resolution re-derives (an unreserved default anchor or
-auto-pinned upstream), so a then-current HEAD branch does not become a permanent
-pin. The I/O half reads lazily once (`load`) for opens and, for every change,
+drops what the open-time resolution re-derives — the leading run of unreserved
+default anchors still in default order (§18.2), so a then-current HEAD branch does
+not become a permanent pin, while a default moved below an explicit entry is saved
+with its place (order is the identity rank). The I/O half reads lazily once (`load`) for opens and, for every change,
 re-reads → merges the one key → writes a temp file → `fs_rename`s it over the
 original (unlinking first where rename cannot replace), so concurrent instances
 keep each other's keys. A corrupt file is `{}` with one WARN. `set_path` redirects
