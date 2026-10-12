@@ -229,18 +229,19 @@ describe("pin rank (§5)", function()
         end)
     end)
 
-    it("tier 0 beats seniority where two first-parent lanes converge", function()
-        -- `t` is senior (minted first); `dv` is pinned. Both have `c` as first parent.
+    it("tier 0 beats the newest-lane tiebreak where two first-parent lanes converge", function()
+        -- `dv` is OLDER (minted first), `t` the newest; both have `c` as first parent.
+        -- Unpinned, tier 2 continues `t`'s lane; pinning `dev` makes tier 0 continue it.
         local function items()
-            local it = h.dag({ { "t", { "c" } }, { "dv", { "c" } }, { "c", { "r" } }, { "r", {} } })
+            local it = h.dag({ { "dv", { "c" } }, { "t", { "c" } }, { "c", { "r" } }, { "r", {} } })
             ref(it, "dv", "dev")
             return it
         end
         for _, pol in ipairs(POLICIES) do
             local plain = columns.layout(opts(STYLES[1].s, pol, nil), items())
-            assert.equals(plain[1].parent_lanes[1].id, row_of(plain, "c").parent_lanes[1].id)
+            assert.equals(plain[2].parent_lanes[1].id, row_of(plain, "c").parent_lanes[1].id)
             local rows = columns.layout(opts(STYLES[1].s, pol, { dev = 1 }), items())
-            local dv = rows[2].parent_lanes[1]
+            local dv = rows[1].parent_lanes[1]
             assert.equals(dv.id, row_of(rows, "c").parent_lanes[1].id, pol)
             assert.equals(dv.color, row_of(rows, "c").parent_lanes[1].color, pol)
             -- and a pinned lane ends where it meets a better one
@@ -250,7 +251,7 @@ describe("pin rank (§5)", function()
                     ref(it, "t", "t")
                     return it
                 end)())
-            assert.equals(r2[1].parent_lanes[1].id, row_of(r2, "c").parent_lanes[1].id, pol)
+            assert.equals(r2[2].parent_lanes[1].id, row_of(r2, "c").parent_lanes[1].id, pol)
         end
     end)
 

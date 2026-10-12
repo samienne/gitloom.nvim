@@ -5492,9 +5492,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local c = row.commit
                 local lit = node_lit(c)
                 -- Ref labels coloured as in the main view: the pane row's node lane
-                -- colour (§6 "Label colour"), HEAD's marker in the HEAD colour;
-                -- dimmed toward the background on an out-of-cone row (§6.2).
-                local lane = c and render.node_lane_hl(opts, row.columns, emphasis, c)
+                -- colour on the label OWNING the lane, the rest per-kind (§6 "Label
+                -- colour"), HEAD's marker in the HEAD colour; dimmed toward the
+                -- background on an out-of-cone row (§6.2).
+                local lane, owner
+                if c then lane, owner = render.node_label_colour(opts, row.columns, emphasis, c, repo.head, true) end
                 local function mark(s0, e0, g)
                     if g and e0 > s0 then
                         marks[#marks + 1] = { li, s0, e0, lit and g or render.dim_hl(opts, g) }
@@ -5507,7 +5509,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- A pointer mark (§11.7.6) carries its own colour; a detached
                     -- `HEAD` the HEAD colour; else the lane colour (or by kind).
                     local g = seg.hl or ((seg.kind == "head" and not seg.arrow) and pal.head)
-                        or render.label_hl(opts, lane, label_hl[seg.kind])
+                        or render.label_hl(opts, seg.key == owner and lane or nil, label_hl[seg.kind])
                     if seg.arrow and g ~= pal.head then
                         mark(s, s + seg.arrow[1] - 1, g)
                         mark(s + seg.arrow[1] - 1, s + seg.arrow[2], pal.head)

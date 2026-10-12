@@ -233,8 +233,9 @@ local function merge_swap_index(state)
     if not pk or state.next_subject ~= pk.hash then return nil end
     -- CLAUSE 3: ... and that row will continue on THIS lane, which is assured exactly
     -- when this merge is its only in-set child: one arriving Lane, so it is the one
-    -- continued (§5). Otherwise a senior sibling Lane wins, ours is evicted anyway, and
-    -- the break buys nothing.
+    -- continued (§5). Otherwise a sibling Lane may win §5 identity (a better rank, a
+    -- first-parent edge, or a larger id), ours is evicted anyway, and the break buys
+    -- nothing.
     if (pre.kids[pk.hash] or 0) ~= 1 then return nil end
     return bi
 end
@@ -347,8 +348,9 @@ end
 ---
 --- Clause 3 is what makes the saving **provable** instead of merely likely. Clause 2
 --- says the next subject row is that parent; it does not say that row will *continue*
---- on the lane we just handed it. If some other, more senior Lane also arrives there
---- (another child of that parent, laid out earlier, so a smaller id), that Lane is the
+--- on the lane we just handed it. If some other Lane also arrives there (another child
+--- of that parent) and wins §5 identity over it — a better rank or a first-parent edge
+--- (ours is a merge's extra-parent edge) — that Lane is the
 --- one it continues (§5), the swapped lane is evicted after all, and the row pays the
 --- handover anyway — on top of a spine break that bought nothing, which is strictly
 --- worse than not firing. "Its only in-set child is this merge" removes the contest:
@@ -726,9 +728,11 @@ function M.session(opts, seed)
     --     second-parent edge is still a candidate — it is the merged-in BRANCH, and
     --     minting a fresh lane for it would recolour every merged-in branch tip (the
     --     `m -> {a, b}` diamond is the smallest case that proves it).
-    --  2. SENIORITY — the smallest id. Ids are minted in row order and carried along a
-    --     whole first-parent chain, so the smallest is the chain that started highest
-    --     and a topic forking off a trunk is always junior to it.
+    --  2. NEWEST — the largest id. Ids are minted in row order and carried along a
+    --     whole first-parent chain, so the largest is the chain that started LOWEST,
+    --     nearest this commit: the branch just followed down into the junction carries
+    --     on and the older chain ends. A trunk keeps its colour through such a
+    --     junction by being pinned (tier 0), not by having started first.
     --
     -- BIRTH AT A PINNED TIP overrules the tiers where this commit's best rank STRICTLY
     -- beats every incoming lane's: every incoming lane ends — a merge's extra-parent
@@ -741,9 +745,11 @@ function M.session(opts, seed)
     -- (colour `-k`, `cp_rank`) beats a plain one, the smaller `k` first. And BIRTH AT
     -- A COUNTERPART TIP is the same overrule one step down: at a commit with no ranked
     -- ref, carrying an implicit remote counterpart of rank `k` whose slot is still
-    -- held, when `k` strictly beats every incoming lane (none ranked, none a
-    -- counterpart lane of rank <= k), every incoming lane ends and a counterpart lane
-    -- is born (fresh id, unranked, colour `-k`). Both births set `state.pin_birth`, so
+    -- held, when `k` strictly beats every incoming lane (none ranked <= k, none a
+    -- counterpart lane of rank <= k — compared by RANK, so a lane of a pin ranked
+    -- worse than `k`, e.g. HEAD's branch below the trunks, is beaten and ends here),
+    -- every incoming lane ends and a counterpart lane is born (fresh id, unranked,
+    -- colour `-k`). Both births set `state.pin_birth`, so
     -- the gutter treats them alike (no claim row, no parent swap).
     --
     -- PINNED COLOURS: a lane born with rank `r` takes slot `r` while it is withheld
@@ -773,7 +779,7 @@ function M.session(opts, seed)
                 trunk = l
             elseif not rank_better(cp_rank(trunk), cp_rank(l)) then
                 local lf, tf = continues_into(l, C), continues_into(trunk, C)
-                if (lf and not tf) or (lf == tf and l.id < trunk.id) then trunk = l end
+                if (lf and not tf) or (lf == tf and l.id > trunk.id) then trunk = l end
             end
         end
         local crank = pin_rank and M.commit_rank(C, pin_rank)
@@ -786,12 +792,23 @@ function M.session(opts, seed)
             state.pin_birth = true
         end
         -- BIRTH AT A COUNTERPART TIP (§5): no ranked ref here, its slot `k` still held,
-        -- and `k` strictly beats every incoming lane — none ranked, none a counterpart
-        -- lane of rank <= k. The ranked rule wins wherever a ranked ref points (`crank`).
+        -- and `k` strictly beats every incoming lane — none ranked <= k, none a
+        -- counterpart lane of rank <= k. A lane of a pin ranked WORSE than `k` is beaten
+        -- like an unranked one. Every incoming lane is checked, not just `trunk`: tier 0
+        -- prefers any ranked lane to a counterpart lane, so a counterpart lane of rank
+        -- <= k may arrive beside a worse-ranked `trunk`, and it still blocks the birth.
+        -- The ranked rule wins wherever a ranked ref points (`crank`).
         local ck = (not crank) and counterpart_at(C) or nil
-        if ck and trunk and trunk.rank == nil and rank_better(ck, cp_rank(trunk)) then
-            trunk, rank = nil, nil
-            state.pin_birth = true
+        if ck and trunk then
+            local beaten = true
+            for _, e in ipairs(incoming) do
+                local l = e.lane
+                if not rank_better(ck, l.rank or cp_rank(l)) then beaten = false; break end
+            end
+            if beaten then
+                trunk, rank = nil, nil
+                state.pin_birth = true
+            end
         end
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do

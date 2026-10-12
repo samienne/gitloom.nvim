@@ -563,7 +563,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
-    lane_label_colors = true, -- ref labels in their node's lane colour (false: per-kind groups)
+    lane_label_colors = true, -- the lane's owning label in the lane colour (false: per-kind groups)
     working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     pin_upstream = true,     -- a pinned local branch also pins its remote counterparts implicitly (§10.6)
@@ -655,9 +655,12 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   right-edge layout above), `"inline"` (left-aligned before the message), or
   `"dual"` (on a separate line above the commit's message). Cycle live with `B`.
   See [specification.md](specification.md) §6.1.
-- **`lane_label_colors`** — draw each ref label in the colour of the lane its
-  commit's node is drawn in (default `true`), dimmed with that lane out of the
-  cursor's reachability cone. The `HEAD` marker keeps `palette.head`, the
+- **`lane_label_colors`** — draw the label of the ref that **owns** a node's lane
+  in that lane's colour (default `true`), dimmed with the lane out of the cursor's
+  reachability cone: the ref the lane was born for (a pinned branch at its tip, a
+  remote counterpart at its own tip), else the node's first label. Every other
+  label on the node keeps its per-kind colour, so a remote branch that merely
+  shares a commit with `origin/dev` does not read as `dev`'s. The `HEAD` marker keeps `palette.head`, the
   `h`/`l`-selected label `palette.selected`. `false` restores the per-kind groups
   (`palette.branch` / `remote` / `tags` / `worktree`). See
   [specification.md](specification.md) §6 "Label colour".
