@@ -284,7 +284,11 @@ Coverage:
   overflow, §6: a contiguous window around the selected ref with separate
   left/right `+N` markers; greedy right-then-left growth; the selected item always
   shown even when it alone overflows; sel clamping; empty), and `refresh_columns`
-  width aggregation from `below` and from every stacked `above`/`below` row (§6.1)
+  width aggregation from `below` and from every stacked `above`/`below` row (§6.1);
+  plus `label_occurrence` + `ref_byte_col`'s `nth` (repeated marker labels such
+  as `(3)`, for cursor parking), and **mirroring keeps the logical label order**
+  (§5.4): `display_item`'s labels in logical order under `mirror` in `inline` /
+  `dual` / `right` mode, a selected index unchanged
 - `tests/ref_window_spec.lua` — the windowed right-ref overflow **end to end** (§6),
   incl. HEAD's label staying visible ahead of the `+N` (attached `(HEAD → x)` and a
   detached bare `HEAD`):
@@ -869,7 +873,11 @@ Coverage:
   dropped with their local or by an explicit unpin, the ranks published on
   `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
   unpinnable / dropped once attached), and `reconcile_refs` stamping
-  the head ref's `branch` (nil when detached).
+  the head ref's `branch` (nil when detached); plus the **default selection**
+  (§2/§5.4) over a stub ctx in a scratch window: `on_cursor_moved` pre-selects
+  the first marker on a packed line and the first label on a dual-mode label row
+  — mirrored or not — leaves other rows / modes on the message, and
+  `cursor_hash` with no marker selected yields the first marker's tip.
 - `tests/pin_rank_spec.lua` — pin priority in lane identity (§5): `commit_rank`
   (best rank, `HEAD` keying), nil / empty / past-the-palette non-matching
   `pin_rank` byte-identical (fuzz + `large_topo`, every style × policy), the birth
@@ -1028,7 +1036,8 @@ only** (not the public API): `classify_ref`, `group_refs`, `parse_worktrees` /
 `marker_units` (a packed row's selectable marker labels; §10.4),
 `display_item` (the per-row renderer — exposed for the §6 ref-window integration
 test), `decoration_texts`,
-`move_selection`, `ref_byte_col`, `parse_commit_line`, `make_line_buffer`
+`move_selection`, `ref_byte_col`, `label_occurrence` (which same-text label a
+selected one is; cursor parking), `parse_commit_line`, `make_line_buffer`
 (the streaming-stdout line de-chunker; §3), `make_future` (the vendored promise;
 exposed for `future_spec`), `order_commits` (the owned
 topological row sort that replaced `git log --topo-order`; §3.1),
@@ -1058,7 +1067,8 @@ cycle; §2), and `selected_ref` /
 `require("gitloom.graph.palette").row_entries`).
 `window._internal` additionally exposes `keys` (the `GRAPH_KEYS` key registry, §17.1),
 `reflow_async` / `resync` (the §19.4 "always ended" glue paths, over a stub ctx),
-`effective_pins` / `effective_pinned`,
+`effective_pins` / `effective_pinned`, `on_cursor_moved` / `cursor_hash_at` (`cursor_hash`; the
+default selection; §2),
 `pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live
 graph session, recorded by `open_graph`. The headless smoke test reads the
 projected model through `ctx` because without a UI there is no rendered text to

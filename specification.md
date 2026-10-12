@@ -925,6 +925,22 @@ pure function of connectivity (§5), the mirrored glyphs (`╭`↔`╮`, `┤`�
 glyph-swap table, and color (lane color slot) is preserved. All §5.1 invariants
 hold on the mirrored output.
 
+**Mirroring does not flip the ref labels.** Only the graph column is mirrored;
+the ref labels of a row (§6) keep their **logical order** in every mode,
+mirrored or not: HEAD's label (the current branch) first, then the local
+branches, the remote-only branches, the tags and the worktree labels — in every
+label mode (§6.1), on collapsed heads and labelled junctions and packed marker
+rows (§10.4), and in the context panes (§6.2). Everything that follows from that
+order is the unmirrored behaviour too: the default selection is the first label
+(and a packed line's first marker), `h`/`l` step through the labels left to
+right, the `+N` overflow (§6) is a trailing one, and the palette lists a packed
+line's per-marker entries first to last. The reason is that the reading order
+carries the labels' **priority**: drawn reversed, the remotes and tags would be
+read before the local branches, and the overflow would no longer hide the least
+important labels. A strict mirror image of the label strip is therefore
+deliberately given up — the labels are not beside the flipped graph anyway (it
+stays in its column, left of the message and the labels).
+
 ### 5.5 Lane colouring (the free list)
 
 A lane's colour is a **palette slot** drawn from a recycling **free list**,

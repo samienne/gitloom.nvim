@@ -6708,10 +6708,13 @@ local function place_cursor(ctx)
     if ctx.sel.active then
         local item = ctx:order_at(line)
         if item and item.type == "markers" and ctx.sel.cursor then
-            for _, u in ipairs(marker_units(item, ctx:pin_marks())) do
+            local units = marker_units(item, ctx:pin_marks())
+            for i, u in ipairs(units) do
                 if u.marker == ctx.sel.cursor then
                     local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
-                    local mcol = ref_byte_col(text, u.text)
+                    -- Marker labels may repeat (`(3)`); skip the copies drawn before it.
+                    local mcol = ref_byte_col(text, u.text, selectm.label_occurrence(
+                        vim.tbl_map(function(x) return x.text end, units), i))
                     if mcol then
                         pcall(vim.api.nvim_win_set_cursor, w, { line, mcol })
                         return
@@ -6729,10 +6732,13 @@ local function place_cursor(ctx)
     if item and item.type == "markers" then
         local col = nil
         if ctx.selection_state.commit == item and ctx.selection_state.index then
-            local u = marker_units(item, ctx:pin_marks())[ctx.selection_state.index]
+            local units = marker_units(item, ctx:pin_marks())
+            local u = units[ctx.selection_state.index]
             if u then
                 local text = vim.api.nvim_buf_get_lines(ctx.buf, line - 1, line, false)[1] or ""
-                col = ref_byte_col(text, u.text)
+                -- Marker labels may repeat (`(3)`); skip the copies drawn before it.
+                col = ref_byte_col(text, u.text, selectm.label_occurrence(
+                    vim.tbl_map(function(x) return x.text end, units), ctx.selection_state.index))
             end
         end
         if not col and ctx.lv and ctx.lv.controller and ctx.lv.controller.col_offset then
@@ -7122,6 +7128,10 @@ M._internal = {
     apply_worktree = apply_worktree,
     integrate_commit = integrate_commit,
     build_display_index = build_display_index,
+    on_cursor_moved = on_cursor_moved, -- the CursorMoved pre-selection (§2); window_internal_spec
+    -- Not named `cursor_hash`: specs copy _internal onto stub ctxs whose own
+    -- `cursor_hash` it would shadow.
+    cursor_hash_at = cursor_hash, -- a packed line's default marker (§2); window_internal_spec
     open_diffview = open_diffview, -- the default diff provider (§11.5); diff_provider_spec
     keys = GRAPH_HELPERS.key_registry(), -- the key registry GRAPH_KEYS (§17.1); palette_spec
     -- §19.4's "always ended" glue paths, driven over a stub ctx; progress_spec

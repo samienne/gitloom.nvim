@@ -629,8 +629,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   `"date"`, or `"author"` (git's date / author-date order). Cycle live with `S`.
 - **`mirror`** — render the graph mirrored, with lane 1 at the right edge of the
   graph column (nearest the message). On by default; set `false` for the
-  conventional left-to-right layout. A render-only transform; toggle live with
-  `M`. See [specification.md](specification.md) §5.4.
+  conventional left-to-right layout. Only the graph flips: the ref labels keep
+  their priority order (HEAD's branch first) either way. A render-only
+  transform; toggle live with `M`. See [specification.md](specification.md) §5.4.
 - **`highlight`** — whether reachability dimming (§12) starts enabled (default
   `true`). Toggle live with `H`.
 - **`collapse_merged`** — whether the first-parent focus (§10.7) starts enabled

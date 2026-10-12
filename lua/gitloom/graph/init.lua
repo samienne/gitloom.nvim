@@ -409,6 +409,7 @@ M._internal = {
     -- gitloom.graph.select
     move_selection = selectm.move_selection,
     ref_byte_col = selectm.ref_byte_col,
+    label_occurrence = selectm.label_occurrence,
     sel_ascend_children = selectm.sel_ascend_children,
     sel_step = selectm.sel_step,
     sel_switch = selectm.sel_switch,
