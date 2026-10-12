@@ -547,14 +547,18 @@ position, in the resolved pin list (§10.6), of the best-ranked pinned ref at th
 commit where the lane was **born** — 1 is the highest priority. Only the list's
 **entries** are ranked: a pinned local branch's implicit remote counterparts
 (§10.6) carry no rank. A lane born where no ranked ref points is **unranked**,
-which is worse than every rank. A continuation carries its lane's rank unchanged,
-exactly as it carries the `id` and the `color`. Which lane continues is decided
+which is worse than every rank. An unranked lane may instead be a **counterpart
+lane** of rank `k` (§5.5 — born at a counterpart tip, below; its colour is slot `k`'s
+counterpart variant): its **counterpart rank** `k` orders it among the unranked
+lanes only, never against a ranked one. A continuation carries its lane's rank (and
+counterpart rank) unchanged, exactly as it carries the `id` and the `color`. Which lane continues is decided
 **semantically**, from the DAG, the row order and the pin ranks alone.
 
 **Which lane a commit's first parent continues.** Among the incoming Lanes, in
 tiers — each tier decides only between the lanes the previous one left tied:
 
-0. **Pin rank.** The best-ranked incoming lane wins.
+0. **Pin rank.** The best-ranked incoming lane wins. Between unranked lanes, a
+   counterpart lane beats a plain one, the better (smaller) counterpart rank first.
 1. **First parent.** A lane whose child **has this commit as its FIRST parent** —
    the child that genuinely continues *into* it — beats one arriving as a merge's
    second-or-later parent edge.
@@ -590,9 +594,29 @@ it are drawn in `x`'s **counterpart colour** (§5.5: the same slot, lightly dimm
 which brightens to the full pinned colour at `x`'s tip. A pinned lane in turn **ends** where it
 converges into a better-ranked lane (tier 0), as any lane does.
 
+**Birth at a counterpart tip.** The same overrule one step down, for an implicit
+remote counterpart (§10.6) of a pin of rank `k`. At a commit such a counterpart
+points at, when **no ranked ref** points there (a ranked ref wins: the pinned rule
+above applies instead), slot `k` is still **held** (§5.5 — so there is a counterpart
+colour to give), and `k` strictly beats every incoming lane — **none** of them is
+ranked and none is a counterpart lane of rank `≤ k` — **every** incoming lane
+**ends** here and a **counterpart lane** is born: a fresh `id`, unranked, counterpart
+rank `k`, colour `-k` (§5.5). A ranked incoming lane — any pinned branch's — still
+continues through (a counterpart loses to a real pin), and a counterpart lane of the
+same pin continues too. So with `dev` pinned and `origin/dev` one commit ahead, the
+remote's commit reads in `dev`'s counterpart colour even when another branch is built
+on top of it: that branch's lane ends at `origin/dev`'s commit instead of running
+through it down to `dev`'s tip. Under the four lane-column policies this changes lane
+ids and colours only (0 glyph changes over the fuzz corpus and the large real-world
+topology); under `gutter` it moves geometry like a pinned birth (55 of 2,064 fuzz rows,
+0 of 3,804 on the real topology, every invariant holding), with the same rules: the
+birth claims no gutter when a fan has a Line of its own, declines the parent swap,
+and its spine break is licensed.
+
 A fresh `id` and `color` are therefore taken where a lane is born: a branch head (a
-commit nothing arrives at), a merge's second-and-later parents (born unranked), and a
-pinned tip that outranks everything arriving at it. A lane born at a pinned tip —
+commit nothing arrives at), a merge's second-and-later parents (born unranked), a
+pinned tip that outranks everything arriving at it, and a counterpart tip that
+outranks everything arriving at it. A lane born at a pinned tip —
 by outranking, or as a head nothing arrives at — takes its branch's pinned colour
 (§5.5) instead of the front of the free list.
 
@@ -953,9 +977,9 @@ Only explicit entries own a colour; a remote counterpart has no rank (§10.6) an
 owns no slot, but **shares its local's** (below).
 
 **Counterpart colours.** A lane **born** at the tip of an implicit remote
-counterpart (§10.6) of a pin of rank `k` — an unranked birth: nothing arrives at
-the counterpart's commit (it is ahead of its local, or diverged from it) and no
-ranked ref points there — takes slot `k` too, marked as a **counterpart lane**. It
+counterpart (§10.6) of a pin of rank `k` — where no ranked ref points: nothing
+arrives at the counterpart's commit, or only lanes it outranks (§5 "Birth at a
+counterpart tip") — takes slot `k` too, marked as a **counterpart lane**. It
 is drawn in the **counterpart variant** of that colour: the same hue, blended
 lightly toward the background by `palette.counterpart_dim` (§8, default `0.25`,
 much lighter than the §12 cone dim), so the local and where each remote thinks it
@@ -969,8 +993,9 @@ pinned lane or by another counterpart lane), counted as one more holder; a slot
 already released, or a rank past the palette, gives the counterpart lane an
 ordinary free-list colour with no counterpart mark. The slot returns to the free
 list only when its **last** holder ends — the reservation or pinned lane and every
-counterpart lane holding it. This is colour only: counterparts still carry no rank,
-identity (§5) is unchanged, so no glyph moves. A counterpart lane that reaches its
+counterpart lane holding it. Counterparts still carry no rank, so a pinned lane
+always beats a counterpart lane; the birth at a counterpart tip (§5) changes lane
+identity, and glyphs only under `gutter`. A counterpart lane that reaches its
 local's tip ends there and the pinned lane is born (§5), so the colour visibly
 brightens at the local's tip; a counterpart at or behind its local sits on the
 pinned lane itself, in full colour. With `pin_upstream` off there are no
@@ -1555,8 +1580,8 @@ colour from the wire arriving from above (§5.6), and a collapsed `◍` head's o
 labelled junction's `◍` colour. The whole label takes it — brackets, the pin icon,
 the name and the `↑remote,…` list — so a label reads as belonging to its lane. A
 remote counterpart's label on a counterpart lane (§5.5) therefore shows its local's
-colour lightly dimmed; one in sync with its local sits on the pinned lane, in full
-colour.
+colour lightly dimmed (out of the cone, the brighter counterpart dim of §12.2);
+one in sync with its local sits on the pinned lane, in full colour.
 Three things keep their own highlight: the **HEAD marker** (a detached `HEAD`
 label, and the `HEAD → ` prefix of the current branch's label) stays in
 `palette.head`, even though HEAD's node glyph is itself drawn in `palette.head`
@@ -1932,7 +1957,9 @@ Endpoint     = Commit | "index" | "worktree"
   terminals without true colour, dimming falls back to a flat `NonText`
   highlight instead. `counterpart_dim` is the lighter blend factor of a remote
   counterpart lane's colour (§5.5; default `0.25`); without true colour a
-  counterpart lane is drawn in the plain slot colour.
+  counterpart lane is drawn in the plain slot colour. `counterpart_dim_out` is a
+  counterpart lane's blend **out of the cone** (§12.2; default `0.75 × dim`, so
+  it stays brighter than every other dimmed lane).
 - `lane_label_colors` — draw each ref label in its commit node's lane colour
   (§6 "Label colour"). **Default true.** `false` restores the per-kind palette
   groups. No toggle key.
@@ -2614,8 +2641,9 @@ of a remote collapsing to a `◍` head. The counterparts:
   have **no rank** (§5), so they never steer lane identity, and no slot of their
   own — a lane born at one **shares its local's pinned colour, lightly dimmed** (the
   counterpart colour, §5.5). A counterpart **diverged** from its local draws its own
-  lane in that colour; one **ahead** of its local reaches the local's tip as an
-  unranked lane in that colour, so the local's pinned lane is born there and the
+  lane in that colour; one **ahead** of its local starts that lane at its own tip
+  (even under another branch built on top of it, §5 "Birth at a counterpart tip")
+  and reaches the local's tip as an unranked lane in that colour, so the local's pinned lane is born there and the
   colour brightens to full; one at or behind the local is on the local's own
   (pinned) lane, in full colour;
 - are **not listed** in the pinned-branches dialog (§10.6.1) — they are not entries
@@ -3323,10 +3351,15 @@ field's / Lane's own highlight colour is blended toward the window background by
 `palette.dim` (§8), so a dimmed Lane keeps its hue and stays individually
 recognisable. On terminals without true colour, dimming falls back to a single
 flat highlight group (`NonText`). A remote counterpart lane (§5.5) is already
-lightly dimmed; out of the cone the cone dim **composes on top** — its
-counterpart colour is blended toward the background again by `palette.dim`, so it
-stays a shade lighter than its dimmed pinned lane (a total blend of
-`1 − (1 − counterpart_dim)(1 − dim)`).
+lightly dimmed in the cone (`counterpart_dim`, default `0.25`). Out of the cone
+the dims do **not** compose: its slot colour is blended by
+`palette.counterpart_dim_out` (§8), **default `0.75 × palette.dim`** (`0.3375` at
+the default `dim`), so an out-of-cone counterpart lane reads a shade **brighter**
+than every other dimmed lane — its own pinned lane's included — while still dim.
+In the cone: pinned lane full, counterpart `0.25`, others full; out of it: pinned
+lane and others `dim`, counterpart `0.75 × dim`. Its label follows (§6 "Label
+colour"). Without true colour every out-of-cone lane, a counterpart's included,
+takes the flat fallback.
 
 The emphasis is **on by default** and follows the cursor; it is recomputed when
 the cursor moves to a new row and when the view scrolls (the window-bounded cone
