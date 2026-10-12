@@ -830,26 +830,39 @@ Coverage:
   keymaps, re-render and focus handoff, which the pure tests cannot reach.
   Plus the **implicit remote counterparts** (§10.6): `pin_counterparts` (same
   short name in `git remote` order, unlisted remotes by name, then a differently
-  named upstream; none for a remote / tag) and `pin_rank` (the layout's
-  `opts.pin_rank`: rank = place, a counterpart sharing its local's, an explicitly
-  unpinned counterpart excluded, an explicitly pinned remote keeping its own,
-  none with `pin_upstream` off) and dialog lines without counterpart rows.
+  named upstream; none for a remote / tag) and `pin_rank` (with counterparts on
+  — the anchor set: rank = place, a counterpart sharing its local's, an explicitly
+  unpinned counterpart excluded, an explicitly pinned remote keeping its own; with
+  them off — the layout's `opts.pin_rank`, entries only) and dialog lines without
+  counterpart rows.
   `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`/
   `pin_rank`/`sync_pin_rank` (default order with HEAD's anchor last, nothing
-  reserved by default, counterparts implicit at the local's rank and never rows,
+  reserved by default, counterparts implicit anchors but NOT in the layout's rank
+  map (§5.5: no rank, no pinned colour) and never rows,
   dropped with their local or by an explicit unpin, the ranks published on
   `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
   unpinnable / dropped once attached), and `reconcile_refs` stamping
   the head ref's `branch` (nil when detached).
 - `tests/pin_rank_spec.lua` — pin priority in lane identity (§5): `commit_rank`
-  (best rank, `HEAD` keying), nil / empty / non-matching `pin_rank` byte-identical
-  (fuzz + `large_topo`, every style × policy), the birth at a pinned tip (the
-  `feature1`-off-`dev` case; a merged pinned tip adopting the edge lane; equal rank
-  `x`/`origin/x` one lane; a worse rank no birth), tier 0 beating seniority, ids /
+  (best rank, `HEAD` keying), nil / empty / past-the-palette non-matching
+  `pin_rank` byte-identical (fuzz + `large_topo`, every style × policy), the birth
+  at a pinned tip (the `feature1`-off-`dev` case; a merged pinned tip ending the
+  merge edge and starting its own pinned-colour lane; a counterpart ahead of its
+  local reaching the tip unranked; equal rank one lane; a worse rank no birth),
+  tier 0 beating seniority, ids /
   colours / ranks identical across policies, 0 glyph changes under the four
   lane-column policies and every invariant + `check_spine` (births licensed, seen
   > 0) under `gutter`, streaming == one-shot incl. a pin change forcing a re-lay
-  (the fingerprint), and footer seeds carrying their main-view rank
+  (the fingerprint), and footer seeds carrying their main-view rank. Plus the
+  **pinned colours** (§5.5): rank k's lane born with slot k and unchanged by a pin
+  added below it; over a fuzz corpus with a 6-slot palette (generate on and off) no
+  other lane holds slot k before rank k's branch start is found, and the slot IS
+  recycled after; a diverged counterpart drawing an ordinary colour; pins past the
+  palette falling back (generated, or shared without truecolor); a non-matching
+  in-palette rank withholding its slot and moving nothing else; and the footer seed
+  taking a withheld slot's reservation over (released once, reused as in the main
+  view). `tests/pane_spec.lua` checks the header never de-collides a lane onto a
+  pinned slot (`pane.header`'s `avoid`)
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -1256,12 +1269,22 @@ Details not covered by the spec or architecture:
   is still that branch continuing; minting fresh there would recolour every
   merged-in branch tip), **2** the most **senior**, the smallest id. A commit whose
   best rank (`columns.commit_rank`) strictly beats every incoming lane's is a
-  **pinned birth**: an arriving merge extra-parent edge (Lane flagged `extra`)
-  adopts the rank, else every incoming lane ends and a fresh ranked lane is born
-  (`state.pin_birth`; under `gutter` it skips the claim row when a fan has its own
-  Line and declines the parent swap). nil/empty `pin_rank` is byte-identical to the
-  unranked layout (0 of 233,025 rows vs the pre-rank code); the map is in the
-  layout fingerprint, and footer seeds carry `rank`/`extra` via `pane.boundary_of`.
+  **pinned birth**: every incoming lane ends — an arriving merge extra-parent edge
+  included (the old "adopt" case is gone: a lane's colour is fixed for life) — and a
+  fresh ranked lane is born (`state.pin_birth`; under `gutter` it skips the claim
+  row when a fan has its own Line and declines the parent swap). **Pinned colours**
+  (§5.5): rank `k <= #palette.tracks` owns curated slot `k` (`columns.pinned_slots`);
+  `M.session` withholds those slots from the FIFO up front (`pin_wait` / `held`,
+  `in_use` 1), a lane born with rank `r` takes slot `r` (`take_pin`), and the slot
+  returns through the ordinary `free_color` when that lane ends — or through
+  `release_pin` at the tip when no lane of its own is born there (outranked, a
+  better ref on the commit, a root). The no-truecolor share path skips held slots,
+  and generated-slot retirement counts only non-held ones. A footer seed carrying a
+  withheld slot takes the reservation over (counted once). nil/empty `pin_rank` is
+  byte-identical to the unranked layout (0 of 233,025 rows vs the pre-rank code); a
+  non-matching rank inside the palette withholds its slot for the whole layout. The
+  map is in the layout fingerprint, and footer seeds carry `rank` via
+  `pane.boundary_of`.
   Under the four lane-column policies ranks change colour only (0 glyphs); under
   `gutter` they move geometry (spec §5's measured exception). The ended lanes' colours are returned in
   **id order**, because `free_color` appends to a FIFO and the return order decides
@@ -1367,10 +1390,13 @@ Details not covered by the spec or architecture:
   `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`: unplaced
   defaults — trunks, seeds, HEAD's anchor last — then the stored entries) into
   exactly the dialog's rows. **Implicit remote counterparts** (`pin_upstream`) are
-  NOT entries: `select.pin_rank` (via `ctx:pin_rank()`) maps every effective
-  anchor to its rank (1 = highest), a local's `select.pin_counterparts` sharing its
-  rank unless explicitly unpinned; `ctx:effective_pinned()` is its key set and is
-  still what `view.owners`/`collapse_owners`/the pin icon consume.
+  NOT entries, and take no rank and no pinned colour (§5.5/§10.6): `ctx:pin_rank()`
+  is `select.pin_rank` with counterparts OFF — the entries' ranks (1 = highest), the
+  layout map; `ctx:effective_pinned()` is the key set of `select.pin_rank` with
+  counterparts ON (a local's `select.pin_counterparts`, unless explicitly unpinned)
+  and is still what `view.owners`/`collapse_owners`/the pin icon consume. The header
+  pane gets `columns.pinned_slots(pane_opts.pin_rank, #tracks)` as `pane.header`'s
+  `avoid`, so its colour de-collision never hands out a pinned slot.
   `ctx:sync_pin_rank()` publishes the table as the layout input `opts.pin_rank`
   (on `ctx.opts` and `ctx.pane_opts`) at the top of every `reflow_build` and
   before the open stream — every pin change reflows, so that is the refresh.

@@ -459,6 +459,16 @@ describe("pin_counterparts / pin_rank (§10.6 implicit remote counterparts)", fu
         assert.same({ dev = 1 }, selectm.pin_rank(pins("dev"), refs(), { "origin" }, {}, false))
     end)
 
+    it("counterparts off is the layout's map: entries only, an explicit remote kept (§5.5)", function()
+        -- The anchor set (counterparts on) is a superset; the layout ranks entries only,
+        -- so no counterpart can be born with, or claim, a pinned colour.
+        local layout = selectm.pin_rank(pins("master", "origin/dev", "dev"), refs(), { "origin" }, {}, false)
+        assert.same({ master = 1, ["origin/dev"] = 2, dev = 3 }, layout)
+        local anchors = selectm.pin_rank(pins("master", "origin/dev", "dev"), refs(), { "origin" }, {})
+        for id, k in pairs(layout) do assert.equal(k, anchors[id]) end
+        assert.equal(1, anchors["origin/master"])
+    end)
+
     it("the dialog lists the entries only — counterparts have no rows", function()
         local list = pin_resolve(pins("dev"), {}, { "master" }, refs())
         local lines, rows = pin_dialog_lines(list)

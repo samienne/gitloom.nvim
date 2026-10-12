@@ -37,9 +37,7 @@ local M = {}
 ---@field parent Commit
 ---@field highlighted boolean
 ---@field rank? integer  pin rank (§5 tier 0): the best pinned ref's rank where the lane
----                      was born (or adopted one); nil = unranked, worse than any rank
----@field extra? boolean a merge's extra-parent edge (born unranked at the merge; the
----                      §5 birth rule's adopt case reads it)
+---                      was born; nil = unranked, worse than any rank
 
 --- The layout's pin-priority input (spec §5 "Lane identity", §10.6). Declared here,
 --- beside the engine that reads it, as a partial of the `GraphOptions` class
@@ -48,10 +46,12 @@ local M = {}
 ---@field pin_rank? table<string, integer>  ref id → pin rank, 1 = highest priority.
 ---   A ref id is its key in `repo.refs` (`git.add_ref`): the ref's `name`
 ---   (`main`, `origin/main`, `v1.0`, `wt:<dir>`), except the `head` ref, keyed
----   `HEAD`. Keyed by exactly the ids the resolved pin list holds, implicit remote
----   counterparts included at their local's rank. A commit's rank is the best over
----   its refs (`columns.commit_rank`). nil or empty ⇒ every lane unranked ⇒ the
----   layout is exactly the unpinned one. Part of the layout fingerprint (§3.1).
+---   `HEAD`. Keyed by exactly the ids of the resolved pin list's ENTRIES — implicit
+---   remote counterparts are not ranked (§10.6). A commit's rank is the best over
+---   its refs (`columns.commit_rank`). Rank `k <= #palette.tracks` also owns curated
+---   slot `k` as its pinned colour (§5.5, `columns.pinned_slots`). nil or empty ⇒
+---   every lane unranked ⇒ the layout is exactly the unpinned one. Part of the
+---   layout fingerprint (§3.1).
 
 --- A **Segment** is one wire within a `GraphColumn`: its connectivity plus the
 --- Lane(s) it draws (a list — usually one, but a shared fan bus carries the set

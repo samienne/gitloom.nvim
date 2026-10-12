@@ -104,6 +104,26 @@ function M.commit_rank(commit, pin_rank)
     return best
 end
 
+--- The **pinned colours** (spec §5.5): slot → rank for every rank in `pin_rank` that
+--- owns a curated slot. Rank `k` owns slot `k` of `palette.tracks` — the list every
+--- lane draws from — so the map is the identity on its keys; it is a set with the
+--- cap applied. A rank past the curated palette (`k > ntracks`) owns nothing and its
+--- lane takes a free-list colour. Pure, and a function of the ranks alone, so the
+--- pinned colours never depend on a column, a row or a layout policy. The header
+--- pane (§6.2) reads it too, to keep its colour de-collision off these slots.
+---@param pin_rank table<string, integer>?  ref id → rank (1 = highest priority)
+---@param ntracks integer                   the curated palette's size
+---@return table<integer, integer>          slot → rank (empty when nothing is pinned)
+function M.pinned_slots(pin_rank, ntracks)
+    local out = {}
+    for _, k in pairs(pin_rank or {}) do
+        if type(k) == "number" and k >= 1 and k <= ntracks and k == math.floor(k) then
+            out[k] = k
+        end
+    end
+    return out
+end
+
 --- Is rank `a` strictly better than rank `b`? Smaller is better; nil (unranked) is
 --- worse than every rank, so two unranked lanes tie.
 ---@param a integer?
@@ -436,6 +456,30 @@ function M.session(opts, seed)
     for i = 1, ntracks do in_use[i] = 0; free[i] = { slot = i, ready = 0 } end
     local function fcount() return qtail - qhead + 1 end
 
+    -- PINNED COLOURS (§5.5). Rank `k` (k <= ntracks) owns curated slot `k`. From the
+    -- start of the layout the slot is WITHHELD: out of the FIFO, `in_use` 1 (the
+    -- reservation is its holder), never handed out by `alloc_color` and never shared.
+    -- The pinned lane born at its tip TAKES the reservation over (`take_pin`); the slot
+    -- returns to the free list through the ordinary `free_color` when that lane ends,
+    -- or through `release_pin` at the tip when no lane of its own is born there.
+    --   `pin_wait[k]` — slot k withheld and not yet claimed by a lane;
+    --   `held[k]`     — slot k withheld OR held by its pinned lane (cleared when the
+    --                   slot finally returns), which is what the share path skips.
+    local pin_wait, held, nheld = {}, {}, 0
+    if pin_rank then
+        for k in pairs(M.pinned_slots(pin_rank, ntracks)) do
+            pin_wait[k], held[k], nheld = true, true, nheld + 1
+        end
+        if nheld > 0 then
+            local kept = {}
+            for i = qhead, qtail do
+                if not held[free[i].slot] then kept[#kept + 1] = free[i] end
+            end
+            free, qhead, qtail = kept, 1, #kept
+            for k in pairs(held) do in_use[k] = 1 end
+        end
+    end
+
     local function alloc_color()
         clock = clock + 1
         -- Reuse the front if it has cooled down; else mint (when generating).
@@ -450,11 +494,18 @@ function M.session(opts, seed)
             in_use[nextgen] = 1
             return nextgen
         end
-        -- No truecolor and exhausted: share the least-shared curated slot.
+        -- No truecolor and exhausted: share the least-shared curated slot — never a
+        -- pinned colour (§5.5) unless every curated slot is one, which falls back to
+        -- sharing among all of them rather than failing.
         local best
-        for off = 0, ntracks - 1 do
-            local c = ((dup + off) % ntracks) + 1
-            if not best or in_use[c] < in_use[best] then best = c end
+        for pass = 1, 2 do
+            for off = 0, ntracks - 1 do
+                local c = ((dup + off) % ntracks) + 1
+                if (pass == 2 or not held[c]) and (not best or in_use[c] < in_use[best]) then
+                    best = c
+                end
+            end
+            if best then break end
         end
         dup = best
         in_use[best] = in_use[best] + 1
@@ -465,10 +516,33 @@ function M.session(opts, seed)
         if not c then return end
         in_use[c] = (in_use[c] or 0) - 1
         if in_use[c] > 0 then return end -- still held (a shared slot's other holder)
+        -- A pinned colour's last holder ended: the slot is an ordinary one again.
+        if held[c] then held[c], nheld = nil, nheld - 1 end
         -- Retire a surplus generated slot rather than recycling it, so quiet
-        -- stretches drift back to the curated palette.
-        if c > ntracks and fcount() >= ntracks then return end
+        -- stretches drift back to the curated palette. "Comfortably full" counts
+        -- only the slots not withheld as pinned colours (§5.5).
+        if c > ntracks and fcount() >= ntracks - nheld then return end
         qtail = qtail + 1; free[qtail] = { slot = c, ready = clock + buffer }
+    end
+
+    -- The colour of a lane born where rank `r` is pinned: its pinned colour while that
+    -- is still withheld (the lane takes the reservation over — `in_use` stays 1), else
+    -- (unranked, past the palette, or already claimed) an ordinary free-list colour.
+    local function take_pin(r)
+        if r and pin_wait[r] then
+            pin_wait[r] = nil
+            return r
+        end
+        return alloc_color()
+    end
+
+    -- Release a still-withheld pinned colour whose branch start was found without a
+    -- lane of its own (§5.5): back to the free list like any returned colour.
+    local function release_pin(k)
+        if pin_wait[k] then
+            pin_wait[k] = nil
+            free_color(k)
+        end
     end
 
     local rows = {}
@@ -490,6 +564,10 @@ function M.session(opts, seed)
         end
         free, qhead, qtail = kept, 1, #kept
         for slot, n in pairs(reserved) do
+            -- A seed carrying a still-withheld pinned colour IS that pinned branch's
+            -- lane continuing across the seam (§5.5): it takes the reservation over,
+            -- so the slot is counted once and released when the seed ends.
+            if pin_wait[slot] then pin_wait[slot] = nil; n = n - 1 end
             in_use[slot] = (in_use[slot] or 0) + n
             if slot > nextgen then nextgen = slot end
         end
@@ -599,14 +677,17 @@ function M.session(opts, seed)
     --     and a topic forking off a trunk is always junior to it.
     --
     -- BIRTH AT A PINNED TIP overrules the tiers where this commit's best rank STRICTLY
-    -- beats every incoming lane's: a merge's extra-parent edge arriving here (born,
-    -- unranked, at a merge with this commit as a non-first parent) continues and
-    -- ADOPTS the rank, keeping its id and colour (the most senior of several; the
-    -- edge is the Lane flagged `extra`);
-    -- otherwise every incoming lane ends and the pinned branch's lane is born (fresh
-    -- id, free-list colour). An EQUAL rank births nothing, so `x` and `origin/x`
-    -- stay one lane. With no `pin_rank` every rank is nil, tier 0 always ties and no
-    -- commit is pinned, so this is exactly the old two-tier choice.
+    -- beats every incoming lane's: every incoming lane ends — a merge's extra-parent
+    -- edge included, since a lane's colour is fixed for life — and the pinned
+    -- branch's lane is born (fresh id, its PINNED COLOUR, §5.5). An equal rank births
+    -- nothing. With no `pin_rank` every rank is nil, tier 0 always ties and no commit
+    -- is pinned, so this is exactly the old two-tier choice.
+    --
+    -- PINNED COLOURS: a lane born with rank `r` takes slot `r` while it is withheld
+    -- (`take_pin`). After the ended lanes return, every rank at this commit whose slot
+    -- is STILL withheld is released (`release_pin`, slot order): the branch's start is
+    -- here, and it got no lane of its own — a better-ranked lane continued, a better
+    -- ref on the same commit named the lane, or the commit is a root.
     --
     -- This used to be "the leftmost incoming lane" — a positional proxy for "the
     -- trunk", true only while the trunk happened to sit leftmost. Choosing
@@ -631,33 +712,23 @@ function M.session(opts, seed)
         local rank = trunk and trunk.rank or crank
         state.pin_birth = nil
         if crank and trunk and rank_better(crank, trunk.rank) then
-            -- `trunk` holds the best incoming rank, so beating it beats them all.
-            local edge
-            for _, e in ipairs(incoming) do
-                local l = e.lane
-                if l.extra and l.rank == nil and (not edge or l.id < edge.id) then
-                    edge = l
-                end
-            end
-            trunk, rank = edge, crank
-            -- No incoming lane continues: the node is where the pinned lane is born.
-            if not edge then state.pin_birth = true end
+            -- `trunk` holds the best incoming rank, so beating it beats them all: no
+            -- incoming lane continues, and the node is where the pinned lane is born.
+            trunk, rank = nil, crank
+            state.pin_birth = true
         end
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
-            local id, color, r, extra
+            local id, color, r
             if i == 1 and trunk then
                 id, color, r = trunk.id, trunk.color, rank
             elseif i == 1 then
-                id, color, r = new_id(), alloc_color(), rank
+                id, color, r = new_id(), take_pin(rank), rank
             else
-                -- A merge's extra-parent edge: born unranked, and flagged so the
-                -- parent can recognise it for the birth rule's ADOPT case. A flag,
-                -- not a re-derivation from `begin.parents`, so a footer seed (whose
-                -- `begin` is a main-view node, §6.2) carries the fact across the seam.
-                id, color, extra = new_id(), alloc_color(), true
+                -- A merge's extra-parent edge: born unranked.
+                id, color = new_id(), alloc_color()
             end
-            outgoing[#outgoing + 1] = { lane = { id = id, color = color, rank = r, extra = extra,
+            outgoing[#outgoing + 1] = { lane = { id = id, color = color, rank = r,
                 begin = C, parent = p, highlighted = false } }
         end
         -- Return the colour of every incoming lane that did not continue (all of
@@ -671,6 +742,15 @@ function M.session(opts, seed)
         end
         table.sort(ended, function(a, b) return a.id < b.id end)
         for _, lane in ipairs(ended) do free_color(lane.color) end
+        if crank and pin_rank then
+            local ks = {}
+            for _, ref in ipairs(C.refs or {}) do
+                local k = pin_rank[ref_id(ref)]
+                if k and pin_wait[k] then ks[#ks + 1] = k end
+            end
+            table.sort(ks)
+            for _, k in ipairs(ks) do release_pin(k) end
+        end
         state.outgoing = outgoing
         state.trunk_in = trunk
         -- The incoming ENTRY carrying that lane, so a placement stage can ask "which

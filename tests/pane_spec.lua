@@ -750,6 +750,54 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         end
     end)
 
+    it("never de-collides a lane onto a pinned colour (§5.5/§6.2)", function()
+        -- The same three anchors, but every branch reports ONE main-view colour (the
+        -- main view recycles colours, so concurrent header lanes can arrive sharing
+        -- one). Two of them must be de-collided — and a replacement colour must never
+        -- be a pinned slot, which reads as its pinned branch.
+        local items = h.dag({
+            { "b1", { "ca" } }, { "b2", { "ca" } }, { "b3", { "ca" } },
+            { "ca", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "b1" } }
+        items[2].commit.refs = { { name = "b2" } }
+        items[3].commit.refs = { { name = "b3" } }
+        local opts = h.big_opts()
+        local _, boundary, cond, _, lane_of, col_of = header_of(items, opts, 5, { b1 = true, b2 = true, b3 = true })
+        local function shared(n)
+            local l = lane_of(n)
+            return l and { id = l.id, color = 9 }
+        end
+        local function heads(res)
+            local out = {}
+            for _, r in ipairs(res.rows) do
+                for _, cell in ipairs(r.columns) do
+                    if cell.has_commit then out[#out + 1] = cell.color end
+                end
+            end
+            return out
+        end
+        -- A crossing lane keeps its boundary colour to the seam (never de-collided), so
+        -- the pinned slots to avoid are the low ones it does NOT hold.
+        local bc = {}
+        for _, l in pairs(boundary) do bc[l.color] = true end
+        local avoid = {}
+        for k = 1, 4 do if not bc[k] then avoid[k] = k end end
+        -- Teeth: without `avoid` a replacement lands on one of those low slots.
+        local plain = heads(pane.header(cond.items, boundary, cond.node_of_hash, shared, col_of))
+        local low = false
+        for _, c in ipairs(plain) do if avoid[c] then low = true end end
+        assert.is_true(low, "the fixture must de-collide onto a low slot")
+        local got = heads(pane.header(cond.items, boundary, cond.node_of_hash, shared, col_of, avoid))
+        assert.equals(3, #got)
+        local seen = {}
+        for _, c in ipairs(got) do
+            assert.is_nil(avoid[c], "a de-collided head took pinned slot " .. tostring(c))
+            assert.is_nil(seen[c], "two heads share colour " .. tostring(c))
+            seen[c] = true
+        end
+    end)
+
     it("collapses the shared future above a meeting point (no head blowup)", function()
         -- Two crossing lanes a, b meet at the confluence M; ABOVE M their shared future
         -- forks into many branches (t1..t5). Those forks don't relate to a or b, so the

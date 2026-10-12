@@ -1622,14 +1622,15 @@ GRAPH_HELPERS.effective_pins = function(ctx)
     return pins
 end
 
--- The **pin rank** of every effective anchor (§5/§10.6): ref id → its place in
--- the resolved list, 1 = highest priority, a pinned local branch's implicit remote
--- counterparts (§10.6, `pin_upstream`) sharing its rank unless explicitly unpinned.
--- Its keys ARE the effective anchor set. This is the layout input `opts.pin_rank`.
+-- The **pin rank** of every pin-list ENTRY (§5/§10.6): ref id → its place in the
+-- resolved list, 1 = highest priority. This is the layout input `opts.pin_rank` —
+-- lane identity and the pinned colours (§5.5). Implicit remote counterparts are NOT
+-- in it: they take no rank and no pinned colour; they are anchors only (see
+-- `effective_pinned`).
 ---@return table<string, integer>
 GRAPH_HELPERS.pin_rank = function(ctx)
     return selectm.pin_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
-        ctx.view_state.unpinned, ctx.opts.pin_upstream ~= false)
+        ctx.view_state.unpinned, false)
 end
 
 -- Publish the current pin ranks on the layout options (`opts.pin_rank`, §5) — the
@@ -1644,11 +1645,15 @@ GRAPH_HELPERS.sync_pin_rank = function(ctx)
 end
 
 -- The effective anchor **set** — the pinned entries plus their implicit remote
--- counterparts (`pin_rank`'s keys). This is what `view.owners` / `collapse_owners`
--- and the pin icon consume.
+-- counterparts (§10.6, `pin_upstream`, unless explicitly unpinned). This is what
+-- `view.owners` / `collapse_owners` and the pin icon consume. A superset of
+-- `pin_rank`'s keys: the counterparts are anchors, but never ranked (§5).
 local function effective_pinned(ctx)
     local set = {}
-    for id in pairs(GRAPH_HELPERS.pin_rank(ctx)) do set[id] = true end
+    for id in pairs(selectm.pin_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
+        ctx.view_state.unpinned, ctx.opts.pin_upstream ~= false)) do
+        set[id] = true
+    end
     return set
 end
 GRAPH_HELPERS.effective_pinned = effective_pinned
@@ -4447,7 +4452,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field open_nbatch? integer   streamed batches seen so far
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
-    ---@field pin_rank fun(self:GraphCtx):table<string,integer>  ref id → pin rank, counterparts included (§5/§10.6)
+    ---@field pin_rank fun(self:GraphCtx):table<string,integer>  ref id → pin rank of each pin-list entry; no counterparts (§5/§10.6)
     ---@field sync_pin_rank fun(self:GraphCtx):table<string,integer>  publish `pin_rank` on opts + pane_opts
     ---@field pin_marks fun(self:GraphCtx):PinMarks
     ---@field build_display_index fun(self:GraphCtx)
@@ -5832,7 +5837,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local cond = pane.continue_up(boundary, tips, pinned, order_of, seam.idx, coroutine.yield,
                     lane_of, lanes_at)
                 if #cond.items == 0 then return nil, "empty@" .. seam.idx end
-                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of)
+                -- The pinned colours (§5.5): a header lane de-collided off its main-view
+                -- colour must not be handed one of them (§6.2).
+                local tracks = ctx.pane_opts.palette and ctx.pane_opts.palette.tracks
+                local avoid = require("gitloom.graph.columns").pinned_slots(ctx.pane_opts.pin_rank,
+                    tracks and #tracks or 8)
+                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of, avoid)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
                 return res.rows, seam.idx .. (seam.kind == "above" and "s" or "c"), seam.cover, seam.idx,
                     cond, boundary

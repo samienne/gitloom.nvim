@@ -1,7 +1,8 @@
 --- Pin priority in lane identity (spec §5 "Lane identity", §5.5, §6.2, §3.1):
 --- `opts.pin_rank` (ref id → rank, 1 = highest) adds tier 0 to the continuation
---- choice and the **birth at a pinned tip** rule, and must leave the layout
---- byte-identical when it is nil or empty.
+--- choice and the **birth at a pinned tip** rule, gives rank `k` curated slot `k` as
+--- its **pinned colour** (§5.5), and must leave the layout byte-identical when it is
+--- nil or empty.
 local h = require("tests.graph_helpers")
 local graph = require("gitloom.graph")
 local columns = require("gitloom.graph.columns")
@@ -37,6 +38,7 @@ end
 
 --- Pin a deterministic scattering of a fuzz DAG's commits (tips AND interior ones,
 --- so births happen), with ranks 1..4 — repeated ranks included, so ties are hit.
+--- (The window never produces a shared rank; the layout must still tolerate one.)
 local function scatter_pins(items, seed)
     local rank = {}
     for i, it in ipairs(items) do
@@ -96,7 +98,7 @@ describe("pin rank (§5)", function()
         end)
     end)
 
-    it("nil, empty and non-matching pin_rank lay out byte-identically", function()
+    it("nil, empty and past-the-palette non-matching pin_rank lay out byte-identically", function()
         local bad = {}
         local sets = corpus(40)
         sets[#sets + 1] = { seed = 0, items = h.dag(fix.dag) }
@@ -105,7 +107,9 @@ describe("pin rank (§5)", function()
             for _, st in ipairs(STYLES) do
                 for _, pol in ipairs(POLICIES) do
                     local base = columns.layout(opts(st.s, pol, nil), set.items)
-                    for _, pr in ipairs({ {}, { nonexistent = 1 } }) do
+                    -- A non-matching rank INSIDE the palette withholds its slot (§5.5),
+                    -- so only one past the palette (big_opts: 64) is fully inert.
+                    for _, pr in ipairs({ {}, { nonexistent = 1000 } }) do
                         local other = columns.layout(opts(st.s, pol, pr), set.items)
                         for i = 1, #base do
                             if h.row_sig(base[i]) ~= h.row_sig(other[i]) and #bad < 3 then
@@ -160,34 +164,59 @@ describe("pin rank (§5)", function()
             end
         end)
 
-        it("a merged pinned tip adopts the merge edge's lane and colour", function()
-            -- master merged dev; dev still points at the merged commit.
+        it("a merged pinned tip ends the merge edge and starts its own pinned-colour lane", function()
+            -- master merged dev; dev still points at the merged commit. A lane's colour is
+            -- fixed for life, so the edge cannot become dev's: it ends at dev's tip.
             local function items()
                 local it = h.dag({ { "m", { "a", "d" } }, { "a", { "b" } }, { "d", { "b" } }, { "b", {} } })
                 ref(it, "m", "master")
                 ref(it, "d", "dev")
                 return it
             end
-            for _, pol in ipairs(POLICIES) do
-                local rows = columns.layout(opts(STYLES[1].s, pol, { master = 1, dev = 2 }), items())
-                local edge = rows[1].parent_lanes[2]
-                local d = row_of(rows, "d").parent_lanes[1]
-                assert.equals(edge.id, d.id, pol)
-                assert.equals(edge.color, d.color, pol)
-                assert.is_nil(edge.rank, pol)
-                assert.equals(2, d.rank, pol)
-                assert.equals(1, rows[1].parent_lanes[1].rank, pol)
+            for _, st in ipairs(STYLES) do
+                for _, pol in ipairs(POLICIES) do
+                    local o = opts(st.s, pol, { master = 1, dev = 2 })
+                    local rows = columns.layout(o, items())
+                    local edge = rows[1].parent_lanes[2]
+                    local d = row_of(rows, "d").parent_lanes[1]
+                    assert.is_true(edge.id ~= d.id, pol)
+                    assert.equals(2, d.color, pol) -- dev's pinned colour
+                    assert.equals(1, rows[1].parent_lanes[1].color, pol) -- master's
+                    assert.is_true(edge.color ~= 1 and edge.color ~= 2, pol)
+                    assert.is_nil(edge.rank, pol)
+                    assert.equals(2, d.rank, pol)
+                    if pol == "gutter" then
+                        local errors = h.check_spine(rows, o)
+                        assert.equals(0, #errors, table.concat(errors, "\n"))
+                    end
+                end
             end
         end)
 
-        it("an equal rank births nothing: x and origin/x stay one lane", function()
+        it("an equal rank births nothing (the layout tolerates a shared rank)", function()
             local items = h.dag({ { "x", { "o" } }, { "o", { "b" } }, { "b", {} } })
             ref(items, "x", "x")
-            ref(items, "o", "origin/x", "remote")
-            local rows = columns.layout(opts(STYLES[1].s, "compact", { x = 1, ["origin/x"] = 1 }), items)
+            ref(items, "o", "y")
+            local rows = columns.layout(opts(STYLES[1].s, "compact", { x = 1, y = 1 }), items)
             local id = rows[1].parent_lanes[1].id
             assert.equals(id, rows[2].parent_lanes[1].id)
             assert.equals(1, rows[2].parent_lanes[1].rank)
+        end)
+
+        it("a counterpart ahead of its local is unranked: the local's lane is born at its tip", function()
+            -- origin/x is ahead of x. The window ranks entries only (§10.6), so the
+            -- counterpart is not in the map: it reaches x's tip as an ordinary lane.
+            local items = h.dag({ { "ox", { "x" } }, { "x", { "b" } }, { "b", {} } })
+            ref(items, "ox", "origin/x", "remote")
+            ref(items, "x", "x")
+            for _, pol in ipairs(POLICIES) do
+                local rows = columns.layout(opts(STYLES[1].s, pol, { x = 1 }), items)
+                local o, x = rows[1].parent_lanes[1], row_of(rows, "x").parent_lanes[1]
+                assert.is_true(o.id ~= x.id, pol)
+                assert.is_nil(o.rank, pol)
+                assert.is_true(o.color ~= 1, pol)
+                assert.equals(1, x.color, pol)
+            end
         end)
 
         it("a worse rank births nothing: the better lane keeps its rank", function()
@@ -346,5 +375,214 @@ describe("pin rank (§5)", function()
         local res = pane.footer(o, { items[2], items[3] }, boundary, node_of)
         assert.equals(main[2].parent_lanes[1].id, res.rows[1].parent_lanes[1].id)
         assert.equals(seam.id, res.rows[1].parent_lanes[1].id)
+    end)
+
+    describe("pinned colours (§5.5)", function()
+        --- Every lane chain in `rows` as { id, color, rank, from, to } — the rows its
+        --- first edge begins and its last edge ends at (`#rows + 1` off the bottom).
+        local function chains(rows)
+            local row = {}
+            for i, r in ipairs(rows) do if r.commit then row[r.commit.hash] = i end end
+            local by = {}
+            for _, r in ipairs(rows) do
+                for _, l in ipairs(r.parent_lanes or {}) do
+                    local c = by[l.id]
+                    if not c then
+                        c = { id = l.id, color = l.color, rank = l.rank, from = math.huge, to = 0 }
+                        by[l.id] = c
+                    end
+                    local b = l.begin and row[l.begin.hash] or 0
+                    local e = l.parent and row[l.parent.hash] or (#rows + 1)
+                    if b < c.from then c.from = b end
+                    if e > c.to then c.to = e end
+                end
+            end
+            return by
+        end
+
+        --- Pin a fuzz DAG with DISTINCT ranks 1..n (what the window produces).
+        local function unique_pins(items, seed, n)
+            local rank, k = {}, 0
+            for i, it in ipairs(items) do
+                if k < n and (i * 5 + seed) % 3 == 0 then
+                    k = k + 1
+                    local id = "u" .. i
+                    local c = it.commit
+                    c.refs = c.refs or {}
+                    table.insert(c.refs, { name = id, kind = "local" })
+                    rank[id] = k
+                end
+            end
+            return rank
+        end
+
+        --- A small palette, so slots recycle and the withholding is actually tested.
+        local function small(ms, policy, rank, n, generate)
+            local o = opts(ms, policy, rank)
+            local p = {}
+            for i = 1, n do p[i] = "C" .. i end
+            o.palette.tracks = p
+            o.palette.generate = generate
+            o.palette.buffer = 0
+            return o
+        end
+
+        it("rank k's lane is born with slot k, unchanged by a pin added below it", function()
+            local function items()
+                local it = h.dag({
+                    { "a", { "m" } }, { "b", { "m" } }, { "c", { "m" } }, { "m", { "r" } }, { "r", {} },
+                })
+                ref(it, "a", "A")
+                ref(it, "b", "B")
+                ref(it, "c", "C")
+                return it
+            end
+            for _, pol in ipairs(POLICIES) do
+                for _, rank in ipairs({ { B = 1, C = 2 }, { B = 1, C = 2, A = 3 } }) do
+                    local rows = columns.layout(opts(STYLES[1].s, pol, rank), items())
+                    assert.equals(1, row_of(rows, "b").parent_lanes[1].color, pol)
+                    assert.equals(2, row_of(rows, "c").parent_lanes[1].color, pol)
+                    if rank.A then assert.equals(3, row_of(rows, "a").parent_lanes[1].color, pol) end
+                end
+                -- Unpinned, `a` (the first tip) would have taken slot 1.
+                local plain = columns.layout(opts(STYLES[1].s, pol, nil), items())
+                assert.equals(1, plain[1].parent_lanes[1].color, pol)
+                local rows = columns.layout(opts(STYLES[1].s, pol, { B = 1 }), items())
+                assert.is_true(rows[1].parent_lanes[1].color ~= 1, pol)
+            end
+        end)
+
+        it("no other lane holds slot k until rank k's branch start is found; then it recycles", function()
+            local bad, reused, pinned_lanes = {}, 0, 0
+            for _, set in ipairs(corpus(60)) do
+                local rank = unique_pins(set.items, set.seed, 4)
+                local tip_row = {}
+                for i, it in ipairs(set.items) do
+                    for _, r in ipairs(it.commit.refs or {}) do
+                        local k = rank[r.name]
+                        if k and (not tip_row[k] or i < tip_row[k]) then tip_row[k] = i end
+                    end
+                end
+                for _, st in ipairs(STYLES) do
+                    for _, gen in ipairs({ true, false }) do
+                        local rows = columns.layout(small(st.s, "compact", rank, 6, gen), set.items)
+                        local by = chains(rows)
+                        for k in pairs(tip_row) do
+                            -- The slot comes back where the branch's start is found: where
+                            -- its own lane ends, else at its tip.
+                            local release = tip_row[k]
+                            for _, c in pairs(by) do
+                                if c.rank == k and c.color == k then
+                                    release = c.to
+                                    pinned_lanes = pinned_lanes + 1
+                                end
+                            end
+                            for _, c in pairs(by) do
+                                if c.color == k and not (c.rank == k) then
+                                    if c.from < release and #bad < 3 then
+                                        bad[#bad + 1] = ("seed=%d %s gen=%s: lane %d took slot %d at row %d, released at %d")
+                                            :format(set.seed, st.name, tostring(gen), c.id, k, c.from, release)
+                                    end
+                                    reused = reused + 1
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            assert.equals(0, #bad, table.concat(bad, "\n"))
+            assert.is_true(pinned_lanes > 0, "no pinned lane was born")
+            assert.is_true(reused > 0, "no pinned slot was ever recycled")
+        end)
+
+        it("a diverged remote counterpart draws an ordinary colour", function()
+            -- x and origin/x diverged from b; only x is ranked (§10.6).
+            local items = h.dag({ { "x", { "a" } }, { "ox", { "b" } }, { "a", { "b" } }, { "b", {} } })
+            ref(items, "x", "x")
+            ref(items, "ox", "origin/x", "remote")
+            for _, pol in ipairs(POLICIES) do
+                local rows = columns.layout(opts(STYLES[1].s, pol, { x = 1 }), items)
+                assert.equals(1, rows[1].parent_lanes[1].color, pol)
+                local o = row_of(rows, "ox").parent_lanes[1]
+                assert.is_true(o.color ~= 1, pol)
+                assert.is_nil(o.rank, pol)
+            end
+        end)
+
+        it("pins past the palette keep their rank but fall back to a free-list colour", function()
+            local function items()
+                local it = h.dag({
+                    { "a", { "m" } }, { "b", { "m" } }, { "c", { "m" } }, { "d", { "m" } }, { "e", { "m" } },
+                    { "m", { "r" } }, { "r", {} },
+                })
+                for _, n in ipairs({ "a", "b", "c", "d", "e" }) do ref(it, n, n:upper()) end
+                return it
+            end
+            local rank = { A = 1, B = 2, C = 3, D = 4, E = 5 }
+            assert.same({ [1] = 1, [2] = 2, [3] = 3, [4] = 4 }, columns.pinned_slots(rank, 4))
+            -- truecolor: every curated slot is pinned, so E's lane is a generated colour.
+            local rows = columns.layout(small(STYLES[1].s, "compact", rank, 4, true), items())
+            for i, n in ipairs({ "a", "b", "c", "d" }) do
+                assert.equals(i, row_of(rows, n).parent_lanes[1].color)
+            end
+            local e = row_of(rows, "e").parent_lanes[1]
+            assert.equals(5, e.rank)
+            assert.is_true(e.color > 4, "E draws a generated colour")
+            -- no truecolor: sharing falls back to the curated slots rather than failing.
+            rows = columns.layout(small(STYLES[1].s, "compact", rank, 4, false), items())
+            e = row_of(rows, "e").parent_lanes[1]
+            assert.is_true(e.color >= 1 and e.color <= 4)
+            assert.equals(5, e.rank)
+        end)
+
+        it("a non-matching rank inside the palette withholds its slot and moves nothing else", function()
+            local bad = {}
+            for _, set in ipairs(corpus(20)) do
+                for _, pol in ipairs(POLICIES) do
+                    local o0, o1 = opts(STYLES[3].s, pol, nil), opts(STYLES[3].s, pol, { nonexistent = 1 })
+                    local r0, r1 = columns.layout(o0, set.items), columns.layout(o1, set.items)
+                    for i = 1, #r0 do
+                        if geometry(o0, r0[i]) ~= geometry(o1, r1[i]) and #bad < 3 then
+                            bad[#bad + 1] = ("seed=%d %s row %d geometry"):format(set.seed, pol, i)
+                        end
+                        for j, l in ipairs(r1[i].parent_lanes or {}) do
+                            if l.color == 1 and #bad < 3 then
+                                bad[#bad + 1] = ("seed=%d %s row %d took slot 1"):format(set.seed, pol, i)
+                            end
+                            if l.id ~= r0[i].parent_lanes[j].id and #bad < 3 then
+                                bad[#bad + 1] = ("seed=%d %s row %d id"):format(set.seed, pol, i)
+                            end
+                        end
+                    end
+                end
+            end
+            assert.equals(0, #bad, table.concat(bad, "\n"))
+        end)
+
+        it("the footer: a seed holding a pinned slot takes the reservation over (§6.2)", function()
+            -- 2 curated slots, no truecolor. dev (1) crosses the seam and ends at root y;
+            -- feat (2) is born and ends inside the pane; then an unpinned g is born. With
+            -- the reservation taken over exactly once, y returns slot 1 and g takes it —
+            -- in the pane exactly as in the main view.
+            local items = h.dag({
+                { "d", { "o" } }, { "o", { "y" } }, { "y", {} }, { "f", { "z" } }, { "z", {} },
+                { "g", { "w" } }, { "w", {} },
+            })
+            ref(items, "d", "dev")
+            ref(items, "f", "feat")
+            local o = small(STYLES[1].s, "compact", { dev = 1, feat = 2 }, 2, false)
+            local main = columns.layout(o, items)
+            assert.equals(1, main[1].parent_lanes[1].color)
+            assert.equals(2, row_of(main, "f").parent_lanes[1].color)
+            assert.equals(1, row_of(main, "g").parent_lanes[1].color)
+            local boundary = pane.boundary_below(main, 1)
+            local node_of = {}
+            for _, it in ipairs(items) do node_of[it.commit.hash] = it.commit end
+            local rest = {}
+            for i = 2, #items do rest[#rest + 1] = items[i] end
+            local res = pane.footer(o, rest, boundary, node_of)
+            assert.equals(2, row_of(res.rows, "f").parent_lanes[1].color)
+            assert.equals(1, row_of(res.rows, "g").parent_lanes[1].color)
+        end)
     end)
 end)
