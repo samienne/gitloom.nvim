@@ -704,7 +704,11 @@ Coverage:
   **every** cutoff and for **every rendered line the seam picker can land on** — a commit's
   `columns` line AND its virtual `split`/`merge` fan lines. Asserts the footer's **top row
   reproduces the seam line** (same column + id — no jog), no crossing lane **strands**
-  (empty `terminate`), and lane **id-continuity** down every row. Guards the footer-layout
+  (empty `terminate`), the pane's rows are in **topological order** (no row before
+  an in-pane child), and lane **id-continuity** down every row; as drawn with the
+  pane style, consecutive lines wire together and **nothing leaves the last line
+  downward** (every lane lands on a node — the two-lane "loop" regression, where a
+  collapsed root head the hash-keyed `order_of` could not rank sorted above its child). Guards the footer-layout
   stage against a mishandled virtual-line seam (the class the header's `header_seam` fixed).
   The seam-**picking** itself is the pure `pane.footer_seam` (below), unit-tested in
   `pane_spec` alongside `header_seam`. Plus the footer **as drawn**, under every layout

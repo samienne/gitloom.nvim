@@ -129,7 +129,19 @@ local function check_seam(b, seam_line, ctx, bad)
                 :format(ctx, tostring(lane.id), col)
         end
     end
-    -- 2. no dangle
+    -- 2. no dangle — at the seam, and below it: the pane's rows must be in
+    -- topological order (every node after all its in-pane children), or a lane is
+    -- laid out into a parent that was already swept past and never lands.
+    local pos = {}
+    for i, it in ipairs(cond.items) do pos[it.commit] = i end
+    for i, it in ipairs(cond.items) do
+        for _, ch in ipairs(it.commit.children or {}) do
+            if pos[ch] and pos[ch] > i then
+                bad[#bad + 1] = ("%s: footer row %d (%s) precedes its child at row %d"):format(
+                    ctx, i, tostring(it.commit.hash), pos[ch])
+            end
+        end
+    end
     if next(res.terminate) ~= nil then
         bad[#bad + 1] = ctx .. ": a crossing lane stranded at the seam (non-empty terminate)"
     end
@@ -151,6 +163,19 @@ local PANE_STYLE = { allow_merge_on_split = false, merge_on_separate_line = fals
 -- A dropped handover row is precisely a wire with nothing on the other side — the
 -- floating `╭` stub and the orphaned root the gutter footer drew on a real repo.
 local function drawn_problem(rows, ctx)
+    -- The footer runs down to the roots, so NOTHING may leave its last line
+    -- downward: every lane ends on a node (its parent, or a root) inside the pane.
+    -- Consecutive-line wiring alone cannot see this — a wire off the bottom has no
+    -- next line to disagree with — and it is exactly the shape of a pane whose rows
+    -- are out of topological order: lanes converge on a junction drawn BELOW the
+    -- root it descends into, then run off the pane (the two-lane "loop").
+    local last = rows[#rows] and rows[#rows].columns or {}
+    for col, cell in pairs(last) do
+        if cell.connectivity.down then
+            return ("%s: last drawn line col %d — a wire leaves the footer downward (no root below)")
+                :format(ctx, col)
+        end
+    end
     for i = 1, #rows - 1 do
         local a, b = rows[i].columns or {}, rows[i + 1].columns or {}
         for col = 1, math.max(#a, #b) do

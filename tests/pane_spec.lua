@@ -1826,6 +1826,37 @@ describe("pane.continue — active lanes reach a root (§6.2)", function()
         end
     end)
 
+    -- The two-lane "loop": two crossing lanes converge on a junction J whose first
+    -- parent is a COLLAPSED root region (a `◍` head — synthetic hash
+    -- `collapsed:<root>`, which the window's hash-keyed `order_of` cannot rank). The
+    -- old index sort ranked the unrankable head newest, laying the root out above its
+    -- own child: the lanes met at J after the sweep had passed the root and ran off
+    -- the bottom of the pane. The order must follow the edges, whatever the index.
+    it("orders a collapsed root head after its child, though order_of cannot rank it", function()
+        local J = { hash = "J", refs = {}, parents = {}, children = {} }
+        local head = { hash = "collapsed:R2", collapsed = true, refs = {}, region = { "R1", "R2" },
+            tip = { hash = "R1" }, parents = {}, children = { J } }
+        J.parents[1] = head
+        local idx = { A = 1, B = 2, J = 3, R1 = 4, R2 = 5 }
+        local bnd = {
+            [1] = { id = 1, color = 1, parent = J, begin = { hash = "A" } },
+            [2] = { id = 2, color = 2, parent = J, begin = { hash = "B" } },
+        }
+        local cond = pane.continue(bnd, nil, {}, function(n) return idx[n.hash] end)
+        local order = {}
+        for i, it in ipairs(cond.items) do order[it.commit.hash] = i end
+        assert.is_not_nil(order.J)
+        assert.is_not_nil(order["collapsed:R2"])
+        assert.is_true(order.J < order["collapsed:R2"], "the junction must precede the root head below it")
+        -- Laid out: every lane lands on a node inside the pane — nothing leaves the
+        -- last line downward.
+        local res = pane.footer(h.big_opts(), cond.items, bnd, cond.node_of_hash)
+        for col, cell in pairs(res.rows[#res.rows].columns) do
+            assert.is_false(cell.connectivity.down and true or false,
+                "a wire leaves the footer's last line downward at col " .. col)
+        end
+    end)
+
     it("introduces no non-active branch (the merged-in b1 is absent)", function()
         -- Seam boundary has only the trunk lane (parent t2); b1 merged into t1
         -- above the seam and must not appear in the footer.

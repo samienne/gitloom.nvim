@@ -293,15 +293,72 @@ function M.continue(boundary, anchor_names, extra, order_of, yield)
         if p and inset[p.hash] then n.parents[1] = node[p.hash] end
         for _, ch in ipairs(fp_child[c.hash] or {}) do n.children[#n.children + 1] = node[ch.hash] end
     end
-    local nodes = {}
-    for _, c in ipairs(queue) do nodes[#nodes + 1] = node[c.hash] end
     -- With several independent entries the BFS order isn't globally
-    -- children-before-parents; sort newest-first so condense/columns.layout see a
-    -- valid topological order.
-    if order_of then
-        -- NB: never yield inside a table.sort comparator — it runs under a C frame
-        -- and yielding across it errors. The walk above is already chunked.
-        table.sort(nodes, function(a, b) return (order_of(a) or 0) < (order_of(b) or 0) end)
+    -- children-before-parents, so emit the nodes in a TOPOLOGICAL order (every node
+    -- after all its in-set children — what condense/columns.layout require), using
+    -- `order_of` (newest first) only to choose among the nodes that are ready.
+    --
+    -- The order is guaranteed by the edges, never by the index: `order_of` cannot be
+    -- trusted to rank every node. A collapsed `◍` head's `hash` is the synthetic
+    -- `collapsed:<root>`, which no hash-keyed index holds — sorting on the index alone
+    -- ranked such a head as 0, i.e. newest, so a collapsed region at the bottom of
+    -- the history (a root region below a junction) was laid out ABOVE its own child:
+    -- the lanes converged on the junction after the sweep had passed the root and ran
+    -- off the bottom of the pane. A head is therefore ranked by its tip as well, and
+    -- an unranked node can no longer break the order — only reorder ready siblings.
+    local function rank(n)
+        local r = order_of and (order_of(n) or (n.tip and order_of(n.tip)))
+        return r or math.huge
+    end
+    local pending, heap = {}, {} -- node → in-set children not yet emitted ; ready min-heap
+    local key, seq = {}, {}
+    local function less(a, b)
+        if key[a] ~= key[b] then return key[a] < key[b] end
+        return seq[a] < seq[b]
+    end
+    local function hpush(n)
+        heap[#heap + 1] = n
+        local i = #heap
+        while i > 1 do
+            local p = math.floor(i / 2)
+            if not less(heap[i], heap[p]) then break end
+            heap[i], heap[p] = heap[p], heap[i]
+            i = p
+        end
+    end
+    local function hpop()
+        local top, n = heap[1], #heap
+        heap[1] = heap[n] -- sequential, not multi-assign: aliases when n == 1
+        heap[n] = nil
+        n = n - 1
+        local i = 1
+        while true do
+            local l, r, m = 2 * i, 2 * i + 1, i
+            if l <= n and less(heap[l], heap[m]) then m = l end
+            if r <= n and less(heap[r], heap[m]) then m = r end
+            if m == i then break end
+            heap[i], heap[m] = heap[m], heap[i]
+            i = m
+        end
+        return top
+    end
+    for i, c in ipairs(queue) do
+        step()
+        local n = node[c.hash]
+        key[n], seq[n] = rank(n), i
+        pending[n] = #n.children
+        if pending[n] == 0 then hpush(n) end
+    end
+    local nodes = {}
+    while #heap > 0 do
+        step()
+        local n = hpop()
+        nodes[#nodes + 1] = n
+        local p = n.parents[1]
+        if p then
+            pending[p] = pending[p] - 1
+            if pending[p] == 0 then hpush(p) end
+        end
     end
     -- Convergence junctions: a commit whose in-set first-parent children PLUS the
     -- boundary lanes landing on it total ≥2 is where crossing lanes meet. Force it
