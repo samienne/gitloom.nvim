@@ -6749,6 +6749,7 @@ local function place_cursor(ctx)
     end
     if not item or not item.commit then return end
     local col = nil
+    local sub = select(3, ctx:order_at(line))
     if ctx.selection_state.commit == item.commit and ctx.selection_state.index then
         local texts = decoration_texts(item.commit, nil, ctx:pin_marks())
         if ctx.selection_state.index <= #texts then
@@ -6758,6 +6759,11 @@ local function place_cursor(ctx)
     end
     if not col and ctx.lv and ctx.lv.controller and ctx.lv.controller.col_offset then
         col = ctx.lv.controller.col_offset(line, "line", COL.flex)
+        -- The dual message row indents its message inside the flex column (§6.1):
+        -- park on the message, not the indent.
+        if sub == 1 and dual_two_line(ctx.opts, item.commit) then
+            col = col + render.DUAL_INDENT
+        end
     end
     pcall(vim.api.nvim_win_set_cursor, w, { line, col or 0 })
 end

@@ -934,6 +934,13 @@ end
 
 -- ── Row rendering (the listview DisplayElement) ─────────────────────────────
 
+--- Display cells the `dual` message row's text is indented by (spec §6.1), so a
+--- labelled commit's message reads as belonging to the label row above. Leading
+--- spaces INSIDE the flex column: the flex column is excluded from the shared
+--- column widths, so no other row moves. `place_cursor` adds it to the flex offset
+--- to park on the message itself.
+M.DUAL_INDENT = 2
+
 --- Whether a commit renders as **two real buffer rows** in the current label
 --- mode (spec §6.1): dual mode and the commit actually has selectable
 --- decorations. The single source of truth shared by the listview's
@@ -1266,7 +1273,9 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
 
         if M.dual_two_line(opts, item.commit) then
             -- Two real rows (§6.1): row 1 = graph (node) + labels; row 2 = the
-            -- message, the graph continued downward (down-passthrough, no node).
+            -- message, the graph continued downward (down-passthrough, no node),
+            -- indented DUAL_INDENT cells from the graph edge (on the graph side in
+            -- both orientations: mirrored, the message still follows the graph).
             local labels = {}
             for k, it in ipairs(ref_items) do
                 if k > 1 then labels[#labels + 1] = " " end
@@ -1277,7 +1286,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 {
                     "", "",
                     M.get_column_chars(opts, passthrough_columns(item.columns, "down"), emphasis),
-                    compose({ ids, message }),
+                    compose({ (" "):rep(M.DUAL_INDENT), ids, message }),
                 },
             }
         elseif label_mode == "inline" then

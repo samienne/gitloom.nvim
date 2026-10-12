@@ -307,7 +307,11 @@ Coverage:
   entering from above, `down` keeps lanes leaving below — the message row;
   a crossing keeps only its through-vertical; edge objects shared so §12 dimming
   still applies) and its rendering via `get_column_chars` (only `│`/blanks — no
-  node or junctions — each vertical coloured by its lane slot)
+  node or junctions — each vertical coloured by its lane slot); plus the **message
+  row indent** through the real `display_item`, mirrored and not: row 2's message
+  `DUAL_INDENT` (2) cells past an unlabelled commit's, row 1 and the fixed columns
+  untouched, the §16 match highlight shifted with it, a labelless dual commit
+  byte-identical to `right` and `right`/`inline` unindented
 - `tests/listview_spec.lua` — the multi-real-line bookkeeping (spec §6.1 dual):
   the buffer-line ↔ item offset map (`rebuild_starts`/`item_index_at`: mixed line
   counts, clamping, the incremental append path) and a windowed smoke test (snacks
@@ -1884,6 +1888,8 @@ Details not covered by the spec or architecture:
   keymaps, cursor parking, and the cone viewport, which converts `w0`/`w$` to
   order indices). `DisplayElement.lines` (a list of real rows) generalises `line`;
   `above`/`below` are stacked virtual rows attached to the first/last real line.
+  The message row indents its message `render.DUAL_INDENT` cells inside the flex
+  column (§6.1); `place_cursor` adds it so the cursor parks on the message.
   `B` calls `controller.relayout()` (resize the buffer + rebuild the map) because
   it changes per-item line counts; `m`/`M`/`d`/`H`/`i` stay on `refresh()`.
   This is the deferred "real branch line" alternative, now built; the cursor sits
