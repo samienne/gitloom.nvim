@@ -602,14 +602,17 @@ remote counterpart (§10.6) of a pin of rank `k`. At a commit such a counterpart
 points at, when **no ranked ref** points there (a ranked ref wins: the pinned rule
 above applies instead), slot `k` is still **held** (§5.5 — so there is a counterpart
 colour to give), and `k` strictly beats every incoming lane — **none** of them is
-ranked and none is a counterpart lane of rank `≤ k` — **every** incoming lane
+ranked `≤ k` and none is a counterpart lane of rank `≤ k` — **every** incoming lane
 **ends** here and a **counterpart lane** is born: a fresh `id`, unranked, counterpart
-rank `k`, colour `-k` (§5.5). A ranked incoming lane — any pinned branch's — still
-continues through (a counterpart loses to a real pin), and a counterpart lane of the
-same pin continues too. So with `dev` pinned and `origin/dev` one commit ahead, the
-remote's commit reads in `dev`'s counterpart colour even when another branch is built
-on top of it: that branch's lane ends at `origin/dev`'s commit instead of running
-through it down to `dev`'s tip. Under the four lane-column policies this changes lane
+rank `k`, colour `-k` (§5.5). The comparison is by rank, exactly as for a pinned
+birth: an incoming lane of a pin ranked **worse** than `k` (rank `> k`) is beaten and
+ends here — its own commits above keep its colour — while a lane of a pin ranked as
+well or better (rank `≤ k`) still continues through (the counterpart loses to it),
+and so does a counterpart lane of rank `≤ k`. So with `dev` pinned and `origin/dev`
+one commit ahead, the remote's commit reads in `dev`'s counterpart colour even when
+another branch is built on top of it — unpinned, or pinned below `dev` (HEAD's
+branch, a default pin ranked after the trunks, §10.6): that branch's lane ends at
+`origin/dev`'s commit instead of running through it down to `dev`'s tip. Under the four lane-column policies this changes lane
 ids and colours only (0 glyph changes over the fuzz corpus and the large real-world
 topology); under `gutter` it moves geometry like a pinned birth (55 of 2,064 fuzz rows,
 0 of 3,804 on the real topology, every invariant holding), with the same rules: the
@@ -997,7 +1000,8 @@ already released, or a rank past the palette, gives the counterpart lane an
 ordinary free-list colour with no counterpart mark. The slot returns to the free
 list only when its **last** holder ends — the reservation or pinned lane and every
 counterpart lane holding it. Counterparts still carry no rank, so a pinned lane
-always beats a counterpart lane; the birth at a counterpart tip (§5) changes lane
+always beats a counterpart lane in tier 0; the birth at a counterpart tip (§5) —
+which ends an arriving pinned lane only when its pin ranks worse than `k` — changes lane
 identity, and glyphs only under `gutter`. A counterpart lane that reaches its
 local's tip ends there and the pinned lane is born (§5), so the colour visibly
 brightens at the local's tip; a counterpart at or behind its local sits on the
