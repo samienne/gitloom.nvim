@@ -421,6 +421,10 @@ function M.session(opts, seed)
     -- nothing, so it is normalised to nil: the "no pins" path is one nil test.
     local pin_rank = opts.pin_rank
     if pin_rank and next(pin_rank) == nil then pin_rank = nil end
+    -- The counterpart map (§5.5): implicit remote counterpart's ref id → its local's
+    -- rank. Colour only — never read by identity. Normalised to nil like `pin_rank`.
+    local pin_cp = opts.pin_counterpart
+    if pin_cp and next(pin_cp) == nil then pin_cp = nil end
     local next_id = 0
     local function new_id()
         next_id = next_id + 1
@@ -514,6 +518,8 @@ function M.session(opts, seed)
 
     local function free_color(c)
         if not c then return end
+        -- A counterpart lane's colour `-k` is slot `k` (§5.5): one more holder of it.
+        if c < 0 then c = -c end
         in_use[c] = (in_use[c] or 0) - 1
         if in_use[c] > 0 then return end -- still held (a shared slot's other holder)
         -- A pinned colour's last holder ended: the slot is an ordinary one again.
@@ -536,6 +542,26 @@ function M.session(opts, seed)
         return alloc_color()
     end
 
+    -- COUNTERPART COLOURS (§5.5). A lane born unranked at an implicit remote
+    -- counterpart's tip shares its local's slot `k` while that slot is still HELD
+    -- (withheld, or held by the pinned lane or another counterpart lane): it is one
+    -- more holder (`in_use[k] + 1`, so `free_color` returns the slot only when the
+    -- last holder ends) and its colour is `-k` — slot k in its counterpart variant,
+    -- the mark every copy of the colour carries. Nothing else may take a held slot.
+    -- The best (smallest) such rank at the commit wins; nil when none applies, and
+    -- the caller then takes an ordinary free-list colour.
+    local function take_counterpart(C)
+        if not pin_cp then return nil end
+        local best
+        for _, ref in ipairs(C.refs or {}) do
+            local k = pin_cp[ref_id(ref)]
+            if k and held[k] and (not best or k < best) then best = k end
+        end
+        if not best then return nil end
+        in_use[best] = in_use[best] + 1
+        return -best
+    end
+
     -- Release a still-withheld pinned colour whose branch start was found without a
     -- lane of its own (§5.5): back to the free list like any returned colour.
     local function release_pin(k)
@@ -553,10 +579,13 @@ function M.session(opts, seed)
     -- colour slot — drop it from the curated free FIFO and bump its in_use — so
     -- the pane's own newly born lanes never reuse a colour live at the seam.
     if seed then
-        local reserved = {}
+        local reserved, cp = {}, {}
         for col, lane in pairs(seed) do
             active[col] = lane
-            reserved[lane.color] = (reserved[lane.color] or 0) + 1
+            -- A counterpart seed (`-k`, §5.5) holds slot k as one more holder.
+            local slot = lane.color < 0 and -lane.color or lane.color
+            reserved[slot] = (reserved[slot] or 0) + 1
+            if lane.color < 0 then cp[slot] = (cp[slot] or 0) + 1 end
         end
         local kept = {}
         for i = qhead, qtail do
@@ -567,7 +596,8 @@ function M.session(opts, seed)
             -- A seed carrying a still-withheld pinned colour IS that pinned branch's
             -- lane continuing across the seam (§5.5): it takes the reservation over,
             -- so the slot is counted once and released when the seed ends.
-            if pin_wait[slot] then pin_wait[slot] = nil; n = n - 1 end
+            -- A counterpart seed never does: it is a holder in addition to the pin.
+            if pin_wait[slot] and n > (cp[slot] or 0) then pin_wait[slot] = nil; n = n - 1 end
             in_use[slot] = (in_use[slot] or 0) + n
             if slot > nextgen then nextgen = slot end
         end
@@ -723,7 +753,10 @@ function M.session(opts, seed)
             if i == 1 and trunk then
                 id, color, r = trunk.id, trunk.color, rank
             elseif i == 1 then
-                id, color, r = new_id(), take_pin(rank), rank
+                -- An unranked birth at a remote counterpart's tip shares its local's
+                -- slot (§5.5, colour only); otherwise the pinned / free-list colour.
+                id, r = new_id(), rank
+                color = (rank == nil and take_counterpart(C)) or take_pin(rank)
             else
                 -- A merge's extra-parent edge: born unranked.
                 id, color = new_id(), alloc_color()

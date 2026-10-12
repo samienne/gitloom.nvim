@@ -798,6 +798,40 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         end
     end)
 
+    it("keeps a counterpart lane's colour (-k) and never hands slot k to another lane (§5.5/§6.2)", function()
+        -- b3 is a remote counterpart's lane in the main view (colour -1: slot 1, light
+        -- dim); b1 / b2 arrive sharing colour 1 (b1 is the crossing trunk, which keeps
+        -- its boundary colour) and b2 must be de-collided — never onto the pinned slot
+        -- 1 — while b3 keeps its counterpart colour as is.
+        local items = h.dag({
+            { "b1", { "ca" } }, { "b2", { "ca" } }, { "b3", { "ca" } },
+            { "ca", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "b1" } }
+        items[2].commit.refs = { { name = "b2" } }
+        items[3].commit.refs = { { name = "b3" } }
+        local opts = h.big_opts()
+        local _, boundary, cond, _, lane_of, col_of = header_of(items, opts, 5, { b1 = true, b2 = true, b3 = true })
+        local function shared(n)
+            local l = lane_of(n)
+            if not l then return nil end
+            local hsh = (n.tip and n.tip.hash) or n.hash
+            return { id = l.id, color = (hsh == "b3") and -1 or 1 }
+        end
+        local avoid = { [1] = 1 }
+        local res = pane.header(cond.items, boundary, cond.node_of_hash, shared, col_of, avoid)
+        local by = {}
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns) do
+                local c = cell.has_commit and cell.commit
+                if c then by[(c.tip and c.tip.hash) or c.hash] = cell.color end
+            end
+        end
+        assert.equals(-1, by.b3, vim.inspect(by))
+        assert.is_not_nil(by.b2)
+        assert.is_true(by.b2 ~= 1 and by.b2 ~= -1, "b2 took slot 1: " .. tostring(by.b2))
+    end)
+
     it("collapses the shared future above a meeting point (no head blowup)", function()
         -- Two crossing lanes a, b meet at the confluence M; ABOVE M their shared future
         -- forks into many branches (t1..t5). Those forks don't relate to a or b, so the

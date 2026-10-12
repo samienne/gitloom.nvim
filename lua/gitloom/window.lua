@@ -1433,6 +1433,7 @@ end
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
 ---@field track? { ahead?: string, behind?: string, gone?: string }  upstream divergence indicator tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
+---@field counterpart_dim? number  lighter blend factor toward bg for a remote counterpart's lane colour (§5.5)
 ---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
 ---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
 ---@field generate? boolean  generate overflow OKLCH colours when truecolor (§5.5)
@@ -1694,9 +1695,20 @@ end
 -- reset, a resync and a HEAD move go through) and before the open-time stream.
 GRAPH_HELPERS.sync_pin_rank = function(ctx)
     local rank = GRAPH_HELPERS.pin_rank(ctx)
-    ctx.opts.pin_rank = rank
-    if ctx.pane_opts then ctx.pane_opts.pin_rank = rank end
+    local cp = GRAPH_HELPERS.pin_counterpart(ctx)
+    ctx.opts.pin_rank, ctx.opts.pin_counterpart = rank, cp
+    if ctx.pane_opts then ctx.pane_opts.pin_rank, ctx.pane_opts.pin_counterpart = rank, cp end
     return rank
+end
+
+-- The **counterpart colours** input (§5.5, `opts.pin_counterpart`): every implicit
+-- remote counterpart's ref id → its local's rank, so a lane born at one shares the
+-- local's pinned colour, lightly dimmed. Empty with `pin_upstream` off.
+---@return table<string, integer>
+GRAPH_HELPERS.pin_counterpart = function(ctx)
+    if ctx.opts.pin_upstream == false then return {} end
+    return selectm.pin_counterpart_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
+        ctx.view_state.unpinned)
 end
 
 -- The effective anchor **set** — the pinned entries plus their implicit remote
@@ -4283,6 +4295,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- Reachability dimming (§12): blend factor toward the bg for the
             -- out-of-cone rows/lanes. Higher = more muted.
             dim = 0.45,
+            counterpart_dim = 0.25,
             -- Commit-view diff colors (§11.3): per-role highlight groups.
             diff = {
                 add = "DiffAdd",
@@ -4509,7 +4522,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
     ---@field pin_rank fun(self:GraphCtx):table<string,integer>  ref id → pin rank of each pin-list entry; no counterparts (§5/§10.6)
-    ---@field sync_pin_rank fun(self:GraphCtx):table<string,integer>  publish `pin_rank` on opts + pane_opts
+    ---@field sync_pin_rank fun(self:GraphCtx):table<string,integer>  publish `pin_rank` + `pin_counterpart` on opts + pane_opts
+    ---@field pin_counterpart fun(self:GraphCtx):table<string,integer>  counterpart ref id → its local's rank (§5.5); {} with pin_upstream off
     ---@field pin_marks fun(self:GraphCtx):PinMarks
     ---@field build_display_index fun(self:GraphCtx)
     ---@field order_at fun(self:GraphCtx, line:integer):table?,integer,integer
@@ -7096,6 +7110,7 @@ M._internal = {
     effective_pinned = effective_pinned,
     pin_rank = GRAPH_HELPERS.pin_rank,
     sync_pin_rank = GRAPH_HELPERS.sync_pin_rank,
+    pin_counterpart = GRAPH_HELPERS.pin_counterpart,
     pin_dialog = GRAPH_HELPERS.pin_dialog, -- §10.6.1; windowed smoke test seam
     reconcile_refs = reconcile_refs,
     prune_to_reachable = prune_to_reachable,

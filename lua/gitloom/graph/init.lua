@@ -32,7 +32,8 @@ local M = {}
 --- parent/child edge, shared by every Segment that draws it.
 ---@class Lane
 ---@field id integer|nil
----@field color integer|nil   palette slot (1-based) from the free list; drives colour
+---@field color integer|nil   palette slot (1-based) from the free list; drives colour.
+---   Negative `-k` = slot `k` in its counterpart variant (a remote counterpart's lane, §5.5)
 ---@field begin Commit
 ---@field parent Commit
 ---@field highlighted boolean
@@ -52,6 +53,11 @@ local M = {}
 ---   slot `k` as its pinned colour (§5.5, `columns.pinned_slots`). nil or empty ⇒
 ---   every lane unranked ⇒ the layout is exactly the unpinned one. Part of the
 ---   layout fingerprint (§3.1).
+---@field pin_counterpart? table<string, integer>  implicit remote counterpart's ref
+---   id → its local's rank (§5.5 "Counterpart colours", `select.pin_counterpart_rank`;
+---   empty with `pin_upstream` off). Colour only: a lane born unranked at such a ref
+---   shares the local's held slot `k`, as colour `-k` (the counterpart variant). nil
+---   or empty ⇒ byte-identical to the layout without it. Part of the fingerprint.
 
 --- A **Segment** is one wire within a `GraphColumn`: its connectivity plus the
 --- Lane(s) it draws (a list — usually one, but a shared fan bus carries the set
@@ -175,7 +181,7 @@ local function layout_fingerprint(opts)
         tostring(ms.allow_merge_on_split), tostring(ms.merge_on_separate_line),
         tostring(ms.split_on_separate_line),
         tostring(p.tracks and #p.tracks or 0), tostring(p.generate), tostring(p.buffer),
-        pin_rank_key(opts.pin_rank),
+        pin_rank_key(opts.pin_rank), pin_rank_key(opts.pin_counterpart),
     }, "")
 end
 

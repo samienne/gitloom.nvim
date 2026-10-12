@@ -1469,9 +1469,11 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
         return id
     end
     -- A replacement colour never lands on a pinned colour (§5.5/§6.2): that slot reads
-    -- as its pinned branch, in the pane as in the graph.
+    -- as its pinned branch, in the pane as in the graph. A counterpart colour (`-k`,
+    -- §5.5) is kept as is: in the graph too it is legitimately shared by every
+    -- counterpart lane of one pin, so the header never swaps it for another colour.
     local function free_color(used, prefer)
-        if prefer and not used[prefer] then return prefer end
+        if prefer and (prefer < 0 or not used[prefer]) then return prefer end
         local c = 1
         while used[c] or avoid[c] do c = c + 1 end
         return c

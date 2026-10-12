@@ -68,6 +68,33 @@ function M.dim_hl(opts, group)
     return name
 end
 
+--- The **counterpart variant** of lane colour `group` (spec §5.5 "Counterpart
+--- colours"): the same hue blended lightly toward the Normal background by
+--- `palette.counterpart_dim` (default 0.25 — much lighter than the §12 cone dim).
+--- Cached in the dim cache (so the ColorScheme reset clears it too). Without
+--- truecolor it is `group` itself. The cone dim composes on top: `dim_hl` of this
+--- group blends ITS colour again, a total of `1 - (1 - cp)(1 - dim)`.
+---@param opts GraphOptions
+---@param group string|nil
+---@return string|nil
+function M.counterpart_hl(opts, group)
+    if not group or not vim.o.termguicolors then return group end
+    local factor = (opts.palette and type(opts.palette.counterpart_dim) == "number")
+        and opts.palette.counterpart_dim or 0.25
+    local key = "cp:" .. group .. ":" .. tostring(factor)
+    if dim_cache[key] then return dim_cache[key] end
+    local ok_src, src = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+    local ok_norm, normal = pcall(vim.api.nvim_get_hl, 0, { name = "Normal", link = false })
+    normal = (ok_norm and normal) or {}
+    local fg = ok_src and src and src.fg
+    if not fg then return group end
+    local bg = normal.bg or ((vim.o.background == "light") and 0xffffff or 0x000000)
+    local name = "GitloomCp_" .. group:gsub("%W", "_") .. "_" .. tostring(math.floor(factor * 100))
+    pcall(vim.api.nvim_set_hl, 0, name, { fg = blend_color(fg, bg, factor) })
+    dim_cache[key] = name
+    return name
+end
+
 --- Clear the dim-group cache (the derived groups are wiped by `hi clear` on a
 --- ColorScheme change); they are recreated lazily on the next render.
 function M.reset_dim_cache()
@@ -362,12 +389,14 @@ M.top_lane = top_lane
 
 --- Resolve a palette slot (1-based, from Phase 1's free list) to its highlight
 --- group: a curated slot indexes `palette.tracks`; a slot beyond the curated set
---- is a generated OKLCH colour (§5.5).
+--- is a generated OKLCH colour (§5.5). A negative slot `-k` is slot `k`'s
+--- counterpart variant (a remote counterpart's lane, §5.5): `counterpart_hl`.
 ---@param opts GraphOptions
 ---@param slot integer|nil
 ---@return string?
 function M.slot_hl(opts, slot)
     if not slot then return nil end
+    if slot < 0 then return M.counterpart_hl(opts, M.slot_hl(opts, -slot)) end
     local n = #opts.palette.tracks
     if slot <= n then return opts.palette.tracks[slot] end
     return generated_hl(opts, slot - n)
