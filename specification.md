@@ -611,15 +611,17 @@ valid across pin changes. The footer's seeded sweep (§6.2) uses the same ranks,
 seeded lane carrying its main-view rank, so a lane born inside the pane obeys the
 same rule as one born in the main view.
 
-> **Implementation risk — `gutter`.** Under the four lane-column policies the
-> continuing lane decides colour only. Under `gutter` (§5.6) several stages *read* it
-> — `claim_gutter` turns the continuing lane into the gutter, and the split and parent
-> swaps decide from it (the parent swap's clause 3 relies on the handed lane winning
-> identity uncontested at its parent) — so a rank that changes which lane continues,
-> or a pinned tip that ends its incoming lanes, can move geometry there. The claim
-> "identity changes colour only" must be re-measured cell for cell under every policy
-> when this is implemented, and then either restricted to the policies where it holds
-> or documented here as the `gutter` exception, with its measured cost.
+> **The `gutter` exception (measured).** Under the four lane-column policies the
+> ranks change colour only: 0 glyph changes over 17,852 fuzz rows and the large
+> real-world topology, with 944 births. Under `gutter` (§5.6) stages *read* the
+> continuing lane, so a birth or a rank-won convergence moves geometry there: 11.5% of
+> fuzz rows change glyphs (Lines 31,394 → 31,149), and on the real topology 65 of
+> 638 rows under the inline-fan-in styles (two Lines fewer) and none under the
+> split-line ones — with every invariant holding, the birth's spine break licensed.
+> A birth claims no gutter when a fan has a Line of its own and declines the parent
+> swap (which would leave the node in neither its own lane's colour above nor below);
+> the parent swap's clause 3 survives unchanged, since a merge's sole-child edge
+> arriving at a pinned tip *adopts* the rank.
 
 > The rule was previously "reuse the **leftmost** incoming lane's id and colour" — a
 > positional proxy for "the trunk", sound only while the trunk happened to sit

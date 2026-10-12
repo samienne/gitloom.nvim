@@ -76,6 +76,52 @@ local function owns_subject(C, opts)
     return true
 end
 
+--- A ref's id: its key in `repo.refs` (`git.add_ref`) — the ref name, except the
+--- `head` ref, which is keyed `HEAD`. `opts.pin_rank` is keyed by exactly these.
+---@param ref Ref
+---@return string
+local function ref_id(ref)
+    return ref.kind == "head" and "HEAD" or ref.name
+end
+
+--- A commit's **pin rank** (spec §5 "Lane identity"): the best (smallest) rank in
+--- `pin_rank` among the refs pointing at it, or nil when none of them is pinned.
+--- Works on a Commit and on a projected DisplayNode alike — a node reads its
+--- commit's `refs` through its metatable, and a collapsed head (§10.3) carries every
+--- member's refs, so a head is ranked by the best pinned ref anywhere in its region.
+--- An attached `HEAD` ref is keyed `HEAD`, which the pin list never holds while HEAD
+--- is attached (§10.6), so it ranks nothing; a detached one does when pinned.
+---@param commit table               a Commit or DisplayNode
+---@param pin_rank table<string, integer>?  ref id → rank (1 = highest priority)
+---@return integer?
+function M.commit_rank(commit, pin_rank)
+    if not pin_rank or not commit then return nil end
+    local best
+    for _, ref in ipairs(commit.refs or {}) do
+        local r = pin_rank[ref_id(ref)]
+        if r and (not best or r < best) then best = r end
+    end
+    return best
+end
+
+--- Is rank `a` strictly better than rank `b`? Smaller is better; nil (unranked) is
+--- worse than every rank, so two unranked lanes tie.
+---@param a integer?
+---@param b integer?
+---@return boolean
+local function rank_better(a, b)
+    return a ~= nil and (b == nil or a < b)
+end
+
+--- Does this incoming Lane arrive as its child's FIRST-parent edge (§5 tier 1)?
+---@param lane table
+---@param C table  the commit it terminates at
+---@return boolean
+local function continues_into(lane, C)
+    local child = lane.begin
+    return (child and child.parents and child.parents[1] == C) and true or false
+end
+
 --- The `gutter` policy's `prepass` (spec §5.6): the two forward facts the
 --- top-to-bottom sweep cannot see for itself, both pure functions of `(opts, items)`.
 ---
@@ -123,6 +169,12 @@ end
 ---@return integer? index  -- the outgoing entry that may continue in the gutter
 local function merge_swap_index(state)
     if not state.subject then return nil end
+    -- CLAUSE 0: not where a pinned lane is BORN (§5). There the first parent is the
+    -- newborn pinned lane, and the node must read in its colour; a swap would put a
+    -- non-first parent below the node and an ending lane above it — the commit's own
+    -- lane on neither side. Declining also leaves the split swap free to keep a
+    -- converging child in the gutter, so the birth pays no handover Line at all.
+    if state.pin_birth then return nil end
     local outgoing, pre = state.outgoing, state.pre
     if not pre or #outgoing < 2 then return nil end
     local p1 = outgoing[1].lane.parent
@@ -345,6 +397,10 @@ end
 ---@param seed table<integer, table>?  -- col -> Lane crossing in from above
 ---@return LayoutSession
 function M.session(opts, seed)
+    -- The pin ranks (§5 tier 0 / birth at a pinned tip). An empty map ranks
+    -- nothing, so it is normalised to nil: the "no pins" path is one nil test.
+    local pin_rank = opts.pin_rank
+    if pin_rank and next(pin_rank) == nil then pin_rank = nil end
     local next_id = 0
     local function new_id()
         next_id = next_id + 1
@@ -520,53 +576,89 @@ function M.session(opts, seed)
     end
 
     -- SPAWN_LANES (shell step): mint one outgoing Lane per parent, then return the
-    -- ended incoming children's colours. Pure lane lifecycle, driven by the DAG and
-    -- the row order, NEVER by placement; must run before any later colour alloc so
-    -- a slot freed here cannot be reused by a lane born on the same line.
+    -- ended incoming children's colours. Pure lane lifecycle, driven by the DAG, the
+    -- row order and the pin ranks, NEVER by placement; must run before any later
+    -- colour alloc so a slot freed here cannot be reused by a lane born on the same
+    -- line.
     --
-    -- IDENTITY (spec §5). The first parent continues the identity of the incoming
-    -- lane that represents the same line of history. Two tiers, both read off the
-    -- DAG and the row order — never off a column:
+    -- IDENTITY (spec §5). A lane is `{ id, color, rank }`; the first parent continues
+    -- the identity of one incoming lane, chosen in tiers, each deciding only between
+    -- the lanes the previous one left tied — all read off the DAG, the row order and
+    -- `opts.pin_rank`, never off a column:
     --
-    --  1. Prefer a lane whose child has THIS COMMIT as its FIRST parent: that
-    --     child's mainline runs into here, so it is a continuation outright.
-    --  2. Otherwise take any incoming lane. A merge's second-parent edge is still a
-    --     continuation — it is the merged-in BRANCH, and this commit is that
-    --     branch's tip carrying on downward. (Minting a fresh lane here instead
-    --     would recolour every merged-in branch tip; the `m -> {a, b}` diamond is
-    --     the smallest case that proves it.)
+    --  0. PIN RANK — the best-ranked lane (1 is best; an unranked lane, `rank == nil`,
+    --     is worse than every rank). A lane's rank is fixed where it is born (the best
+    --     pinned ref at that commit, `M.commit_rank`) and carried by its continuations.
+    --  1. FIRST PARENT — a lane whose child has THIS COMMIT as its FIRST parent: that
+    --     child's mainline runs into here, so it is a continuation outright. A merge's
+    --     second-parent edge is still a candidate — it is the merged-in BRANCH, and
+    --     minting a fresh lane for it would recolour every merged-in branch tip (the
+    --     `m -> {a, b}` diamond is the smallest case that proves it).
+    --  2. SENIORITY — the smallest id. Ids are minted in row order and carried along a
+    --     whole first-parent chain, so the smallest is the chain that started highest
+    --     and a topic forking off a trunk is always junior to it.
     --
-    -- Within whichever tier applies, the most SENIOR wins — the smallest id. Ids are
-    -- minted in row order and carried along a whole first-parent chain, so the
-    -- smallest is the chain that started highest and a topic forking off a trunk is
-    -- always junior to it. Only a genuine tip, with nothing arriving at all, is born.
+    -- BIRTH AT A PINNED TIP overrules the tiers where this commit's best rank STRICTLY
+    -- beats every incoming lane's: a merge's extra-parent edge arriving here (born,
+    -- unranked, at a merge with this commit as a non-first parent) continues and
+    -- ADOPTS the rank, keeping its id and colour (the most senior of several; the
+    -- edge is the Lane flagged `extra`);
+    -- otherwise every incoming lane ends and the pinned branch's lane is born (fresh
+    -- id, free-list colour). An EQUAL rank births nothing, so `x` and `origin/x`
+    -- stay one lane. With no `pin_rank` every rank is nil, tier 0 always ties and no
+    -- commit is pinned, so this is exactly the old two-tier choice.
     --
     -- This used to be "the leftmost incoming lane" — a positional proxy for "the
-    -- trunk", true only while the trunk happened to sit leftmost. Where a topic lane
-    -- landed left of the trunk, the merge and the whole spine below it were drawn as
-    -- the topic. Choosing semantically is also what makes identity **invariant
-    -- across layout policies** (§5.6): no column may reach an id or a colour.
+    -- trunk", true only while the trunk happened to sit leftmost. Choosing
+    -- semantically is also what makes identity **invariant across layout policies**
+    -- (§5.6): no column may reach an id, a colour or a rank.
     local function spawn_lanes(state)
         local C = state.commit
         local incoming = state.incoming
-        local trunk, senior
+        local trunk
         for _, e in ipairs(incoming) do
-            local child = e.lane.begin
-            if child and child.parents and child.parents[1] == C then
-                if not trunk or e.lane.id < trunk.id then trunk = e.lane end
+            local l = e.lane
+            if not trunk then
+                trunk = l
+            elseif rank_better(l.rank, trunk.rank) then
+                trunk = l
+            elseif not rank_better(trunk.rank, l.rank) then
+                local lf, tf = continues_into(l, C), continues_into(trunk, C)
+                if (lf and not tf) or (lf == tf and l.id < trunk.id) then trunk = l end
             end
-            if not senior or e.lane.id < senior.id then senior = e.lane end
         end
-        trunk = trunk or senior
+        local crank = pin_rank and M.commit_rank(C, pin_rank)
+        local rank = trunk and trunk.rank or crank
+        state.pin_birth = nil
+        if crank and trunk and rank_better(crank, trunk.rank) then
+            -- `trunk` holds the best incoming rank, so beating it beats them all.
+            local edge
+            for _, e in ipairs(incoming) do
+                local l = e.lane
+                if l.extra and l.rank == nil and (not edge or l.id < edge.id) then
+                    edge = l
+                end
+            end
+            trunk, rank = edge, crank
+            -- No incoming lane continues: the node is where the pinned lane is born.
+            if not edge then state.pin_birth = true end
+        end
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
-            local id, color
+            local id, color, r, extra
             if i == 1 and trunk then
-                id, color = trunk.id, trunk.color
+                id, color, r = trunk.id, trunk.color, rank
+            elseif i == 1 then
+                id, color, r = new_id(), alloc_color(), rank
             else
-                id, color = new_id(), alloc_color()
+                -- A merge's extra-parent edge: born unranked, and flagged so the
+                -- parent can recognise it for the birth rule's ADOPT case. A flag,
+                -- not a re-derivation from `begin.parents`, so a footer seed (whose
+                -- `begin` is a main-view node, §6.2) carries the fact across the seam.
+                id, color, extra = new_id(), alloc_color(), true
             end
-            outgoing[#outgoing + 1] = { lane = { id = id, color = color, begin = C, parent = p, highlighted = false } }
+            outgoing[#outgoing + 1] = { lane = { id = id, color = color, rank = r, extra = extra,
+                begin = C, parent = p, highlighted = false } }
         end
         -- Return the colour of every incoming lane that did not continue (all of
         -- them when nothing leaves). Ordered by lane id — row order — because
@@ -789,6 +881,14 @@ function M.session(opts, seed)
         if not state.subject or blocked[GUTTER] or state.split_swap then return end
         local incoming = state.incoming
         if #incoming == 0 then return end
+        -- A pinned lane BORN here (§5) continues no incoming lane, so there is nothing
+        -- that must turn in: every incoming lane ends at the node, converging as an arm
+        -- of the fan-in. Claiming one would pay a handover Line only to end it on the
+        -- node — UNLESS the fan-in shares the commit Line with a fan-out: arms running
+        -- in towards the gutter and extra parents running out of it over the same cells
+        -- is the §5.1 mixed-direction share the claim row exists to prevent. So skip it
+        -- only when either fan has a Line of its own or nothing fans out.
+        if state.pin_birth and (state.sep_split or state.sep_merge or #state.outgoing <= 1) then return end
         local claimer
         for _, inc in ipairs(incoming) do
             if inc.lane == state.trunk_in then claimer = inc end

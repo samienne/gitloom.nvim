@@ -819,6 +819,15 @@ Coverage:
   auto-upstream dropping with its local, and a detached HEAD pinning the `HEAD`
   ref first / unpinnable / dropped once attached), and `reconcile_refs` stamping
   the head ref's `branch` (nil when detached).
+- `tests/pin_rank_spec.lua` — pin priority in lane identity (§5): `commit_rank`
+  (best rank, `HEAD` keying), nil / empty / non-matching `pin_rank` byte-identical
+  (fuzz + `large_topo`, every style × policy), the birth at a pinned tip (the
+  `feature1`-off-`dev` case; a merged pinned tip adopting the edge lane; equal rank
+  `x`/`origin/x` one lane; a worse rank no birth), tier 0 beating seniority, ids /
+  colours / ranks identical across policies, 0 glyph changes under the four
+  lane-column policies and every invariant + `check_spine` (births licensed, seen
+  > 0) under `gutter`, streaming == one-shot incl. a pin change forcing a re-lay
+  (the fingerprint), and footer seeds carrying their main-view rank
 - `tests/graph_layout_spec.lua` + `tests/graph_helpers.lua` — the lane-layout
   algorithm, tested by **invariants** rather than golden snapshots (so the
   tests survive visualization changes; see below). Includes two compaction
@@ -891,7 +900,8 @@ Coverage:
   `invariant checker self-test` block also proves **`check_horizontals`** has teeth:
   a fan-in and a fan-out sharing a run is flagged MIXED-DIRECTION, two arms of the
   same fan are not. It proves **`check_spine`** has teeth too, on hand-built rows that
-  isolate each licence clause of BOTH licences. Merge: the licensed swap passes, while
+  isolate each licence clause of BOTH swap licences (a third, the §5 **pinned
+  birth**, is exercised in `pin_rank_spec`). Merge: the licensed swap passes, while
   a break outside the
   gutter column, a break whose wire below is not a parent lane, a next subject row
   whose node is not in the gutter, a next subject row entered by a DIFFERENT lane
@@ -1217,11 +1227,21 @@ Details not covered by the spec or architecture:
   the direct seam-up grid, never `columns.layout`).
 - **Lane identity is independent of placement** (spec §5, `spawn_lanes`): a
   commit's first parent continues the identity of the incoming lane that
-  represents the same line of history — prefer a lane whose child has this commit
-  as its FIRST parent, else any incoming lane (a merge's second-parent edge is
-  still that branch continuing; minting fresh there would recolour every
-  merged-in branch tip), and among the candidates take the most **senior**, the
-  smallest id. Only a genuine tip is born. The ended lanes' colours are returned in
+  represents the same line of history, in tiers: **0** the best **pin rank**
+  (`opts.pin_rank`, ref id → rank, 1 best; each Lane carries the `rank` of the
+  pinned ref at its birth; unranked is worst), **1** a lane whose child has this
+  commit as its FIRST parent, else any incoming lane (a merge's second-parent edge
+  is still that branch continuing; minting fresh there would recolour every
+  merged-in branch tip), **2** the most **senior**, the smallest id. A commit whose
+  best rank (`columns.commit_rank`) strictly beats every incoming lane's is a
+  **pinned birth**: an arriving merge extra-parent edge (Lane flagged `extra`)
+  adopts the rank, else every incoming lane ends and a fresh ranked lane is born
+  (`state.pin_birth`; under `gutter` it skips the claim row when a fan has its own
+  Line and declines the parent swap). nil/empty `pin_rank` is byte-identical to the
+  unranked layout (0 of 233,025 rows vs the pre-rank code); the map is in the
+  layout fingerprint, and footer seeds carry `rank`/`extra` via `pane.boundary_of`.
+  Under the four lane-column policies ranks change colour only (0 glyphs); under
+  `gutter` they move geometry (spec §5's measured exception). The ended lanes' colours are returned in
   **id order**, because `free_color` appends to a FIFO and the return order decides
   which colour a later lane gets. Nothing here reads a column, which buys the
   cross-policy guarantee: **all five policies produce identical lane ids and

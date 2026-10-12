@@ -1045,9 +1045,13 @@ the current row. For each commit `C`:
    and carried along a chain, so the smallest is the chain that started highest.
    At a pinned tip whose rank strictly beats every incoming lane's, a merge's
    extra-parent edge lane arriving there adopts the rank and continues; with none,
-   every incoming lane ends and a new ranked lane is born. *(Specified, not yet
-   implemented: today `spawn_lanes` has no rank tier.)* The pin ranks are an input
-   of the sweep and belong in the layout fingerprint `columns.session` checks.
+   every incoming lane ends and a new ranked lane is born (`state.pin_birth`). The
+   ranks arrive as `opts.pin_rank` (ref id → rank; `columns.commit_rank` reads a
+   commit's best), each Lane carries `rank` and an extra-parent edge `extra` (the
+   adopt test — a flag, so a footer seed carries it across the seam), and the map
+   is part of the layout fingerprint `graph.extend_columns` checks. Under `gutter`
+   a birth claims nothing when a fan has a Line of its own, and declines the parent
+   swap, so the node reads in the newborn lane's colour.
    The choice reads the DAG, the row order and the ranks only, **never a column**,
    which is what makes lane identity identical under every layout policy (but see
    spec §5's `gutter` risk: `claim_gutter` and the swaps read `state.trunk_in`). A
