@@ -1091,6 +1091,21 @@ the current row. For each commit `C`:
    so it takes the reservation over instead of counting it twice. Known up front,
    so the streaming prefix property holds; the header pane passes the same slots as
    `pane.header`'s `avoid` so its de-collision never hands one out.
+   **Counterpart colours** (spec §5.5): `opts.pin_counterpart` (ref id → its
+   local's rank, `select.pin_counterpart_rank`, empty with `pin_upstream` off) is
+   read only at an UNRANKED birth (no trunk, no ranked ref): the best counterpart
+   rank `k` whose slot is still `held` gives the lane colour **`-k`** — the
+   encoding of "slot `k`, counterpart variant", so the mark rides every copy of a
+   lane's `color` (Segments, footer seeds, the header's `lane_of`/de-collision)
+   without a field of its own. `in_use[k]` counts it as one more holder;
+   `free_color` takes the absolute value, so the slot returns only when the last
+   holder (reservation / pinned lane / every counterpart lane) ends. A footer seed
+   carrying `-k` adds a holder and never takes the reservation over. Phase 2's
+   `render.slot_hl` maps `-k` to `counterpart_hl(tracks[k])` — a cached
+   `GitloomCp_*` blend toward the background by `palette.counterpart_dim`, cleared
+   with the dim cache on ColorScheme (plain `tracks[k]` without truecolor); the
+   cone dim then blends that group again (`dim_hl`), so the two compose. Identity
+   reads no colour, so no glyph moves.
 4. **Compaction** (under the `compact` / `survivors` layout policies, §5.6; the
    others hold every survivor in its column): each survivor shifts left through
    the run of *row-start* gaps
@@ -1818,10 +1833,12 @@ list (each at its local's place unless explicitly unpinned or already ranked; an
 explicitly pinned remote keeps its own), and `ctx:effective_pinned()` is that
 table's key set — what `view.owners` / `collapse_owners` and the pin icon consume.
 `ctx:pin_rank()` is the same call with counterparts OFF — ref id → rank of each
-entry, 1 = highest — because counterparts take no rank and no pinned colour
+entry, 1 = highest — because counterparts take no rank and own no slot
 (spec §5.5/§10.6). `ctx:sync_pin_rank()` publishes the
 ranks as the layout input `opts.pin_rank` on both `ctx.opts` and the panes' frozen
-copy `ctx.pane_opts`; it runs at the top of every `reflow_build` (which `P`, every
+copy `ctx.pane_opts`, together with `opts.pin_counterpart` (the counterparts'
+local ranks, `GRAPH_HELPERS.pin_counterpart`, empty with `pin_upstream` off) —
+the counterpart colours (§5.5); it runs at the top of every `reflow_build` (which `P`, every
 dialog key, the reset, a resync and a HEAD move all go through) and before the
 open-time stream.
 
