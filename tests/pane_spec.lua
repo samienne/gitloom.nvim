@@ -802,7 +802,9 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         -- b3 is a remote counterpart's lane in the main view (colour -1: slot 1, light
         -- dim); b1 / b2 arrive sharing colour 1 (b1 is the crossing trunk, which keeps
         -- its boundary colour) and b2 must be de-collided — never onto the pinned slot
-        -- 1 — while b3 keeps its counterpart colour as is.
+        -- 1 — while b3 keeps its counterpart colour as is. b1 is pinned (rank 1), as the
+        -- local a counterpart belongs to is: so its lane is the one `ca` continues (§5
+        -- tier 0) and it draws slot 1 in the main view.
         local items = h.dag({
             { "b1", { "ca" } }, { "b2", { "ca" } }, { "b3", { "ca" } },
             { "ca", { "base" } }, { "base", {} },
@@ -811,6 +813,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         items[2].commit.refs = { { name = "b2" } }
         items[3].commit.refs = { { name = "b3" } }
         local opts = h.big_opts()
+        opts.pin_rank = { b1 = 1 }
         local _, boundary, cond, _, lane_of, col_of = header_of(items, opts, 5, { b1 = true, b2 = true, b3 = true })
         local function shared(n)
             local l = lane_of(n)
@@ -860,13 +863,16 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         -- dev and HEAD fork from a shared lane s. In the graph dev sits in the LEFT
         -- column (it forks first), HEAD in the right. The header — though it lays out
         -- bottom-up — must place them in the SAME left-right order, by main-view column,
-        -- not by which head the sweep reached first.
+        -- not by which head the sweep reached first. Both are ranked as the window
+        -- ranks the default anchors (trunk first, HEAD's anchor last; §10.6), so dev's
+        -- lane is the one `s` continues (§5 tier 0).
         local items = h.dag({
             { "dev", { "s" } }, { "head", { "s" } }, { "s", { "base" } }, { "base", {} },
         })
         items[1].commit.refs = { { name = "dev" } }
         items[2].commit.refs = { { name = "head" } }
         local opts = h.big_opts()
+        opts.pin_rank = { dev = 1, head = 2 }
         local main = columns.layout(opts, items)
         -- the graph's column for each head
         local gcol = {}

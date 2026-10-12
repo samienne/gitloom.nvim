@@ -181,16 +181,26 @@ Coverage:
   node keeps `◌`; a collapsed head holding HEAD keeps `◍` in the HEAD colour; an
   out-of-cone HEAD node dims; `icons.head` honoured and `""` turns it off; and a
   laid-out graph marks exactly HEAD's row, mirrored or not
-- `tests/label_color_spec.lua` — ref labels take their node's lane colour (§6
-  "Label colour", §12.2) through the real `display_item`: a plain row's labels
-  (branch group incl. `↑remote`, tag) equal the node glyph's `get_column_chars`
-  colour; a `gutter` `own_lane_up` node colours them from the up wire (unflagged:
+- `tests/label_color_spec.lua` — the label OWNING a node's lane takes its lane
+  colour, every other label its per-kind group (§6 "Label colour", §12.2), through
+  the real `display_item`: a plain row's first label (branch group incl. `↑remote`)
+  equals the node glyph's `get_column_chars` colour while its tag is per-kind;
+  ownership (`label_owner`): a counterpart lane `-k` born here belongs to the
+  counterpart's group even when another remote branch is listed first, a pinned
+  lane to its pinned ref's group, a pinned colour whose ref is elsewhere / a pin
+  past the palette fall back to the first label, a pinned detached HEAD owns its
+  lane (every other label per-kind, `HEAD` never the fallback), a packed marker's
+  labels each coloured on their own, a collapsed head's owner; `origin/HEAD` is
+  no label (`classify_ref`); the **lumeeditor shape** through a real
+  `columns.layout` (`compact` + `gutter`: pinned `dev` at X, `origin/dev` +
+  `origin/leppanen/validation` on its child Y, an unlabelled Z above — Y's node is
+  `-1` and only `(dev ↑origin)` takes it); `pane_labels`' `key`s; a `gutter` `own_lane_up` node colours them from the up wire (unflagged:
   the down wire); a collapsed `◍` head; each marker of a packed row its OWN node
   colour; the attached label's `HEAD → ` prefix and a detached `HEAD` keep
   `palette.head`, the h/l-selected label `palette.selected`, a pointer mark its
   `hl`; out of cone the label is `dim_hl` of the lane colour (a packed marker per
   marker), in cone / no pivot undimmed; `lane_label_colors = false` restores the
-  per-kind groups. Panes: `pane_labels`'s `arrow` span and `node_lane_hl` on a
+  per-kind groups everywhere. Panes: `pane_labels`'s `arrow` span and `node_lane_hl` on a
   header-style (segment-level `highlighted`) row matching the glyph. The pane
   window glue (`render_pane`) is untested
 - `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
@@ -866,7 +876,7 @@ Coverage:
   at a pinned tip (the `feature1`-off-`dev` case; a merged pinned tip ending the
   merge edge and starting its own pinned-colour lane; a counterpart ahead of its
   local reaching the tip unranked; equal rank one lane; a worse rank no birth),
-  tier 0 beating seniority, ids /
+  tier 0 beating the newest-lane tiebreak, ids /
   colours / ranks identical across policies, 0 glyph changes under the four
   lane-column policies and every invariant + `check_spine` (births licensed, seen
   > 0) under `gutter`, streaming == one-shot incl. a pin change forcing a re-lay
@@ -1230,7 +1240,8 @@ Details not covered by the spec or architecture:
   shipping FOCUSED view and buys nothing (a `◍` head sits after the merge by §3.1
   lineage grouping, and a head owns no subject row), measured at crossings 116 → 209,
   rows +29.5%, node-in-gutter 1.000 → 0.943. Clause 3 makes the saving *provable*:
-  without it a senior sibling lane wins §5 identity at that parent, ours is evicted
+  without it a sibling lane may win §5 identity at that parent (a better rank or a
+  first-parent edge), ours is evicted
   anyway, and the break buys nothing — it declines exactly the unearned fires
   (15 of 100 on a 1040-commit repo expanded, 0 of 11 on `large_topo`). Cost on that
   repo expanded: crossings 598 → 512, rendered Lines 1593 → 1423, ink −12.3%,
@@ -1322,7 +1333,17 @@ Details not covered by the spec or architecture:
   pinned ref at its birth; unranked is worst), **1** a lane whose child has this
   commit as its FIRST parent, else any incoming lane (a merge's second-parent edge
   is still that branch continuing; minting fresh there would recolour every
-  merged-in branch tip), **2** the most **senior**, the smallest id. A commit whose
+  merged-in branch tip), **2** the **newest**, the largest id (the chain that
+  started nearest the commit; it was the most senior until the user chose this —
+  a trunk keeps its colour through such a junction by being pinned, tier 0; the
+  ended lanes' colours are still freed in id ORDER, which is only the FIFO's
+  determinism, not a continuation choice). Since the four lane-column policies
+  still put the node on the LEFTMOST incoming lane, the newest lane usually
+  arrives from the right, so an unpinned fork shows a colour change at the node
+  under them (`check_spine` errors ~3.5x the senior rule's over fuzz; `gutter` 0).
+  Fixtures that need a trunk to continue through a fork PIN it (`pin_rank`), as
+  production does (the split-swap block, the fork-hub fixture, `header_replay_spec`,
+  two `pane_spec` header cases, the focused spine sweep's `t1`). A commit whose
   best rank (`columns.commit_rank`) strictly beats every incoming lane's is a
   **pinned birth**: every incoming lane ends — an arriving merge extra-parent edge
   included (the old "adopt" case is gone: a lane's colour is fixed for life) — and a

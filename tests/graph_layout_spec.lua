@@ -360,8 +360,12 @@ describe("compaction never crosses a lane (§5)", function()
                 for _, e in ipairs(e1) do
                     if #bad < 6 then bad[#bad + 1] = ("raw seed=%d %s"):format(seed, e) end
                 end
-                local foc = build_graph(opts, h.focused(h.dag(h.random_dag(4 + (seed % 14), seed))))
-                local e2, n2 = h.check_spine(foc, opts)
+                -- The projection's anchor ranked, as the window ranks it (§10.6): with §5
+                -- tier 2 picking the NEWEST lane, an unranked trunk would hand its forks to
+                -- the topic already in the gutter, and the swaps would fire here too.
+                local fopts = vim.tbl_extend("force", opts, { pin_rank = { t1 = 1 } })
+                local foc = build_graph(fopts, h.focused(h.dag(h.random_dag(4 + (seed % 14), seed))))
+                local e2, n2 = h.check_spine(foc, fopts)
                 licensed_foc = licensed_foc + n2
                 for _, e in ipairs(e2) do
                     if #bad < 6 then bad[#bad + 1] = ("focused seed=%d %s"):format(seed, e) end
@@ -401,7 +405,12 @@ describe("compaction never crosses a lane (§5)", function()
             { "f",     { "r" } },
             { "r",     {} },
         })
+        -- The trunk is pinned (as the window pins `master`/`main`/`dev`, §10.6): §5 tier
+        -- 0 is what continues it through `f`; unpinned, tier 2 would continue the NEWEST
+        -- lane (`t2`'s, already in the gutter) and there would be no trunk to keep.
+        items[1].commit.refs = { { kind = "local", name = "trunk" } }
         local opts = policy_opts({ split_on_separate_line = true, merge_on_separate_line = false }, "gutter")
+        opts.pin_rank = { trunk = 1 }
         local rows = build_graph(opts, items)
         assert.equals(0, #h.check_spine(rows, opts), "the fork's spine changes lane at the node")
 
@@ -414,10 +423,10 @@ describe("compaction never crosses a lane (§5)", function()
         assert.truthy(frow)
         assert.equals(3, #frow.child_lanes) -- main's, t1's and t2's edges converge here
         local trunk = frow.parent_lanes[1].id
-        -- the trunk's own edge into f is the SENIOR incoming lane (§5 identity)
-        local senior = math.huge
-        for _, l in ipairs(frow.child_lanes) do senior = math.min(senior, l.id) end
-        assert.equals(senior, trunk, "f must continue the senior (trunk) lane")
+        -- the trunk's own edge into f is the RANKED incoming lane (§5 identity, tier 0)
+        local ranked
+        for _, l in ipairs(frow.child_lanes) do if l.rank == 1 then ranked = l.id end end
+        assert.equals(ranked, trunk, "f must continue the pinned (trunk) lane")
 
         local fan = frow.above[#frow.above] -- fan_in appends the split Line last
         local ncol
@@ -613,6 +622,23 @@ end)
 -- `h.focused` (§10.7, the shipping default, where the gutter is already the trunk's and
 -- there is nothing to swap).
 describe("the gutter split swap (§5.6)", function()
+    -- Every fixture's TRUNK (its first row) carries a `trunk` ref pinned at rank 1, and
+    -- the §10.7 projection's anchor (`t1`, `h.focused`) is ranked too — as the window
+    -- ranks its anchors (§10.6). The swap exists for a fork the trunk continues while a
+    -- topic holds the gutter; with §5 tier 2 picking the NEWEST lane, an UNPINNED fork
+    -- continues the topic already in the gutter and there is nothing to swap.
+    local function gopts(ms, policy)
+        local o = policy_opts(ms, policy)
+        o.pin_rank = { trunk = 1, t1 = 1 }
+        return o
+    end
+    local function gdag(spec)
+        local items = h.dag(spec)
+        local c = items[1].commit
+        c.refs = c.refs or {}
+        table.insert(c.refs, { kind = "local", name = "trunk" })
+        return items
+    end
     local build_graph = require("gitloom.graph")._internal.build_graph
     local SPLITLINE = { split_on_separate_line = true, merge_on_separate_line = false }
     local INLINE = { split_on_separate_line = false, merge_on_separate_line = false }
@@ -689,8 +715,8 @@ describe("the gutter split swap (§5.6)", function()
     }
 
     it("fires with a split Line: the node takes the gutter and BREAKS NOTHING", function()
-        local o = policy_opts(SPLITLINE, "gutter")
-        local rows = build_graph(o, h.dag(FORK))
+        local o = gopts(SPLITLINE, "gutter")
+        local rows = build_graph(o, gdag(FORK))
         local f = row_of(rows, "f")
         assert.equals(3, #f.child_lanes) -- main's, t1's and t2's edges converge here
         assert.is_true(split_swapped(f))
@@ -715,8 +741,8 @@ describe("the gutter split swap (§5.6)", function()
     end)
 
     it("fires with an inline fan-in: the break is LICENSED, priced in the rows it saved", function()
-        local o = policy_opts(INLINE, "gutter")
-        local rows = build_graph(o, h.dag(FORK))
+        local o = gopts(INLINE, "gutter")
+        local rows = build_graph(o, gdag(FORK))
         local f = row_of(rows, "f")
         assert.is_true(split_swapped(f))
         assert.equals(0, handover_rows(f))
@@ -759,8 +785,8 @@ describe("the gutter split swap (§5.6)", function()
 
     it("declines for a PASS-THROUGH occupant: it is evicted and the node stays in the gutter", function()
         for _, ms in ipairs({ SPLITLINE, INLINE }) do
-            local o = policy_opts(ms, "gutter")
-            local rows = build_graph(o, h.dag(PASSTHROUGH))
+            local o = gopts(ms, "gutter")
+            local rows = build_graph(o, gdag(PASSTHROUGH))
             local f = row_of(rows, "f")
             -- precondition: the gutter's occupant is not one of `f`'s converging children
             local kids = {}
@@ -795,8 +821,8 @@ describe("the gutter split swap (§5.6)", function()
         -- pays none either (the merge swap). The node's wire from above is still the
         -- commit's own lane — the hub descent — so it is the MERGE licence that applies,
         -- unchanged, and the node keeps the trunk's colour via `own_lane_up`.
-        local o = policy_opts(SPLITLINE, "gutter")
-        local rows = build_graph(o, h.dag(BOTH))
+        local o = gopts(SPLITLINE, "gutter")
+        local rows = build_graph(o, gdag(BOTH))
         local f = row_of(rows, "f")
         assert.is_true(split_swapped(f))
         assert.equals(0, handover_rows(f))
@@ -817,8 +843,8 @@ describe("the gutter split swap (§5.6)", function()
         -- licence can price and which could not even be coloured from its own lane. The
         -- merge swap wins (same two rows saved, on the next row instead of this one), so
         -- this row pays its handover and the break is the merge's.
-        local o = policy_opts(INLINE, "gutter")
-        local rows = build_graph(o, h.dag(BOTH))
+        local o = gopts(INLINE, "gutter")
+        local rows = build_graph(o, gdag(BOTH))
         local f = row_of(rows, "f")
         assert.is_false(split_swapped(f))
         assert.equals(2, handover_rows(f))
@@ -841,9 +867,9 @@ describe("the gutter split swap (§5.6)", function()
         -- gutter at a kept fork is the trunk's own and there is nothing to swap. This is
         -- the byte-identity claim in invariant form for the default view.
         for _, ms in ipairs({ SPLITLINE, INLINE }) do
-            local o = policy_opts(ms, "gutter")
+            local o = gopts(ms, "gutter")
             for _, spec in ipairs({ FORK, PASSTHROUGH, BOTH }) do
-                assert.equals(0, swaps(build_graph(o, h.focused(h.dag(spec)))))
+                assert.equals(0, swaps(build_graph(o, h.focused(gdag(spec)))))
             end
             local total = 0
             for seed = 1, 60 do
@@ -856,8 +882,8 @@ describe("the gutter split swap (§5.6)", function()
     it("never fires under any other policy (§5.6: only `gutter` constrains a column)", function()
         for _, policy in ipairs({ "compact", "survivors", "linear", "straight" }) do
             for _, style in ipairs(STYLES) do
-                local o = policy_opts(style.ms, policy)
-                for _, items in ipairs({ h.dag(FORK), h.focused(h.dag(FORK)) }) do
+                local o = gopts(style.ms, policy)
+                for _, items in ipairs({ gdag(FORK), h.focused(gdag(FORK)) }) do
                     local rows = build_graph(o, items)
                     -- Without a gutter the node is not pinned to column 1, so the swap has
                     -- no column to keep; asserted through the same rendered predicate.
@@ -1084,15 +1110,17 @@ describe("graph layout [inline+mergesplit] characterization", function()
     -- change is flagged for review. NOT an assertion of correctness: at a merge
     -- under allow_merge_on_split an incoming lane terminates and a new parent
     -- lane reuses the same column (the sanctioned two-turn cell), so the vertical
-    -- colour changes mid-column. Repro: random_dag(7, 108).
+    -- colour changes mid-column. Repro: random_dag(7, 108). (The glyphs are
+    -- unchanged by §5 tier 2 picking the NEWEST lane; only the last two rows' lane
+    -- ids moved, 1 -> 5: the newer lane now continues at the merge.)
     local EXPECTED = [[
 ◉─╮  122
 ○ │  1.2
 │ │ ◉─╮  1.2.344
 │ │ │ │ ◉  1.2.3.4.5
 ○─│─│─╯ │  1464344.5
-○─│─┴───╯  136335555
-◎─╯  166]]
+○─│─┴───╯  536335555
+◎─╯  566]]
 
     it("renders the known merge-handoff repro unchanged", function()
         local opts = h.opts({

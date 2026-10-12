@@ -40,6 +40,12 @@ local function build(policy)
     local display = proj.items
     local opts = h.big_opts()
     opts.layout_policy = policy
+    -- The pinned anchors' lane ranks, as `ctx:sync_pin_rank` publishes them (the
+    -- default order: trunks first, HEAD's anchor last; §10.6). Without them §5 tier 2
+    -- (the NEWEST lane) may end an anchor's lane at a junction below its tip, and the
+    -- lane crossing a cutoff there is legitimately another one — the production
+    -- graph never lays an anchor out unranked.
+    opts.pin_rank = { dev = 1, enne = 2 }
     local main = columns.layout(opts, display)
     local didx, lane_main, node_col = {}, {}, {}
     for i, it in ipairs(display) do

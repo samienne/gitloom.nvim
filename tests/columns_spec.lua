@@ -226,8 +226,9 @@ describe("columns.layout lane identity (spec §5)", function()
     --   t2 -> m3          (the topic forked from m3)
     --   m3 -> m4
     --
-    -- Both m2 and t2 have m3 as their first parent, so the tiebreak decides: the
-    -- SENIOR chain (smallest id — master's, born at the tip) must continue.
+    -- Both m2 and t2 have m3 as their first parent. Unpinned, tier 2 decides and the
+    -- NEWEST chain (largest id — the topic's, minted lowest) continues; with master
+    -- pinned, tier 0 decides first and the trunk survives the merge.
     local MERGED = {
         { "m1", { "m2" } },
         { "m2", { "m3", "t1" } },
@@ -258,10 +259,20 @@ describe("columns.layout lane identity (spec §5)", function()
         return ord
     end
 
+    --- MERGED with a `master` ref on m1, pinned at rank 1.
+    local function pinned_merged(policy)
+        local opts = policy_opts(nil, policy)
+        opts.pin_rank = { master = 1 }
+        local ord = ordered(MERGED)
+        for _, it in ipairs(ord) do
+            if it.commit.hash == "m1" then it.commit.refs = { { kind = "local", name = "master" } } end
+        end
+        return columns.layout(opts, ord)
+    end
+
     for _, policy in ipairs(POLICIES) do
-        it("the trunk survives a merge whose lineage is expanded [" .. policy .. "]", function()
-            local opts = policy_opts(nil, policy)
-            local sp = spine(columns.layout(opts, ordered(MERGED)))
+        it("a PINNED trunk survives a merge whose lineage is expanded [" .. policy .. "]", function()
+            local sp = spine(pinned_merged(policy))
             assert.is_not_nil(sp.m1)
             assert.equals(sp.m1.id, sp.m2.id, "m1->m2 and m2->m3 must be one lane")
             assert.equals(sp.m2.id, sp.m3.id, "the spine must survive the merge at m3")
@@ -273,8 +284,9 @@ describe("columns.layout lane identity (spec §5)", function()
     it("a merged-in branch tip carries its own lane on", function()
         -- `base` is reached only as a SECOND parent, from two different merges. Each
         -- of those edges IS the merged-in branch, and `base` is its tip continuing
-        -- downward — so the continuation keeps one of them (the senior) rather than
-        -- being born afresh. Minting here would recolour every merged-in branch tip.
+        -- downward — so the continuation keeps one of them (the NEWEST, tier 2: `b`'s,
+        -- minted lower) rather than being born afresh. Minting here would recolour
+        -- every merged-in branch tip.
         for _, policy in ipairs(POLICIES) do
             local opts = policy_opts(nil, policy)
             local rows = columns.layout(opts, ordered({
@@ -295,17 +307,23 @@ describe("columns.layout lane identity (spec §5)", function()
             assert.is_true(next(incoming) ~= nil, "base must have incoming lanes")
             assert.is_true(incoming[sp.base.id] == true,
                 policy .. ": base must continue one of its incoming lanes")
+            local newest = -math.huge
+            for id in pairs(incoming) do newest = math.max(newest, id) end
+            assert.equals(newest, sp.base.id,
+                policy .. ": of two unranked merged-in edges, the NEWER continues (§5 tier 2)")
         end
     end)
 
-    it("the tiebreak is SENIORITY, not arrival order", function()
-        -- Both `m2` and `t2` have `m3` as their first parent; the senior chain (the
-        -- smaller id — master's, born at the tip) must win under every policy, which
-        -- is what makes identity independent of where the lanes were placed.
+    it("the tiebreak is the NEWEST lane, not arrival order", function()
+        -- Both `m2` and `t2` have `m3` as their first parent and nothing is pinned:
+        -- the newest chain (the larger id — the topic's, minted below master's tip)
+        -- must win under every policy, which is what makes identity independent of
+        -- where the lanes were placed.
         for _, policy in ipairs(POLICIES) do
             local sp = spine(columns.layout(policy_opts(nil, policy), ordered(MERGED)))
-            assert.is_true(sp.m3.id < sp.t1.id,
-                policy .. ": the senior lane must be the one that continues")
+            assert.equals(sp.t1.id, sp.m3.id,
+                policy .. ": the newest lane must be the one that continues")
+            assert.is_true(sp.m1.id < sp.m3.id, policy .. ": master's lane ends at m3")
         end
     end)
 end)
@@ -431,13 +449,13 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
             -- instead of leaving an empty-column gap. The gap made the width oscillate
             -- (2 vs 3) and bounced a right-aligned mirror graph. Width must stay STABLE.
             --
-            -- `gutter` (§5.6) is one wider on this pathological staircase and stable
-            -- there: the gutter may be entered ONLY by the lane owning the next subject
-            -- row, so a fan-out may not reclaim it even when a terminating child just
-            -- freed it. The claim being made — a short and a long staircase render the
-            -- same width, i.e. it does not grow per merge — is unchanged; only the
-            -- constant differs, so it is pinned per policy rather than loosened.
-            local expect = policy == "gutter" and 3 or 2
+            -- `gutter` (§5.6) used to be one wider here (3): the gutter may be entered
+            -- ONLY by the lane owning the next subject row, so a fan-out may not reclaim
+            -- it even when a terminating child just freed it. Since §5 tier 2 picks the
+            -- NEWEST lane, `m(k+1)` continues `fK`'s lane — the one already in the
+            -- gutter — and the trunk lane from `mK` ends there, so the gutter needs no
+            -- extra column and every policy is width 2, stable per merge.
+            local expect = 2
             local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = true }, policy)
             assert.equals(expect, max_width(columns.layout(opts, h.dag(staircase(3)))))
             assert.equals(expect, max_width(columns.layout(opts, h.dag(staircase(12)))))

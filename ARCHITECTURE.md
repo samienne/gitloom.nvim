@@ -1049,8 +1049,19 @@ the current row. For each commit `C`:
    prefer an incoming
    lane whose child has this commit as its FIRST parent, else any incoming lane (a
    merge's second-parent edge is still that branch continuing), and among the
-   candidates take the most SENIOR — the smallest id. Ids are minted in row order
-   and carried along a chain, so the smallest is the chain that started highest.
+   candidates take the NEWEST — the largest id. Ids are minted in row order and
+   carried along a chain, so the largest is the chain that started lowest, nearest
+   this commit; a trunk keeps its colour through such a junction by being pinned
+   (tier 0). The freed colours of the ended lanes are still returned in **id order**
+   (smallest first): that order only decides which colour the FIFO free list hands
+   a later lane, it is not a continuation choice, and keeping it placement-free is
+   all §5.5 needs — so it was left alone. Because the node still sits on the
+   LEFTMOST incoming lane under the four lane-column policies (`place_commit`), the
+   newest lane continuing usually arrives from the right of the node: the straight
+   wire above the node is then the ended lane and the wire below the newest one, a
+   colour change at the node (`check_spine` errors over the fuzz corpus, all four
+   styles: ~410–470 per policy with the senior rule, ~1510–1560 with the newest;
+   `gutter` holds 0, as before).
    At a pinned tip whose rank strictly beats every incoming lane's, every incoming
    lane ends (a merge's extra-parent edge included) and a new ranked lane is born
    (`state.pin_birth`) in its **pinned colour** (below). The ranks arrive as
@@ -1589,8 +1600,9 @@ The parent swap's three clauses (all required) and the reason each exists are in
   edges (§10.3) and only in-set edges become Lanes.
 - **Clause 3 is what makes the licence provable.** "This merge is that parent's only
   in-set child" means the Lane born here is the only Lane arriving there, so it wins
-  §5 identity's tier 2 uncontested and cannot be evicted. Without it, a more senior
-  sibling Lane wins, the handed Lane is evicted anyway, and the row pays its handover
+  §5 identity's tier 2 uncontested and cannot be evicted. Without it, a sibling Lane
+  may win §5 identity (a better rank or a first-parent edge — the handed Lane is a
+  merge's extra-parent edge), the handed Lane is evicted anyway, and the row pays its handover
   *plus* a spine break that bought nothing. Measured, clause 3 declines exactly the
   unearned fires and no others: 15 of 100 (a 1040-commit repository expanded),
   38 of 60 (fuzz), 0 of 11 (`tests/large_topo`).
@@ -1773,13 +1785,24 @@ itself is a behaviour-preserving refactor within the current spec.
   graph column is `passthrough_columns(item.columns, "down")` — a vertical-only
   projection of the commit's lanes that continues every down-going lane as a `│`
   (no node), carrying the same edges so §12 dimming still applies. A `dual` commit
-  with no labels stays a single row. `B` cycles the mode. A label's colour is
-  its node's lane colour (spec §6 "Label colour"), read by `node_lane_hl` — the
-  SAME `top_lane` + `seg_color` + slot lookup `get_column_chars` colours the node
-  glyph with, minus the HEAD-node override — so a label can never disagree with its
-  node; `label_hl` picks it over the per-kind group (`lane_label_colors`) and dims
-  it with `dim_hl`. A packed marker row resolves it per marker (the cell whose
-  `commit` is that marker); the panes call the same helper on their own rows.
+  with no labels stays a single row. `B` cycles the mode. The label OWNING a node's
+  lane takes the node's lane colour (spec §6 "Label colour"), read by `node_lane_hl`
+  — the SAME `top_lane` + `seg_color` + slot lookup `get_column_chars` colours the
+  node glyph with, minus the HEAD-node override — so a label can never disagree with
+  its node; `label_hl` picks it over the per-kind group (`lane_label_colors`) and
+  dims it with `dim_hl`. Every other label gets its per-kind group. The owner is
+  `label_owner(opts, commit, slot, head_branch)`, keyed like the labels
+  (`b:<short>` a branch group, `t:` a tag, `w:` a worktree, `HEAD` a detached
+  marker): the ref on the node whose own colour the lane's slot is — rank `k`'s
+  pinned slot `k` (`opts.pin_rank`, `k <= #tracks`) or counterpart rank `k`'s `-k`
+  (`opts.pin_counterpart`), i.e. the ref the lane was born for — else the first
+  branch group / tag / worktree. Matching the COLOUR rather than reading a layout
+  flag is what lets the panes, which carry the main view's colours, agree with no
+  extra plumbing. `node_label_colour` returns both; `decoration_keys` /
+  `pane_labels`' `key` / `marker_units`' `keys` give each drawn label its key. A
+  packed marker row resolves it per marker (the cell whose `commit` is that
+  marker), colouring each of a marker's labels on its own; the panes call the
+  same helper on their own rows.
 - `passthrough_columns(columns, dir)` — builds a vertical-only `GraphColumn` per
   input column (`dir = "up"` keeps lanes entering from above, `"down"` lanes
   leaving below; the rest blank), reused through `get_column_chars` for
