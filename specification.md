@@ -2057,7 +2057,8 @@ commit the trunk reaches (the mainline) is not collapsible.
   or a branch, never both:
   - **commit** — a **plain commit row** (cursor on a normal commit's message, no
     ref selected): **open diff** (`D`), **checkout commit** (detached),
-    **checkout & examine**. No branch actions.
+    **checkout & examine** (**examine** when the row is HEAD's commit,
+    §10.4.2). No branch actions.
   - **branch** — a ref selected with `h`/`l`, or a **collapsed head**:
     **checkout** of that branch (§10.4.1; a collapsed head detaches at its tip;
     a remote branch whose local counterpart sits elsewhere gets the explicit
@@ -2213,6 +2214,23 @@ what makes "the working tree" equal "that commit".
   selection's existing working-tree range (§13.5, already single-rev) and changes
   nothing else.
 
+**Examine (the newer end is HEAD).** When the newer end already **is** HEAD's
+commit — HEAD attached or detached — there is nothing to check out either, so the
+palette offers **Examine** (`Examine <short>` on a commit row, **Examine
+selection** while selecting) in place of Checkout & examine. It opens the same
+single-rev range — `<older>`'s first parent, the empty tree at a root — so the
+provider's right side is the working tree, and does nothing else: no checkout, no
+stash, no examine state recorded, so no Return. A **dirty** tree is examined as
+it is, without a prompt: the right side shows the files on disk, uncommitted
+changes included. (To see the uncommitted changes as their own range, extend the
+selection onto the §4.2 working-tree nodes instead.) An examine already active is
+left alone — its state and its Return entry stay. Whether the newer end is HEAD
+is decided from the cached refs (the `HEAD` ref's commit) when the palette is
+built, never by spawning git. A §13 selection whose newer end is a working-tree
+node is likewise labelled **Examine selection**, since it checks nothing out
+either. (Should HEAD have moved since the refs were read, a Checkout & examine
+whose newer end turns out to be HEAD's commit behaves as Examine too.)
+
 **A dirty tree.** Before checking out, gitloom reads `git status --porcelain`.
 If there are staged, unstaged or untracked changes it asks (`vim.ui.select`):
 **Stash N changes and continue** / **Cancel**, where N is the number of changed
@@ -2276,10 +2294,13 @@ time per graph session (shared with the palette's fetch / pull, §17.3).
 
 **Entry points.** Both are in the command palette (`<C-Space>`, §17). Among the
 row entries (§10.4) **Checkout & examine** follows the checkout entry on a plain
-commit row (the commit context) — never in the branch context (a selected ref or
-a collapsed head), on a §4.2 working-tree row or on a packed-marker line. While a §13 selection is active the selection's entries
-replace the row's and lead with **Checkout & examine selection** (§17.1). Both
-appear only when a diff provider is configured (§11.5).
+commit row (the commit context) — **Examine** instead when that row is HEAD's
+commit — never in the branch context (a selected ref or a collapsed head), on a
+§4.2 working-tree row or on a packed-marker line. While a §13 selection is active
+the selection's entries replace the row's and lead with **Checkout & examine
+selection** (**Examine selection** when its newer end is HEAD's commit or a
+working-tree node; §17.1). Both appear only when a diff provider is configured
+(§11.5).
 
 ### 10.5 Reflow
 
@@ -3632,7 +3653,7 @@ There is no examine entry: `<CR>` examines directly (§11). Many terminals send
 
 | Context | When | Row entries (§10.4) |
 |---|---|---|
-| `commit` | a plain commit row, cursor on its message, no ref selected | open diff, checkout (detached), checkout & examine |
+| `commit` | a plain commit row, cursor on its message, no ref selected | open diff, checkout (detached), checkout & examine (examine on HEAD's commit) |
 | `branch` | a ref selected with `h`/`l`, or a collapsed head; also a packed line **with** a marker selected | checkout, branch sync (fast-forward / reset to upstream, §17.2), collapse / expand, hide — of that branch (or that one marker) |
 | `markers` | a packed line with **no** marker selected | expand / hide per marker |
 | `selection` | a §13 selection is active | the `selection` commands (below) |
@@ -3659,7 +3680,8 @@ The palette lists the context entries — the row's, or while a §13 selection
 is active the `selection` entries in registry order **instead** — then the
 `global` entries, in registry order. The `selection` entries are **Open diff**
 (`D`, the range in the diff provider, §13.5) and **Checkout & examine selection**
-(§10.4.2), both only with a diff provider. Among the globals **Return** (§10.4.2)
+(§10.4.2; **Examine selection** when the newer end is HEAD's commit or a §4.2
+working-tree node — nothing to check out), both only with a diff provider. Among the globals **Return** (§10.4.2)
 comes first while an examine is active, since it is then the likeliest choice.
 
 **The keys.** Every graph key is one entry of a single **key registry** — the
@@ -3715,7 +3737,7 @@ The `selection` entries (while selecting, with a diff provider):
 | Command | Key | Runs |
 |---|---|---|
 | **Open diff** | `D` | the selection's range in the diff provider (§13.5) — exactly `D` |
-| **Checkout & examine selection** | — | Checkout & examine (§10.4.2) of the selection |
+| **Checkout & examine selection** | — | Checkout & examine (§10.4.2) of the selection; labelled **Examine selection** when its newer end is HEAD's commit or a working-tree node (no checkout, §10.4.2) |
 
 Exiting the selection is the `V` key's entry (listed with the keys in the
 `selection` context).

@@ -1834,7 +1834,7 @@ commit directly — no menu: `select.menu_target` maps a collapsed head to its t
 and a packed line uses the selected marker's tip (the first marker's when none
 is selected). The row's other actions are the command palette's **row entries**
 (below): `ctx:palette()` classifies the row (`plain` / `branch` / `markers`, with
-the selected marker) and the pure `palette.row_entries(row, has_diff)` returns
+the selected marker) and the pure `palette.row_entries(row, has_diff, head)` returns
 them in order — scoped to the commit or the branch, never both — each tagged
 with an `op` that the palette helper maps to its glue. The repository-mutating
 **checkout** entry (specification.md §10.4.1) is built by the pure
@@ -1997,9 +1997,11 @@ preview) share the commit-view renderer.
 single action menu: a `vim.ui.select` over `palette.palette_entries(info)`, where
 `info` is a snapshot — the classified cursor row, whether a §13 selection is
 active, `ctx.remotes`, the repository's examine state (`nav.examine[root]`) and
-whether a diff provider is configured, and the key registry. The pure builder
+whether a diff provider is configured, HEAD's commit hash from the cached refs
+(`select.head_target`) and the selection's newer end — the two the Examine vs
+Checkout & examine choice reads (§10.4.2) — and the key registry. The pure builder
 returns ONE ordered list: the **context** first — `row_entries(row)` (a commit's
-diff / checkout / checkout & examine, a branch's checkout / collapse / expand /
+diff / checkout / checkout & examine — examine on HEAD's commit — a branch's checkout / collapse / expand /
 hide, a selected marker's actions only; `row_context(row)` names it `commit` /
 `branch` / `markers`), or the registry's `selection` entries instead while
 selecting — then the registry's `global` entries, then `key_entries` (below). The
@@ -2185,10 +2187,15 @@ window glue.
 
 Checkout & examine (specification.md §10.4.2) splits three ways. The pure
 decisions are `git/examine.lua`: `examine_plan({ newer, older, status, head,
-state, root })` → `open` (a §4.2 working-tree newer end: just the existing range)
-/ `refuse` (an examine is active and the tree is dirty — never a second stash) /
+state, root })` → `open` (a §4.2 working-tree newer end: just the existing range;
+or the newer end IS `head.hash` — **Examine**: `examine_range`, no checkout, stash
+or state, whatever the tree or an active examine) / `refuse` (an examine is active and the tree is dirty — never a second stash) /
 `checkout` (`git checkout --detach <newer>`, an optional `git stash push -u -m`
-step, the state to record, and the range); `examine_stash_message`;
+step, the state to record, and the range); `needs_checkout(newer, head_hash)`
+(false for a §4.2 node or HEAD's commit — the same predicate the palette uses,
+over the CACHED `HEAD` ref's hash, to label the commit entry `Examine <short>` /
+the selection entry `Examine selection`; the glue then opens without even the
+status probe); `examine_stash_message`;
 `return_plan(state)` (`git switch` or a detached checkout, then `git stash apply
 --index <sha>`, plus the plain `git stash apply <sha>` fallback); `index_refused`
 (whether a failed `--index` apply was git's "conflicts in index" refusal — checked

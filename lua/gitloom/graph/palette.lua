@@ -37,6 +37,8 @@ local M = {}
 ---@field examine? ExamineState  the repository's active Checkout & examine (§10.4.2)
 ---@field has_diff? boolean      a diff provider is configured (§11.5)
 ---@field row? PaletteRow        the cursor row (nil while selecting or with no row)
+---@field newest_at_head? boolean  selecting: the selection's newer end needs no checkout —
+---                              HEAD's commit or a §4.2 working-tree node (§10.4.2)
 
 ---@class PaletteCommand
 ---@field id string              stable name (`fetch`, `pull`, `return`); a
@@ -61,7 +63,10 @@ local function has_diff(st) return st.has_diff == true end
 M.COMMANDS = {
     { id = "selection_diff", label = "Open diff", key = "D", scope = "selection", when = has_diff,
         action = function(ctx) ctx:open_selection_diff() end },
-    { id = "examine_selection", label = "Checkout & examine selection", scope = "selection",
+    { id = "examine_selection", scope = "selection",
+        label = function(st)
+            return st.newest_at_head and "Examine selection" or "Checkout & examine selection"
+        end,
         when = has_diff, action = function(ctx) ctx:examine_selection() end },
     { id = "return", scope = "global",
         label = function(st) return examine.return_plan(st.examine).label end,
@@ -79,7 +84,7 @@ M.COMMANDS = {
         action = function(ctx) ctx:reset_view() end },
 }
 
----@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"
+---@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"examine"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"
 
 ---@class PaletteEntry
 ---@field id string              `fetch:origin`, `collapse`, `hide:2`, `key:R`, …
@@ -87,7 +92,7 @@ M.COMMANDS = {
 ---@field key? string            the key that runs the same thing (its hint is in the label)
 ---@field action? fun(ctx: table)  a registry command or a key: run on the session
 ---@field op? PaletteOp          a row entry: what window.lua runs on the row
----@field commit? table          diff / checkout_examine: the real commit to act on
+---@field commit? table          diff / checkout_examine / examine: the real commit to act on
 ---@field checkout? CheckoutSpec checkout: what to run
 ---@field marker? integer        expand/hide on a packed line: the marker index
 ---@field sync? SyncTarget       fast_forward / reset_branch: the branch + its upstream (§17.2)
@@ -127,7 +132,8 @@ end
 --- or a branch, never both. `row.kind`:
 ---
 ---  * `"plain"` (commit) — open diff (`D`), checkout (detached), checkout &
----    examine;
+---    examine — **examine** instead when the row is HEAD's commit (`head`, the
+---    cached `HEAD` ref's hash; §10.4.2);
 ---  * `"branch"` — a ref selected, or a collapsed head: checkout of the branch (a
 ---    head's tip), the branch sync entries (§17.2), then collapse+hide (expanded)
 ---    or expand+hide (collapsed), the toggle carrying `<Space>`; no commit diff,
@@ -148,8 +154,9 @@ end
 --- §4.2 virtual commit gets neither checkout. Pure.
 ---@param row PaletteRow?
 ---@param diff boolean?
+---@param head string?  HEAD's commit hash, from the cached refs (nil when unknown)
 ---@return PaletteEntry[]
-function M.row_entries(row, diff)
+function M.row_entries(row, diff, head)
     local out = {}
     if not row then return out end
     local function add(e)
@@ -206,8 +213,13 @@ function M.row_entries(row, diff)
         if c and diff then add({ id = "diff", op = "diff", label = "Open diff", key = "D", commit = c }) end
         checkout()
         if spec and c and diff then
-            add({ id = "checkout_examine", op = "checkout_examine", commit = c,
-                label = ("Checkout & examine %s (detached)"):format(c.hash:sub(1, 7)) })
+            if examine.needs_checkout(c, head) then
+                add({ id = "checkout_examine", op = "checkout_examine", commit = c,
+                    label = ("Checkout & examine %s (detached)"):format(c.hash:sub(1, 7)) })
+            else
+                add({ id = "examine", op = "examine", commit = c,
+                    label = ("Examine %s"):format(c.hash:sub(1, 7)) })
+            end
         end
     elseif row.kind == "markers" then
         local texts = row.markers or {}
@@ -345,6 +357,9 @@ end
 ---@field remotes? string[]       the cached `git remote` names (nil until read)
 ---@field examine? ExamineState   the repository's active examine (§10.4.2)
 ---@field has_diff? boolean       a diff provider is configured (§11.5)
+---@field head? string           HEAD's commit hash, from the cached refs — the commit row's
+---                               Examine vs Checkout & examine (§10.4.2); no git spawn
+---@field newest? table           selecting: the selection's newer end (a real or §4.2 commit)
 ---@field keys? GraphKey[]        the key registry (window.lua's `GRAPH_KEYS`); no keys listed when nil
 ---@field commands? PaletteCommand[]  defaults to the registry (a test seam)
 
@@ -359,9 +374,11 @@ function M.palette_entries(info)
     info = info or {}
     local commands = info.commands or M.COMMANDS
     local state = { examine = info.examine, has_diff = info.has_diff,
-        row = not info.selection and info.row or nil }
+        row = not info.selection and info.row or nil,
+        newest_at_head = info.selection and info.newest ~= nil
+            and not examine.needs_checkout(info.newest, info.head) or nil }
     local out = info.selection and scoped(commands, "selection", info.remotes, state)
-        or M.row_entries(info.row, info.has_diff)
+        or M.row_entries(info.row, info.has_diff, info.head)
     for _, e in ipairs(scoped(commands, "global", info.remotes, state)) do out[#out + 1] = e end
     if info.keys then
         local taken = {}

@@ -506,7 +506,9 @@ Coverage:
   N = changed PATHS, each once: an `MM` file and a rename count 1, so N is not the
   per-state sum), `examine_plan` over clean /
   dirty × single / range × a working-tree newer end (`open`, no checkout, no
-  stash) × an examine already active (clean: `orig` + stash kept, only `examined`
+  stash) × a newer end AT HEAD — **Examine**, attached or detached (`open`
+  `examine_range`, no checkout / stash / state, dirty or not, an active examine
+  left untouched; `needs_checkout`) × an examine already active (clean: `orig` + stash kept, only `examined`
   moves, the active state not mutated; dirty: `refuse` "Return to … first" — no
   stash chain), unknown HEAD refused, never forcing; `return_plan` (branch → `git
   switch`, detached → `git checkout --detach`, apply `--index` by SHA + the plain
@@ -514,9 +516,14 @@ Coverage:
   "conflicts in index" refusal, either capitalisation, licenses the fallback — not
   a merge conflict, a local change in the way, a success or a spawn failure);
   `stash_index` (by SHA, CRLF-safe, nil when absent); the palette entries
-  that reach it. Then the git side against REAL scratch repositories
+  that reach it (HEAD's row → `Examine <short>` op `examine`, another row or an
+  unknown head → Checkout & examine, none without a provider, Return still listed;
+  the selection entry `Examine selection` for a HEAD / working-tree newer end).
+  Then the git side against REAL scratch repositories
   (`fetch.examine_probe` / `examine_run` / `examine_return`): the probe's branch /
-  detached / counts (a staged-only + an `MM` + an untracked file → N = 3); dirty → stash (`stash@{0}`, the message) → detached checkout
+  detached / counts (a staged-only + an `MM` + an untracked file → N = 3); Examine
+  of HEAD's commit on a dirty tree (attached and detached) → `open`, nothing
+  stashed, HEAD and the edits untouched; dirty → stash (`stash@{0}`, the message) → detached checkout
   → clean tree, then Return → branch, edits AND untracked files restored, stash
   dropped; **the index round-trips** (a staged edit comes back staged, an unstaged
   one unstaged, an untracked file restored; one file with BOTH a staged and an
@@ -1431,7 +1438,12 @@ Details not covered by the spec or architecture:
   newest end) out detached and open diffview on ONE rev — the older end's first
   parent, the empty tree for a root (`range.examine_range`) — so the right side is
   `RevType.LOCAL`, the files on disk, and LSP attaches; a working-tree newer end
-  checks nothing out and opens its existing single-rev range. Three layers: the
+  checks nothing out and opens its existing single-rev range, and so does a newer
+  end that already IS HEAD's commit — the palette then labels it **Examine**
+  (`Examine <short>` / `Examine selection`), decided by `examine.needs_checkout`
+  over the CACHED `HEAD` ref (`select.head_target`, passed to `palette_entries`
+  as `head` + the selection's `newest`): no probe, checkout, stash or state, a
+  dirty tree examined as is. Three layers: the
   pure plans in `git/examine.lua` (`examine_plan` → `open` / `refuse` /
   `checkout`; `examine_stash_message`; `return_plan`; `stash_index`), the git side
   in `fetch.lua` (`examine_probe`, `examine_run`, `examine_return`, `drop_stash` —

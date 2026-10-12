@@ -4,7 +4,10 @@
 --- `return_plan` for a branch vs a detached `orig` with and without a stash,
 --- `stash_index`), the single-rev base (`range.examine_range`, incl. a root commit
 --- giving the empty tree) and the palette entries that reach it (Return, the
---- selection's Checkout & examine, the row's). Then the git side
+--- selection's Checkout & examine, the row's), plus **Examine** — the newer end
+--- already HEAD's commit (`needs_checkout`): an `open` plan with no checkout,
+--- stash or state whatever the tree / an active examine, and the palette's
+--- `Examine <short>` / `Examine selection` labels from a cached head hash. Then the git side
 --- (`fetch.examine_probe` / `examine_run` / `examine_return`) against REAL scratch
 --- repositories — never this one: a dirty tree is stashed, checked out detached
 --- and restored by Return with the stash dropped and the index restored (staged
@@ -157,6 +160,43 @@ describe("examine_plan (§10.4.2)", function()
         assert.truthy(p.reason:find("4 changes", 1, true))
     end)
 
+    -- Examine: the newer end already is HEAD's commit — nothing to check out.
+    it("newer end at HEAD (attached or detached): open examine_range, no checkout/stash/state", function()
+        for _, head in ipairs({ { branch = "main", hash = A }, { hash = A } }) do
+            for _, st in ipairs({ CLEAN, DIRTY }) do
+                for _, o in ipairs({ newer, older }) do
+                    local p = examine.examine_plan({ newer = newer, older = o, status = st,
+                        head = head, root = ROOT })
+                    assert.equals("open", p.kind)
+                    assert.is_nil(p.checkout)
+                    assert.is_nil(p.stash)
+                    assert.is_nil(p.state)
+                    assert.same(range.examine_range(newer, o, ROOT), p.range)
+                end
+            end
+        end
+    end)
+
+    it("newer end at HEAD with an examine active: opens, the active state untouched", function()
+        local act = { orig = "main", detached = false, stash = C, stash_message = "m", examined = A }
+        for _, st in ipairs({ CLEAN, DIRTY }) do
+            local p = examine.examine_plan({ newer = newer, older = older, status = st,
+                head = { hash = A }, state = act, root = ROOT })
+            assert.equals("open", p.kind)
+            assert.is_nil(p.state)
+        end
+        assert.same({ orig = "main", detached = false, stash = C, stash_message = "m", examined = A }, act)
+    end)
+
+    it("needs_checkout: not for a §4.2 node or HEAD's commit; yes otherwise / HEAD unknown", function()
+        assert.is_false(examine.needs_checkout(newer, A))
+        local v = { hash = ("0"):rep(40), virtual = "staged", parents = {} }
+        assert.is_false(examine.needs_checkout(v, A))
+        assert.is_true(examine.needs_checkout(newer, B))
+        assert.is_true(examine.needs_checkout(newer, nil))
+        assert.is_false(examine.needs_checkout(nil, A))
+    end)
+
     it("refuses when HEAD is unknown and no examine is active", function()
         assert.equals("refuse", examine.examine_plan({ newer = newer, older = older, status = CLEAN }).kind)
     end)
@@ -226,6 +266,38 @@ describe("palette entries for examine (§17, §10.4.2)", function()
         assert.same({ "checkout" }, ids(palette.row_entries(row, false)))
         local v = { kind = "plain", commit = { hash = A, refs = {}, virtual = "untracked" } }
         assert.same({ "diff" }, ids(palette.row_entries(v, true)))
+    end)
+
+    it("HEAD's row offers Examine instead of Checkout & examine (cached head hash)", function()
+        local e = palette.row_entries(row, true, A)
+        assert.same({ "diff", "checkout", "examine" }, ids(e))
+        assert.equals("Examine aaaaaaa", e[3].label)
+        assert.equals("examine", e[3].op)
+        assert.equals(A, e[3].commit.hash)
+        -- another commit, or HEAD unknown: unchanged
+        assert.same({ "diff", "checkout", "checkout_examine" }, ids(palette.row_entries(row, true, B)))
+        assert.same({ "diff", "checkout", "checkout_examine" }, ids(palette.row_entries(row, true, nil)))
+        -- no provider: no examine entry of either kind
+        assert.same({ "checkout" }, ids(palette.row_entries(row, false, A)))
+        -- through palette_entries, with an examine active: Return still listed
+        local all = palette.palette_entries({ row = row, has_diff = true, head = A, examine = st })
+        assert.same({ "diff", "checkout", "examine", "return" }, { all[1].id, all[2].id, all[3].id, all[4].id })
+    end)
+
+    it("the selection's entry reads Examine selection when its newer end needs no checkout", function()
+        local function label(info)
+            for _, e in ipairs(palette.palette_entries(info)) do
+                if e.id == "examine_selection" then return e.label end
+            end
+        end
+        local c = { hash = A, parents = {} }
+        assert.equals("Examine selection", label({ selection = true, has_diff = true, newest = c, head = A }))
+        assert.equals("Checkout & examine selection",
+            label({ selection = true, has_diff = true, newest = c, head = B }))
+        assert.equals("Checkout & examine selection", label({ selection = true, has_diff = true, head = A }))
+        local v = { hash = ("0"):rep(40), virtual = "unstaged", parents = { c } }
+        assert.equals("Examine selection", label({ selection = true, has_diff = true, newest = v, head = B }))
+        assert.is_nil(label({ selection = true, has_diff = false, newest = c, head = A }))
     end)
 
     it("Return is labelled with orig (a detached one by its short hash)", function()
@@ -377,6 +449,25 @@ describe("examine against a real repository (§10.4.2)", function()
         vim.fn.delete(dir, "rf")
     end)
 
+    it("Examine at HEAD on a dirty tree: opens, nothing stashed, HEAD and the edits untouched", function()
+        for _, detach in ipairs({ false, true }) do
+            local dir, _, head = scratch()
+            if detach then sh(dir, "checkout", "-q", "--detach", "HEAD") end
+            write(dir .. "/f", "dirty\n")
+            write(dir .. "/new", "u\n")
+            local plan, r = run_examine(dir, head)
+            assert.equals("open", plan.kind)
+            assert.is_nil(r)
+            assert.equals("worktree", plan.range.to) -- one rev against the files on disk
+            assert.equals(head, sh(dir, "rev-parse", "HEAD"))
+            assert.equals("", stash_list(dir))
+            assert.equals(detach and "HEAD" or "main", sh(dir, "rev-parse", "--abbrev-ref", "HEAD"))
+            assert.equals("dirty\n", read(dir .. "/f"))
+            assert.equals("u\n", read(dir .. "/new"))
+            vim.fn.delete(dir, "rf")
+        end
+    end)
+
     it("clean tree: no stash, state still records orig; Return switches back", function()
         local dir, root_hash = scratch()
         local plan, r = run_examine(dir, root_hash)
@@ -474,7 +565,13 @@ describe("examine against a real repository (§10.4.2)", function()
         write(dir .. "/h", "1\n2\n3\n4\n5\n")
         sh(dir, "add", "h")
         sh(dir, "commit", "-q", "-m", "h")
-        return sh(dir, "rev-parse", "HEAD")
+        local base = sh(dir, "rev-parse", "HEAD")
+        -- Move `main` past `base` (h untouched): examining HEAD's own commit would
+        -- be a plain Examine — no checkout, no stash (§10.4.2).
+        write(dir .. "/k", "k\n")
+        sh(dir, "add", "k")
+        sh(dir, "commit", "-q", "-m", "k")
+        return base
     end
 
     it("--index refused → plain apply: changes back but unstaged, flagged, stash dropped", function()

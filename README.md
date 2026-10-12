@@ -188,7 +188,8 @@ commit's history — no ref needed, so they work for ref-less regions too
   result, so holding `<Space>` flips a branch open and closed.
 - `<C-Space>` opens the **command palette**, whose first entries are the
   actions on **what is selected** — a commit or a branch, never both. On the
-  message (the commit): open diff, checkout (detached), checkout & examine. With
+  message (the commit): open diff, checkout (detached), checkout & examine
+  (**examine** on HEAD's own commit). With
   a ref selected or on a collapsed head (the branch): checkout of that branch,
   the **branch sync** entries (below), collapse / expand, **hide**. On a packed
   marker line with a marker selected: that marker's checkout / sync / expand /
@@ -342,7 +343,12 @@ retried; a conflicting apply keeps the stash and names it. The state survives
 closing and reopening the graph. A second examine while one is active just moves
 the examined commit — on a dirty tree it is refused ("Return first"), so there is
 never a chain of stashes. A selection ending at a working-tree row opens its
-working-tree range with no checkout. Requires a diff provider (§10.4.2).
+working-tree range with no checkout. When the newest commit already **is** HEAD's
+(attached or detached) the entry is **Examine** (`Examine <short>` / **Examine
+selection**) instead: it just opens the same diffview — no checkout, no stash, no
+Return — even on a dirty tree, whose uncommitted changes then show on the right
+(select up onto the working-tree rows to see those as their own range). Requires
+a diff provider (§10.4.2).
 
 **Commit selection (range).** Press `V` to start a modal selection that picks a
 range of commits **along one branch**. It is not a contiguous block of rows — it

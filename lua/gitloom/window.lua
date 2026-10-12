@@ -2488,10 +2488,14 @@ GRAPH_HELPERS.palette = function(ctx)
         end
     end
     -- Built from cached state only (the remote list is nil until `load_remotes`
-    -- lands, so no per-remote entries yet) — the palette never waits on git.
+    -- lands, so no per-remote entries yet; HEAD's commit from the cached refs) —
+    -- the palette never waits on git.
+    local sp = ctx.sel.active and ctx.sel.path
     local entries = require("gitloom.graph.palette").palette_entries({
         row = row, selection = ctx.sel.active, remotes = ctx.remotes,
         examine = nav.examine[repo.root], has_diff = has_diff, keys = ctx:key_registry(),
+        head = selectm.head_target(repo.refs),
+        newest = sp and #sp > 0 and real_newest(sp[1]) or nil,
     })
     if #entries == 0 then return end
     local function owners_of(u)
@@ -2528,7 +2532,7 @@ GRAPH_HELPERS.palette = function(ctx)
             open_diff(opts, e.commit, repo.root)
         elseif op == "checkout" then
             checkout(e.checkout)
-        elseif op == "checkout_examine" then
+        elseif op == "checkout_examine" or op == "examine" then
             ctx:examine(e.commit, e.commit)
         elseif op == "fast_forward" or op == "reset_branch" or op == "checkout_ff"
             or op == "checkout_reset" then
@@ -2712,6 +2716,8 @@ end
 
 -- Check `newer` out (detached) and open the single-rev range on `older`'s base
 -- (§10.4.2); a dirty tree asks before stashing. `newer == older` for one commit.
+-- A newer end that is HEAD's commit (cached refs) or a §4.2 node is Examine: the
+-- range opens at once, with no probe, checkout, stash or examine state.
 GRAPH_HELPERS.examine = function(ctx, newer, older)
     local open = ctx.opts.diff and ctx.opts.diff.open
     if not open then
@@ -2719,9 +2725,12 @@ GRAPH_HELPERS.examine = function(ctx, newer, older)
         return
     end
     local root = ctx.repo.root
-    if newer.virtual then
-        -- The working tree already is the newer end: nothing to check out.
-        local plan = git.examine_plan({ newer = newer, older = older, root = root })
+    local head_hash = selectm.head_target(ctx.repo.refs)
+    if not git.needs_checkout(newer, head_hash) then
+        -- The working tree already is the newer end (a §4.2 node, or HEAD's own
+        -- commit — Examine): nothing to check out, stash or record (§10.4.2).
+        local plan = git.examine_plan({ newer = newer, older = older, root = root,
+            head = head_hash and { hash = head_hash } or nil })
         if plan.range then open(plan.range) end
         return
     end

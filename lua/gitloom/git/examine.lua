@@ -57,6 +57,18 @@ function M.examine_stash_message(examined, head)
         head.branch or head.hash:sub(1, 7))
 end
 
+--- Whether examining with `newer` as the newer end needs a checkout (§10.4.2):
+--- not for a §4.2 working-tree node, nor for HEAD's own commit (`head_hash`,
+--- attached or detached) — the working tree already is the newer end, so the
+--- palette offers **Examine** rather than Checkout & examine. Pure.
+---@param newer Commit?
+---@param head_hash string?  HEAD's commit (nil when unknown)
+---@return boolean
+function M.needs_checkout(newer, head_hash)
+    if not newer or newer.virtual then return false end
+    return not (head_hash ~= nil and newer.hash == head_hash)
+end
+
 --- What Checkout & examine of `newer`..`older` does (§10.4.2). `p.newer` /
 --- `p.older` are the selection's real ends (the same commit for one commit);
 --- `p.status` the `parse_status` counts; `p.head` HEAD now; `p.state` the
@@ -64,6 +76,9 @@ end
 ---
 ---  * the newer end is a §4.2 working-tree node → `open` its existing
 ---    working-tree range: nothing to check out;
+---  * the newer end is HEAD's commit (`p.head.hash`) → `open`
+---    `range.examine_range` (Examine): no checkout, no stash, no state — a dirty
+---    tree is examined as it is and an active examine is left untouched;
 ---  * an examine is active and the tree is dirty → `refuse` (Return first — never
 ---    a second stash, so never a chain);
 ---  * otherwise `checkout --detach <newer>`, stashing first when dirty (and no
@@ -75,6 +90,9 @@ function M.examine_plan(p)
     local newer, older = p.newer, p.older
     if newer.virtual then
         return { kind = "open", range = range.range_endpoints(newer, older, p.root) }
+    end
+    if not M.needs_checkout(newer, p.head and p.head.hash) then
+        return { kind = "open", range = range.examine_range(newer, older, p.root) }
     end
     local n = M.dirty_count(p.status)
     local st = p.state
