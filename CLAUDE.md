@@ -188,8 +188,10 @@ Coverage:
   ownership (`label_owner`): a counterpart lane `-k` born here belongs to the
   counterpart's group even when another remote branch is listed first, a pinned
   lane to its pinned ref's group, a pinned colour whose ref is elsewhere / a pin
-  past the palette fall back to the first label, a pinned detached HEAD owns its
-  lane (every other label per-kind, `HEAD` never the fallback), a packed marker's
+  past the palette fall back to the first label, a lane born for a pinned
+  detached HEAD going to the first OTHER label (branch group, else tag; the bare
+  `HEAD` stays `palette.head` and never owns — with no other label none does; the
+  pane path's `label_owner` likewise), a packed marker's
   labels each coloured on their own, a collapsed head's owner; `origin/HEAD` is
   no label (`classify_ref`); the **lumeeditor shape** through a real
   `columns.layout` (`compact` + `gutter`: pinned `dev` at X, `origin/dev` +

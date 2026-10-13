@@ -1630,8 +1630,11 @@ The **owner** is decided per node, in two steps:
 2. **Otherwise the first label** in logical order: the current branch's group (the
    `(HEAD → x …)` label), then the other branch groups, then tags, then worktree
    labels. A detached HEAD's bare `HEAD` marker is never an owner candidate (it is
-   always `palette.head`) — but when the lane was born for a pinned detached `HEAD`
-   (step 1), HEAD owns it and every other label is per-kind.
+   always `palette.head`) — and that holds when the lane was born for a pinned
+   detached `HEAD` (step 1) too: since the `HEAD` label can never show the lane
+   colour, ownership passes to the **first other label** on the node (this step), so
+   a branch sitting on a detached HEAD reads in its lane's colour. With no other
+   label, no label carries it.
 
 A **branch group** (a local and its `↑remote,…` list) is **one** label: it owns when
 any of its refs does, and then the whole label takes the lane colour — brackets, the

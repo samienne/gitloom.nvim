@@ -1822,7 +1822,9 @@ itself is a behaviour-preserving refactor within the current spec.
   marker): the ref on the node whose own colour the lane's slot is — rank `k`'s
   pinned slot `k` (`opts.pin_rank`, `k <= #tracks`) or counterpart rank `k`'s `-k`
   (`opts.pin_counterpart`), i.e. the ref the lane was born for — else the first
-  branch group / tag / worktree. Matching the COLOUR rather than reading a layout
+  branch group / tag / worktree. A detached `HEAD` matched in the first step never
+  owns (its marker is always `palette.head`), so its lane falls through to the first
+  other label. Matching the COLOUR rather than reading a layout
   flag is what lets the panes, which carry the main view's colours, agree with no
   extra plumbing. `node_label_colour` returns both; `decoration_keys` /
   `pane_labels`' `key` / `marker_units`' `keys` give each drawn label its key. A

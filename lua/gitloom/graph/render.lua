@@ -489,7 +489,9 @@ end
 ---     view's colours) agree.
 ---  2. Otherwise the first label in logical order: the current branch's group, the
 ---     other branch groups, tags, worktrees. A detached HEAD's bare marker is never
----     this fallback (it is always `palette.head`).
+---     an owner (it is always `palette.head`) — not even when the lane was born for
+---     a pinned detached `HEAD` in step 1: that lane falls through to here, so a
+---     branch on a detached HEAD reads in its lane's colour.
 ---
 --- nil when the node has no label at all. A remote's `origin/HEAD` symref is no ref
 --- (`git.classify_ref` drops it), so it can never own.
@@ -507,7 +509,10 @@ function M.label_owner(opts, commit, slot, head_branch)
             local id = ref.kind == "head" and "HEAD" or ref.name
             if (slot > 0 and slot <= ntracks and rank and rank[id] == slot)
                 or (slot < 0 and cp and cp[id] == -slot) then
-                return ref_label_key(ref)
+                -- a detached HEAD's bare marker is always `palette.head`, so a lane
+                -- born for it passes to the first other label (step 2)
+                local key = ref_label_key(ref)
+                if key ~= "HEAD" then return key end
             end
         end
     end
