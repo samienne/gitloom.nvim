@@ -757,7 +757,12 @@ Coverage:
   is in its lane id's main-view colour and every node in its main-view node colour —
   exactly 0 mismatches (nodes not asserted under `gutter`: a head reached only through
   a merge's second parent draws that edge, the main view colours its node by its
-  first-parent lane — 3 nodes there). Fails on the pre-fix header (si=42 seg id=22)
+  first-parent lane — 3 nodes there). Fails on the pre-fix header (si=42 seg id=22).
+  Three more configurations add `origin/dev` (pinned, `pin_counterpart` → rank 1) three
+  first-parent commits below HEAD's tip — a **counterpart birth** (§5/§5.5) the header
+  must not carry the lower `-1` lane up through (`compact` 64 / 6 colours fail without
+  the birth guard; the `gutter` one passes either way). `tests/pane_spec.lua`'s "colours follow the main view"
+  block pins the same LumeScene shape on a minimal DAG under every policy
 - `tests/footer_replay_spec.lua` (+ `tests/large_topo.lua`) — the **footer** counterpart:
   the same real-world topology through the **full projection**, then the footer built at
   **every** cutoff and for **every rendered line the seam picker can land on** — a commit's

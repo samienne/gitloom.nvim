@@ -370,6 +370,11 @@ to each other and to the lanes crossing the cutoff:
      anchor's lane is **tracked**, so the crossing lane on it follows the spine by id
      unbroken to the anchor; a collapsed continuation's `lane_of` is its `parent_lanes[1]`
      (the trunk lane, keyed by the tip hash), so a recycled tip-own lane never severs it.
+     `header` keeps the surviving lane through such a first-parent collapsed child even
+     when the ids differ — EXCEPT where the main view itself starts a new lane at the node
+     (a pinned or counterpart **birth**, §5/§5.5: the lane arriving from the child differs
+     from the node's own first-parent lane), where the child's lane takes its main-view
+     id and colour instead.
      Finally each pinned anchor is connected **down** its first-parent spine to the
      already-inducted trunk (edges only), so a **divergent** anchor whose tip is ahead of
      the trunk — its lane never crossing the seam, the up-walk never reaching it — relates

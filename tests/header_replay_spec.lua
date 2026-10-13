@@ -11,7 +11,7 @@ local view = require("gitloom.graph.view")
 local fix = require("tests.large_topo")
 
 -- Build the projected display + lane maps ONCE (the projection is cutoff-independent).
-local function build(policy, small)
+local function build(policy, small, cp)
     local items = h.dag(fix.dag)
     local byhash = {}
     for _, it in ipairs(items) do byhash[it.commit.hash] = it.commit end
@@ -20,6 +20,17 @@ local function build(policy, small)
         HEAD = { name = "HEAD", kind = "head", commit = byhash[fix.head] },
         dev = { name = "dev", kind = "local", commit = byhash[fix.dev] },
     }
+    if cp then
+        -- dev's remote counterpart a few first-parent commits below HEAD's branch tip
+        -- (the LumeScene shape): a counterpart birth (§5/§5.5) ends enne's lane there.
+        local c = byhash[fix.head]
+        for _ = 1, 3 do
+            local p = c.parents and c.parents[1]
+            p = type(p) == "table" and p or byhash[p]
+            if p then c = p end
+        end
+        refs["origin/dev"] = { name = "origin/dev", kind = "remote", commit = c }
+    end
     for _, r in ipairs(fix.refs) do
         if byhash[r.commit] and not refs[r.name] then
             refs[r.name] = { name = r.name, kind = "local", commit = byhash[r.commit] }
@@ -36,6 +47,7 @@ local function build(policy, small)
         return out
     end
     local pinned = { enne = true, dev = true } -- HEAD's branch + dev, like effective_pinned
+    if cp then pinned["origin/dev"] = true end -- a counterpart is an anchor too (§10.6)
     local proj = view.project(items, view.owners(items, ofr(), pinned, {}, true), nil)
     local display = proj.items
     local opts = h.big_opts()
@@ -53,6 +65,7 @@ local function build(policy, small)
     -- lane crossing a cutoff there is legitimately another one — the production
     -- graph never lays an anchor out unranked.
     opts.pin_rank = { dev = 1, enne = 2 }
+    if cp then opts.pin_counterpart = { ["origin/dev"] = 1 } end
     local main = columns.layout(opts, display)
     local didx, lane_main, node_col, edge = {}, {}, {}, {}
     for i, it in ipairs(display) do
@@ -231,11 +244,13 @@ end
 
 describe("large real-world header replay — colours follow the main view (§6.2 Colour)", function()
     for _, cfg in ipairs({ { "compact" }, { "survivors" }, { "linear" }, { "straight" }, { "gutter" },
-        { "compact", true } }) do
-        local policy, small = cfg[1], cfg[2]
-        it(("[%s%s] no header lane or node off its main-view colour"):format(policy, small and ", 6 colours" or ""),
+        { "compact", true }, { "compact", false, true }, { "gutter", false, true },
+        { "compact", true, true } }) do
+        local policy, small, cp = cfg[1], cfg[2], cfg[3]
+        it(("[%s%s%s] no header lane or node off its main-view colour"):format(policy,
+                small and ", 6 colours" or "", cp and ", counterpart birth" or ""),
             function()
-                local segs, nodes, where = colour_mismatches(build(policy, small))
+                local segs, nodes, where = colour_mismatches(build(policy, small, cp))
                 assert.equals(0, segs, table.concat(where, "\n  ", 1, math.min(#where, 12)))
                 -- Under `gutter` a head reached ONLY through a merge's second parent
                 -- draws that edge's lane, while the main view colours its node by its

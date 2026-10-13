@@ -1601,8 +1601,19 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
                 -- switches to a fresh id at the merge — the trunk "terminates" and HEAD gets a
                 -- brand-new id (the merge-at-cutoff bug). Only a genuine FAN-OUT (N is not this
                 -- child's first parent and the lanes differ) switches.
+                -- The topological test must NOT outvote the main view where the main view
+                -- itself starts a new lane at N: a pinned or counterpart BIRTH (§5/§5.5)
+                -- ends every arriving lane there, so the lane arriving at N from the child
+                -- (`mv1`) is a different main-view lane from the one N continues downward
+                -- (`lane_of(N)`, its first-parent lane). A spliced run between them is one
+                -- lane: a birth needs a ranked or counterpart ref, i.e. a pinned anchor,
+                -- which `condense` never splices. The recycled-tip case keeps the two equal
+                -- (the main view continues through N; only the header's id drifted), so
+                -- comparing them separates it from a birth.
                 local first_parent = upkids[1].parents and upkids[1].parents[1] == N
-                if mv1 == plane.id or (first_parent and upkids[1].collapsed) then
+                local down = lane_of and lane_of(N)
+                local born = mv1 ~= nil and down ~= nil and down.id ~= mv1
+                if mv1 == plane.id or (first_parent and upkids[1].collapsed and not born) then
                     upid[1], upcolor[1] = plane.id, plane.color
                 else
                     upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color

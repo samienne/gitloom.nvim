@@ -2363,6 +2363,58 @@ describe("pane.header — colours follow the main view (§6.2 Colour)", function
         assert.equals(30, by.a2.color, "a2 recoloured although never alive beside a1")
     end)
 
+    it("does not carry a lane up through a counterpart birth (§5/§5.5)", function()
+        -- The LumeScene shape: `dev` pinned rank 1 at X, its counterpart `origin/dev` on
+        -- X's child Y, and HEAD's branch `enne` (rank 2) three commits above Y. In the
+        -- main view enne's lane (slot 2) ENDS at Y and a counterpart lane (-1) is born
+        -- there, going down. The header, cut below Y, gets the -1 lane at the seam; the
+        -- stretch from Y up to enne's tip must be drawn as the main view draws it — enne's
+        -- lane, slot 2 — not the -1 lane carried on up through Y.
+        local function ref(items, hash, name, kind)
+            for _, it in ipairs(items) do
+                if it.commit.hash == hash then
+                    it.commit.refs = it.commit.refs or {}
+                    table.insert(it.commit.refs, { name = name, kind = kind or "local", commit = it.commit })
+                end
+            end
+        end
+        for _, pol in ipairs({ "compact", "survivors", "linear", "straight", "gutter" }) do
+            local items = h.dag({
+                { "H", { "A2" } }, { "A2", { "A1" } }, { "A1", { "Y" } },
+                { "Y", { "X" } }, { "X", { "W" } }, { "W", { "V" } }, { "V", {} },
+            })
+            ref(items, "H", "enne")
+            ref(items, "Y", "origin/dev", "remote")
+            ref(items, "X", "dev")
+            local opts = h.big_opts()
+            opts.layout_policy = pol
+            opts.pin_rank = { dev = 1, enne = 2 }
+            opts.pin_counterpart = { ["origin/dev"] = 1 }
+            -- the counterpart is an anchor too, as `effective_pinned` makes it (§10.6)
+            local res, boundary, _, _, lane_of =
+                header_of(items, opts, 5, { dev = true, enne = true, ["origin/dev"] = true })
+            local enne = lane_of({ hash = "H" })
+            local cp = lane_of({ hash = "Y" })
+            if not (enne and cp) then error("fixture: no main-view lanes") end
+            assert.equals(2, enne.color, pol .. ": fixture: enne's lane is slot 2")
+            assert.equals(-1, cp.color, pol .. ": fixture: a counterpart lane is born at Y")
+            local by = node_colors(res)
+            assert.is_not_nil(by.H, pol .. ": enne shown")
+            assert.equals(2, by.H.color, pol .. ": enne's head took the counterpart lane's colour")
+            assert.is_not_nil(by.Y, pol .. ": origin/dev shown")
+            assert.equals(-1, by.Y.color, pol .. ": origin/dev's node is the counterpart lane's")
+            -- every segment above origin/dev's row (the last header row) is enne's
+            for i = 1, #res.rows - 1 do
+                for _, cell in ipairs(res.rows[i].columns) do
+                    for _, s in ipairs(cell.lanes or {}) do
+                        assert.equals(2, s.color, pol .. ": row " .. i .. " carries colour " .. tostring(s.color))
+                    end
+                end
+            end
+            assert_seam_match(res.rows, boundary)
+        end
+    end)
+
     it("colours a fork child reached through its SECOND parent by that edge's lane", function()
         -- `c` merges the fork node `n` as its second parent; its first parent `o` is a
         -- root the header never shows. In the main view the edge c → n is its own lane,
