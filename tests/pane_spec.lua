@@ -403,12 +403,15 @@ end
 local function header_of(items, opts, seam_pos, pinned)
     pinned = pinned or {}
     local main = columns.layout(opts, items)
-    local idx, lane_main = {}, {}
+    local idx, lane_main, edge_main = {}, {}, {}
     local node_col = {}
     for i, it in ipairs(items) do
         idx[it.commit.hash] = i
         local pl = main[i].parent_lanes
         if pl and pl[1] then lane_main[it.commit.hash] = { id = pl[1].id, color = pl[1].color } end
+        for _, l in ipairs(pl or {}) do
+            edge_main[l.begin.hash .. ">" .. l.parent.hash] = { id = l.id, color = l.color }
+        end
         for j, cell in ipairs(main[i].columns or {}) do
             if cell.has_commit and cell.commit then node_col[cell.commit.hash] = j end
         end
@@ -427,7 +430,13 @@ local function header_of(items, opts, seam_pos, pinned)
     -- main-view lane { id, color } per node's branch (its tip), so each branch keeps
     -- its own distinct colour (matching the graph) — mirrors graph.lua's lane_of. Passed
     -- into continue_up too: the tracked-lane induce matches lanes by id (§6.2).
-    local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
+    -- With `p`, the lane of the EDGE n → p (a merge's second-parent edge is its own
+    -- lane, §6.2 Colour), falling back to n's first-parent lane.
+    local function key(n) return (n.tip and n.tip.hash) or n.hash end
+    local function lane_of(n, p)
+        if not n then return nil end
+        return (p and p.hash and edge_main[key(n) .. ">" .. key(p)]) or lane_main[key(n)]
+    end
     local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
     local cond = pane.continue_up(boundary, tips, pinned, function(n) return idx[n.hash] end, seam_pos,
         nil, lane_of)
@@ -1040,6 +1049,7 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         -- (2) The diverging arm is the BRANCH's (dev's) colour, not the trunk's: the arm
         --     glyphs (everything past the pivot's vertical, which is the first run) are dev's.
         local dev = lane_of({ hash = "d1" })
+        if not dev then error("d1 has no main-view lane") end
         assert.is_not_nil(dev)
         local dev_hl = opts.palette.tracks[dev.color]
         assert.equals(dev_hl, seq[#seq], ("arm tip is not dev's colour in [%s]"):format(g.text or ""))
@@ -2308,5 +2318,117 @@ describe("pane rebuild gate (§6.2)", function()
         g:started("7:0"); g:dropped(); g:built()
         assert.is_nil(g:key())
         assert.equals("rebuild", g:decide("7:0"))
+    end)
+end)
+
+describe("pane.header — colours follow the main view (§6.2 Colour)", function()
+    -- hash → the colour of the header cell drawing that node
+    local function node_colors(res)
+        local by = {}
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns) do
+                local c = cell.has_commit and cell.commit
+                if c then by[(c.tip and c.tip.hash) or c.hash] = { color = cell.color, id = cell.id } end
+            end
+        end
+        return by
+    end
+
+    it("leaves two heads that are never alive together on their shared colour", function()
+        -- Two pinned anchors fork off the trunk one above the other: a1's lane ends
+        -- (row a1) BELOW the fork j2 that starts a2's, so the two are never on one header
+        -- row. The main view recycles a1's colour onto a2; the header must not recolour
+        -- either — only lanes alive together are de-collided.
+        local items = h.dag({
+            { "top", { "j2" } }, { "a2", { "j2" } }, { "j2", { "j1" } },
+            { "a1", { "j1" } }, { "j1", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "top" } }
+        items[2].commit.refs = { { name = "a2" } }
+        items[4].commit.refs = { { name = "a1" } }
+        local opts = h.big_opts()
+        opts.pin_rank = { top = 1 } -- the trunk continues through both forks (§5 tier 0)
+        local _, boundary, cond, _, lane_of, col_of =
+            header_of(items, opts, 6, { top = true, a2 = true, a1 = true })
+        local function recycled(n, p)
+            local l = lane_of(n, p)
+            if not l then return nil end
+            local hsh = (n.tip and n.tip.hash) or n.hash
+            return { id = l.id, color = (hsh == "a1" or hsh == "a2") and 30 or l.color }
+        end
+        local res = pane.header(cond.items, boundary, cond.node_of_hash, recycled, col_of)
+        local by = node_colors(res)
+        assert.is_not_nil(by.a1, "a1 shown"); assert.is_not_nil(by.a2, "a2 shown")
+        assert.equals(30, by.a1.color, "a1 recoloured although never alive beside a2")
+        assert.equals(30, by.a2.color, "a2 recoloured although never alive beside a1")
+    end)
+
+    it("colours a fork child reached through its SECOND parent by that edge's lane", function()
+        -- `c` merges the fork node `n` as its second parent; its first parent `o` is a
+        -- root the header never shows. In the main view the edge c → n is its own lane,
+        -- coloured differently from c's first-parent lane — and that edge is what the
+        -- header draws from n up to c.
+        local items = h.dag({
+            { "top", { "n" } }, { "c", { "o", "n" } }, { "o", {} },
+            { "n", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "top" } }
+        items[2].commit.refs = { { name = "c" } }
+        local opts = h.big_opts()
+        local res, _, _, _, lane_of = header_of(items, opts, 5, { top = true, c = true })
+        local c, n = { hash = "c" }, { hash = "n" }
+        local edge, fp = lane_of(c, n), lane_of(c)
+        if not (edge and fp) then error("fixture: c has no main-view lanes") end
+        assert.is_true(edge.color ~= fp.color, "fixture: the c → n edge must differ from c's first-parent lane")
+        local by = node_colors(res)
+        assert.is_not_nil(by.c, "c shown")
+        -- every segment of c's header lane
+        local seen = 0
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    if s.id == by.c.id then
+                        seen = seen + 1
+                        assert.equals(edge.color, s.color, "c's header lane is not the c → n edge's colour")
+                    end
+                end
+            end
+        end
+        assert.is_true(seen > 0)
+    end)
+
+    it("without generated colours, a replacement stays within the palette and off the pinned slots", function()
+        -- Three concurrent anchors all arriving on colour 2 with a 3-colour palette and
+        -- slot 3 pinned: the two replacements must share a curated slot (as the main view
+        -- does when exhausted), never mint slot 4 (which wraps onto a curated colour —
+        -- possibly a pinned one) and never take the pinned slot 3.
+        local items = h.dag({
+            { "b1", { "ca" } }, { "b2", { "ca" } }, { "b3", { "ca" } },
+            { "ca", { "base" } }, { "base", {} },
+        })
+        items[1].commit.refs = { { name = "b1" } }
+        items[2].commit.refs = { { name = "b2" } }
+        items[3].commit.refs = { { name = "b3" } }
+        local opts = h.big_opts()
+        local _, boundary, cond, _, lane_of, col_of = header_of(items, opts, 5, { b1 = true, b2 = true, b3 = true })
+        local b = {}
+        for col, l in pairs(boundary) do b[col] = setmetatable({ color = 2 }, { __index = l }) end
+        local function shared(n, p)
+            local l = lane_of(n, p)
+            return l and { id = l.id, color = 2 }
+        end
+        local avoid = { [3] = 3 }
+        local res = pane.header(cond.items, b, cond.node_of_hash, shared, col_of, avoid, 3)
+        local heads = 0
+        for _, r in ipairs(res.rows) do
+            for _, cell in ipairs(r.columns) do
+                for _, s in ipairs(cell.lanes or {}) do
+                    assert.is_true(s.color >= 1 and s.color <= 3, "colour outside the palette: " .. s.color)
+                    assert.is_true(s.color ~= 3, "a replacement took pinned slot 3")
+                end
+                if cell.has_commit then heads = heads + 1 end
+            end
+        end
+        assert.equals(3, heads)
     end)
 end)

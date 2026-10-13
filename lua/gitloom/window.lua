@@ -5769,11 +5769,21 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- lane_main: the node's primary (first-parent) lane { id, color }. lane_set:
             -- the **all-lanes** id set the commit touches — every parent_lanes + child_lanes
             -- id — for the header's per-path loop-back visited list (§6.2).
-            local dnode, lane_main, node_col, lane_set = {}, {}, {}, {}
+            -- lane_edge: "<child>><parent>" (tip-keyed) → the main-view lane of that EDGE,
+            -- so the header colours a fork child reached through a merge's second parent by
+            -- that edge's lane rather than the child's first-parent lane (§6.2 Colour).
+            local dnode, lane_main, node_col, lane_set, lane_edge = {}, {}, {}, {}, {}
             for _, it in ipairs(repo.display) do
                 py()
                 local pl = it.parent_lanes
                 local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color }
+                for _, l in ipairs(pl or {}) do
+                    local b, pa = l.begin, l.parent
+                    if b and pa then
+                        lane_edge[((b.tip and b.tip.hash) or b.hash) .. ">" .. ((pa.tip and pa.tip.hash) or pa.hash)] =
+                            { id = l.id, color = l.color }
+                    end
+                end
                 local lset
                 for _, l in ipairs(it.parent_lanes or {}) do lset = lset or {}; lset[l.id] = true end
                 for _, l in ipairs(it.child_lanes or {}) do lset = lset or {}; lset[l.id] = true end
@@ -5805,7 +5815,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 for _, m in ipairs(it.markers or {}) do add(m) end
             end
             local function order_of(n) return n and didx[(n.tip and n.tip.hash) or n.hash] end
-            local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
+            local function lane_of(n, p)
+                if not n then return nil end
+                local k = (n.tip and n.tip.hash) or n.hash
+                return (p and p.hash and lane_edge[k .. ">" .. ((p.tip and p.tip.hash) or p.hash)]) or lane_main[k]
+            end
             local function lanes_at(n) return n and lane_set[(n.tip and n.tip.hash) or n.hash] end
             local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
 
@@ -5936,7 +5950,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local tracks = ctx.pane_opts.palette and ctx.pane_opts.palette.tracks
                 local avoid = require("gitloom.graph.columns").pinned_slots(ctx.pane_opts.pin_rank,
                     tracks and #tracks or 8)
-                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of, avoid)
+                -- Without generated colours (no truecolor) a replacement shares a curated
+                -- slot instead of minting one past the palette (§5.5).
+                local res = pane.header(cond.items, boundary, cond.node_of_hash, lane_of, col_of, avoid,
+                    not (ctx.pane_opts.palette and ctx.pane_opts.palette.generate) and (tracks and #tracks or 8) or nil)
                 if #res.rows == 0 then return nil, "norows@" .. seam.idx end
                 return res.rows, seam.idx .. (seam.kind == "above" and "s" or "c"), seam.cover, seam.idx,
                     cond, boundary

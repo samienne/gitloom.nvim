@@ -699,7 +699,12 @@ Coverage:
   direct seam-up grid with the seam as the bottom row matching the main view's top
   edge. Each lane keeps its own colour (`lane_of`, the main-view colour so the
   header matches the graph and forks are distinct — the pivot continuation keeps the
-  pivot's colour, only an extra fork child takes a new one). Asserted vertically
+  pivot's colour, only an extra fork child takes a new one). Plus a **colours follow
+  the main view** block (§6.2 Colour): two heads never alive together keep their
+  shared main-view colour (only lanes on one drawn row are de-collided), a fork child
+  reached through a merge's SECOND parent is drawn in that edge's lane colour, and
+  without generated colours (`ncolors`) a replacement stays in the palette and off the
+  pinned slots. Asserted vertically
   id-continuous, **distinct-coloured** (concurrent lanes never share a colour),
   through the wires-connect checker, with `assert_seam_match` (every crossing lane
   present at the seam) and a **minimal-subgraph oracle** (`confluences_of` +
@@ -747,7 +752,12 @@ Coverage:
   HEAD + dev pinned) and `continue_up`/`header` at **every** display cutoff: asserts the
   pinned anchors HEAD and dev keep their **graph lane id** throughout — they never sever
   onto a fresh synthetic id when a merge sits at the cutoff (the merge-at-cutoff
-  anchor-severing regression)
+  anchor-severing regression). Plus **§6.2 Colour** at every cutoff, every policy
+  (64-colour palette) and `compact` with 6 colours + generation: every header segment
+  is in its lane id's main-view colour and every node in its main-view node colour —
+  exactly 0 mismatches (nodes not asserted under `gutter`: a head reached only through
+  a merge's second parent draws that edge, the main view colours its node by its
+  first-parent lane — 3 nodes there). Fails on the pre-fix header (si=42 seg id=22)
 - `tests/footer_replay_spec.lua` (+ `tests/large_topo.lua`) — the **footer** counterpart:
   the same real-world topology through the **full projection**, then the footer built at
   **every** cutoff and for **every rendered line the seam picker can land on** — a commit's
@@ -1784,10 +1794,13 @@ Details not covered by the spec or architecture:
   lane drops; `condense(up)`; the **direct seam-up
   grid** `header` — a bottom-up sweep seeded from the boundary so the seam is the
   bottom row, columns never reused, each lane drawn in **its own colour**
-  (`lane_of`, the main-view colour; the pivot continuation keeps the pivot's colour,
-  an extra fork child takes its own) and unpinned heads packed onto as few rows as
-  possible (`pack_heads`/`overlay_rows` — pinned anchors and junctions keep their own
-  line); `cap`; §6.2). **Both panes are wired** via
+  (`lane_of(child, parent)`, the main-view colour of the EDGE drawn — `via` names the
+  first hop across a spliced run; the pivot is the arriving lane the main view
+  continues and keeps its colour, an extra fork child takes its own) and unpinned heads
+  packed onto as few rows as possible (`pack_heads`/`overlay_rows` — pinned anchors and
+  junctions keep their own line) BEFORE the de-collision, which recolours only lanes
+  sharing a drawn row, never onto a pinned slot, and within the palette without
+  truecolor (`ncolors`); `cap`; §6.2). **Both panes are wired** via
   graph.lua `update_panes` (gated by `opts.panes`, toggled by `F`): borderless
   overlays (footer at the bottom, header at the top). Both seams are computed by
   **pure, virtual-line-aware** seam functions that round to **whole commit blocks** so
@@ -1808,8 +1821,10 @@ Details not covered by the spec or architecture:
   seam off the main view's first visible line. The footer
   continues the seam lanes down to the roots (pinned refs below the cutoff
   included); the header rebuilds the focused up-sub-DAG (`dnode`/`order_of` resolve
-  the projected nodes; `lane_main[hash]` from each item's `parent_lanes[1]` gives
-  `lane_of` the main-view colour so the header matches the graph) and lays it out
+  the projected nodes; `lane_edge["<child>><parent>"]` from each item's
+  `parent_lanes`, falling back to `lane_main[hash]` (its `parent_lanes[1]`), gives
+  `lane_of(n, p)` the main-view colour of each drawn edge so the header matches the
+  graph) and lays it out
   seam-up with distinct colours and packed unpinned heads — `converge_header`
   min-fit-sizes from the `(#pinned tips above)+1` guess up to `HEADER_MAX` (8),
   capping over-tall headers with `+N above`, and **hides the header at the top** (and `build_footer` hides the footer at the bottom, `"at bottom"`)

@@ -11,7 +11,7 @@ local view = require("gitloom.graph.view")
 local fix = require("tests.large_topo")
 
 -- Build the projected display + lane maps ONCE (the projection is cutoff-independent).
-local function build(policy)
+local function build(policy, small)
     local items = h.dag(fix.dag)
     local byhash = {}
     for _, it in ipairs(items) do byhash[it.commit.hash] = it.commit end
@@ -39,6 +39,13 @@ local function build(policy)
     local proj = view.project(items, view.owners(items, ofr(), pinned, {}, true), nil)
     local display = proj.items
     local opts = h.big_opts()
+    if small then
+        -- A 6-colour palette (generated colours on): the main view recycles colours
+        -- heavily, which is what the header's de-collision must not over-react to.
+        opts.palette.tracks = { "T1", "T2", "T3", "T4", "T5", "T6" }
+        opts.palette.generate = true
+        opts.palette.buffer = 3
+    end
     opts.layout_policy = policy
     -- The pinned anchors' lane ranks, as `ctx:sync_pin_rank` publishes them (the
     -- default order: trunks first, HEAD's anchor last; §10.6). Without them §5 tier 2
@@ -47,10 +54,11 @@ local function build(policy)
     -- graph never lays an anchor out unranked.
     opts.pin_rank = { dev = 1, enne = 2 }
     local main = columns.layout(opts, display)
-    local didx, lane_main, node_col = {}, {}, {}
+    local didx, lane_main, node_col, edge = {}, {}, {}, {}
     for i, it in ipairs(display) do
         local c = it.commit
         local pl = main[i].parent_lanes
+        for _, l in ipairs(pl or {}) do edge[l.begin.hash .. ">" .. l.parent.hash] = { id = l.id, color = l.color } end
         local function reg(x) didx[x] = i; if pl and pl[1] then lane_main[x] = { id = pl[1].id, color = pl[1].color } end end
         if c then
             reg((c.tip and c.tip.hash) or c.hash)
@@ -62,7 +70,11 @@ local function build(policy)
         end
     end
     local function order_of(n) return n and didx[(n.tip and n.tip.hash) or n.hash] end
-    local function lane_of(n) return n and lane_main[(n.tip and n.tip.hash) or n.hash] end
+    -- With `p`, the lane of the EDGE n → p, as window.lua's lane_of (§6.2 Colour).
+    local function lane_of(n, p)
+        if not n then return nil end
+        return (p and edge[n.hash .. ">" .. p.hash]) or lane_main[(n.tip and n.tip.hash) or n.hash]
+    end
     local function col_of(n) return n and node_col[(n.tip and n.tip.hash) or n.hash] end
     local function dnode_of(hash)
         for _, it in ipairs(display) do
@@ -73,7 +85,7 @@ local function build(policy)
             end
         end
     end
-    return { display = display, main = main, refs = refs, pinned = pinned, opts = opts,
+    return { display = display, main = main, refs = refs, pinned = pinned, opts = opts, didx = didx,
         order_of = order_of, lane_of = lane_of, col_of = col_of, dnode_of = dnode_of }
 end
 
@@ -144,7 +156,7 @@ describe("large real-world header replay [" .. policy .. "] (§6.2)", function()
         local ctx = build(policy)
         local head_lane = ctx.lane_of(ctx.dnode_of(fix.head))
         local dev_lane = ctx.lane_of(ctx.dnode_of(fix.dev))
-        assert.is_not_nil(head_lane, "HEAD must have a main-view lane")
+        if not head_lane then error("HEAD must have a main-view lane") end
         local loose = LOOSE_ORACLE[policy]
         local real = loose and main_ids(ctx) or nil
         local function ok(id, lane)
@@ -169,3 +181,68 @@ describe("large real-world header replay [" .. policy .. "] (§6.2)", function()
     end)
 end)
 end
+
+-- §6.2 Colour over the whole real topology: every header lane is drawn in the colour
+-- the main view gives that lane id, and every node in its main-view node colour. With
+-- a palette large enough that no two lanes the header shows together share a colour,
+-- nothing is ever de-collided, so the expected count is exactly 0. Guards three bugs:
+-- heads never alive together recoloured apart, a fork child reached through a merge's
+-- second parent coloured by its first-parent lane, and that wrong colour then moved.
+local render = require("gitloom.graph.render")
+local function colour_mismatches(ctx)
+    local idcol = {}
+    for _, row in ipairs(ctx.main) do
+        for _, l in ipairs(row.parent_lanes or {}) do idcol[l.id] = l.color end
+    end
+    local segs, nodes, where = 0, 0, {}
+    for si = 2, #ctx.display do
+        local line = (ctx.main[si].above or {})[1] or ctx.main[si].columns
+        local boundary = pane.boundary_of(line, true)
+        if next(boundary) then
+            local tips = {}
+            for name in pairs(ctx.pinned) do
+                local r = ctx.refs[name]
+                local dn = r and r.commit and ctx.dnode_of(r.commit.hash)
+                if dn and (ctx.order_of(dn) or math.huge) < si then tips[#tips + 1] = dn end
+            end
+            local cond = pane.continue_up(boundary, tips, ctx.pinned, ctx.order_of, si, nil, ctx.lane_of)
+            local avoid = columns.pinned_slots(ctx.opts.pin_rank, #ctx.opts.palette.tracks)
+            local res = pane.header(cond.items, boundary, cond.node_of_hash, ctx.lane_of, ctx.col_of, avoid)
+            for _, r in ipairs(res.rows) do
+                for _, cell in ipairs(r.columns or {}) do
+                    for _, sg in ipairs(cell.lanes or {}) do
+                        if idcol[sg.id] ~= nil and idcol[sg.id] ~= sg.color then
+                            segs = segs + 1; where[#where + 1] = ("si=%d seg id=%s"):format(si, tostring(sg.id))
+                        end
+                    end
+                    if cell.has_commit and cell.commit then
+                        local i = ctx.didx[(cell.commit.tip and cell.commit.tip.hash) or cell.commit.hash]
+                        local ms = i and render.node_lane_slot(ctx.main[i].columns, nil, nil)
+                        if ms ~= nil and ms ~= render.node_lane_slot(r.columns, nil, cell.commit) then
+                            nodes = nodes + 1; where[#where + 1] = ("si=%d node %s"):format(si, cell.commit.hash)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return segs, nodes, where
+end
+
+describe("large real-world header replay — colours follow the main view (§6.2 Colour)", function()
+    for _, cfg in ipairs({ { "compact" }, { "survivors" }, { "linear" }, { "straight" }, { "gutter" },
+        { "compact", true } }) do
+        local policy, small = cfg[1], cfg[2]
+        it(("[%s%s] no header lane or node off its main-view colour"):format(policy, small and ", 6 colours" or ""),
+            function()
+                local segs, nodes, where = colour_mismatches(build(policy, small))
+                assert.equals(0, segs, table.concat(where, "\n  ", 1, math.min(#where, 12)))
+                -- Under `gutter` a head reached ONLY through a merge's second parent
+                -- draws that edge's lane, while the main view colours its node by its
+                -- first-parent lane (not drawn in the header): node colour then differs.
+                if policy ~= "gutter" then
+                    assert.equals(0, nodes, table.concat(where, "\n  ", 1, math.min(#where, 12)))
+                end
+            end)
+    end
+end)

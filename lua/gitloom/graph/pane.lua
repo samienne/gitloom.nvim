@@ -146,13 +146,16 @@ function M.condense(nodes, anchor_names, up, yield, keep)
         return cur
     end
 
-    -- A copy per kept node (inherits the original's fields via metatable).
+    -- A copy per kept node (inherits the original's fields via metatable). `via` maps a
+    -- kept parent copy to the node's IMMEDIATE parent on the way there (itself when the
+    -- edge is direct), so the header can colour a spliced edge by the main-view lane
+    -- that actually leaves this node toward that parent (§6.2 Colour).
     local copy = {}
     for _, n in ipairs(nodes) do
         step()
         if not transp[n] then
             copy[n] = setmetatable({
-                hash = n.hash, parents = {}, children = {},
+                hash = n.hash, parents = {}, children = {}, via = {},
                 refs = marker_refs(n), region = n.region, tip = n.tip,
             }, { __index = n })
         end
@@ -168,6 +171,7 @@ function M.condense(nodes, anchor_names, up, yield, keep)
                 local k = transp[p] and follow(p, "parents") or p
                 if k and copy[k] and not pseen[k] then
                     pseen[k] = true; c.parents[#c.parents + 1] = copy[k]
+                    c.via[copy[k]] = p
                 end
             end
             for _, ch in ipairs(n.children) do
@@ -1413,19 +1417,25 @@ end
 ---@param items table[]  -- condensed OrderItems from continue_up, newest-first
 ---@param boundary table<integer, table>  -- col → lane { id, color, begin }
 ---@param node_of table<string, table>?  -- hash → condensed node (continue_up's node_of_hash)
----@param lane_of (fun(node: table): table?)?  -- node → its branch's main-view { id, color }
+---@param lane_of (fun(node: table, parent: table?): table?)?  -- node → its branch's main-view
+---   { id, color }; with `parent`, the main-view lane of the EDGE node → parent (a merge's
+---   second-parent edge is a lane of its own), falling back to the node's first-parent lane
 ---@param col_of (fun(node: table): integer?)?  -- node → its main-view column (left-right order)
 ---@param avoid table<integer, any>?  -- palette slots a de-collided lane must not be handed:
 ---   the pinned colours (§5.5, `columns.pinned_slots`). A lane may still KEEP one as its
 ---   own main-view colour; only a replacement colour skips them.
+---@param ncolors integer?  -- the palette size when no colour can be generated (no
+---   truecolor, §5.5): a replacement then stays within `1..ncolors`, SHARING a curated
+---   slot when they are exhausted, as the main view does. nil = unbounded (generated).
 ---@return table  -- { rows = table[] }
-function M.header(items, boundary, node_of, lane_of, col_of, avoid)
+function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
     node_of = node_of or {}
     avoid = avoid or {}
     -- The main-view lane id/colour for a node's branch, so each branch keeps its OWN
-    -- distinct colour (matching the graph). Falls back to a given default.
-    local function lane(node, def)
-        local l = lane_of and lane_of(node)
+    -- distinct colour (matching the graph). With `parent`, the lane of the edge
+    -- node → parent — the one the header draws between them. Falls back to `def`.
+    local function lane(node, def, parent)
+        local l = lane_of and lane_of(node, parent)
         if l then return l.id, l.color end
         return def and def.id, def and def.color
     end
@@ -1440,11 +1450,6 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
     -- header keeps matching the graph wherever it can.
     local maxid = 0
     for _, l in pairs(boundary) do if type(l.id) == "number" and l.id > maxid then maxid = l.id end end
-    -- The crossing/seam lane ids (must keep their boundary colour to the seam). Above-seam
-    -- lanes (fork children / merge continuations) carry their own main-view ids now, so the
-    -- distinction is set membership, not an id threshold.
-    local boundary_set = {}
-    for _, l in pairs(boundary) do if l.id ~= nil then boundary_set[l.id] = true end end
     -- A fresh (fork-child) id must clearly be NEW: above every id that appears in the
     -- header — the boundary lanes AND every node's main-view lane — so it never
     -- numerically coincides with an existing main-view lane id (which reads as the branch
@@ -1472,11 +1477,22 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
     -- as its pinned branch, in the pane as in the graph. A counterpart colour (`-k`,
     -- §5.5) is kept as is: in the graph too it is legitimately shared by every
     -- counterpart lane of one pin, so the header never swaps it for another colour.
+    -- `used` counts the lanes holding each colour. Without generated colours
+    -- (`ncolors`) an exhausted palette SHARES the least-held curated slot — never a
+    -- pinned one, never the colour being moved off — rather than minting a slot past
+    -- the palette, which the renderer would wrap onto an arbitrary curated colour.
     local function free_color(used, prefer)
         if prefer and (prefer < 0 or not used[prefer]) then return prefer end
         local c = 1
         while used[c] or avoid[c] do c = c + 1 end
-        return c
+        if not ncolors or c <= ncolors then return c end
+        local best, bn
+        for k = 1, ncolors do
+            if not avoid[k] and k ~= prefer and (bn == nil or (used[k] or 0) < bn) then
+                best, bn = k, used[k] or 0
+            end
+        end
+        return best or prefer or 1
     end
 
     -- Sweep position per condensed node (newest-first index; larger = nearer seam).
@@ -1521,12 +1537,29 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
     local function header_node(N)
         local arriving = {}
         for col, a in pairs(active) do if a.node == N then arriving[#arriving + 1] = col end end
+        -- A child's first step toward N (N itself unless `condense` spliced a run between).
+        local function hop(kid) return (kid.via and kid.via[N]) or N end
         if #arriving > 0 then
             table.sort(arriving)
-            local pivot = arriving[1]
-            local plane = active[pivot] -- the surviving lane (continues up from pivot)
             local upkids = {}
             for _, c in ipairs(N.children or {}) do upkids[#upkids + 1] = c end
+            -- The surviving lane is the arriving one the main view CONTINUES into a child
+            -- (the child's edge into N carries its id — first-parent children first), so a
+            -- merge's mainline keeps its own colour up the header (§6.2 Colour) instead of
+            -- whichever arriving lane happens to sit leftmost. Leftmost when none does.
+            local pivot = arriving[1]
+            if #arriving > 1 then
+                local found
+                for _, kid in ipairs(upkids) do
+                    local mv = lane(kid, nil, hop(kid))
+                    for _, col in ipairs(arriving) do
+                        if mv ~= nil and active[col].id == mv then found = col; break end
+                    end
+                    if found then break end
+                end
+                pivot = found or pivot
+            end
+            local plane = active[pivot] -- the surviving lane (continues up from pivot)
             -- The pivot (upkids[1]) inherits the surviving lane's id/colour, so it must be
             -- the child that ACTUALLY carries that lane in the main view (its lane_of id
             -- equals the boundary lane's). The condensed first-parent order can diverge
@@ -1537,7 +1570,7 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
             -- colour switches at the junction anyway).
             if #upkids > 1 and plane and plane.id ~= nil then
                 for k = 2, #upkids do
-                    if lane(upkids[k]) == plane.id then
+                    if lane(upkids[k], nil, hop(upkids[k])) == plane.id then
                         upkids[1], upkids[k] = upkids[k], upkids[1]
                         break
                     end
@@ -1558,7 +1591,7 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
             local upcols, upid, upcolor = {}, {}, {}
             if not is_head then
                 upcols[1] = pivot
-                local mv1, c1col = lane(upkids[1], plane)
+                local mv1, c1col = lane(upkids[1], plane, hop(upkids[1]))
                 -- The surviving lane CONTINUES AS ITSELF when the pivot child is the mainline
                 -- continuation — recognised by main-view lane (mv1 == plane.id) OR
                 -- TOPOLOGICALLY (it is N's first-parent child). The topological test is what
@@ -1575,7 +1608,7 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
                     upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color
                 end
                 for k = 2, #upkids do
-                    local mvid, pref = lane(upkids[k], plane)
+                    local mvid, pref = lane(upkids[k], plane, hop(upkids[k]))
                     local col = free_col(col_of and col_of(upkids[k]))
                     used_cols[col] = true
                     if col > maxcol then maxcol = col end
@@ -1718,6 +1751,10 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
     -- Bottom-up → newest-first (tip on top).
     local rows = {}
     for i = #lines, 1, -1 do rows[#rows + 1] = lines[i] end
+    -- Pack the unpinned heads FIRST, so "alive together" below is what is drawn: heads
+    -- packed onto one line sit side by side and must differ, heads on separate lines
+    -- need not (§6.2 Colour). Packing reads lane ids, never colours.
+    rows = pack_heads(rows)
 
     -- Global colour de-collision (interval colouring). Each unique lane id spans a set
     -- of rows; the main view RECYCLES colours, so two ids alive on the same row can
@@ -1749,16 +1786,10 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
                         local cc = s.connectivity or {}
                         if cell.has_commit and not cc.up and not cc.left and not cc.right then
                             head_id[s.id] = true
-                            -- A head reads as ITS OWN branch (the tip) colour — but ONLY
-                            -- for above-seam lanes (fork children and merge continuations).
-                            -- A crossing/seam lane keeps its boundary colour all the way to
-                            -- the seam and must NOT be switched (the seam-never-switches
-                            -- rule); being a straight lane its colour already equals its
-                            -- head's.
-                            if s.id ~= nil and not boundary_set[s.id] then
-                                local _, hc = lane(cell.commit)
-                                if hc then pref[s.id] = hc end
-                            end
+                            -- No recolouring toward the head: a fork child's lane already
+                            -- carries the colour of its main-view EDGE into the fork (its
+                            -- branch's colour for a first-parent edge), and a mainline
+                            -- continuation keeps the incoming lane's colour (§6.2 Colour).
                         end
                     end
                 end
@@ -1781,9 +1812,9 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
             for oid, c in pairs(final) do
                 local overlap = false
                 for ri in pairs(id_rows[id]) do if id_rows[oid][ri] then overlap = true; break end end
-                -- Two HEADS must differ even when not concurrent: each is a distinct
-                -- branch tip, so it must read as a distinct colour (no HEAD/dev clash).
-                if overlap or (head_id[id] and head_id[oid]) then used[c] = true end
+                -- Only lanes ALIVE TOGETHER — sharing a header row, packed head rows
+                -- included — must differ (§6.2 Colour); a head is not special.
+                if overlap then used[c] = (used[c] or 0) + 1 end
             end
             final[id] = free_color(used, pref[id])
         end
@@ -1800,7 +1831,7 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid)
         end
     end
 
-    return { rows = pack_heads(rows) }
+    return { rows = rows }
 end
 
 --- Why the context panes are hidden, or nil when they may be built (spec §6.2):

@@ -389,15 +389,26 @@ to each other and to the lanes crossing the cutoff:
    boundary, so the bottom row *is* the seam. Processing nodes nearest-seam first,
    each emits one line: still-active lanes carry up as bars, a head places a `◍`
    (labelled for an anchor, bare otherwise), a junction draws a node-less crossing.
-   **Colour** comes from `lane_of(node)` — the node's main-view lane colour (graph.lua
-   builds `lane_main[hash]` from each display item's `parent_lanes[1]`), so the pane
-   matches the graph and forks are distinct. The **pivot continuation keeps the
-   pivot's colour**; each *extra* fork child takes its own, and fork children take
-   fresh columns (**columns are never reused**) so colour continuity is exact. Lines
-   are collected bottom-up then reversed (tip on top), and `pack_heads` merges
-   consecutive **unpinned-head** rows (`overlay_rows`, the §10.4 marker rule) so bare
-   `◍` heads share rows — pinned-anchor and junction rows break a run and keep their
-   own line.
+   **Colour** comes from `lane_of(child, parent)` — the main-view lane of the EDGE the
+   header draws (window.lua builds `lane_edge["<child>><parent>"]` from every
+   display item's `parent_lanes`, falling back to `lane_main[hash]`, the child's
+   `parent_lanes[1]`), so a fork child reached through a merge's second parent takes
+   that edge's colour, not its first-parent lane's. Where `condense` spliced a run
+   between them, the child's `via[parent]` names its immediate parent, so the edge
+   looked up is the one actually leaving the child. The **pivot** — the arriving lane
+   that survives a junction — is the one the main view continues into a child (its
+   edge carries that lane id; leftmost when none does), and it **keeps its colour**;
+   each *extra* fork child takes its own, and fork children take fresh columns
+   (**columns are never reused**) so colour continuity is exact. Lines are collected
+   bottom-up then reversed (tip on top), and `pack_heads` merges consecutive
+   **unpinned-head** rows (`overlay_rows`, the §10.4 marker rule) so bare `◍` heads
+   share rows — pinned-anchor and junction rows break a run and keep their own line.
+   Then the **de-collision**: one colour per lane id, kept unless a lane sharing a
+   (packed) row already holds it — packing runs FIRST so "alive together" is what is
+   drawn, and heads get no extra rule. A replacement skips the pinned slots
+   (`avoid`), never moves a counterpart `-k`, and without generated colours
+   (`ncolors`, no truecolor) shares the least-held curated slot instead of minting
+   one past the palette, which the renderer would wrap onto an arbitrary colour.
 4. **Size + render.** `converge_header` does a **min-fit search**: start at
    `H = (#pinned tips above) + 1`, grow until the rows + the seam separator fit; cap
    at `HEADER_MAX` (8), then clip with a `+N above` indicator (`pane.cap(...,
