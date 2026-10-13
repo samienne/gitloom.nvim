@@ -344,8 +344,49 @@ describe("call sites end their operation (§19.4)", function()
         ctx.reflow_build = function(_, yield) if yield then yield() end return {} end
         ctx.reflow_apply = function(c) c.applied = c.applied + 1 end
         ctx.reflow_async = window._internal.reflow_async
+        ctx.shown = true
+        ctx.win = function(c) return c.shown and 1000 or nil end
         return ctx
     end
+
+    -- The host window closed (`q` hides it, §14) while the open's projection was
+    -- still running across ticks. The session survives a hide, so the projection
+    -- is applied to its BUFFER (the listview renders nothing without a window and
+    -- the next show re-establishes the view) and the caller's `done` runs — which
+    -- is what ends the open's Op. Regression: the result used to be PARKED until
+    -- the next show, leaving the Op (fidget: "Loading <repo> — laying out")
+    -- running forever when the graph was never shown again.
+    it("reflow_async: a projection completing with the window gone still applies and completes", function()
+        local ctx = stub_ctx()
+        local log, op = op_log()
+        local done = false
+        ctx:reflow_async(function() done = true; op:finish("done") end, nil, op)
+        ctx.shown = false -- `q` before the next slice
+        vim.wait(200, function() return done end)
+        assert.is_true(done, "the open's done never ran: its Op is left running")
+        assert.equals(1, ctx.applied)
+        assert.same({ "done" }, log)
+        assert.is_nil(ctx.parked_reflow)
+    end)
+
+    -- The graph buffer wiped (`<C-w>q` destroys the session, §14.1) mid-projection:
+    -- nothing is left to apply to, so the projection stops at its next slice and
+    -- ends its Op `cancelled` — never applied into a wiped buffer, never parked.
+    it("reflow_async: a projection whose graph buffer was wiped ends cancelled, never applied", function()
+        local ctx = stub_ctx()
+        local b = vim.api.nvim_create_buf(false, true)
+        ctx.lv = { buf = b }
+        local log, op = op_log()
+        local done = false
+        ctx:reflow_async(function() done = true end, nil, op)
+        vim.api.nvim_buf_delete(b, { force = true })
+        ctx.shown = false
+        vim.wait(200, function() return op.ended end)
+        assert.same({ "cancelled" }, log)
+        assert.is_false(done)
+        assert.equals(0, ctx.applied)
+        assert.is_nil(ctx.parked_reflow)
+    end)
 
     it("reflow_async: a superseded projection ends its Op cancelled, never applied", function()
         local ctx = stub_ctx()

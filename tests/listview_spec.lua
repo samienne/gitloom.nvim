@@ -135,4 +135,31 @@ describe("multi-line rendering (windowed)", function()
         assert.equals(2, ctrl.item_at(2))
         assert.equals(2, ctrl.item_start(2))
     end)
+
+    -- A reflow landing after the host window closed (`q` hides it; the async open
+    -- projection, §10.5, completes on a later tick): snacks drops `win.win`, so the
+    -- host getter yields nil. The buffer is still the list's identity — re-lay it,
+    -- but render nothing (the decoration provider draws it on the next show).
+    -- Regression: `listview.lua: Invalid 'win': Expected Lua number`.
+    it("set_items / refresh with the host window gone re-lay the buffer, render nothing", function()
+        local inst = listview.open({
+            win = {},
+            flex = 4,
+            line_count = function() return 1 end,
+            display = function(d) return { line = { "", "", "", "X" .. d.id } } end,
+            on_controller = function(c) ctrl = c end,
+        })
+        buf = inst.win.buf
+        ctrl.insert({ { id = 1 }, { id = 2 }, { id = 3 } }, 1)
+
+        vim.api.nvim_win_close(inst.win.win, true)
+        inst.win.win = nil -- what snacks' close/hide leaves behind
+
+        ctrl.set_items({ { id = 1 }, { id = 9 } })
+        assert.equals(2, vim.api.nvim_buf_line_count(buf))
+        assert.equals(2, ctrl.item_at(2))
+        ctrl.refresh()
+        ctrl.relayout()
+        assert.equals(2, vim.api.nvim_buf_line_count(buf))
+    end)
 end)

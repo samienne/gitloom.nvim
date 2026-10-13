@@ -107,6 +107,16 @@ local recent_refs = {}
 -- `:GitloomResetView` can reach it from outside the graph (§18.5).
 local nav = { sessions = {}, mru = {}, examine = {}, ctxs = {} }
 
+-- Run a frame's on_enter / a session's on_show. Protected, so a failing view
+-- restore never aborts the navigation itself — but REPORTED: a silently
+-- swallowed error here would leave no trace of a view that failed to restore.
+function nav.call_enter(fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        vim.notify("gitloom: restoring the view failed: " .. tostring(err), vim.log.levels.ERROR)
+    end
+end
+
 function nav.valid(sess)
     return sess ~= nil and sess.host ~= nil and sess.host.buf ~= nil
         and vim.api.nvim_buf_is_valid(sess.host.buf)
@@ -218,7 +228,7 @@ local function nav_enter(sess, frame)
     if sess.host and sess.host.valid and sess.host:valid() then
         sess.host:set_buf(frame.buf)
     end
-    if frame.on_enter then pcall(frame.on_enter) end
+    if frame.on_enter then nav.call_enter(frame.on_enter) end
     nav.render_crumbs(sess)
 end
 
@@ -237,7 +247,7 @@ function nav.show(sess)
     if frame and frame.buf and vim.api.nvim_buf_is_valid(frame.buf) then
         nav_enter(sess, frame)
     elseif sess.on_show then
-        pcall(sess.on_show)
+        nav.call_enter(sess.on_show)
     end
 end
 
@@ -5068,28 +5078,39 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 ctx:reflow_async(function() promise.resolve() end, reveal_focus, ctx.open_op)
                 return fut
             end).next(function()
-                update_footer()
-                -- Focus an explicit commit if asked (the submodule link, §11.7.6),
-                -- else the remembered position for this repo, else HEAD; center the
-                -- view on it (§2). goto_hash resolves a folded commit to its
-                -- collapsed head; if the target is gone it leaves the cursor at the
-                -- top. HEAD is HEAD's commit on a branch or detached alike: HEAD is
-                -- always an anchor (§10.6), so a detached HEAD is focused too.
-                local target = focus_hash or saved_positions[repo_key]
-                if not (target and goto_hash(target)) then
-                    local head_hash = selectm.head_target(repo.refs)
-                    if head_hash then goto_hash(head_hash) end
-                end
-                center_view()
-                place_cursor()
-                -- Focusing HEAD moved the pivot and scrolled the viewport, so the
-                -- cone reflow ran for the wrong (top) range — recompute it for the
-                -- new pivot/viewport and redraw (§12).
-                update_cone()
-                if lv and lv.controller then lv.controller.refresh() end
-                update_panes()
+                -- The open's Op ends here on every path (§19.4): a failing focus
+                -- step is reported and ends it `failed` rather than leaving the
+                -- progress spinning on "laying out" forever.
+                local fok, ferr = pcall(function()
+                    update_footer()
+                    -- Hidden mid-open (`q`, §14): nothing to focus now. Leave an
+                    -- explicit focus target where the next show's on_show looks.
+                    if focus_hash and not ctx:win() then saved_positions[repo_key] = focus_hash end
+                    -- Focus an explicit commit if asked (the submodule link, §11.7.6),
+                    -- else the remembered position for this repo, else HEAD; center the
+                    -- view on it (§2). goto_hash resolves a folded commit to its
+                    -- collapsed head; if the target is gone it leaves the cursor at the
+                    -- top. HEAD is HEAD's commit on a branch or detached alike: HEAD is
+                    -- always an anchor (§10.6), so a detached HEAD is focused too.
+                    local target = focus_hash or saved_positions[repo_key]
+                    if not (target and goto_hash(target)) then
+                        local head_hash = selectm.head_target(repo.refs)
+                        if head_hash then goto_hash(head_hash) end
+                    end
+                    center_view()
+                    place_cursor()
+                    -- Focusing HEAD moved the pivot and scrolled the viewport, so the
+                    -- cone reflow ran for the wrong (top) range — recompute it for the
+                    -- new pivot/viewport and redraw (§12).
+                    update_cone()
+                    if lv and lv.controller then lv.controller.refresh() end
+                    update_panes()
+                end)
                 util.open_trace("done", { rows = #repo.display, ms = util.open_ms(ctx.open_t0 or 0) })
-                ctx.open_op:finish("done")
+                ctx.open_op:finish(fok and "done" or "failed")
+                if not fok then
+                    vim.notify("gitloom: open failed: " .. tostring(ferr), vim.log.levels.ERROR)
+                end
             end)
         end,
     }
@@ -6589,7 +6610,12 @@ GRAPH_HELPERS.reflow = reflow
 --
 -- A newer reflow (`reflow`, or another `reflow_async`) bumps `reflow_gen`, and
 -- the in-flight one is dropped at its next resume without having touched
--- anything.
+-- anything; so is one whose graph buffer was wiped (`<C-w>q` destroys the
+-- session, §14.1). One that completes while the host window is merely HIDDEN
+-- (`q` mid-open, §14) is applied all the same: the swap re-lays the session's
+-- buffer, every view step (cursor, cone, panes) is a no-op without a window, and
+-- the next show re-establishes the view (on_show). So `done` always runs and the
+-- open's Op always ends (§19.4) — never left waiting on a show that may not come.
 ---@param ctx GraphCtx
 ---@param done (fun())?                    called after the display is swapped in
 ---@param on_signatures (fun(): boolean?)? see reflow_build
@@ -6602,7 +6628,8 @@ GRAPH_HELPERS.reflow_async = function(ctx, done, on_signatures, op)
         return ctx:reflow_build(coroutine.yield, on_signatures)
     end)
     local function drive()
-        if ctx.reflow_gen ~= gen then
+        local b = ctx.lv and ctx.lv.buf
+        if ctx.reflow_gen ~= gen or (b and not vim.api.nvim_buf_is_valid(b)) then
             if op then op:finish("cancelled") end
             return
         end
@@ -6613,6 +6640,8 @@ GRAPH_HELPERS.reflow_async = function(ctx, done, on_signatures, op)
             return
         end
         if coroutine.status(co) == "dead" then
+            -- Applied whether or not the host window is showing (see above): a
+            -- hidden graph's buffer is re-laid and its view re-established on show.
             ctx:reflow_apply(res)
             if done then done() end
             return

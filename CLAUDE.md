@@ -318,7 +318,9 @@ Coverage:
   stubbed with a real window) that an item renders the right number of real buffer
   lines and that `relayout` grows the buffer when a mode switch makes a commit two
   rows, and that `set_items` swaps the whole list and re-lays the buffer (the
-  reflow-swap primitive; §10.5)
+  reflow-swap primitive; §10.5), and that `set_items` / `refresh` / `relayout`
+  with the host window gone (closed / hidden) re-lay the buffer and render
+  nothing (the `Invalid 'win'` regression)
 - `tests/commit_spec.lua` — `parse_commit_line`, `parse_timestamp`, the
   date formatters (`format_absolute`, `format_relative`), and `make_line_buffer`
   (the unbuffered-stdout de-chunker: whole lines vs. the held trailing partial,
@@ -838,7 +840,11 @@ Coverage:
   `failed` / `cancelled`, nothing at all when it ended before the delay, the running
   message never notified. Plus the glue paths reachable without a window
   (`window._internal.reflow_async` superseded → `cancelled`, erroring → `failed`,
-  completing → left to the caller; `resync`'s closed-window exit → `cancelled`)
+  completing → left to the caller, completing with the window HIDDEN → still
+  applied and `done` run (so the open's Op ends; the result is never parked —
+  the regression where a parked open spun on "laying out" forever), the graph
+  buffer wiped mid-projection → `cancelled`, never applied; `resync`'s
+  closed-window exit → `cancelled`)
 - `tests/snippet_spec.lua` — `graph_snippet` (the commit-search graph snippet,
   §15.3): the `[focus±radius]` window + reported focus row, top/bottom clamping,
   the focus-row gutter marker, the per-row subject, the shared graph-column width

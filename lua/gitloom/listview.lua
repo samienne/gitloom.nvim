@@ -878,6 +878,18 @@ function M.open(opts)
     -- Re-render after a change that alters per-item line counts (the B label-mode
     -- cycle, or a reflow that swaps the item list). Rebuilds the buffer-line map,
     -- resizes the buffer to the new total, and redraws the visible range.
+    -- Lay out + draw the host window's visible range. Nothing when the host is
+    -- gone (closed / hidden, §14): the buffer stays current and the decoration
+    -- provider draws it on the next show.
+    local function render_visible()
+        local w = host_winid()
+        if not (w and vim.api.nvim_win_is_valid(w)) then return end
+        local bf, bl = get_visible_range(w)
+        local first, last = item_index_at(model, bf), item_index_at(model, bl)
+        refresh_columns(w, model, first, last)
+        display(w, lv_buf, model, first, last)
+    end
+
     local function do_relayout()
         rebuild_starts(model, 1)
         for _, item in ipairs(model.items) do
@@ -892,10 +904,7 @@ function M.open(opts)
         vim.api.nvim_buf_clear_namespace(buf, namespace, 0, -1)
         vim.bo[buf].modifiable = false
         vim.bo[buf].readonly = true
-        local bf, bl = get_visible_range(host_winid())
-        local first, last = item_index_at(model, bf), item_index_at(model, bl)
-        refresh_columns(host_winid(), model, first, last)
-        display(host_winid(), lv_buf, model, first, last)
+        render_visible()
     end
 
     ---@type ListViewController
@@ -937,10 +946,7 @@ function M.open(opts)
             for _, item in ipairs(model.items) do
                 item.columns = nil
             end
-            local bf, bl = get_visible_range(host_winid())
-            local first, last = item_index_at(model, bf), item_index_at(model, bl)
-            refresh_columns(host_winid(), model, first, last)
-            display(host_winid(), lv_buf, model, first, last)
+            render_visible()
         end,
         -- Re-render after a change that alters per-item line counts (e.g. the B
         -- label-mode cycle turning labelled commits into two rows).
