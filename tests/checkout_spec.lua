@@ -135,9 +135,9 @@ describe("row_entries (§10.4, the palette's row scope — commit vs branch, §1
         assert.same({ "checkout" }, actions(entries({ kind = "plain", commit = commit() })))
     end)
 
-    it("plain virtual row: no checkout of either kind", function()
+    it("plain virtual row: no checkout of either kind, but Examine working tree", function()
         local m = entries({ kind = "plain", commit = commit({}, { virtual = "unstaged" }), has_diff = true })
-        assert.same({ "diff" }, actions(m))
+        assert.same({ "diff", "examine_worktree" }, actions(m))
     end)
 
     it("selected expanded branch: checkout of the branch, collapse, hide — no commit diff / examine", function()

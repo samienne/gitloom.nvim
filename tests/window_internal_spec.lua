@@ -330,10 +330,69 @@ describe("window._internal working-tree splice (§3.3/§4.2)", function()
         assert.same({ "untracked", "unstaged", "staged", "real" }, kinds)
     end)
 
-    it("returns 'clean' and splices nothing when the tree is clean", function()
+    it("splices the single clean node above HEAD when the tree is clean (default)", function()
+        local repo, head = repo_at_head()
+        local ctx = new_ctx(repo)
+        assert.equals("ok", internal.apply_worktree(ctx, state(0, 0, 0)))
+        assert.equals(1, #ctx.worktree_commits)
+        assert.equals(2, #repo.order)
+        local v = repo.order[1].commit
+        assert.equals("clean", v.virtual)
+        assert.equals("0000000000000000000000000000000000000003", v.hash)
+        assert.equals(head, v.parents[1])
+        assert.equals(v, head.children[1])
+        assert.equals(v, repo.commits[v.hash])
+        assert.equals(head, repo.order[2].commit)
+    end)
+
+    it("working_tree = 'dirty' splices nothing on a clean tree", function()
+        local repo = repo_at_head()
+        local ctx = new_ctx(repo, { opts = { working_tree = "dirty" } })
+        assert.equals("clean", internal.apply_worktree(ctx, state(0, 0, 0)))
+        assert.equals(0, #ctx.worktree_commits)
+        assert.equals(1, #repo.order)
+    end)
+
+    it("working_tree = 'dirty' still splices the change nodes", function()
+        local repo = repo_at_head()
+        local ctx = new_ctx(repo, { opts = { working_tree = "dirty" } })
+        assert.equals("ok", internal.apply_worktree(ctx, state(0, 2, 0)))
+        assert.equals(1, #ctx.worktree_commits)
+        assert.equals("unstaged", repo.order[1].commit.virtual)
+    end)
+
+    it("never shows the clean node together with a change node", function()
         local repo = repo_at_head()
         local ctx = new_ctx(repo)
-        assert.equals("clean", internal.apply_worktree(ctx, state(0, 0, 0)))
+        internal.apply_worktree(ctx, state(1, 0, 1))
+        for _, it in ipairs(repo.order) do assert.is_true(it.commit.virtual ~= "clean") end
+    end)
+
+    it("swaps clean <-> dirty on re-apply (the §3.4 refresh)", function()
+        local repo, head = repo_at_head()
+        local ctx = new_ctx(repo)
+        internal.apply_worktree(ctx, state(0, 0, 0))
+        assert.equals("clean", repo.order[1].commit.virtual)
+        internal.apply_worktree(ctx, state(1, 1, 0)) -- the tree turned dirty
+        local kinds = {}
+        for _, it in ipairs(repo.order) do kinds[#kinds + 1] = it.commit.virtual or "real" end
+        assert.same({ "unstaged", "staged", "real" }, kinds)
+        assert.is_nil(repo.commits["0000000000000000000000000000000000000003"])
+        internal.apply_worktree(ctx, state(0, 0, 0)) -- and clean again
+        kinds = {}
+        for _, it in ipairs(repo.order) do kinds[#kinds + 1] = it.commit.virtual or "real" end
+        assert.same({ "clean", "real" }, kinds)
+        assert.equals(1, #head.children) -- only the clean node hangs off HEAD
+    end)
+
+    it("splices nothing (not even the clean node) when HEAD is unborn", function()
+        local repo = repo_at_head()
+        local ctx = new_ctx(repo)
+        -- An unborn HEAD resolves no hash (§3.3): no commit to stand on.
+        assert.equals("clean", internal.apply_worktree(ctx,
+            { head_hash = nil, status = { staged = 0, unstaged = 0, untracked = 1 } }))
+        assert.equals("clean", internal.apply_worktree(ctx,
+            { head_hash = nil, status = { staged = 0, unstaged = 0, untracked = 0 } }))
         assert.equals(0, #ctx.worktree_commits)
         assert.equals(1, #repo.order)
     end)

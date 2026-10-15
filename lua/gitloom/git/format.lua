@@ -14,7 +14,8 @@ local trim_ws = util.trim_ws
 local M = {}
 
 --- The graph-row label for a working-tree virtual commit (§4.2): a synthesized
---- subject (the model carries no message), with the file counts from §3.3.
+--- subject (the model carries no message), with the file counts from §3.3; the
+--- clean node reads `Working tree · clean` (§5.3).
 ---@param commit Commit
 ---@return string
 function M.worktree_label(commit)
@@ -25,6 +26,8 @@ function M.worktree_label(commit)
         return "Staged changes · " .. files
     elseif commit.virtual == "untracked" then
         return "Untracked files · " .. files
+    elseif commit.virtual == "clean" then
+        return "Working tree · clean"
     end
     return "Unstaged changes · " .. files
 end
@@ -273,7 +276,7 @@ function M.format_range_detail(commits, palette)
 end
 
 --- Metadata rows for the working-tree commit view (spec §11.8): a short title
---- naming the state (staged / unstaged / untracked). There is no
+--- naming the state (staged / unstaged / untracked / clean). There is no
 --- hash/author/committer/parent — the per-file counts come from the diffstat
 --- (§11.4) below. Pure.
 ---@param commit Commit   a virtual commit (commit.virtual + commit.wt)
@@ -286,6 +289,15 @@ function M.format_worktree_detail(commit, palette)
     if commit.virtual == "staged" then
         rows[#rows + 1] = highlight_text("Staged changes", palette.author)
         rows[#rows + 1] = highlight_text("index vs HEAD", palette.date)
+    elseif commit.virtual == "clean" then
+        -- No diff below it (§11.8): the header says so itself, `no changes` where
+        -- the diffstat would be. HEAD is the node's parent (never stacked).
+        local head = (commit.parents or {})[1]
+        local short = type(head) == "table" and head.hash and head.hash:sub(1, 7) or ""
+        rows[#rows + 1] = highlight_text("Working tree clean", palette.author)
+        rows[#rows + 1] = highlight_text("matches HEAD " .. short, palette.date)
+        rows[#rows + 1] = highlight_text("")
+        rows[#rows + 1] = highlight_text("no changes", palette.date)
     elseif commit.virtual == "untracked" then
         local n = wt.changed or 0
         rows[#rows + 1] = highlight_text("Untracked files", palette.author)

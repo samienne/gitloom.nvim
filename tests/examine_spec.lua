@@ -265,7 +265,19 @@ describe("palette entries for examine (§17, §10.4.2)", function()
         assert.same({ "diff", "checkout", "checkout_examine" }, ids(palette.row_entries(row, true)))
         assert.same({ "checkout" }, ids(palette.row_entries(row, false)))
         local v = { kind = "plain", commit = { hash = A, refs = {}, virtual = "untracked" } }
-        assert.same({ "diff" }, ids(palette.row_entries(v, true)))
+        assert.same({ "diff", "examine_worktree" }, ids(palette.row_entries(v, true)))
+    end)
+
+    it("every working-tree row, clean included, offers Examine working tree (§10.4.2)", function()
+        for _, kind in ipairs({ "staged", "unstaged", "untracked", "clean" }) do
+            local v = { kind = "plain", commit = { hash = A, refs = {}, virtual = kind } }
+            local e = palette.row_entries(v, true, B)
+            assert.same({ "diff", "examine_worktree" }, ids(e), kind)
+            assert.equals("Examine working tree", e[2].label)
+            assert.equals("examine_worktree", e[2].op)
+            -- no provider: neither entry
+            assert.same({}, ids(palette.row_entries(v, false, B)), kind)
+        end
     end)
 
     it("HEAD's row offers Examine instead of Checkout & examine (cached head hash)", function()

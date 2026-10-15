@@ -559,11 +559,15 @@ local diff_contexts = git.diff_contexts
 
 local format_diffstat = git.format_diffstat
 
--- Reserved sentinel hashes for the working-tree virtual commits (§4.2): values
--- git never produces for a real object, so every hash-keyed path keeps working.
-local WORKTREE_UNSTAGED_HASH = "0000000000000000000000000000000000000000"
-local WORKTREE_STAGED_HASH = "0000000000000000000000000000000000000001"
-local WORKTREE_UNTRACKED_HASH = "0000000000000000000000000000000000000002"
+-- Reserved sentinel hashes for the working-tree virtual commits (§4.2), keyed by
+-- `Commit.virtual`: values git never produces for a real object, so every
+-- hash-keyed path keeps working. One table, not four locals (the 200-local limit).
+local WORKTREE_HASH = {
+    unstaged = "0000000000000000000000000000000000000000",
+    staged = "0000000000000000000000000000000000000001",
+    untracked = "0000000000000000000000000000000000000002",
+    clean = "0000000000000000000000000000000000000003",
+}
 
 -- Working-tree I/O (state + diffs, §3.3) now lives in gitloom.git.fetch.
 local fetch_worktree_state = git.fetch_worktree_state
@@ -1378,6 +1382,12 @@ local function open_commit_view(opts, commit, range, root)
             end
             return { meta = nil, diff = res.out }
         end)
+    elseif commit and commit.virtual == "clean" then
+        -- The clean node (§11.8) has no diff: no git is spawned, the view is the
+        -- synthesized header alone (format_worktree_detail's `no changes`).
+        local future, promise = make_future()
+        promise.resolve({ meta = nil, diff = nil })
+        fetched = future
     elseif commit and commit.virtual then
         -- Working-tree commit view (§11.8): the node's own diff (staged = index
         -- vs HEAD; unstaged = tracked working tree vs index; untracked = the
@@ -1481,7 +1491,7 @@ end
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field lane_label_colors? boolean  ref labels in their node's lane colour (default true); §6
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
----@field working_tree? boolean  show uncommitted changes as virtual commits; §3.3/§4.2
+---@field working_tree? boolean|"dirty"  the working-tree row above HEAD: true = always (a clean node on a clean tree), "dirty" = only with changes, false = never; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
 ---@field pin_upstream? boolean  a pinned local branch also pins its remote counterparts implicitly (default true); §10.6
 ---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
@@ -1500,7 +1510,7 @@ end
 -- sibling dispatch resolves at call time (no definition-order coupling). All the
 -- module-level deps they use (order_commits, fetch_rev_order, get_or_create_commit,
 -- diff_ref_tips, add_ref, reachable_hashes, range_endpoints, item_lines, the
--- WORKTREE_*_HASH / SORT_MODES constants, make_future) are declared above.
+-- WORKTREE_HASH / SORT_MODES constants, make_future) are declared above.
 local GRAPH_HELPERS = {}
 
 -- The OrderItem for a DisplayNode (by hash), or nil when packed into a marker
@@ -1953,20 +1963,28 @@ end
 GRAPH_HELPERS.clear_worktree_nodes = clear_worktree_nodes
 
 -- Rebuild the working-tree virtual commits (§3.3/§4.2) from a fetched state,
--- splicing untracked → unstaged → staged above HEAD. Returns the status string.
+-- splicing untracked → unstaged → staged above HEAD — or, on a clean tree, the
+-- single clean node (unless `working_tree = "dirty"`). Returns the status string:
+-- "off" | "clean" (nothing spliced) | "moved" (HEAD left the model) | "ok".
 local function apply_worktree(ctx, state)
     local repo, opts = ctx.repo, ctx.opts
     ctx:clear_worktree_nodes()
     if opts.working_tree == false then return "off" end
     ctx.worktree_head = state and state.head_hash
     local st = state and state.status
+    -- No status or an unborn HEAD (no commit to stand on): no node, not even clean.
     if not (st and ctx.worktree_head) then return "clean" end
     local anchor = repo.commits[ctx.worktree_head]
     if not anchor then return "moved" end -- history advanced past the snapshot
-    local want_staged = st.staged > 0
-    local want_unstaged = st.unstaged > 0
-    local want_untracked = st.untracked > 0
-    if not (want_staged or want_unstaged or want_untracked) then return "clean" end
+    local kinds = {}
+    if st.staged > 0 then kinds[#kinds + 1] = { "staged", st.staged } end
+    if st.unstaged > 0 then kinds[#kinds + 1] = { "unstaged", st.unstaged } end
+    if st.untracked > 0 then kinds[#kinds + 1] = { "untracked", st.untracked } end
+    if #kinds == 0 then
+        -- A clean tree: the clean node stands in for the change nodes (§3.3).
+        if opts.working_tree == "dirty" then return "clean" end
+        kinds[1] = { "clean", 0 }
+    end
     local ai
     for i, it in ipairs(repo.order) do
         if it.commit == anchor then ai = i; break end
@@ -1975,19 +1993,17 @@ local function apply_worktree(ctx, state)
     -- Build bottom-up (parent first); new_items ends newest-first for the splice.
     local below = anchor
     local new_items = {}
-    local function make(kind, wt, hash)
+    for _, k in ipairs(kinds) do
+        local kind = k[1]
         ---@type Commit
-        local v = { hash = hash, virtual = kind, parents = { below },
-            children = {}, refs = {}, wt = wt }
+        local v = { hash = WORKTREE_HASH[kind], virtual = kind, parents = { below },
+            children = {}, refs = {}, wt = { changed = k[2] } }
         table.insert(below.children, v)
         below = v
         ctx.worktree_commits[#ctx.worktree_commits + 1] = v
-        repo.commits[hash] = v
+        repo.commits[v.hash] = v
         table.insert(new_items, 1, { type = "commit", commit = v, columns = {} })
     end
-    if want_staged then make("staged", { changed = st.staged }, WORKTREE_STAGED_HASH) end
-    if want_unstaged then make("unstaged", { changed = st.unstaged }, WORKTREE_UNSTAGED_HASH) end
-    if want_untracked then make("untracked", { changed = st.untracked }, WORKTREE_UNTRACKED_HASH) end
     for k = #new_items, 1, -1 do
         table.insert(repo.order, ai, new_items[k])
     end
@@ -2622,6 +2638,16 @@ GRAPH_HELPERS.palette = function(ctx)
             checkout(e.checkout)
         elseif op == "checkout_examine" or op == "examine" then
             ctx:examine(e.commit, e.commit)
+        elseif op == "examine_worktree" then
+            -- §10.4.2: the working tree vs HEAD (from the cached refs, else the
+            -- stack's anchor) — nothing checked out, stashed or recorded.
+            local head = repo.commits[selectm.head_target(repo.refs) or ""]
+            if not head then
+                head = e.commit
+                while head and head.virtual do head = (head.parents or {})[1] end
+            end
+            local open = opts.diff and opts.diff.open
+            if open then open(git.worktree_examine_range(head, repo.root)) end
         elseif op == "fast_forward" or op == "reset_branch" or op == "checkout_ff"
             or op == "checkout_reset" then
             ctx:branch_sync(op, e.sync)
@@ -4027,8 +4053,8 @@ local function schedule_cone_update(ctx)
 end
 GRAPH_HELPERS.schedule_cone_update = schedule_cone_update
 
--- Working-tree refresh triggers (§3.4): a buffer write or regaining focus
--- re-reads the dirty state, debounced so rapid events coalesce into one git read.
+-- Working-tree refresh triggers (§3.4): a buffer write, regaining focus, a `:!`
+-- command (ShellCmdPost) or leaving a terminal (TermLeave) re-reads the state, debounced so rapid events coalesce into one git read.
 -- Skipped while a commit selection is active (§13) so a background write never
 -- yanks the selection out from under the user.
 local WT_DEBOUNCE_MS = 200
@@ -4113,6 +4139,10 @@ local function refresh_worktree(ctx, silent)
         local keep
         local ok, pos = pcall(vim.api.nvim_win_get_cursor, hw)
         if ok then keep = ctx:cursor_hash(pos[1]) end
+        -- A cursor on a working-tree node follows the stack, not the sentinel: a
+        -- clean <-> dirty swap replaces the nodes, so re-home it on the topmost one
+        -- (§3.4). The stack is built bottom-up, so the topmost is the last.
+        local on_wt = keep and ctx.repo.commits[keep] and ctx.repo.commits[keep].virtual
         -- Save the full view (topline AND topfill) so an auto-refresh (FocusGained /
         -- BufWritePost) doesn't jitter the view: `reflow` re-renders the buffer, which
         -- resets the virtual-line sub-scroll (`topfill` -> 0, a ~1-line jump); restoring
@@ -4120,6 +4150,10 @@ local function refresh_worktree(ctx, silent)
         -- row actually shifted (same discipline as `resync`).
         local vok, view = pcall(vim.api.nvim_win_call, hw, vim.fn.winsaveview)
         local res = ctx:apply_worktree(state)
+        if on_wt then
+            local top = ctx.worktree_commits[#ctx.worktree_commits]
+            keep = top and top.hash or ctx.worktree_head
+        end
         ctx:reflow()
         ctx:update_footer()
         if vok and view then pcall(vim.api.nvim_win_call, hw, function() vim.fn.winrestview(view) end) end
@@ -5014,9 +5048,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 util.open_trace("sort", { mode = SORT_MODES[sort_mode_index]
                     and SORT_MODES[sort_mode_index].name, ms = util.open_ms(ctx.open_tsort or ctx.open_t0 or 0) })
                 -- Working-tree virtual commits (§3.3/§4.2): with HEAD now in the
-                -- model, read the dirty state and splice the staged/unstaged/
-                -- untracked nodes above HEAD before the projection. Gated by
-                -- working_tree; a clean tree is a no-op. Chained so the reflow
+                -- model, read the working-tree state and splice the staged/
+                -- unstaged/untracked nodes — or the clean node — above HEAD before
+                -- the projection. Gated by working_tree. Chained so the reflow
                 -- below projects them.
                 if opts.working_tree == false then return nil end
                 return fetch_worktree_state()
@@ -5226,11 +5260,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- The working-tree refresh debounce generation (read by the module-level
         -- schedule_wt_refresh, §3.4).
         ctx.wt_gen = 0
-        vim.api.nvim_create_autocmd("BufWritePost", {
-            group = group,
-            callback = function() ctx:schedule_wt_refresh() end,
-        })
-        vim.api.nvim_create_autocmd("FocusGained", {
+        -- A write, regaining focus, a `:!` command and leaving a terminal's insert
+        -- mode (the last two catch `git add` / `git stash` from inside Neovim with
+        -- no write, which would leave the always-shown row stale — §3.4).
+        vim.api.nvim_create_autocmd({ "BufWritePost", "FocusGained", "ShellCmdPost", "TermLeave" }, {
             group = group,
             callback = function() ctx:schedule_wt_refresh() end,
         })

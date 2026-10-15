@@ -97,11 +97,19 @@ end
 --- member's refs, so a head is ranked by the best pinned ref anywhere in its region.
 --- An attached `HEAD` ref is keyed `HEAD`, which the pin list never holds while HEAD
 --- is attached (§10.6), so it ranks nothing; a detached one does when pinned.
+--- A §4.2 working-tree node (`virtual`, no refs) is ranked as the first real commit
+--- down its first parents — the HEAD commit the stack stands on — so the ◌ lane
+--- continues into HEAD in HEAD's branch colour.
 ---@param commit table               a Commit or DisplayNode
 ---@param pin_rank table<string, integer>?  ref id → rank (1 = highest priority)
 ---@return integer?
 function M.commit_rank(commit, pin_rank)
     if not pin_rank or not commit then return nil end
+    -- A §4.2 working-tree node ranks as the HEAD commit it stands on (spec §4.2
+    -- "Layout identity follows HEAD"): its lane continues into HEAD instead of
+    -- ending there at a pinned-tip birth.
+    while commit and commit.virtual do commit = (commit.parents or {})[1] end
+    if not commit then return nil end
     local best
     for _, ref in ipairs(commit.refs or {}) do
         local r = pin_rank[ref_id(ref)]

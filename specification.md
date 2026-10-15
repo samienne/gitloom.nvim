@@ -161,7 +161,8 @@ persistent view.
   arrives; the window must not block on git completing.
 - **Initial focus and position retention.** When the graph finishes loading it
   moves the cursor to **HEAD** (the current branch's commit, or the checked-out
-  commit itself on a detached HEAD, §3.2) and **centers** the view on that row
+  commit itself on a detached HEAD, §3.2) — HEAD's own row, never the §4.2
+  working-tree row always drawn above it — and **centers** the view on that row
   when possible — clamped at the top/bottom of the graph (like `zz`). HEAD is
   always an anchor (§10.6), so attached and detached focus alike; only a
   repository with no HEAD commit (empty) leaves the cursor at the top. The cursor's row is then **remembered per
@@ -316,9 +317,13 @@ worktrees do not; that is the general case §10.2's total owner coverage handles
 
 ### 3.3 Working-tree state
 
-When the working tree is dirty, gitloom shows the uncommitted changes as up to
-three **virtual commits** (§4.2) stacked on top of HEAD — the live state the user
-is building. gitloom **displays** the index and working tree; it never stages,
+gitloom always shows the **working tree** as a row directly on top of HEAD — the
+live state the user is building, and the place a selection or an examine can
+start from to land on the real files (§10.4.2, §13.5). When the tree is dirty the
+uncommitted changes appear as up to three **virtual commits** (§4.2) stacked on
+top of HEAD; when it is **clean** a single **clean** virtual commit stands there
+instead, so the row never disappears and HEAD always has the working tree drawn
+above it. gitloom **displays** the index and working tree; it never stages,
 unstages, or commits by itself (§9). The operations that change them are the
 ones the user explicitly picks: **checkout** (§10.4.1), which only moves HEAD and
 the working tree; **checkout & examine** (§10.4.2), which on a dirty tree stashes
@@ -340,12 +345,21 @@ The state is read with porcelain queries that run **after** the commit stream
 
 A node is materialised **only when it has content**: a clean index produces no
 staged node, no tracked working-tree changes produce no unstaged node, and no
-untracked files produce no untracked node, so the count of virtual commits is 0,
+untracked files produce no untracked node, so the count of change nodes is 0,
 1, 2, or 3. The untracked files are their own node — separate from the tracked
 unstaged changes — stacked newest-first as untracked → unstaged → staged → HEAD.
+When the count is **0** (all three queries came back empty: the tree is clean)
+the **clean** node is materialised in their place, so the working-tree stack
+always has 1, 2 or 3 nodes. The clean node is never shown together with a change
+node. Dirtiness is decided by the same `git status --porcelain` read that already
+counts the three kinds (§3.4), spawned like every git call through
+`fetch.lua`'s `spawn`; a clean tree costs that one read and no diff.
 
-The reads are gated by the `working_tree` option (§8, default on) and are skipped
-entirely when it is off or when HEAD is unborn (no commits yet). They never block
+The reads are gated by the `working_tree` option (§8, default `true`) and are
+skipped entirely when it is off or when HEAD is unborn (no commits yet — there is
+no HEAD to stand on, so no clean node either). With `working_tree = "dirty"` the
+clean node is not materialised (the stack may be empty, as before this row was
+always shown). They never block
 the graph: the main view streams and renders first; the virtual commits are added
 when their queries resolve.
 
@@ -358,8 +372,16 @@ are distinguished, and they are independent:
   index or working tree changes (the user edits, stages, or unstages). The set of
   real commits is unchanged. This **is** supported: a debounced refresh re-runs
   the §3.3 queries and rebuilds the virtual commits on the current HEAD anchor.
-  It is triggered on buffer writes and on focus regained, and it first re-reads
-  HEAD's hash so it can detect when history has moved out from under it.
+  It is triggered on buffer writes, on focus regained, after a `:!` shell
+  command (`ShellCmdPost`) and on leaving a terminal's insert mode (`TermLeave`)
+  — the last two catch `git add` / `git stash` / edits made from inside Neovim
+  without a write, which would otherwise leave the always-visible row (a clean
+  label especially) stale. It first re-reads
+  HEAD's hash so it can detect when history has moved out from under it. A
+  refresh that turns a clean tree dirty (or back) **replaces** the clean node by
+  the change nodes (or the reverse); a cursor that was on any working-tree node
+  stays on the **topmost** working-tree node, since the sentinel hash it was
+  remembered by may no longer exist (§4.2).
 - **History refresh** — re-reading the commit DAG and refs because real history
   changed (`commit`, `fetch`, `rebase`, a `checkout` that moves HEAD). This is
   **supported** in place via *resync* (the `R` key, §2): gitloom re-reads the
@@ -444,15 +466,21 @@ The working-tree state (§3.3) enters the model as **virtual commits** — synth
 `Commit` nodes that are not part of the real DAG:
 
 ```
-Commit.virtual = "staged" | "unstaged" | "untracked" | nil   -- nil for a real commit
+Commit.virtual = "staged" | "unstaged" | "untracked" | "clean" | nil   -- nil for a real commit
 ```
+
+The **clean** node stands for a working tree with no changes (§3.3). It is a
+virtual commit like the other three in every rule below — sentinel hash, one
+parent (always the HEAD commit, since it is never stacked with a change node), no
+children, no refs, placed directly above HEAD — and it carries no diff: its
+content is by definition HEAD's.
 
 A virtual commit:
 
 - carries a reserved **sentinel hash** (a value git never produces for a real
   object), so every hash-keyed path (the commit table, cursor memory, navigation)
-  keeps working unchanged. The staged, unstaged, and untracked nodes use distinct
-  sentinels;
+  keeps working unchanged. The staged, unstaged, untracked and clean nodes use
+  distinct sentinels;
 - has **one parent** and **no children**, so it is a tip (§5.3). Each node's
   parent is the next existing node down the stack: the untracked node's parent is
   the unstaged node, else the staged node, else the HEAD commit; the unstaged
@@ -476,9 +504,27 @@ which descends toward ancestors) touches it: its reachability signature is
 always shown" behaviour, and it falls out of the existing view model with no new
 owner kind.
 
-Virtual commits are present only while the working tree is dirty and the
-`working_tree` option is on; the working-tree refresh (§3.4) adds, updates, and
-removes them as the index and working tree change.
+Virtual commits are **not** real commits for commit search (§15) or the filter
+search (§16): neither matches, lists nor previews them.
+
+**Layout identity follows HEAD.** The empty signature governs *attribution* only
+(display mode, §10.2). For *layout* the working-tree stack is drawn as HEAD's own
+continuation: a working-tree node's **pin rank** (§5 "Lane identity") is the rank
+of the HEAD commit it stands on (the current branch's rank, or the `HEAD` owner's
+when detached), and for a **reserved column** (§10.6.2) it counts as attributed to
+HEAD commit's highest-priority reserved owner. So the lane born at the topmost
+working-tree node carries HEAD's rank and colour into HEAD's row — it **ties**
+there, so the "birth at a pinned tip" overrule (§5) does not fire and the lane
+simply continues — and it is born in HEAD's reserved column when there is one.
+Without this rule the stack would sit on an unranked lane that ends at HEAD
+(HEAD's branch is pinned by default, §10.6), in an unrelated free-list colour and,
+under a reservation, bending in from another column. The rule changes no
+invariant: it only feeds the existing rank and reservation inputs.
+
+The stack is present whenever the `working_tree` option is on and HEAD is born:
+the change nodes while the tree is dirty, the clean node while it is clean
+(§3.3; `working_tree = "dirty"` drops the clean node). The working-tree refresh
+(§3.4) adds, updates, swaps and removes them as the index and working tree change.
 
 ## 5. Graph layout
 
@@ -552,7 +598,10 @@ lane** of rank `k` (§5.5 — born at a counterpart tip, below; its colour is sl
 counterpart variant): its **counterpart rank** `k` orders it among the unranked
 lanes only, never against a ranked one. A continuation carries its lane's rank (and
 counterpart rank) unchanged, exactly as it carries the `id` and the `color`. Which lane continues is decided
-**semantically**, from the DAG, the row order and the pin ranks alone.
+**semantically**, from the DAG, the row order and the pin ranks alone. A §4.2
+working-tree node has no refs but **ranks as the HEAD commit it stands on** (§4.2
+"Layout identity follows HEAD"), so the working-tree lane continues into HEAD in
+HEAD's branch colour rather than ending there.
 
 **Which lane a commit's first parent continues.** Among the incoming Lanes, in
 tiers — each tier decides only between the lanes the previous one left tied:
@@ -888,7 +937,7 @@ node-less junction, §10.4). Commit markers:
 | `◎`    | root commit (no parents) |
 | `◉`    | tip commit (no children) |
 | `○`    | ordinary commit |
-| `◌`    | working-tree commit (a virtual staged/unstaged/untracked node, §4.2) |
+| `◌`    | working-tree commit (a virtual staged/unstaged/untracked/clean node, §4.2), in the HEAD colour |
 | `◍`    | collapsed head (a contracted region, §10.3) |
 | merge icon | merge commit when merges are folded onto the line and `icons.merge` is set |
 | `●`    | the commit **HEAD** points at, attached or detached (`icons.head`), in the HEAD colour |
@@ -906,6 +955,17 @@ out-of-cone dimming (§12) applies to it as to any node. The mirror transform
 (§5.4), the context panes (§6.2) and the commit-search snippet (§15.3) mark it
 the same way. Setting `icons.head = ""` turns the marker off (the ordinary glyph
 and lane colour).
+
+**The working-tree node** (§4.2) is drawn `◌` in the **HEAD colour** too — only
+the glyph cell, its lane keeps HEAD's branch colour (§4.2 "Layout identity follows
+HEAD"). Since the stack is always present (§3.3), every graph shows a HEAD-coloured
+`◌` directly above the HEAD-coloured `●` and joined to it, which is what makes
+HEAD stand out at a glance even on a clean tree. Its row label is synthesized (the
+model carries no message): `Staged changes · N files`, `Unstaged changes · N
+files`, `Untracked files · N files`, and for the clean node `Working tree ·
+clean`, drawn in the date colour (dimmer than a subject) so a clean row reads as
+state, not as a commit. Date and author cells are blank. With `icons.head = ""`
+the `◌` takes its lane colour.
 
 ### 5.4 Mirroring
 
@@ -2066,11 +2126,13 @@ Endpoint     = Commit | "index" | "worktree"
   commit view's action-label text (default `▶ Open diff (diffview)`). Override
   `open`/`label` to use a different diff plugin; set `open` to `nil`/`false` to
   disable the integration (no action label, `D` is a no-op).
-- `working_tree` — show uncommitted changes as virtual commits on top of HEAD
-  (§3.3, §4.2). **Default true.** When on, a dirty working tree adds up to three
-  `◌` nodes (staged / unstaged / untracked) that update on the working-tree
-  refresh (§3.4); when off, the working tree is never read and no virtual commits
-  appear.
+- `working_tree` — show the working tree as virtual commits on top of HEAD
+  (§3.3, §4.2): `true` | `"dirty"` | `false`. **Default `true`.** With `true` the
+  working-tree row is **always** shown: a dirty tree adds up to three `◌` nodes
+  (staged / unstaged / untracked), a clean one a single `◌ Working tree · clean`
+  node; they update on the working-tree refresh (§3.4). `"dirty"` shows only the
+  change nodes (no clean node — the pre-always behaviour). `false` never reads the
+  working tree and no virtual commits appear.
 - `scrolloff` — window-local `'scrolloff'` applied to the graph and commit-view
   windows: the number of context rows kept above/below the cursor (**default
   `10`**). Set explicitly so the windows don't inherit the global value. Note: a
@@ -2376,6 +2438,11 @@ commit the trunk reaches (the mainline) is not collapsible.
   virtual commit gets no checkout entry; open diff and checkout & examine appear
   only when a diff provider is configured (§11.5). There is no examine entry: that
   is `<CR>`.
+  - **working-tree row** (a §4.2 node, clean or not) — **Examine working tree**
+    (§10.4.2) and **open diff** (§11.8), both only with a diff provider; on the
+    clean node both open the same empty working-tree-vs-HEAD range. Nothing else: no checkout, checkout & examine, branch
+    sync, expand, collapse, hide or pin — the row has no ref, no owner and no
+    commit object. The globals (fetch, pull, Return, …, §17) are unaffected.
 - `<CR>` — **examine**: the commit view (§11) of the row's commit, directly (§11).
 
 On a packed line, `h`/`l` selects among the markers (all of them, regardless of
@@ -2528,6 +2595,22 @@ node is likewise labelled **Examine selection**, since it checks nothing out
 either. (Should HEAD have moved since the refs were read, a Checkout & examine
 whose newer end turns out to be HEAD's commit behaves as Examine too.)
 
+**Examine working tree (a working-tree row).** The cheapest case: the real files
+are already on disk, so nothing is checked out, nothing is stashed, no examine
+state is recorded and there is no Return. On any §4.2 row it opens one single-rev `DiffRange` — `rev` = HEAD's commit hash (from the cached
+refs), `from` = HEAD, `to` = `"worktree"` — i.e. **every** uncommitted change
+(staged and unstaged together; untracked as the provider lists them) against
+HEAD, with the right side the files on disk so LSP attaches. It is the same
+range whichever stack row the cursor is on: the entry examines *the working
+tree*, not one node's slice of it (that per-node slice is **open diff**, §11.8).
+On the **clean** node the entry is the same, and so is the range: the working
+tree against HEAD, which is **empty** — the provider opens with no files. That is
+the honest answer for "the working tree" when nothing is uncommitted, and it is
+deliberately *not* rerouted to HEAD's Examine (that entry is on HEAD's own row). A
+§13 selection whose newer end is any working-tree node — the clean one included —
+is **Examine selection** as already described: `<older>`'s first parent against
+the working tree.
+
 **A dirty tree.** Before checking out, gitloom reads `git status --porcelain`.
 If there are staged, unstaged or untracked changes it asks (`vim.ui.select`):
 **Stash N changes and continue** / **Cancel**, where N is the number of changed
@@ -2592,8 +2675,9 @@ time per graph session (shared with the palette's fetch / pull, §17.3).
 **Entry points.** Both are in the command palette (`<C-Space>`, §17). Among the
 row entries (§10.4) **Checkout & examine** follows the checkout entry on a plain
 commit row (the commit context) — **Examine** instead when that row is HEAD's
-commit — never in the branch context (a selected ref or a collapsed head), on a
-§4.2 working-tree row or on a packed-marker line. While a §13 selection is active
+commit — never in the branch context (a selected ref or a collapsed head) or on
+a packed-marker line. A §4.2 working-tree row gets **Examine working tree**
+(above) and never Checkout & examine. While a §13 selection is active
 the selection's entries replace the row's and lead with **Checkout & examine
 selection** (**Examine selection** when its newer end is HEAD's commit or a
 working-tree node; §17.1). Both appear only when a diff provider is configured
@@ -2848,7 +2932,10 @@ reserved**.
   so a commit may belong to several reserved branches at once. The column is
   chosen deterministically: the **highest-priority reserved owner in the
   signature** — the earliest such entry in the pin list. This is where pin-list
-  order decides *placement*; lane identity (§5) is where it decides colour.
+  order decides *placement*; lane identity (§5) is where it decides colour. A §4.2
+  working-tree node, whose signature is empty, is placed as if attributed to the
+  HEAD commit's highest-priority reserved owner (§4.2 "Layout identity follows
+  HEAD"), so the stack is born in HEAD's reserved column instead of bending in.
 - **The context panes are exempt.** Neither the footer nor the header honours
   reservations. The footer is a *seeded* sweep whose seam row must reproduce the
   main view's boundary columns exactly (§6.2), and the header is a direct
@@ -3365,6 +3452,18 @@ Like the rest of the commit view it is strictly read-only (§9): it shows the
 staged/unstaged/untracked diff but offers no way to stage, unstage, or commit
 from it.
 
+**The clean node** has no diff to show. Its commit view is the metadata region
+— the title `Working tree clean` and the line `matches HEAD <short>` (HEAD's
+commit, from the cached refs) — followed by an empty diffstat (`no changes`). No
+git is spawned for it: the clean state is the last working-tree refresh's
+(§3.4), and opening the view does not re-check it. The diff **action label** and
+`D` are kept and open the working tree against HEAD (single rev `<HEAD hash>`,
+`to = "worktree"`) — the same, empty, range as **Examine working tree**
+(§10.4.2) — so the row behaves like every other working-tree row. A **range**
+whose newer end is the clean node (§13.5) is an ordinary working-tree range and
+shows its combined diff as usual — the clean row only contributes its `working`
+line to the range list.
+
 ## 12. Reachability emphasis
 
 The row under the cursor defines a **pivot** commit. gitloom continuously
@@ -3497,7 +3596,10 @@ commits.
 - The **working-tree virtual commits** (§4.2) **are** selectable, but only as the
   **newer** end. A selection may start on one (`V` on a working-tree row) and may
   ascend into one (`k` from HEAD walks into the stack HEAD → staged → unstaged →
-  untracked). This is structural, not a rule the walk has to enforce: a virtual
+  untracked, or HEAD → clean on a clean tree). Because the stack is always
+  present (§3.3), the working tree is always a reachable newer end — on a clean
+  tree too, where `V` on the clean row and `j` down to a commit selects "that
+  commit through the working tree". This is structural, not a rule the walk has to enforce: a virtual
   commit has no children (§4.2), so ascending into one ends there and it can only
   ever be the path's newest member. Everything below it on the path is a real
   commit.
@@ -3584,6 +3686,7 @@ the selection actually reached decides the form:
 | `staged` | `--cached <base>` | `<base>` | `"index"` | `git diff --cached <base>` |
 | `unstaged` | `<base>` | `<base>` | `"worktree"` | `git diff <base>` |
 | `untracked` | `<base>` | `<base>` | `"worktree"` | `git diff <base>` + the synthesized untracked additions (§3.3) |
+| `clean` | `<base>` | `<base>` | `"worktree"` | `git diff <base>` (the working tree equals HEAD, so this is `<base>..HEAD`'s content, on disk) |
 
 The single-rev form is the point, not an implementation detail: a two-rev range
 makes the diff provider build both sides from git blobs, which are read-only and
@@ -3599,6 +3702,9 @@ span does, and the same way *up* the worktree stack:
   is another tree state: the `staged` node is `"index"`, the `unstaged` /
   `untracked` nodes are `"worktree"`. `rev` is then the empty string — the
   provider's own default, working tree vs index. A sentinel hash is never read.
+  When that next node down is HEAD's real commit (the bottom of the stack — e.g.
+  the clean node selected alone) the base is HEAD's hash, as for any real parent;
+  for the clean node the range is then empty.
 
 The **staged** endpoint is the one case that does *not* get on-disk files: its
 head is the index, whose content has no path in the working tree. That is

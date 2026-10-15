@@ -247,3 +247,70 @@ describe("virtual commit row keeps its fan / handover lines (§4.2/§5)", functi
         end
     end
 end)
+
+--- The **clean** node (§3.3/§4.2): the always-shown working-tree row on a clean
+--- tree — its label, its commit-view header, and its ranges (§10.4.2/§11.8/§13.5):
+--- every one is the working tree against HEAD, a single rev, empty by definition.
+describe("the clean working-tree node", function()
+    local git = require("gitloom.git")
+    local SENT = "0000000000000000000000000000000000000003"
+    local function texts(rows)
+        local out = {}
+        for _, r in ipairs(rows) do out[#out + 1] = r.text end
+        return out
+    end
+    local function clean_on(head)
+        local v = C({ hash = SENT, virtual = "clean", parents = { head }, wt = { changed = 0 } })
+        head.children = { v }
+        return v
+    end
+
+    it("labels the row `Working tree · clean` (§5.3)", function()
+        assert.equal("Working tree · clean", worktree_label(C({ virtual = "clean", wt = { changed = 0 } })))
+    end)
+
+    it("headers the commit view `Working tree clean` / `matches HEAD <short>` / `no changes`", function()
+        local head = C({ hash = "abcdef0123456789" })
+        local rows = texts(format_worktree_detail(clean_on(head), {}))
+        assert.equal("Working tree clean", rows[1])
+        assert.equal("matches HEAD abcdef0", rows[2])
+        assert.is_true(vim.tbl_contains(rows, "no changes"))
+    end)
+
+    it("its own range (commit view D) is the working tree vs HEAD, single rev", function()
+        local head = C({ hash = "abcdef0123456789" })
+        local r = commit_range(clean_on(head), "/repo")
+        assert.equal("abcdef0123456789", r.rev)
+        assert.equal(head, r.from)
+        assert.equal("worktree", r.to)
+        assert.equal("/repo", r.root)
+        assert.is_nil(r.untracked)
+    end)
+
+    it("worktree_examine_range is that same range, from HEAD's real commit", function()
+        local head = C({ hash = "abcdef0123456789" })
+        local r = git.worktree_examine_range(head, "/repo")
+        assert.same({ rev = "abcdef0123456789", from = head, to = "worktree", root = "/repo" }, r)
+        -- a raw hash is accepted; an unknown HEAD falls back to the HEAD rev name
+        assert.equal("abc", git.worktree_examine_range("abc").rev)
+        assert.equal("HEAD", git.worktree_examine_range(nil).rev)
+        assert.equal(r.rev, commit_range(clean_on(head), "/repo").rev)
+    end)
+
+    it("as a selection's newer end it is `<older>^` vs the working tree (§13.5)", function()
+        local p = C({ hash = "p000000" })
+        local head = C({ hash = "h000000", parents = { p } })
+        local v = clean_on(head)
+        local r = git.range_endpoints(v, head)
+        assert.equal("p000000", r.rev)
+        assert.equal(p, r.from)
+        assert.equal("worktree", r.to)
+        -- the clean node selected alone is its own (empty) range
+        assert.equal("h000000", git.range_endpoints(v, v).rev)
+        -- Examine selection on it opens the same range, nothing checked out (§10.4.2)
+        local plan = git.examine_plan({ newer = v, older = head })
+        assert.equal("open", plan.kind)
+        assert.equal("p000000", plan.range.rev)
+        assert.is_false(git.needs_checkout(v, "h000000"))
+    end)
+end)

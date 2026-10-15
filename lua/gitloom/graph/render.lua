@@ -708,11 +708,14 @@ function M.get_column_chars(opts, columns, emphasis)
         -- HEAD's node (§5.3): the commit carrying the `head` ref (attached or
         -- detached — a collapsed head aggregates its region's refs, so one folding
         -- HEAD in carries it too) draws `icons.head` in the HEAD colour. A
-        -- working-tree node keeps ◌; a ◍ marker keeps its glyph but takes the colour.
+        -- working-tree node keeps ◌ but takes the HEAD colour too (only the glyph:
+        -- its lane keeps HEAD's branch colour); a ◍ marker keeps its glyph but
+        -- takes the colour. `icons.head = ""` turns both off.
         local head_icon = opts.icons and opts.icons.head
         if head_icon == nil then head_icon = "●" end
         local is_head = is_node and head_icon ~= "" and not track.commit.virtual
             and M.has_head_ref(track.commit)
+        local is_wt = is_node and head_icon ~= "" and track.commit.virtual ~= nil
         -- Colour (and dim state) from the Column's "top" Segment (§5): the
         -- Segment whose edge colours the glyph (a highlighted edge wins, but
         -- only with emphasis — so the picture is unchanged when it is off).
@@ -799,7 +802,7 @@ function M.get_column_chars(opts, columns, emphasis)
             cell_active = not color_seg or seg_hl(color_seg)
         end
         local cell_hl = get_highlight(track_color)
-        if is_head and track.override == nil and opts.palette.head then cell_hl = opts.palette.head end
+        if (is_head or is_wt) and track.override == nil and opts.palette.head then cell_hl = opts.palette.head end
         if not cell_active then cell_hl = M.dim_hl(opts, cell_hl) end
         result = compose({ result, highlight_text(char, cell_hl) })
 
@@ -1237,7 +1240,9 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 rh("", palette.date),
                 rh("", palette.author),
                 graph_item,
-                rh(git.worktree_label(item.commit), palette.message),
+                -- The clean row reads as state, not a commit: the dimmer date colour.
+                rh(git.worktree_label(item.commit),
+                    item.commit.virtual == "clean" and palette.date or palette.message),
             },
         }
     end

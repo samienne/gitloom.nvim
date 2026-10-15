@@ -45,14 +45,18 @@ function commit_shape(commit)
     -- Working-tree virtual commits (§4.2): the endpoint is a tree state, not a
     -- commit (§11.5). Staged is the index vs HEAD; unstaged the working tree vs
     -- HEAD. The untracked node has no git-tracked counterpart, so it reuses the
-    -- unstaged node's working-tree range (§11.8). The exact provider invocation
-    -- (rev) is a verify-against-diffview point (spec §11.5 open).
+    -- unstaged node's working-tree range (§11.8). The clean node has no diff of
+    -- its own: it is the working tree vs HEAD (its parent), which is empty — the
+    -- same range as Examine working tree (§10.4.2/§11.8). The exact provider
+    -- invocation (rev) is a verify-against-diffview point (spec §11.5 open).
     if commit.virtual == "staged" then
         return { rev = "--cached", from = (commit.parents or {})[1], to = "index" }
     elseif commit.virtual == "untracked" then
         return { rev = "HEAD", from = "index", to = "worktree", untracked = true }
     elseif commit.virtual == "unstaged" then
         return { rev = "HEAD", from = "index", to = "worktree" }
+    elseif commit.virtual == "clean" then
+        return M.worktree_examine_range((commit.parents or {})[1])
     end
     local parents = commit.parents or {}
     if #parents == 0 then
@@ -62,8 +66,8 @@ function commit_shape(commit)
 end
 
 --- The tree state a working-tree virtual commit (§4.2) denotes as a range
---- endpoint: the staged node is the **index**, the unstaged and untracked nodes
---- are the **working tree**. `nil` for a real commit. This is the whole reason a
+--- endpoint: the staged node is the **index**, the unstaged, untracked and clean
+--- nodes are the **working tree**. `nil` for a real commit. This is the whole reason a
 --- virtual endpoint never contributes a rev — its hash is a reserved sentinel,
 --- not a git object (§13.5).
 --- `Commit.parents` may still hold raw hash strings before resolution, so the
@@ -73,7 +77,7 @@ end
 local function tree_state(c)
     if type(c) ~= "table" then return nil end
     if c.virtual == "staged" then return "index" end
-    if c.virtual then return "worktree" end -- unstaged / untracked
+    if c.virtual then return "worktree" end -- unstaged / untracked / clean
     return nil
 end
 
@@ -165,6 +169,21 @@ function M.examine_range(newer, older, root)
     -- `parents` may still hold a raw hash string before resolution.
     local rev = (type(p) == "table" and p.hash) or (type(p) == "string" and p) or M.EMPTY_TREE
     return { rev = rev, from = type(p) == "table" and p or nil, to = "worktree", root = root }
+end
+
+--- The `DiffRange` **Examine working tree** opens on any §4.2 working-tree row
+--- (§10.4.2): a **single** rev — HEAD's commit hash — against the **working
+--- tree**, i.e. every uncommitted change (staged and unstaged together) with the
+--- right side the files on disk. The same range whichever stack row it is run
+--- from; on the clean node it is empty (also that node's commit-view `D`, §11.8).
+--- `head` is HEAD's real commit (from the cached refs, or the stack's anchor) —
+--- never a sentinel; `rev` is `HEAD` itself when it is unknown. Pure.
+---@param head Commit|string|nil  HEAD's commit (a raw hash string is accepted)
+---@param root? string   stamped on the range as `root` (§2.1/§11.5)
+---@return DiffRange
+function M.worktree_examine_range(head, root)
+    local hash = (type(head) == "table" and head.hash) or (type(head) == "string" and head) or "HEAD"
+    return { rev = hash, from = type(head) == "table" and head or nil, to = "worktree", root = root }
 end
 
 --- The argument list the default provider hands diffview (`diffview.open(args)`,

@@ -587,3 +587,80 @@ describe("pin rank (§5)", function()
         end)
     end)
 end)
+
+-- §4.2 "Layout identity follows HEAD": a working-tree node (no refs) ranks as the
+-- HEAD commit it stands on, so the ◌ lane continues into HEAD in HEAD's colour
+-- instead of ending there at a pinned-tip birth in an unrelated free-list colour.
+describe("working-tree node rank (§4.2 layout identity)", function()
+    local WT = "0000000000000000000000000000000000000003"
+
+    -- m3 -> m2 -> m1 (main); f2 -> f1 -> m2 (feature); HEAD at `head_at`,
+    -- optionally with the clean ◌ node (or a two-node dirty stack) spliced above it.
+    local function items_for(head_at, stack)
+        local items = h.dag({ { "m3", { "m2" } }, { "f2", { "f1" } }, { "f1", { "m2" } },
+            { "m2", { "m1" } }, { "m1", {} } })
+        ref(items, "m3", "main")
+        ref(items, "f2", "feature")
+        ref(items, head_at, "HEAD", "head")
+        local below
+        for _, it in ipairs(items) do if it.commit.hash == head_at then below = it.commit end end
+        for i, kind in ipairs(stack or {}) do
+            local v = { hash = WT:sub(1, 39) .. i, virtual = kind, parents = { below },
+                children = {}, refs = {}, wt = { changed = 0 } }
+            table.insert(below.children, v)
+            for k, it in ipairs(items) do
+                if it.commit == below then table.insert(items, k, { type = "commit", commit = v }); break end
+            end
+            below = v
+        end
+        return items
+    end
+
+    it("commit_rank walks a virtual node down to its HEAD commit", function()
+        local items = items_for("m3", { "staged", "unstaged" })
+        local top = items[1].commit
+        assert.equals("unstaged", top.virtual)
+        assert.equals(1, columns.commit_rank(top, { main = 1 }))
+        assert.equals(1, columns.commit_rank(items[2].commit, { main = 1 }))
+        assert.is_nil(columns.commit_rank(top, { feature = 1 }))
+        -- a dangling virtual node (no parent) ranks nothing rather than erroring
+        assert.is_nil(columns.commit_rank({ virtual = "clean", parents = {} }, { main = 1 }))
+    end)
+
+    local CASES = {
+        { name = "HEAD on pinned main", head = "m3", rank = { main = 1 } },
+        { name = "HEAD on unpinned feature", head = "f2", rank = { main = 1 } },
+        { name = "detached HEAD mid-history (pinned)", head = "m2", rank = { HEAD = 1, main = 2 } },
+    }
+    for _, cs in ipairs(CASES) do
+        for _, stack in ipairs({ { "clean" }, { "staged", "unstaged" } }) do
+            it(("%s: the ◌ lane continues into HEAD in HEAD's colour (%s)"):format(cs.name,
+                table.concat(stack, "+")), function()
+                for _, pol in ipairs(POLICIES) do
+                    local plain = columns.layout(opts(STYLES[1].s, pol, cs.rank), items_for(cs.head))
+                    local rows = columns.layout(opts(STYLES[1].s, pol, cs.rank), items_for(cs.head, stack))
+                    local hd = row_of(rows, cs.head).parent_lanes[1]
+                    local vrows = {}
+                    for _, r in ipairs(rows) do
+                        if r.commit and r.commit.virtual then vrows[#vrows + 1] = r end
+                    end
+                    assert.equals(#stack, #vrows, pol)
+                    -- every stack node rides HEAD's lane, in HEAD's colour and rank
+                    for _, r in ipairs(vrows) do
+                        local l = r.parent_lanes[1]
+                        assert.equals(hd.id, l.id, pol)
+                        assert.equals(hd.color, l.color, pol)
+                        assert.equals(hd.rank, l.rank, pol)
+                    end
+                    -- HEAD keeps the colour it has with no stack, and so do the others
+                    for _, c in ipairs({ "m3", "f2", "f1", "m2", "m1" }) do
+                        local a, b = row_of(plain, c), row_of(rows, c)
+                        if a.parent_lanes[1] then
+                            assert.equals(a.parent_lanes[1].color, b.parent_lanes[1].color, pol .. " " .. c)
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)

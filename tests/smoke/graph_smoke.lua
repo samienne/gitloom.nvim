@@ -127,6 +127,32 @@ function M.run()
     -- be inspected -- the listview draws through a decoration provider, and the
     -- buffer lines themselves are empty. Read the projected model instead.
     local sess = require("gitloom.window")._internal.ctx
+    -- §3.3/§2: the working-tree stack (the clean node on a clean tree) always
+    -- stands on HEAD by default, and the open lands the cursor on HEAD's OWN row,
+    -- never on the ◌ row above it.
+    if not sess then
+        fail("no live session after open (window._internal.ctx)")
+    else
+        local head = require("gitloom.graph.select").head_target(sess.repo.refs)
+        local function cursor_commit()
+            local w = focus()
+            return w and sess:cursor_hash(vim.api.nvim_win_get_cursor(w)[1])
+        end
+        -- The splice + the open-time focus land after the stream settles.
+        vim.wait(6000, function()
+            return #(sess.worktree_commits or {}) > 0 and cursor_commit() == head
+        end, 50)
+        local wt = sess.worktree_commits or {}
+        if #wt == 0 then
+            fail("no working-tree row above HEAD (working_tree defaults to true, §3.3)")
+        elseif not (wt[1].parents[1] and wt[1].parents[1].hash == head) then
+            fail("the working-tree stack does not stand on HEAD")
+        end
+        local at = cursor_commit()
+        if at ~= head then
+            fail(("open put the cursor on %s, not HEAD %s (§2)"):format(tostring(at), tostring(head)))
+        end
+    end
     local function collapsed_heads()
         local n = 0
         for _, it in ipairs((sess and sess.repo.display) or {}) do

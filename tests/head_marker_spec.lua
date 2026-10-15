@@ -1,7 +1,7 @@
 --- HEAD's node marker (spec §5.3): the commit HEAD points at — attached or
 --- detached — renders `●` (`icons.head`) in the HEAD colour (`palette.head`)
 --- instead of the shape marker (`○ ◉ ◎` / the merge icon). A working-tree node
---- keeps `◌`; a collapsed `◍` head / labelled junction containing HEAD keeps `◍`
+--- keeps `◌` but takes the HEAD colour (its lane keeps its own); a collapsed `◍` head / labelled junction containing HEAD keeps `◍`
 --- but takes the HEAD colour; out-of-cone dimming still applies; `""` disables.
 --- Driven through the real Phase-2 renderer, `get_column_chars`, on hand-built
 --- cells, plus one end-to-end layout (incl. mirrored).
@@ -77,10 +77,26 @@ describe("HEAD node marker (§5.3)", function()
         assert.equals("M", (draw(o, node_cell(commit({ parents = { {}, {} } })))))
     end)
 
-    it("a working-tree virtual node keeps ◌ (precedence)", function()
-        local g, hl = draw(opts(), node_cell(commit({ virtual = true, refs = { HEAD_ATTACHED } })))
+    it("a working-tree virtual node keeps ◌ (precedence) in the HEAD colour", function()
+        local g, hl = draw(opts(), node_cell(commit({ virtual = "staged", refs = { HEAD_ATTACHED } })))
+        assert.equals("◌", g)
+        assert.equals("HeadHl", hl)
+        -- the clean node (no refs at all) too
+        g, hl = draw(opts(), node_cell(commit({ virtual = "clean" })))
+        assert.equals("◌", g)
+        assert.equals("HeadHl", hl)
+    end)
+
+    it("icons.head = \"\" leaves ◌ in its lane colour", function()
+        local g, hl = draw(opts({ head = "" }), node_cell(commit({ virtual = "clean" })))
         assert.equals("◌", g)
         assert.equals("C0", hl)
+    end)
+
+    it("dims an out-of-cone ◌ like any node (§12)", function()
+        local o = opts()
+        local _, hl = draw(o, node_cell(commit({ virtual = "clean" }), { active = false }), true)
+        assert.equals(render.dim_hl(o, "HeadHl"), hl)
     end)
 
     it("a collapsed head containing HEAD keeps ◍ but takes the HEAD colour", function()

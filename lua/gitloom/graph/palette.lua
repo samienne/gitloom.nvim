@@ -84,7 +84,7 @@ M.COMMANDS = {
         action = function(ctx) ctx:reset_view() end },
 }
 
----@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"examine"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"
+---@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"examine"|"examine_worktree"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"
 
 ---@class PaletteEntry
 ---@field id string              `fetch:origin`, `collapse`, `hide:2`, `key:R`, …
@@ -92,7 +92,8 @@ M.COMMANDS = {
 ---@field key? string            the key that runs the same thing (its hint is in the label)
 ---@field action? fun(ctx: table)  a registry command or a key: run on the session
 ---@field op? PaletteOp          a row entry: what window.lua runs on the row
----@field commit? table          diff / checkout_examine / examine: the real commit to act on
+---@field commit? table          diff / checkout_examine / examine: the commit to act on
+---                              (examine_worktree: the §4.2 row's node)
 ---@field checkout? CheckoutSpec checkout: what to run
 ---@field marker? integer        expand/hide on a packed line: the marker index
 ---@field sync? SyncTarget       fast_forward / reset_branch: the branch + its upstream (§17.2)
@@ -151,7 +152,8 @@ end
 --- `fast_forward` / `reset_branch`) first, then the detached checkout.
 ---
 --- Open diff and checkout & examine need a diff provider (`has_diff`, §11.5); a
---- §4.2 virtual commit gets neither checkout. Pure.
+--- §4.2 virtual commit gets neither checkout but **Examine working tree** (also
+--- provider-gated). Pure.
 ---@param row PaletteRow?
 ---@param diff boolean?
 ---@param head string?  HEAD's commit hash, from the cached refs (nil when unknown)
@@ -211,6 +213,13 @@ function M.row_entries(row, diff, head)
     if row.kind == "plain" then
         local c = selectm.menu_target(row.commit)
         if c and diff then add({ id = "diff", op = "diff", label = "Open diff", key = "D", commit = c }) end
+        -- A §4.2 working-tree row (clean included): Examine working tree — every
+        -- uncommitted change vs HEAD, nothing checked out (§10.4.2). Nothing else:
+        -- it has no ref, owner or commit object.
+        if c and c.virtual and diff then
+            add({ id = "examine_worktree", op = "examine_worktree", commit = c,
+                label = "Examine working tree" })
+        end
         checkout()
         if spec and c and diff then
             if examine.needs_checkout(c, head) then

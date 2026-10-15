@@ -741,7 +741,18 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   (`fetch_untracked_diff`: each `git ls-files --others --exclude-standard` file
   rendered via `git diff --no-index -- /dev/null <f>`, capped at
   `UNTRACKED_DIFF_CAP`). `git_lines` / `git_string` are the thin `run` helpers
-  these share.
+  these share. The window's `apply_worktree` (a `GRAPH_HELPERS` method) splices
+  the result above HEAD: the change nodes when any count is non-zero, otherwise
+  the single **clean** node (`virtual = "clean"`, its own sentinel) unless
+  `working_tree = "dirty"`. The clean node has no diff source —
+  `fetch_worktree_diff` is never called for it. The layout reads a working-tree
+  node's rank from the HEAD commit it stands on (`columns.commit_rank` walks a
+  virtual commit's first parents down to its HEAD anchor; the ◌ lane's birth then
+  `take_pin`s HEAD's withheld pinned slot and ties at HEAD, so no pinned-tip birth
+  fires), so the stack continues HEAD's lane in its colour. (The §10.6.2
+  reservation owner pick must resolve the same way once dedicated columns are
+  consumed by the layout — today only the flag is stored.) Attribution
+  (`sigset`/`view`) is unchanged and still gives it the empty signature.
 
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
 documented placeholder contract — the de-facto way to script this. The
@@ -922,7 +933,13 @@ the filesystem reads and the async picker orchestration are I/O and window glue
   (the index has no on-disk path either, which is inherent, not a gap). The base
   is still the older end's first parent, resolved through the same tree-state map
   when *that* parent is itself virtual (a selection covering only worktree rows).
-  Because the mapping lives here, no caller can leak a sentinel. Pure.
+  Because the mapping lives here, no caller can leak a sentinel. Pure. The
+  **clean** node (§3.3/§4.2) maps to `"worktree"` like unstaged/untracked.
+- `worktree_examine_range(head, root)` — **Examine working tree** on any
+  working-tree row (specification.md §10.4.2): single rev `<HEAD hash>`, `from` =
+  HEAD, `to = "worktree"` — every uncommitted change vs HEAD, right side on disk;
+  empty on the clean node, where it is also the commit view's `D` range (§11.8).
+  Built from the cached HEAD ref, never a sentinel. Pure.
 - `format_range_detail(commits, palette)` — the range commit view's metadata rows
   (specification.md §13.5): an `N commits (oldest..newest)` summary then one
   newest-first `<abbrev> <subject>` row per selected commit. A §4.2 working-tree
@@ -966,19 +983,24 @@ reference, and `Commit.refs` is the inverse).
 ### Working-tree virtual commits (§3.3 / §4.2)
 
 When the working tree is dirty, up to three **virtual commits** (`Commit.virtual =
-"staged" | "unstaged" | "untracked"`, with reserved sentinel hashes) are spliced
+"staged" | "unstaged" | "untracked"`, with reserved sentinel hashes — one
+`WORKTREE_HASH` table keyed by kind) are spliced
 into `repo.order` just above the HEAD commit — `untracked → unstaged → staged →
 HEAD`, each present only when it has content (the untracked node is the untracked
-files; the unstaged node is tracked-only). `apply_worktree(state)` builds them (wiring
+files; the unstaged node is tracked-only). On a clean tree the single `"clean"`
+node stands there instead (not with `working_tree = "dirty"`; never on an unborn
+HEAD). `apply_worktree(state)` builds them (wiring
 `parents`/`children` like real commits) from the fetched dirty-state counts and
 `clear_worktree_nodes()` removes them; both leave the real DAG untouched. Because
 they sit *above* HEAD, no owner's first-parent reach (§10.2) touches them, so they
 project (`view.lua`) as **empty-signature → normal** nodes that are never
 collapsible — the §4.2 "always shown" behaviour with no new owner kind. They
-render via the `Commit.virtual` branches in `get_column_chars` (the `◌` glyph) and
-`display_item` (a synthesized `worktree_label`, blank date/author), and the commit
-view branches on `virtual` to use `fetch_worktree_diff` + `format_worktree_detail`
-instead of `git show`.
+render via the `Commit.virtual` branches in `get_column_chars` (the `◌` glyph, in
+`palette.head` unless `icons.head = ""`) and `display_item` (a synthesized
+`worktree_label`, blank date/author; the clean label in the date colour), and the
+commit view branches on `virtual` to use `fetch_worktree_diff` +
+`format_worktree_detail` instead of `git show` — the clean node spawns nothing (an
+already-resolved future; its header carries `no changes`).
 
 They are also **commit-selection endpoints** (§13.2) — the newer end of a range,
 so "this branch point versus what I have right now" is one selection. Nothing
@@ -993,8 +1015,10 @@ what keeps LSP attached to the opened files.
 - `refresh_worktree(silent)` re-reads only the dirty state and rebuilds the
   virtual commits on the *current* HEAD anchor (re-resolving HEAD first, so it
   returns `"moved"` when real history advanced past the model). Triggered by a
-  debounced `BufWritePost`/`FocusGained` autocmd and once at stream completion;
-  skipped while a commit selection is active.
+  debounced `BufWritePost`/`FocusGained`/`ShellCmdPost`/`TermLeave` autocmd and
+  once at stream completion; skipped while a commit selection is active. A cursor
+  on a working-tree node is re-homed on the topmost node of the rebuilt stack (a
+  clean ↔ dirty swap replaces the sentinels it was remembered by).
 - `resync()` (the `R` key) is the **general history refresh**: re-read refs
   (`fetch_refs`), diff against the model for added / removed / moved tips
   (`diff_ref_tips`), pull the newly-reachable commits (`git rev-list --parents
@@ -2001,7 +2025,8 @@ with an `op` that the palette helper maps to its glue. The repository-mutating
 **checkout** entry (specification.md §10.4.1) is built by the pure
 `select.checkout_spec(commit,
 select.selected_ref(commit, index))` (an argv that never forces; none for a §4.2
-virtual commit; a collapsed head resolves to its tip) and run by
+virtual commit, which instead gets `examine_worktree` → `range.worktree_examine_range`
+opened straight on the provider; a collapsed head resolves to its tip) and run by
 `git.run_checkout(argv, repo.root)` — `git_code` with an explicit `cwd`, so a
 submodule graph checks out in the submodule. A non-zero exit is reported via
 `format_git_error`; success runs the §3.4 resync in its **follow-HEAD** form

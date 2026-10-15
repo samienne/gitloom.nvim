@@ -44,10 +44,13 @@ even though it ships as part of the same suite. See
 - **Reachability emphasis** — the row under the cursor dims everything not in
   its history (ancestors) or downstream of it (descendants), keeping each
   lane's colour (just muted) so the relevant graph stands out
-- **Working-tree changes** — uncommitted work shows as up to three `◌` nodes
-  (staged, unstaged, untracked) on top of HEAD; open any to inspect its
-  diff in the commit view or the external viewer. Updates live as you edit or
-  stage (and on `R`); strictly read-only — gitloom never stages or commits
+- **Working tree** — a `◌` row always sits on top of HEAD (in the HEAD colour):
+  uncommitted work shows as up to three nodes (staged, unstaged, untracked), a
+  clean tree as one `Working tree · clean` row. Open any to inspect its diff in the
+  commit view or the external viewer, or pick **Examine working tree** in the
+  palette to see every uncommitted change against HEAD on the real files. Updates
+  live as you edit or stage (and on `R`); strictly read-only — gitloom never
+  stages or commits
 - **Linked worktrees** — a worktree checked out on a **detached HEAD** would
   otherwise have no branch naming its commits, so they would show as a run of
   fully expanded rows in an otherwise focused graph (and vanish on the next `R`).
@@ -382,7 +385,7 @@ follows the branch, skipping rows that belong to other branches:
 - `V` again or `<Esc>` ends selection.
 
 A selection can end at the **working tree**: start on (or extend `k` into) one of
-the `◌` uncommitted-change rows and the range runs from the older commit to your
+the `◌` working-tree rows (the clean row too) and the range runs from the older commit to your
 live tree rather than to another commit — "what has changed since that branch
 point, including everything I have not committed". Because the newer end is a tree
 state and not a commit, gitloom hands the diff viewer a **single rev**, so it opens
@@ -565,7 +568,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     lane_label_colors = true, -- the lane's owning label in the lane colour (false: per-kind groups)
-    working_tree = true,     -- show uncommitted changes as ◌ nodes (§3.3/§4.2); refresh with R
+    working_tree = true,     -- the ◌ working-tree row above HEAD: true | "dirty" | false (§3.3/§4.2)
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     pin_upstream = true,     -- a pinned local branch also pins its remote counterparts implicitly (§10.6)
     persist = true,          -- remember the view toggles + pin lists across sessions (§18)
@@ -676,14 +679,21 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   `label` is the action-label text. Override `open` to use a different diff
   plugin, or set it to `nil` to disable the integration. See
   [specification.md](specification.md) §11.5.
-- **`working_tree`** — show uncommitted changes as virtual `◌` commits on top of
-  HEAD (default `true`): a *staged* node (index vs HEAD), an *unstaged* node
-  (tracked working tree vs index), and an *untracked* node (untracked files as
-  additions), stacked newest-first untracked → unstaged → staged → HEAD and each
-  shown only when it has content. They open in the commit view / external diff like
-  any commit, and refresh live as you edit or stage (`BufWritePost` / focus), or as
-  part of the full `R` resync. gitloom never stages or commits. See
-  [specification.md](specification.md) §3.3 / §4.2.
+- **`working_tree`** — show the working tree as virtual `◌` commits on top of
+  HEAD: `true` (default) | `"dirty"` | `false`. A dirty tree shows a *staged* node
+  (index vs HEAD), an *unstaged* node (tracked working tree vs index), and an
+  *untracked* node (untracked files as additions), stacked newest-first untracked →
+  unstaged → staged → HEAD and each shown only when it has content. With `true` a
+  clean tree shows a single `◌ Working tree · clean` row instead, so HEAD always has
+  the working tree drawn above it; `"dirty"` shows only the change nodes (nothing on
+  a clean tree); `false` never reads the working tree. The `◌` takes the HEAD
+  colour and continues HEAD's lane in its branch colour; opening the graph still
+  puts the cursor on HEAD's own row. They open in the commit view / external diff
+  like any commit (the clean row's diff is empty), the palette's **Examine working
+  tree** shows every uncommitted change against HEAD on the real files, and they
+  refresh live as you edit or stage (`BufWritePost`, focus, `:!` commands and
+  leaving a terminal), or as part of the full `R` resync. gitloom never stages or
+  commits. See [specification.md](specification.md) §3.3 / §4.2.
 - **`scrolloff`** — the window-local `'scrolloff'` for the graph and commit-view
   windows: how many context rows are kept above/below the cursor (default `10`).
   Set explicitly so the windows don't inherit your global value. A non-zero value
