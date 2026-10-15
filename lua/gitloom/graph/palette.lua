@@ -103,7 +103,10 @@ M.COMMANDS = {
 ---@field commit? table          the row's commit (a collapsed head stands for its tip;
 ---                              a packed line: the selected marker's tip)
 ---@field ref? SelectedRef       the ref selected with h/l, if any
----@field state? string          `branch_under_cursor`'s state (expanded / collapsed / …)
+---@field state? string          `branch_under_cursor`'s state (expanded / collapsed / mainline)
+---@field own? string            the collapse / expand entry's owners, named (§10.4 —
+---                              `select.owner_label` of the row's own owners); nil/"" = "branch"
+---@field keepers? string        a collapse's keepers, named: the entry says it stays open via them
 ---@field markers? string[]      a packed line's marker label texts
 ---@field selected? integer      a packed line: the marker selected with h/l, if any
 ---@field head? table            a collapsed head / the selected marker: the node whose
@@ -137,7 +140,8 @@ end
 ---    cached `HEAD` ref's hash; §10.4.2);
 ---  * `"branch"` — a ref selected, or a collapsed head: checkout of the branch (a
 ---    head's tip), the branch sync entries (§17.2), then collapse+hide (expanded)
----    or expand+hide (collapsed), the toggle carrying `<Space>`; no commit diff,
+---    or expand+hide (collapsed) — the toggle carrying `<Space>` and naming the
+---    row's own owners (`row.own`, `row.keepers`; §10.4); none on mainline; no commit diff,
 ---    no checkout & examine;
 ---  * `"markers"` — a packed line: with a marker selected (`row.selected`) that
 ---    marker's checkout (`row.commit`, its tip), sync entries, expand and hide
@@ -243,11 +247,16 @@ function M.row_entries(row, diff, head)
         counterpart_entries()
         checkout()
         sync_entries()
+        -- Collapse / expand are <Space>'s (§10.4): they act on the row's own owners,
+        -- which the entry names (`own`), and a collapse a branch built on top will
+        -- leave open says so (`keepers`). A mainline row has neither entry.
+        local own = (row.own and row.own ~= "") and row.own or "branch"
         if row.state == "expanded" then
-            add({ id = "collapse", op = "collapse", label = "Collapse branch", key = "<Space>" })
+            local stays = (row.keepers and row.keepers ~= "") and (" (stays open via " .. row.keepers .. ")") or ""
+            add({ id = "collapse", op = "collapse", label = "Collapse " .. own .. stays, key = "<Space>" })
             add({ id = "hide", op = "hide", label = "Hide branch" })
         elseif row.state == "collapsed" then
-            add({ id = "expand", op = "expand", label = "Expand branch", key = "<Space>" })
+            add({ id = "expand", op = "expand", label = "Expand " .. own, key = "<Space>" })
             add({ id = "hide", op = "hide", label = "Hide branch" })
         end
     end

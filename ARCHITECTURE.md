@@ -150,8 +150,9 @@ Consequences for the build:
 
   `view.signatures` still returns a `hash -> { [owner id] = true }` table: indexing
   it materialises that one commit's set on the spot, so every consumer outside the
-  projection (`collapse_owners`, a head's stored `signature`, the §11.7.6 reveal)
-  is unchanged. It is deliberately *not* cached per hash — caching would let a
+  projection (a head's stored `signature`, the §11.7.6 reveal) is unchanged; the
+  own-owner rule (`select.own_owners`) reaches through `sigset.of` for the
+  handles instead. It is deliberately *not* cached per hash — caching would let a
   cursor walked down a merge-heavy trunk re-accumulate the footprint this exists
   to avoid — and `pairs()` over the map does not enumerate commits (nothing in
   gitloom iterates it). `view.project` still accepts a plain table of sets and
@@ -1896,7 +1897,38 @@ decoration strings (branch groups then tags), so `display_item` (rendering + the
 — that the window resolves (`ctx:pin_marks()`, fresh per call) and hands to
 `display_item` / `pane_labels` / `marker_units` / `place_cursor`, so the pin icon
 (§6) is part of the label text everywhere a label is measured; the renderer never
-reads the session. HEAD's node marker (§5.3) needs no such argument:
+reads the session. The expanded marker (§6) rides the same argument:
+`PinMarks` gains `expanded` (the set of ref owner ids whose effective mode is
+normal while their §10.7 default is collapsed — focus on and not an anchor;
+`reflow_owners` writes it to `view_state.expanded` beside `effective` and
+`owner_tip`) and `expanded_icon` (`icons.expanded`), and the group/name icon
+helpers (`group_pin` / `name_pin`) emit it after the pin icon, so it too is in
+the label text everywhere a label is measured. The set is resolved per reflow
+(it changes only with the view state), not per call. The
+`<Space>` toggle, the palette's collapse / expand, `expand_to_hash` (filter
+jump), the §11.7.6 reveal and the §13.4 selection toggle all act on one set,
+the commit's **own owners** (§10.2):
+`own(c) = { o ∈ sig(c) : sig(tip(o)) = sig(c) }`. It is computed by a pure
+`select.own_owners` over the interned signatures: `sigset` gives one node per
+distinct set, so the test is a handle comparison (`handles[tip] ==
+handles[c]`), not a set comparison, and it costs O(|sig(c)|) per keypress (the
+owner tips come from `view_state.owner_tip`). Two pure helpers build on it:
+`select.open_owners` (the collapsed own owners, or every collapsed owner on a
+shared stretch; empty when the commit is already open) is the expand side —
+`<Space>` on a `◍`, the palette's expand, `ensure_expanded` (filter jump), the
+reveal and the selection toggle — and `select.toggle_target` resolves a row to
+`{state, owners, keepers, anchors}`: `mainline` with the anchors reaching it, or
+the normal non-anchor own owners to collapse plus the normal non-own `keepers`.
+`branch_under_cursor` wraps it (adding `selected`, the h/l ref's owners, and
+`hide_owners` for the per-ref actions), and `GRAPH_HELPERS.toggle_branch` acts
+on it and gives the notices, named by `select.owner_label`. They replace the
+region-wide collapse set and "every collapsed owner in the signature" expand set,
+and need no new mode state: modes stay per-owner in `view_state.modes`, and the
+persisted format is unchanged.
+When a collapse leaves keepers, the projection cannot change: every commit an
+own owner reaches, a keeper above reaches too (they share the line from `c`
+down). Only the row's `▾` labels change, but the normal reflow path is still
+used. A selected ref never narrows the set. HEAD's node marker (§5.3) needs no such argument:
 `get_column_chars` recognises HEAD's commit by the `head` ref in its `refs`
 (`render.has_head_ref`), which a collapsed head aggregates from its region and a
 resync re-binds. `place_cursor` parks
@@ -1937,7 +1969,7 @@ plus the tracked upstream when its short name differs; `select.pin_counterparts`
 are NOT entries: `select.pin_rank` with counterparts on resolves them beside the
 list (each at its local's place unless explicitly unpinned or already ranked; an
 explicitly pinned remote keeps its own), and `ctx:effective_pinned()` is that
-table's key set — what `view.owners` / `collapse_owners` and the pin icon consume.
+table's key set — what `view.owners` / `select.toggle_target` and the pin icon consume.
 `ctx:pin_rank()` is the same call with counterparts OFF — ref id → rank of each
 entry, 1 = highest — because counterparts take no rank and own no slot
 (spec §5.5/§10.6). `ctx:sync_pin_rank()` publishes the

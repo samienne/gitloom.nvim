@@ -187,39 +187,68 @@ end
 
 -- ── Ref decorations (specification.md §6) ───────────────────────────────────
 
---- The pin set a label render is given (§6/§10.6): the **effective** pinned ref
---- ids (ref names, as `repo.refs` keys them — so the default anchors and an
---- implicit remote counterparts of a pinned local branch are in it) and the icon to prefix a pinned label with.
---- Passed in by the caller so the renderer stays pure; nil = no pin icons.
+--- The label marks a label render is given (§6/§10.6): the **effective** pinned
+--- ref ids (ref names, as `repo.refs` keys them — so the default anchors and an
+--- implicit remote counterparts of a pinned local branch are in it) and the icon to
+--- prefix a pinned label with, plus the **expanded** ref ids (§6 "Expanded marker":
+--- effective normal while the §10.7 default is collapsed) and their icon, drawn
+--- after the pin icon. Passed in by the caller so the renderer stays pure; nil = no
+--- label icons.
 ---@class PinMarks
 ---@field set table<string, boolean>  pinned ref ids
 ---@field icon? string  the label prefix (default "⚲"; "" turns it off)
+---@field expanded? table<string, boolean>  expanded ref ids (§6); nil = none
+---@field expanded_icon? string  their prefix, after the pin icon (default "▾"; "" turns it off)
 
---- The icon for a pinned ref name, or "" (§6).
+--- The expanded icon (§6), or "" when `marks` has none.
+---@param pins PinMarks?
+---@return string
+local function expanded_icon(pins)
+    local i = pins and pins.expanded_icon
+    if i == nil then i = "▾" end
+    return i
+end
+
+--- The label icons for a ref name (§6): the pin icon when it is pinned, then the
+--- expanded icon when it is expanded; "" when neither.
 ---@param pins PinMarks?
 ---@param name string
 ---@return string
 function M.name_pin(pins, name)
-    if not (pins and pins.set and pins.set[name]) then return "" end
-    return pins.icon or "⚲"
+    if not pins then return "" end
+    local out = ""
+    if pins.set and pins.set[name] then out = pins.icon or "⚲" end
+    if pins.expanded and pins.expanded[name] then out = out .. expanded_icon(pins) end
+    return out
 end
 
---- The icon for a branch group (§6): marked when its local branch or any of its
---- listed `remote/name` refs is pinned. HEAD's group (`current`) never is — HEAD
---- is already singled out by its place and colour.
+--- Whether any ref of a branch group is in `set`: its local branch or any of its
+--- listed `remote/name` refs. The bare name is a ref only when a local exists (or
+--- the group is a malformed remote shown raw) — a remote-only group must not be
+--- marked by a same-named local branch sitting elsewhere.
+---@param set table<string, boolean>?
+---@param b RefGroup
+---@return boolean
+local function group_in(set, b)
+    if not set then return false end
+    if (b.has_local or #b.remotes == 0) and set[b.name] then return true end
+    for _, r in ipairs(b.remotes) do
+        if set[r .. "/" .. b.name] then return true end
+    end
+    return false
+end
+
+--- The label icons for a branch group (§6): the pin icon when any ref of it is
+--- pinned, then the expanded icon when any is expanded. HEAD's group (`current`)
+--- never carries either — HEAD is already singled out by its place and colour.
 ---@param pins PinMarks?
 ---@param b RefGroup
 ---@return string
 function M.group_pin(pins, b)
-    if b.current or not (pins and pins.set) then return "" end
-    -- The bare name is a ref only when a local exists (or the group is a
-    -- malformed remote shown raw) — a remote-only group must not be marked by a
-    -- same-named local branch sitting elsewhere.
-    if (b.has_local or #b.remotes == 0) and pins.set[b.name] then return pins.icon or "⚲" end
-    for _, r in ipairs(b.remotes) do
-        if pins.set[r .. "/" .. b.name] then return pins.icon or "⚲" end
-    end
-    return ""
+    if b.current or not pins then return "" end
+    local out = group_in(pins.set, b) and (pins.icon or "⚲") or ""
+    if group_in(pins.expanded, b) then out = out .. expanded_icon(pins) end
+    return out
 end
 
 --- The plain text of each selectable ref decoration on a commit, in selection

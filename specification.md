@@ -52,8 +52,8 @@ exists primarily to exercise and validate the graph algorithm.
   algorithms can be compared the same way; `M` toggles
   graph mirroring (§5.4); `B` cycles the **ref label mode** (§6.1) so the ref
   placements can be compared at a glance. `<Space>` is the quick **collapse ⇄
-  expand toggle** for the branch under the cursor (§10.4): it collapses an
-  expanded branch or expands a marker, in place, and the cursor follows so
+  expand toggle** for the row under the cursor (§10.4): it collapses the row's
+  own branch(es) or expands a marker, in place, and the cursor follows so
   repeated `<Space>` flips it open/closed. (`<Tab>` is `<C-i>`, the navigation
   *forward* key — §14.3.) `<CR>` **examines**: it opens the **commit view**
   (§11) of the row's commit directly — never a menu (a collapsed head or a
@@ -152,9 +152,9 @@ persistent view.
   commit's first row (with the node) and the message on its second row, both real
   lines the cursor occupies normally: landing on a labelled commit's first row
   **pre-selects the first** ref (so `h`/`l` refine an already-active selection),
-  and the cursor sits physically on the selected ref. This selection is the
-  substrate for the planned
-  per-branch actions (collapse / hide / pin, §10); it has no effect yet. The
+  and the cursor sits physically on the selected ref. This selection scopes the
+  per-ref actions — the palette's checkout, branch sync and hide, and `P` (§10,
+  §17); it does not narrow `<Space>`, which acts on the row's own owners (§10.4). The
   row under the cursor also defines a **pivot** whose reachable history
   (ancestors and descendants) is emphasised while everything else dims (§12).
 - The view opens immediately and is populated asynchronously as git output
@@ -1666,6 +1666,42 @@ follows the pin set live (`P`, the dialog §10.6.1, a resync), and
 upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
 §6.3.
 
+**Expanded marker.** A label whose ref is **expanded** opens with the
+**expanded icon** (`icons.expanded`, default `▾`, §8) inside its bracket, after
+the pin icon when both apply: `(▾feature/x)`, `(▾fix/y ↑origin)`, `[▾v2.0]`,
+`{▾wt:review}`. A ref is *expanded* when its owner's **effective** mode is
+**normal** (§10.1) while its **default** mode (§10.7) is **collapsed** — that is,
+the user opened it (`<Space>` on its `◍` head, the palette's expand, a filter
+jump §16.4, a §11.7.6 reveal). It marks exactly the refs that keep their rows
+open *by the user's choice*, so on a row carrying several heads the one that
+holds the branch open reads at a glance. `<Space>` (§10.4) on a row collapses
+the row's own refs, so their `▾` go even when the row stays open. What still
+holds the row open is then a branch built on top, which keeps its `▾` on its own
+tip row (and `<Space>` names it). The rule is about
+**deviation from the default**, so:
+
+- an **anchor** (§10.6) — pinned, a default trunk, an implicit counterpart, HEAD's
+  branch — is never marked: its default is normal, and the pin icon / the HEAD
+  label already say why it is open (and that `<Space>` will not fold it);
+- with the first-parent focus **off** (`collapse_merged = false`, `c`) every
+  default is normal, so nothing is marked;
+- a ref that is collapsed or hidden is not marked; a `◍` head's labels
+  (§10.4), whose owners are all collapsed by definition, never are.
+
+A **branch group** is marked when any ref in it is expanded (as for the pin
+icon). **HEAD's label never carries it** — an attached HEAD's branch is an anchor,
+and a detached `HEAD` label is not a ref label. Like the pin icon it is part of
+the label's text — the width budget, the `+N` windowing, the `h`/`l` selection
+and the cursor parking all measure it — it is drawn in the label's own colour (no
+separate highlight, so lane ownership, dimming and `palette.selected` apply
+unchanged), it appears in every label mode (§6.1), on packed marker lines and in
+the context panes (§6.2), and it follows the view state live (every reflow).
+`icons.expanded = ""` turns it off.
+
+Anonymous owners (§10.2 — merge parents, uncovered tips) carry no label, so an
+expanded one cannot be marked on its row; the palette's collapse entry (§10.4)
+names it instead.
+
 **Label colour.** A node's **lane colour** — exactly the colour its node glyph gets
 (§5, §12.2): the cell's top Segment's palette slot, including a `gutter`
 parent-swapped node that takes its colour from the wire arriving from above (§5.6),
@@ -2096,8 +2132,9 @@ Endpoint     = Commit | "index" | "worktree"
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
 - `icons` — glyph overrides: `merge` (the folded merge marker, §5.3; unset by
-  default), `head` (HEAD's node, §5.3; default `●`) and `pin` (the pinned-anchor
-  label icon, §6; default `⚲`). `""` turns `head` / `pin` off.
+  default), `head` (HEAD's node, §5.3; default `●`), `pin` (the pinned-anchor
+  label icon, §6; default `⚲`) and `expanded` (the expanded-ref label icon, §6;
+  default `▾`). `""` turns `head` / `pin` / `expanded` off.
 - `sort_mode` — the initial **row sort mode** (§3.1): `"topo"` (default,
   gitloom's own order reproducing git's `--topo-order`), `"date"`, or `"author"`.
   Cycle live with `S`.
@@ -2311,6 +2348,32 @@ A region's display mode is the **join** over the owners in its signature:
 - any **normal** owner in the signature → **normal**
 - otherwise (all collapsed) → **collapsed**
 
+**A commit's own owners.** The owners in `sig(c)` whose **tip has the same
+signature as `c`**: `own(c) = { o ∈ sig(c) : sig(tip(o)) = sig(c) }`. These are
+the owners whose tip sits in `c`'s region (§10.2: a region is a connected run of
+equal signature, so no owner joins between the tip and `c`). They are the owners
+the row *belongs to*. An owner in `sig(c)` that is not own has its tip above
+`c`'s region: it is a branch built on top of this one, and it reaches `c` only
+through the part it shares. Examples:
+- `c` carries refs `A` and `B` with branch `D` built on top: `own(c) = {A, B}`.
+- a ref-less commit in the middle of `D`'s own commits: `own(c) = {D}`.
+- a `◍` head: since every commit it contracts shares one signature, its own
+  owners are those whose tip is the head's newest commit. That is the refs on
+  its label, plus any anonymous merge-parent or tip owner (§10.2) starting there.
+
+Several own owners always share their entire first-parent line, from the shared
+tip down, so they can never be told apart on screen. §10.4's collapse and expand
+act on them together.
+
+`own(c)` is **empty** on a stretch that several branches share below the point
+where they meet, for example the history under a fork whose sides are two
+branches. No owner's tip lies in that region, so nothing there belongs to one
+branch. Such a stretch is open while either branch is, by the join. For it:
+- **expand** (its `◍` head) opens every collapsed owner in its signature, as
+  before this amendment, because the stretch belongs to all of them;
+- **collapse** has nothing of its own to collapse and only names the keepers
+  (§10.4).
+
 Intended consequences:
 
 - A commit reachable from only one owner B follows B's mode.
@@ -2398,18 +2461,52 @@ exception to "one commit per line" (§5.1). Message-bearing commit rows never pa
 Packing is **on by default**, toggled live with `p` and via a config option;
 with it off, every marker occupies its own line.
 
-**Interaction.** Collapse/expand acts on the **region under the cursor**, found
-through each commit's signature (§10.2) — not through a ref — so it works for any
-collapsed region, including ref-less ones (first-parent-merged, squashed). A
-commit the trunk reaches (the mainline) is not collapsible.
+**Interaction.** Collapse/expand acts on the **owners the row belongs to**, its
+**own owners** (§10.2), found through the commit's signature rather than a
+selected ref. So it works for any region, including ref-less ones
+(first-parent-merged, squashed). Each owner keeps its own collapsed / normal
+state, and the §10.2 join does the rest: a row is open while **any** normal owner
+reaches it. An owner reaches a commit along **first parents only** (§10.7): an
+open branch opens its own first-parent line, never the branches merged into it.
+So opening `dev` (or the trunk) does not open everything ever merged into it;
+each merged-in side keeps its own state, behind its own `◍`. A commit the trunk
+reaches (the mainline) is not collapsible.
 
-- `<Space>` — the quick **collapse ⇄ expand toggle**: collapse the expanded
-  branch under the cursor (set its non-trunk owners collapsed), or expand the
-  marker under the cursor (set its owners normal). Two-state — *hidden* is not in
-  this cycle, so the toggled thing never vanishes from under the cursor. After the
-  reflow the cursor is repositioned onto the resulting node (the new marker, or
-  the expanded region's tip), so repeated `<Space>` flips it open/closed in place.
-  (`<Tab>` / `<C-i>` is reserved for forward navigation, §14.3.)
+A row's **keepers** are the normal owners in its signature, the ones holding it
+open. A keeper that is not an own owner is a **branch built on top** (or an
+anonymous merge-parent or tip owner above): it reaches this row through the
+history it shares. Collapse never touches such a keeper, so a row it keeps open
+stays open. The `▾` on that branch's label (§6) and the notice below say why.
+
+- `<Space>` — the quick **collapse ⇄ expand toggle**. The **row** decides the
+  direction, never a selected ref's own mode.
+  - **On an open row** it sets every **normal, non-anchor own owner** collapsed.
+    If a keeper remains (a branch built on top), the row stays open, and gitloom
+    says so, naming the keepers' refs with anonymous ones as a count
+    (`still open via feature/z +1 merged`). With nothing left to collapse (the own
+    owners already are), it gives only that notice. The key never looks dead,
+    and pressing it again never re-opens what it closed.
+  - **On a `◍` head** it **expands** the head: it sets the head's **own owners**
+    normal, the owners whose tip is the head's newest commit (§10.2). Owners that
+    only reach the head through a branch built on top are left alone, so a
+    collapsed branch above stays a `◍`. The newly normal owners also open the
+    history they reach further down, by the join.
+
+  The other ways of opening a commit follow the same rule: they set the commit's
+  own owners normal, which is the least that makes it visible. These are the
+  palette's expand, a filter jump (§16.4), the §11.7.6 reveal and the selection
+  fold toggle (§13.4). A ref selected with `h`/`l` (or pre-selected by landing,
+  §2) does **not** narrow the toggle. The refs on one row share their whole
+  first-parent line, so collapsing only some of them can never fold the row, and
+  a per-ref toggle would flip a ref's invisible mode back and forth while the row
+  stays open. A row an **anchor** reaches (the mainline, §10.6) is not
+  collapsible: `<Space>` there leaves the view unchanged and says why, naming the
+  anchor(s) that reach it (e.g. `on dev's mainline — not collapsible`). Two-state —
+  *hidden* is not in this cycle, so the toggled thing never vanishes from under
+  the cursor. After the reflow the cursor is repositioned onto the resulting node
+  (the new marker, or the expanded region's tip), so repeated `<Space>` flips it
+  open/closed in place. (`<Tab>` / `<C-i>` is reserved for forward navigation,
+  §14.3.)
 - `<C-Space>` — the **command palette** (§17), gitloom's single action menu
   (`vim.ui.select`): the row's actions come first, then the global commands, then
   the keys (§17.1). The row entries are **scoped to what is selected** — a commit
@@ -2425,11 +2522,21 @@ commit the trunk reaches (the mainline) is not collapsible.
     then the **branch sync** entries of a local branch tracking an upstream —
     **fast-forward to `<upstream>`** and **reset to `<upstream>`…** (§17.2) —
     then **collapse** (`<Space>`) + **hide** of an expanded branch or **expand**
-    (`<Space>`) + **hide** of a collapsed one. No commit open diff and no
+    (`<Space>`) + **hide** of a collapsed one. **Collapse** and **expand** are
+    `<Space>`'s: they act on the row's own owners. Each entry **names them**, with
+    their ref names and the anonymous ones as a count
+    (`Collapse feature/x, fix/y +1 merged`; `Collapse branch` when it has none).
+    When a branch built on top will keep the row open, the collapse entry says so
+    (`… (stays open via feature/z)`), and choosing it gives `<Space>`'s notices. On
+    a mainline row there is neither a collapse nor a hide entry. **Hide** stays
+    per-ref: it hides the selected branch's owners only (a `◍` with no ref
+    selected: every collapsed owner in its signature; hidden owners do not vote,
+    §10.2).
+    No commit open diff and no
     detached checkout & examine — those are the commit's, reached from its message.
   - **packed-marker line, a marker selected** (`h`/`l`) — that marker's actions
-    only: **checkout** of its tip, its **branch sync** entries (§17.2), **expand**,
-    **hide**. (The keys then follow the branch context.)
+    only: **checkout** of its tip, its **branch sync** entries (§17.2), **expand**
+    (its own owners, as `<Space>` on a `◍`), **hide**. (The keys then follow the branch context.)
   - **packed-marker line, no marker selected** — **expand** / **hide** per marker,
     by name. The palette is the overflow-proof way to reach any marker on a packed
     line even when not all labels fit.
@@ -3655,8 +3762,9 @@ unambiguous even though the line holds many.
 
 `<Space>` while selecting **folds / unfolds the head under the cursor in place**
 (the §10.4 collapse⇄expand toggle, scoped to the selection): it expands the
-collapsed head the cursor sits on (or collapses the cursor's region) **without
-changing what is selected**. An unfolded head expands into its **whole region**,
+collapsed head the cursor sits on (or collapses the cursor's region) — acting on
+the commit's own owners (§10.2), as `<Space>` does outside a selection —
+**without changing what is selected**. An unfolded head expands into its **whole region**,
 so the revealed branch stays selected and lit (not just its tip); a collapsed run
 maps back to its head. The **diff range is therefore unchanged** by fold/unfold.
 The anchor keeps its end and the cursor lands on the toggled (opposite) end, and

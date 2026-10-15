@@ -195,7 +195,7 @@ describe("pin_add", function()
 end)
 
 describe("pin_ids", function()
-    it("is the membership set — what view.owners / collapse_owners consume", function()
+    it("is the membership set — what view.owners / toggle_target consume", function()
         local set = pin_ids(pins("a*", "b"))
         assert.is_true(set.a)
         assert.is_true(set.b)

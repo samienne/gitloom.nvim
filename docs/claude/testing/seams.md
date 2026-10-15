@@ -32,8 +32,9 @@ virtual-commit pure helpers; §3.3/§4.2/§11.8),
 `passthrough_columns` (the dual label mode's vertical-only branch line; §6.1),
 `owners_from_refs` (refs → view-builder owners; §10), the branch-mode toggle
 helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
-marker-packing pass; §10.4), `collapse_owners` (the region's collapsible
-owners under the cursor; §10.4), the ordered-pin-list helpers `pin_resolve` /
+marker-packing pass; §10.4), `own_owners` / `open_owners` / `toggle_target` / `owner_label` (a row's own
+owners, what `<Space>` collapses or expands, and their naming; §10.2/§10.4 —
+`own_owners_spec`), the ordered-pin-list helpers `pin_resolve` /
 `pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
 `reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), `smartcase_match` /
 `filter_keep` (the filter-search matcher + keep-set; §16.2), `ref_cycle_members` / `ref_cycle_next` / `cycle_source` / `visible_hashes` (the `%` local ⇄ remote
@@ -42,6 +43,8 @@ cycle; §2), and `selected_ref` /
 `require("gitloom.graph.palette").row_entries`).
 `window._internal` additionally exposes `keys` (the `GRAPH_KEYS` key registry, §17.1),
 `reflow_async` / `resync` (the §19.4 "always ended" glue paths, over a stub ctx),
+`branch_under_cursor` / `toggle_branch` / `reflow_owners` / `pin_marks` (`<Space>`'s
+target, act and notices, and the §6 expanded set, over a stub ctx; `space_toggle_spec`),
 `effective_pins` / `effective_pinned`, `on_cursor_moved` / `cursor_hash_at` (`cursor_hash`; the
 default selection; §2),
 `pin_dialog` (the §10.6.1 dialog, a windowed smoke-test seam) and `ctx` — the live

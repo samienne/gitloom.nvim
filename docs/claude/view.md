@@ -56,8 +56,10 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   sealed universe raises rather than minting a second node for an existing set.
   `view.signatures` still
   returns a `hash -> { [owner id] = true }` table — indexing it materialises that
-  one commit's set — so `collapse_owners`, a head's stored `signature` and the
-  §11.7.6 reveal are unchanged; it is deliberately NOT cached per hash (caching
+  one commit's set — so a head's stored `signature` and the §11.7.6 reveal are
+  unchanged (the own-owner rule, `select.own_owners`, compares the interned
+  handles via `sigset.of` instead: own(c) = owners whose tip shares c's handle,
+  §10.2 — what `<Space>`, the palette, the filter jump and the reveal act on); it is deliberately NOT cached per hash (caching
   would let the cursor re-accumulate the footprint) and `pairs()` over the MAP
   enumerates nothing, so any test that iterated it must iterate the items instead
   or it passes vacuously. `view.project` still accepts a plain table of sets and
@@ -101,7 +103,7 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   is `select.pin_rank` with counterparts OFF — the entries' ranks (1 = highest), the
   layout map; `ctx:effective_pinned()` is the key set of `select.pin_rank` with
   counterparts ON (a local's `select.pin_counterparts`, unless explicitly unpinned)
-  and is still what `view.owners`/`collapse_owners`/the pin icon consume. The header
+  and is still what `view.owners`/`select.toggle_target`/the pin icon consume. The header
   pane gets `columns.pinned_slots(pane_opts.pin_rank, #tracks)` as `pane.header`'s
   `avoid`, so its colour de-collision never hands out a pinned slot.
   **Counterpart colours** (§5.5): `ctx:pin_counterpart()` (`select.pin_counterpart_rank`

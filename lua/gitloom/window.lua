@@ -518,7 +518,6 @@ local item_lines = reach.item_lines
 -- Engine data-model types (Connectivity / Lane / Segment / GraphColumn /
 -- OrderItem / SelectionState) and the layout orchestration (build_graph,
 -- refresh_columns, pack_markers, owners_from_refs) live in gitloom.graph.
-local collapse_owners = selectm.collapse_owners
 
 -- Vendored highlight-composition helper (util.lua). listview.lua keeps its own
 -- private copy so it stays standalone — do not dedupe across that boundary.
@@ -1469,6 +1468,7 @@ end
 ---@field merge? string
 ---@field head? string  HEAD's node marker (default "●"; "" off); §5.3
 ---@field pin? string   the pinned-anchor label icon (default "⚲"; "" off); §6/§10.6
+---@field expanded? string  the expanded-ref label icon, after the pin icon (default "▾"; "" off); §6
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
@@ -1734,7 +1734,7 @@ end
 
 -- The effective anchor **set** — the pinned entries plus their implicit remote
 -- counterparts (§10.6, `pin_upstream`, unless explicitly unpinned). This is what
--- `view.owners` / `collapse_owners` and the pin icon consume. A superset of
+-- `view.owners` / `select.toggle_target` and the pin icon consume. A superset of
 -- `pin_rank`'s keys: the counterparts are anchors, but never ranked (§5).
 local function effective_pinned(ctx)
     local set = {}
@@ -1746,13 +1746,17 @@ local function effective_pinned(ctx)
 end
 GRAPH_HELPERS.effective_pinned = effective_pinned
 
--- The pin set the label renderers are handed (§6/§10.6): the effective anchors
--- (implicit counterparts included) + `icons.pin`. Resolved fresh on every call (it
--- is a handful of entries), so a label can never show a stale pin after `P`, the
--- dialog, or a resync.
+-- The label marks the label renderers are handed (§6/§10.6): the effective anchors
+-- (implicit counterparts included) + `icons.pin`, and the expanded refs (§6
+-- "Expanded marker") + `icons.expanded`. The pin set is resolved fresh on every
+-- call (it is a handful of entries), so a label can never show a stale pin after
+-- `P`, the dialog, or a resync; the expanded set is resolved per reflow
+-- (`reflow_owners`), the only time a mode changes.
 ---@return PinMarks
 GRAPH_HELPERS.pin_marks = function(ctx)
-    return { set = effective_pinned(ctx), icon = ctx.opts.icons and ctx.opts.icons.pin }
+    local icons = ctx.opts.icons
+    return { set = effective_pinned(ctx), icon = icons and icons.pin,
+        expanded = ctx.view_state.expanded, expanded_icon = icons and icons.expanded }
 end
 
 -- node hash → repo.display index, and packed-head marker locations (§13.4).
@@ -2298,17 +2302,12 @@ local function selection_toggle(ctx)
     local sel, view_state, sig_cache, repo = ctx.sel, ctx.view_state, ctx.sig_cache, ctx.repo
     local node = sel.active and sel.cursor
     if not node or not ctx:win() then return end
-    local owners, mode = {}, nil
-    if node.collapsed then -- a head: expand its still-collapsed owners
-        for oid in pairs(node.signature or {}) do
-            if (view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
-        end
-        mode = "normal"
-    else -- a normal/expanded commit: collapse its region, unless mainline
-        owners = collapse_owners(sig_cache.sig and sig_cache.sig[node.hash],
-            ctx:effective_pinned(), view_state.effective) or {}
-        mode = "collapsed"
-    end
+    -- The same own-owner rule as <Space> (§10.4): a head expands its own owners, an
+    -- open commit collapses its normal non-anchor own owners (a no-op on mainline).
+    local hash = node.collapsed and node.tip and node.tip.hash or node.hash
+    local owners = selectm.toggle_target(sig_cache.sig, hash, view_state.owner_tip or {},
+        ctx:effective_pinned(), view_state.effective, node.collapsed).owners
+    local mode = node.collapsed and "normal" or "collapsed"
     if #owners == 0 then return end
 
     local w = ctx:win() --[[@as integer]] -- guarded non-nil above
@@ -2475,12 +2474,7 @@ local function h_space(ctx)
     if ctx.sel.active then selection_toggle(ctx); return end
     local line = vim.api.nvim_win_get_cursor(ctx:win() --[[@as integer]])[1]
     local b = ctx:branch_under_cursor(line)
-    if not b or not b.owners or #b.owners == 0 then return end
-    if b.state == "collapsed" then
-        ctx:set_branch(b, "normal", b.follow)
-    elseif b.state == "expanded" then
-        ctx:set_branch(b, "collapsed", b.follow)
-    end
+    if b then GRAPH_HELPERS.toggle_branch(ctx, b) end
 end
 
 -- <CR>: examine — the commit view (§11.1) of the row's commit, never a menu: a
@@ -2586,8 +2580,12 @@ GRAPH_HELPERS.palette = function(ctx)
                 local ref = ref_selected and selectm.selected_ref(item.commit, st.index) or nil
                 -- A remote branch whose local namesake sits elsewhere (§10.4.1).
                 if ref then ref.counterpart = selectm.local_counterpart(ref, repo.refs, repo.head) end
+                -- The collapse / expand entries name the row's own owners and,
+                -- for a collapse, the keepers that will hold it open (§10.4).
                 row = { kind = "branch", state = b.state, commit = b.commit, ref = ref,
-                    head = item.commit and item.commit.collapsed and item.commit or nil }
+                    head = item.commit and item.commit.collapsed and item.commit or nil,
+                    own = selectm.owner_label(b.owners or {}, repo.refs),
+                    keepers = selectm.owner_label(b.keepers or {}, repo.refs) }
             end
         end
     end
@@ -2602,7 +2600,14 @@ GRAPH_HELPERS.palette = function(ctx)
         newest = sp and #sp > 0 and real_newest(sp[1]) or nil,
     })
     if #entries == 0 then return end
-    local function owners_of(u)
+    -- A packed marker's expand opens its own owners (§10.4, as <Space> on a `◍`);
+    -- its hide takes every owner in its signature.
+    local function owners_of(u, expand)
+        if expand then
+            local tip = u.marker.tip
+            return tip and selectm.open_owners(ctx.sig_cache.sig, tip.hash, ctx.view_state.owner_tip or {},
+                ctx.view_state.effective) or {}
+        end
         local owners = {}
         for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
         return owners
@@ -2654,16 +2659,14 @@ GRAPH_HELPERS.palette = function(ctx)
         elseif e.marker then
             local u = units[e.marker]
             if op == "expand" then
-                ctx:set_branch({ owners = owners_of(u) }, "normal", u.marker.tip and u.marker.tip.hash)
+                ctx:set_branch({ owners = owners_of(u, true) }, "normal", u.marker.tip and u.marker.tip.hash)
             else
                 ctx:set_branch({ owners = owners_of(u) }, "hidden", nil)
             end
-        elseif op == "collapse" then
-            ctx:set_branch(b, "collapsed", b.follow)
-        elseif op == "expand" then
-            ctx:set_branch(b, "normal", b.follow)
+        elseif op == "collapse" or op == "expand" then
+            GRAPH_HELPERS.toggle_branch(ctx, b) -- <Space>'s, notices included (§10.4)
         elseif op == "hide" then
-            ctx:set_branch(b, "hidden", nil)
+            ctx:set_branch({ owners = b.hide_owners or {} }, "hidden", nil)
         end
     end
     vim.ui.select(entries, {
@@ -3669,11 +3672,13 @@ local function h_pin(ctx)
     if not w then return end
     local line = vim.api.nvim_win_get_cursor(w)[1]
     local b = ctx:branch_under_cursor(line)
-    if not b or not b.owners then return end
+    -- The selected ref when there is one, else the row's own owners (§10.2).
+    local cands = b and (b.selected or b.owners)
+    if not cands then return end
     local repo, view_state = ctx.repo, ctx.view_state
     -- Only refs are pinnable (v1, §10.6) — drop anonymous merge-parent owners.
     local targets = {}
-    for _, oid in ipairs(b.owners) do
+    for _, oid in ipairs(cands) do
         if repo.refs[oid] then targets[#targets + 1] = oid end
     end
     if #targets == 0 then return end
@@ -3952,7 +3957,7 @@ local GRAPH_KEYS = {
         -- On a mainline row (an anchor's own line) there is nothing to toggle (§10.4).
         when = function(st) return not (st.row and st.row.state == "mainline") end,
         desc = "Collapse / expand branch",
-        help = "Collapse / expand the branch under the cursor (selecting: fold / unfold the head)" },
+        help = "Collapse / expand the row's own branch(es) under the cursor (selecting: fold / unfold the head)" },
     { key = "L", run = function(ctx) ctx:pin_dialog() end, group = "refs", desc = "Pinned branches…",
         help = "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
     { key = "/", run = h_filter, group = "refs", desc = "Filter the graph…",
@@ -4456,6 +4461,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             --merge = "M",
             head = "●", -- HEAD's node marker (§5.3); "" turns it off
             pin = "⚲", -- the pinned-anchor label icon (§6/§10.6); "" turns it off
+            expanded = "▾", -- the expanded-ref label icon (§6); "" turns it off
         },
     }
     -- The default footer is computed before opts.mirror is resolved; unless the
@@ -4533,7 +4539,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field sel GraphSel
     ---@field display_index table<string,integer>
     ---@field node_loc table<string,{item:table,col:integer}>
-    ---@field view_state { cone?:table, modes:table, effective:table, pins:PinEntry[], unpinned:table<string,boolean> }
+    ---@field view_state { cone?:table, modes:table, effective:table, owner_tip:table<string,string>, expanded:table<string,boolean>, pins:PinEntry[], unpinned:table<string,boolean> }
     ---@field sig_cache { norder:integer, nowners:integer, cm?:boolean, sig?:table }
     ---@field colstream? table       the streaming Phase-1 sweep held open across
     ---                              batches (graph.extend_columns; §3.1). Cleared by
@@ -4596,6 +4602,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field branch_under_cursor fun(self:GraphCtx, line:integer):table?
     ---@field graph_title fun(self:GraphCtx):string
     ---@field set_branch fun(self:GraphCtx, b:table, mode:string, follow:string?)
+    ---@field toggle_branch fun(self:GraphCtx, b:table)  the Space toggle's act + notices (§10.4)
     ---@field ensure_expanded fun(self:GraphCtx, hash:string?):boolean
     --- == helpers kept nested in open_graph but exposed for the extracted callers ==
     ---@field update_panes fun(self:GraphCtx)
@@ -4680,7 +4687,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- the HEAD / master / main / dev defaults. `ctx:effective_pins()` resolves the
     -- two into the live list and `ctx:effective_pinned()` reduces it to the anchor
     -- set, which generalises the single trunk of §10.7.
-    local view_state = { cone = nil, modes = {}, effective = {}, pins = {}, unpinned = {} }
+    local view_state = { cone = nil, modes = {}, effective = {}, owner_tip = {}, expanded = {}, pins = {}, unpinned = {} }
     -- The repository's persisted pin list (§18.2) seeds the session.
     view_state.pins, view_state.unpinned = require("gitloom.persist").restore_pins(opts, root)
 
@@ -5090,20 +5097,20 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 -- instead of the whole reflow running a second time.
                 local function reveal_focus()
                     local hash = focus_hash
-                    local sig = hash and sig_cache.sig and sig_cache.sig[hash]
-                    if not sig then return false end
+                    if not (hash and sig_cache.sig and sig_cache.sig[hash]) then return false end
                     -- Reveal the focus target if the first-parent default (§10.7)
                     -- folded its branch into a collapsed head: the clicked commit
-                    -- may be an intermediate (not a pinned pointer). Set that head's
-                    -- collapsed owners to normal **by hash** (via the projection
-                    -- signature) — robust even when the head is packed onto a
-                    -- shared marker line (§10.4).
+                    -- may be an intermediate (not a pinned pointer). Set the
+                    -- commit's own owners (§10.2, `select.open_owners`) to normal
+                    -- **by hash** (via the projection signature) — robust even when
+                    -- the head is packed onto a shared marker line (§10.4).
                     local revealed = false
-                    for oid in pairs(sig) do
-                        if (view_state.effective[oid] or "normal") == "collapsed" then
-                            view_state.modes[oid] = "normal"
-                            revealed = true
-                        end
+                    -- (inline require: open_graph is at its upvalue ceiling)
+                    for _, oid in ipairs(require("gitloom.graph.select").open_owners(sig_cache.sig, hash,
+                        view_state.owner_tip or {},
+                        view_state.effective)) do
+                        view_state.modes[oid] = "normal"
+                        revealed = true
                     end
                     return revealed
                 end
@@ -6549,8 +6556,9 @@ end
 ---@return table[] owners
 GRAPH_HELPERS.reflow_owners = function(ctx, cm)
     local viewbuilder = require("gitloom.graph.view")
+    local pinned = ctx:effective_pinned()
     local owners = viewbuilder.owners(
-        ctx.repo.order, owners_from_refs(ctx.repo.refs, {}), ctx:effective_pinned(), ctx.view_state.modes, cm)
+        ctx.repo.order, owners_from_refs(ctx.repo.refs, {}), pinned, ctx.view_state.modes, cm)
     -- Filter-search (§16.3): contract *everything* -- force every owner collapsed,
     -- so only the matches (the `keep` set) and junctions stay visible. This is a
     -- mode-only override (the owner tips are unchanged), so it does not invalidate
@@ -6558,8 +6566,21 @@ GRAPH_HELPERS.reflow_owners = function(ctx, cm)
     if ctx.filter then
         for _, o in ipairs(owners) do o.mode = "collapsed" end
     end
-    ctx.view_state.effective = {}
-    for _, o in ipairs(owners) do ctx.view_state.effective[o.id] = o.mode end
+    -- `effective`: the resolved mode per owner. `owner_tip`: each owner's tip hash,
+    -- for the own-owner rule (§10.2) the collapse interactions act on. `expanded`:
+    -- the ref owners the user opened — effective normal while the §10.7 default is
+    -- collapsed (focus on, not an anchor) — which the label renderers mark with
+    -- `icons.expanded` (§6). Anonymous owners carry no label, so they are left out.
+    local focus = cm and next(pinned) ~= nil
+    local vs = ctx.view_state
+    vs.effective, vs.owner_tip, vs.expanded = {}, {}, {}
+    for _, o in ipairs(owners) do
+        vs.effective[o.id] = o.mode
+        vs.owner_tip[o.id] = o.tip.hash
+        if focus and o.mode == "normal" and not pinned[o.id] and ctx.repo.refs[o.id] then
+            vs.expanded[o.id] = true
+        end
+    end
     return owners
 end
 
@@ -6871,49 +6892,87 @@ local function cursor_hash(ctx, line)
 end
 GRAPH_HELPERS.cursor_hash = cursor_hash
 
--- The "branch" the collapse interactions (§10.4) act on at a buffer line:
--- resolved from the selection (a ref or a packed marker) or the region under the
--- cursor via its signature.
+-- The "branch" the collapse interactions (§10.4) act on at a buffer line: the
+-- row's **own owners** (§10.2), via `select.toggle_target` over the commit's
+-- signature — a `◍` head (or a packed line's selected marker) expands its own
+-- owners; an open row collapses its normal, non-anchor own owners, `keepers`
+-- naming the branches built on top that keep it open; a row an anchor reaches is
+-- `mainline`, with its `anchors`. A ref selected with h/l does NOT narrow
+-- `owners` (§10.4); it is returned as `selected` (its owner ids) for the per-ref
+-- actions — the palette's hide and `P`. `hide_owners` is what hide acts on: the
+-- selected ref's owners, else (a head) every collapsed owner in its signature.
+---@return ToggleTarget|{ state: "collapsed" }|nil
 local function branch_under_cursor(ctx, line)
     local item = ctx:order_at(line)
     if not item then return nil end
+    local vs = ctx.view_state
+    local function target(hash, collapsed)
+        return selectm.toggle_target(ctx.sig_cache.sig, hash, vs.owner_tip or {},
+            ctx:effective_pinned(), vs.effective, collapsed)
+    end
+    local function collapsed_in(sig)
+        local out = {}
+        for oid in pairs(sig or {}) do
+            if (vs.effective[oid] or "normal") == "collapsed" then out[#out + 1] = oid end
+        end
+        table.sort(out)
+        return out
+    end
     if item.type == "markers" then
         if ctx.selection_state.commit == item and ctx.selection_state.index then
             local u = marker_units(item)[ctx.selection_state.index]
-            if u then
-                local owners = {}
-                for oid in pairs(u.marker.signature or {}) do owners[#owners + 1] = oid end
-                return { state = "collapsed", owners = owners,
-                    follow = u.marker.tip and u.marker.tip.hash, commit = u.marker.tip }
+            local tip = u and u.marker.tip
+            if tip then
+                local t = target(tip.hash, true)
+                t.hide_owners = collapsed_in(u.marker.signature)
+                t.follow, t.commit = tip.hash, tip
+                return t
             end
         end
         return { state = "collapsed" } -- packed line, no selection
     end
     local c = item.commit
     if not c then return nil end
-    if ctx.selection_state.index and ctx.selection_state.commit == c then
-        local ids = selected_owner_ids(c, ctx.selection_state.index)
-        if ids then
-            local cur = ctx.view_state.effective[ids[1]] or "normal"
-            return { state = (cur == "collapsed") and "collapsed" or "expanded",
-                owners = ids, follow = c.hash, commit = c }
-        end
-    end
+    local selected = ctx.selection_state.index and ctx.selection_state.commit == c
+        and selected_owner_ids(c, ctx.selection_state.index) or nil
+    local t
     if c.collapsed then
-        local owners = {}
-        for oid in pairs(c.signature or {}) do
-            if (ctx.view_state.effective[oid] or "normal") == "collapsed" then owners[#owners + 1] = oid end
-        end
-        return { state = "collapsed", owners = owners,
-            follow = c.tip and c.tip.hash, commit = c.tip }
+        local tip = c.tip
+        if not tip then return nil end
+        t = target(tip.hash, true)
+        t.follow, t.commit = tip.hash, tip
+        t.hide_owners = selected or collapsed_in(c.signature)
+    else
+        t = target(c.hash, false)
+        t.follow, t.commit = c.hash, c
+        t.hide_owners = selected
     end
-    local ids = collapse_owners(ctx.sig_cache.sig and ctx.sig_cache.sig[c.hash], ctx:effective_pinned(), ctx.view_state.effective)
-    if ids then
-        return { state = "expanded", owners = ids, follow = c.hash, commit = c }
-    end
-    return { state = "mainline", commit = c }
+    t.selected = selected
+    return t
 end
 GRAPH_HELPERS.branch_under_cursor = branch_under_cursor
+
+-- Act on `<Space>`'s target (§10.4): expand a `◍`'s owners or collapse an open
+-- row's, reflowing with the cursor kept on the result. A collapse that leaves
+-- keepers (branches built on top) says so — `still open via …` — and so does a
+-- row with nothing of its own left to collapse; a mainline row only gets the
+-- notice naming its anchors. Never flips a ref's mode back and forth while the row
+-- stays put: the row's state decides the direction.
+---@param b table  -- a `branch_under_cursor` result
+GRAPH_HELPERS.toggle_branch = function(ctx, b)
+    local owners = b.owners or {}
+    if b.state == "collapsed" then
+        if #owners > 0 then ctx:set_branch(b, "normal", b.follow) end
+    elseif b.state == "expanded" then
+        if #owners > 0 then ctx:set_branch(b, "collapsed", b.follow) end
+        if b.keepers and #b.keepers > 0 then
+            vim.notify("still open via " .. selectm.owner_label(b.keepers, ctx.repo.refs), vim.log.levels.INFO)
+        end
+    elseif b.state == "mainline" and b.anchors and #b.anchors > 0 then
+        vim.notify(("on %s's mainline — not collapsible"):format(selectm.owner_label(b.anchors, ctx.repo.refs)),
+            vim.log.levels.INFO)
+    end
+end
 
 -- The window title identifying the repository (§2.1): its name + current branch,
 -- or `detached @<short>` on a detached HEAD, so it always says what is checked out.
@@ -6939,10 +6998,11 @@ GRAPH_HELPERS.set_branch = set_branch
 
 -- Expand the collapsed branch(es) containing `hash` so the commit becomes its own
 -- visible row (§10.3) rather than staying folded inside a `◍` head. Used by the
--- filter jump (§16.4) so landing on a match **opens** its branch. Sets every
--- collapsed owner reaching the commit to normal and reflows; a no-op when the
--- commit is already a visible row (or has no signature). Returns true if it
--- reflowed.
+-- filter jump (§16.4) so landing on a match **opens** its branch. Sets the
+-- commit's own owners (§10.2) normal — `select.open_owners`, the same rule as
+-- `<Space>` on a `◍`, so a collapsed branch built on top stays folded — and
+-- reflows; a no-op when the commit is already a visible row (or has no
+-- signature). Returns true if it reflowed.
 local function ensure_expanded(ctx, hash)
     if not hash then return false end
     for _, it in ipairs(ctx.repo.display or {}) do
@@ -6950,14 +7010,12 @@ local function ensure_expanded(ctx, hash)
             return false -- already a visible commit row
         end
     end
-    local sig = ctx.sig_cache.sig and ctx.sig_cache.sig[hash]
-    if not sig then return false end
+    if not (ctx.sig_cache.sig and ctx.sig_cache.sig[hash]) then return false end
     local changed = false
-    for oid in pairs(sig) do
-        if (ctx.view_state.effective[oid] or "normal") == "collapsed" then
-            ctx.view_state.modes[oid] = "normal"
-            changed = true
-        end
+    for _, oid in ipairs(selectm.open_owners(ctx.sig_cache.sig, hash, ctx.view_state.owner_tip or {},
+        ctx.view_state.effective)) do
+        ctx.view_state.modes[oid] = "normal"
+        changed = true
     end
     if changed then
         ctx:reflow()
@@ -7212,6 +7270,13 @@ M._internal = {
     clear_worktree_nodes = clear_worktree_nodes,
     apply_worktree = apply_worktree,
     integrate_commit = integrate_commit,
+    -- The §10.4 collapse target + <Space>'s act-and-notify, over a stub ctx; space_toggle_spec.
+    branch_under_cursor = branch_under_cursor,
+    toggle_branch = GRAPH_HELPERS.toggle_branch,
+    -- The owner resolution (effective modes, owner tips, the §6 expanded set) and
+    -- the label marks built from it; space_toggle_spec.
+    reflow_owners = GRAPH_HELPERS.reflow_owners,
+    pin_marks = GRAPH_HELPERS.pin_marks,
     build_display_index = build_display_index,
     on_cursor_moved = on_cursor_moved, -- the CursorMoved pre-selection (§2); window_internal_spec
     -- Not named `cursor_hash`: specs copy _internal onto stub ctxs whose own

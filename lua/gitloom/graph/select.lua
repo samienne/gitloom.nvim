@@ -1,6 +1,6 @@
 --- Selection & branch-mode interaction — the pure helpers behind the ref
 --- selection (`h`/`l`, §2), the branch-mode cycle (§10.1), the collapse target
---- under the cursor (§10.4) and the commit-selection path walk (§13). All pure
+--- under the cursor — a row's own owners (§10.2/§10.4) and the commit-selection path walk (§13). All pure
 --- (no window state): they operate on the DisplayNode graph and ref data; the
 --- window glue resolves rows / lanes / ranges. Part of the gitloom graph engine.
 
@@ -254,29 +254,155 @@ function M.ref_byte_col(line_text, deco, nth)
     return found and (found - 1) or nil
 end
 
---- The owner ids whose collapse turns the region containing a shown commit into
---- a marker (spec §10.4): every non-anchor owner currently keeping it visible.
---- Returns nil when the commit is **mainline** (a pinned anchor reaches it, so it
---- can't be collapsed) or nothing normal keeps it visible. Used by the `<Tab>`
---- collapse toggle and the `<CR>` menu to act on the region under the cursor
---- without needing a ref.
----@param sig table<string, boolean>?  -- the commit's signature (owner id set)
----@param pinned table<string, boolean>?  -- the anchor owner ids (§10.6)
----@param effective table<string, string>  -- owner id → effective mode
----@return string[]|nil
-function M.collapse_owners(sig, pinned, effective)
-    if not sig then return nil end
-    pinned = pinned or {}
-    for pid in pairs(pinned) do
-        if sig[pid] then return nil end -- on an anchor's line: not collapsible
+-- ── Own owners: what collapse / expand act on (spec §10.2, §10.4) ───────────
+
+--- A commit's **own owners** (spec §10.2): the owners in `sig(c)` whose tip has the
+--- same signature as `c` — `own(c) = { o ∈ sig(c) : sig(tip(o)) = sig(c) }`, the
+--- owners whose tip sits in `c`'s region. Over the interned signatures
+--- (`sigset.of(sig)`) the test is a handle comparison, O(|sig(c)|); a plain table
+--- of sets (a test, or a caller that built its own) gets a set comparison. Sorted,
+--- so callers and notices are deterministic. Empty on a stretch shared below a
+--- fork (no tip in the region) and on an uncovered commit.
+---@param sig table?  -- hash -> owner-id set (the `view.signatures` map)
+---@param hash string  -- the commit (a `◍` head: its tip, the region's newest commit)
+---@param tip_of table<string, string>  -- owner id -> its tip's hash
+---@return string[]
+function M.own_owners(sig, hash, tip_of)
+    local members = sig and sig[hash]
+    if not members then return {} end
+    local S = require("gitloom.graph.sigset").of(sig)
+    local out = {}
+    for oid in pairs(members) do
+        local th = tip_of[oid]
+        local same = false
+        if th == hash then
+            same = true
+        elseif th and S then
+            same = S.handles[th] ~= nil and S.handles[th] == S.handles[hash]
+        elseif th then
+            local ts = sig and sig[th] ---@type table<string, boolean>?
+            if ts then
+                same = true
+                for k in pairs(ts) do if not members[k] then same = false break end end
+                if same then for k in pairs(members) do if not ts[k] then same = false break end end end
+            end
+        end
+        if same then out[#out + 1] = oid end
+    end
+    table.sort(out)
+    return out
+end
+
+--- The owners to set normal so the commit `hash` becomes visible (spec §10.4):
+--- its **own owners** that are collapsed — the least that opens it, never a
+--- collapsed branch built on top — or, when it has none (a stretch shared below a
+--- fork, §10.2), every collapsed owner in its signature. Empty when a normal owner
+--- already reaches it (it is visible; nothing to open). Sorted. The rule behind
+--- `<Space>` on a `◍`, the palette's expand, the filter jump (§16.4), the
+--- §11.7.6 reveal and the selection fold toggle (§13.4).
+---@param sig table?  -- hash -> owner-id set
+---@param hash string  -- the commit (a head: its tip's hash)
+---@param tip_of table<string, string>  -- owner id -> tip hash
+---@param effective table<string, string>  -- owner id -> effective mode
+---@return string[]
+function M.open_owners(sig, hash, tip_of, effective)
+    local members = (sig and sig[hash]) or {}
+    local function mode(oid) return effective[oid] or "normal" end
+    for oid in pairs(members) do
+        if mode(oid) == "normal" then return {} end
     end
     local out = {}
-    for oid in pairs(sig) do
-        if not pinned[oid] and (effective[oid] or "normal") == "normal" then
-            out[#out + 1] = oid
+    for _, oid in ipairs(M.own_owners(sig, hash, tip_of)) do
+        if mode(oid) == "collapsed" then out[#out + 1] = oid end
+    end
+    if #out == 0 then
+        for oid in pairs(members) do
+            if mode(oid) == "collapsed" then out[#out + 1] = oid end
+        end
+        table.sort(out)
+    end
+    return out
+end
+
+--- What `<Space>` / the palette's collapse-expand act on for a row (spec §10.4):
+---  * a `◍` head (`collapsed`): `expanded` → `owners` = its own owners that are
+---    collapsed, or every collapsed owner in its signature when it has no own owner
+---    (a stretch shared below a fork);
+---  * an open row an anchor reaches: `mainline`, with the `anchors` reaching it;
+---  * any other open row: `expanded`, `owners` = its normal, non-anchor own owners
+---    (possibly none) and `keepers` = the normal owners that stay — branches built
+---    on top, which keep the row open after the collapse.
+--- `owners`, `keepers` and `anchors` are sorted owner-id lists.
+---@class ToggleTarget
+---@field state "expanded"|"collapsed"|"mainline"
+---@field owners string[]    what collapse / expand set (own owners, §10.2)
+---@field keepers string[]   normal non-own owners that keep an open row open
+---@field anchors string[]   the anchors reaching a mainline row
+---@field selected? string[]     window glue: the h/l-selected ref's owner ids
+---@field hide_owners? string[]  window glue: what the palette's hide acts on
+---@field follow? string         window glue: the hash the cursor follows
+---@field commit? table          window glue: the row's commit (a head: its tip)
+---@param sig table?  -- hash -> owner-id set
+---@param hash string  -- the commit (a head: its tip's hash)
+---@param tip_of table<string, string>  -- owner id -> tip hash
+---@param pinned table<string, boolean>?  -- the anchor owner ids (§10.6)
+---@param effective table<string, string>  -- owner id -> effective mode
+---@param collapsed boolean?  -- the row is a `◍` head
+---@return ToggleTarget
+function M.toggle_target(sig, hash, tip_of, pinned, effective, collapsed)
+    pinned = pinned or {}
+    local owners, keepers, anchors = {}, {}, {}
+    if collapsed then
+        owners = M.open_owners(sig, hash, tip_of, effective)
+        return { state = "collapsed", owners = owners, keepers = keepers, anchors = anchors }
+    end
+    local members = (sig and sig[hash]) or {}
+    local own = M.own_owners(sig, hash, tip_of)
+    local function mode(oid) return effective[oid] or "normal" end
+    for oid in pairs(members) do
+        if pinned[oid] then anchors[#anchors + 1] = oid end
+    end
+    if #anchors > 0 then
+        table.sort(anchors)
+        return { state = "mainline", owners = owners, keepers = keepers, anchors = anchors }
+    end
+    local is_own = {}
+    for _, oid in ipairs(own) do
+        is_own[oid] = true
+        if mode(oid) == "normal" then owners[#owners + 1] = oid end
+    end
+    for oid in pairs(members) do
+        if not is_own[oid] and mode(oid) == "normal" then keepers[#keepers + 1] = oid end
+    end
+    table.sort(keepers)
+    return { state = "expanded", owners = owners, keepers = keepers, anchors = anchors }
+end
+
+--- Name a set of owners for a notice or a palette entry (spec §10.4): the ref
+--- owners by their branch / tag / worktree name — a remote branch folded into its
+--- short name, so `dev` and `origin/dev` read once — and the anonymous ones (the
+--- §10.2 `merge:` / `tip:` families, no ref in `refs`) as a count: `feature/z +1
+--- merged`, or `2 merged` with no ref at all. "" for an empty list.
+---@param ids string[]
+---@param refs table<string, Ref>  -- repo.refs (ref id -> Ref)
+---@return string
+function M.owner_label(ids, refs)
+    local names, seen, anon = {}, {}, 0
+    for _, id in ipairs(ids) do
+        local r = refs[id]
+        if not r then
+            anon = anon + 1
+        else
+            local n = (r.kind == "remote") and (id:match("^[^/]+/(.+)$") or id) or id
+            if not seen[n] then seen[n] = true; names[#names + 1] = n end
         end
     end
-    return (#out > 0) and out or nil
+    table.sort(names)
+    local s = table.concat(names, ", ")
+    if anon > 0 then
+        s = (s == "") and (anon .. " merged") or (s .. " +" .. anon .. " merged")
+    end
+    return s
 end
 
 -- ── Pinned branches: the ordered pin list (spec §10.6) ──────────────────────
@@ -472,7 +598,7 @@ function M.pin_add(pins, id, reserved)
 end
 
 --- The membership set of a pin list — the anchor owner ids (§10.6), which is
---- what `view.owners` / `collapse_owners` consume.
+--- what `view.owners` / `toggle_target` consume.
 ---@param pins PinEntry[]?
 ---@return table<string, boolean>
 function M.pin_ids(pins)

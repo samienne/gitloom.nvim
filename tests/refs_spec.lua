@@ -10,7 +10,7 @@ local ref_picker_items = internal.ref_picker_items
 local owners_from_refs = internal.owners_from_refs
 local next_mode = internal.next_mode
 local selected_owner_ids = internal.selected_owner_ids
-local collapse_owners = internal.collapse_owners
+local toggle_target = internal.toggle_target
 local parse_worktrees = internal.parse_worktrees
 local worktree_refs = internal.worktree_refs
 local decoration_texts = internal.decoration_texts
@@ -448,29 +448,40 @@ describe("branch-mode toggle helpers", function()
         assert.is_nil(selected_owner_ids(commit({ { "local", "main" } }), 5))
     end)
 
-    it("collapse_owners returns nil for a mainline commit (an anchor reaches it)", function()
-        assert.is_nil(collapse_owners({ trunk = true, feat = true }, { trunk = true },
-            { trunk = "normal", feat = "normal" }))
+    -- The collapse target (§10.4) on a plain table of sets: `toggle_target`
+    -- with every owner tipped at the row itself (so every owner is own).
+    local function target(sig, pinned, effective)
+        local tip_of = {}
+        for oid in pairs(sig) do tip_of[oid] = "c" end
+        return toggle_target({ c = sig }, "c", tip_of, pinned, effective, false)
+    end
+
+    it("toggle_target is mainline for a commit an anchor reaches", function()
+        local t = target({ trunk = true, feat = true }, { trunk = true }, { trunk = "normal", feat = "normal" })
+        assert.equals("mainline", t.state)
+        assert.same({ "trunk" }, t.anchors)
     end)
 
-    it("collapse_owners returns the non-anchor normal owners off the mainline", function()
+    it("toggle_target collapses the non-anchor normal own owners off the mainline", function()
         -- feat is normal (keeps it visible); the merge owner is already collapsed
-        assert.same({ "feat" }, collapse_owners({ feat = true, ["merge:m:2"] = true }, { trunk = true },
-            { feat = "normal", ["merge:m:2"] = "collapsed" }))
+        local t = target({ feat = true, ["merge:m:2"] = true }, { trunk = true },
+            { feat = "normal", ["merge:m:2"] = "collapsed" })
+        assert.equals("expanded", t.state)
+        assert.same({ "feat" }, t.owners)
     end)
 
-    it("collapse_owners is nil when nothing normal keeps the commit visible", function()
-        assert.is_nil(collapse_owners({ feat = true }, { trunk = true }, { feat = "collapsed" }))
+    it("toggle_target has nothing to collapse when nothing normal keeps the commit visible", function()
+        assert.same({}, target({ feat = true }, { trunk = true }, { feat = "collapsed" }).owners)
     end)
 
-    it("collapse_owners treats every pinned anchor as mainline (§10.6)", function()
+    it("toggle_target treats every pinned anchor as mainline (§10.6)", function()
         -- two anchors; a commit reached by either is mainline (not collapsible),
         -- even if a non-anchor ref also reaches it.
-        assert.is_nil(collapse_owners({ dev = true, feat = true }, { trunk = true, dev = true },
-            { dev = "normal", feat = "normal" }))
+        assert.equals("mainline", target({ dev = true, feat = true }, { trunk = true, dev = true },
+            { dev = "normal", feat = "normal" }).state)
         -- off both anchors: feat alone keeps it visible, so it is collapsible.
-        assert.same({ "feat" }, collapse_owners({ feat = true }, { trunk = true, dev = true },
-            { feat = "normal" }))
+        assert.same({ "feat" }, target({ feat = true }, { trunk = true, dev = true },
+            { feat = "normal" }).owners)
     end)
 end)
 
@@ -731,5 +742,63 @@ describe("pin icon on pinned labels (§6/§10.6)", function()
         } }
         local units = marker_units(item, PINS)
         assert.same({ "(⚲dev)", "(feat)" }, { units[1].text, units[2].text })
+    end)
+end)
+
+describe("expanded marker on user-opened labels (§6)", function()
+    local pane_labels = internal.pane_labels
+    local marker_units = internal.marker_units
+    local function ref(kind, name, extra)
+        local r = { kind = kind, name = name }
+        for k, v in pairs(extra or {}) do r[k] = v end
+        return r
+    end
+    local MARKS = { set = { main = true, dev = true }, icon = "⚲",
+        expanded = { feat = true, ["origin/rel"] = true, v1 = true, ["wt:rev"] = true, main = true },
+        expanded_icon = "▾" }
+
+    it("prefixes an expanded ref's label inside its bracket, in every bracket kind", function()
+        local commit = { refs = {
+            ref("local", "feat"), ref("remote", "origin/feat"),
+            ref("local", "other"),
+            ref("tag", "v1"), ref("tag", "v2"),
+            ref("worktree", "wt:rev"),
+        } }
+        assert.same({ "(▾feat ↑origin)", "(other)", "[▾v1]", "[v2]", "{▾wt:rev}" },
+            decoration_texts(commit, nil, MARKS))
+    end)
+
+    it("a branch group is marked when any ref in it is expanded", function()
+        local commit = { refs = { ref("local", "rel"), ref("remote", "origin/rel") } }
+        assert.same({ "(▾rel ↑origin)" }, decoration_texts(commit, nil, MARKS))
+    end)
+
+    it("goes after the pin icon when both apply", function()
+        local commit = { refs = { ref("local", "dev") } }
+        local both = { set = { dev = true }, icon = "⚲", expanded = { dev = true } }
+        assert.same({ "(⚲▾dev)" }, decoration_texts(commit, nil, both))
+    end)
+
+    it("defaults to ▾ and \"\" turns it off", function()
+        local commit = { refs = { ref("local", "feat") } }
+        assert.same({ "(▾feat)" }, decoration_texts(commit, nil, { set = {}, expanded = { feat = true } }))
+        assert.same({ "(feat)" }, decoration_texts(commit, nil,
+            { set = {}, expanded = { feat = true }, expanded_icon = "" }))
+    end)
+
+    it("never marks HEAD's label", function()
+        local attached = { refs = { ref("local", "main"), ref("local", "feat"), ref("head", "HEAD", { branch = "main" }) } }
+        assert.same({ "(HEAD → main)", "(▾feat)" }, decoration_texts(attached, nil, MARKS))
+    end)
+
+    it("pane labels and packed marker units carry it too", function()
+        local segs = pane_labels({ refs = { ref("local", "feat"), ref("tag", "v2") } }, nil, MARKS)
+        assert.same({ "(▾feat)", "[v2]" }, { segs[1].text, segs[2].text })
+        local item = { type = "markers", markers = {
+            { hash = "x", collapsed = true, count = 2, refs = { ref("local", "feat") } },
+            { hash = "y", collapsed = true, count = 3, refs = { ref("local", "other") } },
+        } }
+        local units = marker_units(item, MARKS)
+        assert.same({ "(▾feat)", "(other)" }, { units[1].text, units[2].text })
     end)
 end)

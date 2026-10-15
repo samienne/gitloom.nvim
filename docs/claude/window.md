@@ -167,12 +167,20 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   map is cached (`order_idx`), rebuilt only when the order length changes. Full
   cross-level head packing (all unpinned heads on ONE row, vs. today's consecutive
   packing) is pending. listview.lua is a git-agnostic reusable widget.
-- **Collapse interaction** (spec §10.4): acts on the *region under the cursor*,
-  not a ref — `branch_under_cursor(line)` resolves the selection (ref/marker) or
-  the commit's signature (`collapse_owners`) into `{state, owners, follow,
-  commit}`. `<Tab>` is the 2-state collapse⇄expand toggle (`set_branch` flips the
-  owners, reflows, then `goto_hash` repositions the cursor on the result so it is
-  repeatable). `<CR>` is **examine, never a menu** (`h_cr`): the commit view of
+- **Collapse interaction** (spec §10.4): acts on the row's **own owners**
+  (§10.2), not a selected ref — `branch_under_cursor(line)` runs
+  `select.toggle_target` over the commit's signature (a head / packed marker: its
+  tip) into `{state, owners, keepers, anchors, selected, hide_owners, follow,
+  commit}`; `selected` (the h/l ref's owners) feeds only the per-ref actions
+  (palette hide, `P`). `<Space>` is the 2-state collapse⇄expand toggle:
+  `GRAPH_HELPERS.toggle_branch` calls `set_branch` (flips the owners, reflows,
+  then `goto_hash` repositions the cursor on the result so it is repeatable) and
+  gives the `still open via …` / mainline notices (`select.owner_label`); the
+  palette's collapse / expand go through it too. The expand side everywhere
+  (filter jump `ensure_expanded`, the §11.7.6 reveal, the selection toggle, a
+  packed marker's expand) is `select.open_owners`. `reflow_owners` writes
+  `view_state.owner_tip` (the rule's input) and `view_state.expanded` (the §6
+  `▾` set `pin_marks` hands the renderers). `<CR>` is **examine, never a menu** (`h_cr`): the commit view of
   the row's commit — `select.menu_target` maps a collapsed head to its `tip`, a
   packed-marker line uses the selected marker's tip (the **first** marker's when
   none is selected), and while a §13 selection is active it is the range view.

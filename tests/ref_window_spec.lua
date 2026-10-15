@@ -154,6 +154,22 @@ describe("windowed right-ref overflow (integration, §6)", function()
         assert.is_not_nil(gi.ref_byte_col(sel, texts[4]))
     end)
 
+    -- The expanded marker (§6) is measured exactly like the pin icon: windowing,
+    -- the `+N` overflow, the selection and the cursor target all see it.
+    it("draws the expanded marker in the label text; windowing and the cursor target see it", function()
+        local pins = { set = { alpha = true }, icon = "⚲", expanded = { delta = true, alpha = true },
+            expanded_icon = "▾" }
+        local item, commit = commit_item({ "alpha", "beta", "gamma", "delta" })
+        local line = render(item, { commit = nil, index = nil }, pins)
+        assert.is_not_nil(line:find("(⚲▾alpha)", 1, true))
+        assert.is_not_nil(line:match("%+%d"))
+        local sel = render(item, { commit = commit, index = 4 }, pins)
+        assert.is_not_nil(sel:find("(▾delta)", 1, true))
+        local texts = gi.decoration_texts(commit, nil, pins)
+        assert.equals("(▾delta)", texts[4])
+        assert.is_not_nil(gi.ref_byte_col(sel, texts[4]))
+    end)
+
     it("never puts the pin icon on HEAD's label", function()
         local pins = { set = { main = true }, icon = "⚲" }
         local item, commit = commit_item({ "main" })

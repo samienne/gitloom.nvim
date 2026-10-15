@@ -158,7 +158,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `C` | Cycle the lane layout policy (compact → survivors → linear → straight → gutter) — which lanes may move sideways to close a gap, and (gutter) whether the current branch's lane is pinned to a fixed column beside the message |
 | `M` | Toggle mirroring — render the graph with lane 1 on the right, nearest the message |
 | `B` | Cycle the ref label placement (right edge → inline before the message → its own line) |
-| `<Space>` | Collapse ⇄ expand the branch under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
+| `<Space>` | Collapse ⇄ expand the row's own branch(es) under the cursor (toggle; the cursor follows so repeated `<Space>` flips it in place) |
 | `<CR>` | Examine — open the **commit view** of the row's commit (a collapsed head or a packed marker: its tip — the selected marker's, else the first; while selecting: the range view). Every other row action is in the `<C-Space>` palette |
 | `D` | Open the commit's diff in an external diff viewer (diffview by default) |
 | `d` | Toggle the date column between absolute and relative ("3 days ago") |
@@ -184,12 +184,24 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 
 **Branch modes.** A branch can be **normal**, **collapsed** (contracted to a
 single `◍` marker row — a commit count and the ref), or **hidden**. The
-collapse interactions act on the **branch under the cursor**, found from the
-commit's history — no ref needed, so they work for ref-less regions too
-(first-parent-merged, squashed):
+collapse interactions act on the **row's own branches** — the branches whose
+tip is in the row's stretch of history — found from the commit's history, not a
+selected ref, so they work for ref-less regions too (first-parent-merged,
+squashed). A branch opens only its own first-parent line: opening `dev` (or the
+trunk) never opens the branches merged into it.
 
 - `<Space>` toggles **collapse ⇄ expand** in place; the cursor follows the
-  result, so holding `<Space>` flips a branch open and closed.
+  result, so holding `<Space>` flips a branch open and closed. On an open row it
+  collapses every ref of that row together (selecting one with `h`/`l` does not
+  narrow it). A branch **built on top** is never collapsed with it: if one keeps
+  the row open, gitloom says so (`still open via feature/z +1 merged`). On a `◍`
+  it expands only that marker's own branches, so a collapsed branch above stays
+  folded. A pinned branch's line is not collapsible (`on dev's mainline — not
+  collapsible`).
+- A branch you opened (one that is collapsed by default) carries an **expanded
+  marker** in its label — `(▾feature/x)`, after the pin icon when both apply
+  (`icons.expanded`; `""` turns it off). Pinned branches and HEAD never carry it,
+  and nothing is marked with the first-parent focus off (`c`).
 - `<C-Space>` opens the **command palette**, whose first entries are the
   actions on **what is selected** — a commit or a branch, never both. On the
   message (the commit): open diff, checkout (detached), checkout & examine
@@ -553,6 +565,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- merge = "M",
         head = "●",          -- HEAD's node marker (§5.3); "" = off
         pin = "⚲",           -- pinned-anchor label icon (§6/§10.6); "" = off
+        expanded = "▾",      -- label icon of a branch you opened (§6); "" = off
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     layout_policy = "compact", -- lane placement (§5.6); cycle with C:

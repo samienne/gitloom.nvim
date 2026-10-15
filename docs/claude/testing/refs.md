@@ -14,8 +14,8 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   `decoration_texts` + `ref_picker_items` upstream threading (§6.3),
   `owners_from_refs` (view-builder owners per ref; an attached HEAD skipped, a
   detached HEAD an owner with id `HEAD`; §10/§10.6), the
-  branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `collapse_owners`
-  (§10/§10.4), and the **linked-worktree refs** (§3.2/§4.1): `parse_worktrees`
+  branch-mode toggle helpers `next_mode` / `selected_owner_ids` / `toggle_target`
+  (§10/§10.4), the **expanded marker** label text (§6; `icons.expanded`), and the **linked-worktree refs** (§3.2/§4.1): `parse_worktrees`
   (the `git worktree list --porcelain` stanza parser — main-vs-linked, bare,
   detached *derived* from a HEAD with no branch, basename from either path
   separator), `worktree_refs` (the `wt:<dir>` labels + all three skips: the main
@@ -125,6 +125,15 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   reflow-swap primitive; §10.5), and that `set_items` / `refresh` / `relayout`
   with the host window gone (closed / hidden) re-lay the buffer and render
   nothing (the `Invalid 'win'` regression)
+- `tests/own_owners_spec.lua` — a row's own owners (§10.2) over real interned
+  signatures and plain sets (`select.own_owners`), the `<Space>` target
+  (`select.toggle_target`: multi-ref fold, a branch on top kept, `◍` expand of own
+  owners only, the shared-stretch fallback, mainline), first-parent-only reach
+  through `view.project`, and `select.owner_label`.
+- `tests/space_toggle_spec.lua` — `<Space>` through the window glue over a stub
+  ctx (`window._internal.branch_under_cursor` / `toggle_branch`): owners acted on,
+  the `still open via …` / mainline notices, the palette's named entries, and the
+  §6 expanded set from `reflow_owners` / `pin_marks`.
 - `tests/pin_spec.lua` — the ordered pin list (§10.6) + the dialog (§10.6.1):
   `pin_resolve` (the unplaced defaults first — HEAD's anchor last among them —
   then the stored entries, a new pin at the bottom; unpinned suppressed,
