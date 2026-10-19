@@ -481,7 +481,7 @@ lua/gitloom/
     examine.lua     Checkout & examine plans: examine / stash message / Return (§10.4.2)
     order.lua       order_commits — gitloom's owned topo-sort (§3.1)
     date.lua        Timestamp parse + date formatters (§4/§6)
-    remote.lua      Palette fetch / pull argv + env, `git remote` parse, failure text (§17)
+    remote.lua      Palette fetch / pull argv + env, `git remote` parse, failure text, fetch log / live status / ref summary (§17)
     sync.lua        Branch sync plans: fast-forward / reset to upstream argv, prompt, stale check (§17.2)
     fetch.lua       The async git I/O (vim.system) — the only Neovim-coupled corner
   graph/          The graph ENGINE (gitloom.graph): commits + view state → rows
@@ -2267,6 +2267,33 @@ and resyncs on success, or always for a pull. `resync` returns early when the
 graph window has gone. Both helpers are `GRAPH_HELPERS` fields — window.lua is at
 the 200-local ceiling.
 
+**Live status and the fetch log** (specification.md §17.4). The argvs carry
+`--progress`, and `run_remote` passes `git.run_remote` an `on_chunk`: the runner
+gives `spawn` stdout / stderr callbacks, collects the pieces itself (vim.system's
+result has nil `stdout` / `stderr` once a callback is given) and hands each piece
+to `on_chunk` on the main loop, before the future resolves. The window side is
+thin over the pure `gitloom.git.remote`:
+
+- `remote.new_log` / `log_feed` / `log_finish` — the **fetch log**
+  (`ctx.remote_log`, the running or last command): a per-stream line buffer
+  that splits on `\r` and `\n`, carries a partial tail across chunks, replaces a
+  `\r`-ended (in-place progress) line with the stream's next one, and caps at
+  `LOG_MAX` lines. `log_lines` renders it for the buffer.
+- `remote.status_text(log, now)` — the operation's message (`m:ss · <latest line>`,
+  `waiting for the remote`, `(no output for N s)`), re-reported from a 1 s uv
+  timer and from output (throttled to 250 ms). The timer stops at the job's end,
+  or on its next tick once the operation was ended by the session teardown.
+- `remote.ref_summary(err)` / `summary_text(cmd, counts)` — the success notice,
+  counted on the ref table's flag column (untranslated; `fetch --porcelain` is
+  not usable because `pull` rejects it).
+
+The start and outcome notices go through one `progress.notice()` handle (below),
+so under a replacing notifier the whole job is one notice. `show_remote_log`
+opens `ctx.remote_log` in a scratch float (`float_zindex`, `q` closes);
+`refresh_remote_log` re-renders it on every status refresh and at the end,
+following the last line unless the cursor left it. The palette lists **Show
+fetch log** from its `remote_log` state flag. No footer segment, no key.
+
 **Branch sync** (specification.md §17.2) — the branch context's *Fast-forward `<b>`
 to `<upstream>`* / *Reset `<b>` to `<upstream>`…* row entries. `row_entries` asks
 the pure `git/sync.lua`: `sync_target(ref)` (a local `SelectedRef` whose
@@ -2355,6 +2382,14 @@ Shape:
   `BufWipeout`.
 - Every provider call is `pcall`ed: a broken provider costs that operation its
   display, never the operation.
+- `progress.notice(notify?)` — an operation's own **replaceable notice**: every
+  `show` passes one `id` (snacks.notifier), the previous show's return as
+  `replace` (nvim-notify) and `title = "gitloom"`. A nil return (Neovim's
+  built-in) leaves `handle` nil, which means "cannot replace". Passed as
+  `opts.notice` to `tracker:start`, it reaches the provider; the notify provider
+  shows the running message through it (`gitloom: <title> <message>`, at most once
+  per `NOTICE_INTERVAL`) only when `handle` is set — fetch / pull's live status
+  (§17.4, §19.3).
 
 The **fidget provider** maps an Op to
 `require("fidget.progress").handle.create{ title, message,
@@ -2373,9 +2408,10 @@ Call sites (start → every end):
   error branch ends it `failed`, its `reflow_gen` mismatch ends it `cancelled`.
 - **Resync** — `resync()`: both `if not ctx:win() then return end` exits end it
   `cancelled`; the final callback ends it `done`.
-- **Fetch / pull** — `run_remote`: started where `vim.notify(cmd.running)` is
-  (which is skipped when the resolved provider is fidget); ended `done`/`failed`
-  in the job callback, before the resync.
+- **Fetch / pull** — `run_remote`: started where the `cmd.running` notice is
+  shown (through its `progress.notice`; skipped when the resolved provider is
+  fidget), with the live status as its message, re-reported while it runs
+  (§17.4); ended `done`/`failed` in the job callback, before the resync.
 - **Branch sync** — `branch_sync`'s `exec` only; ended in its callback.
 - **Checkout** — the palette's `checkout(spec)`; ended in its callback.
 - **Examine / Return** — `examine`'s `go()` and `examine_return`; every branch of
@@ -2393,7 +2429,10 @@ all; one past it calls `start` once with the latest message, `report` after, and
 `cancelled` and none twice; a throwing provider leaves the Op's caller unaffected;
 `"auto"` selects fidget iff the fake `fidget.progress` loads; the notify provider's
 start/end rules per `own_notices` × outcome (no start for an own-notice Op, no end
-for `failed`/`cancelled`, an end only after a shown start). The fidget adapter
+for `failed`/`cancelled`, an end only after a shown start); the replaceable
+`progress.notice` (one id, `replace` = previous handle) and the live running
+message through it — throttled, only with a handle, the entry's message under
+fidget. The fidget adapter
 against the real fidget (from the lazy dir, `pending` when absent): the client
 name is `gitloom`, the handle is finished on `failed` and `cancelled` without
 raising. Per call site, an "always ended" check drives the glue's paths over a

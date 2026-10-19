@@ -283,6 +283,86 @@ describe("notify provider (§19.3)", function()
         op:report("a"); op:report("b")
         assert.equals(1, #d.notices)
     end)
+
+    -- §19.3 / §17.4: fetch / pull's live status through its own replaceable notice.
+    local function notifier(ret)
+        local calls = {}
+        local f = function(msg, level, opts)
+            calls[#calls + 1] = { msg = msg, level = level, opts = opts }
+            return ret and ret(#calls) or nil
+        end
+        return f, calls
+    end
+
+    it("a notice passes one id, the previous handle as replace, and title gitloom", function()
+        local f, calls = notifier(function(n) return { id = n } end)
+        local notice = progress.notice(f)
+        notice:show("gitloom: Fetching…")
+        notice:show("gitloom: fetched", vim.log.levels.WARN)
+        assert.equals(notice.id, calls[1].opts.id)
+        assert.equals(notice.id, calls[2].opts.id)
+        assert.is_nil(calls[1].opts.replace)
+        assert.same({ id = 1 }, calls[2].opts.replace)
+        assert.equals("gitloom", calls[2].opts.title)
+        assert.equals(vim.log.levels.INFO, calls[1].level)
+        assert.equals(vim.log.levels.WARN, calls[2].level)
+        assert.is_true(notice.id ~= progress.notice(f).id)
+    end)
+
+    it("a replaceable notifier: the running message replaces the notice, at most once per second", function()
+        local d = fake_deps()
+        local f, calls = notifier(function(n) return n end)
+        local notice = progress.notice(f)
+        notice:show("gitloom: Fetching origin…")
+        local op = progress.tracker({ provider = "notify" }, d):start("Fetching origin",
+            { own_notices = true, notice = notice, message = "0:00 · waiting for the remote" })
+        op:report("0:00 · waiting for the remote")
+        assert.equals(1, #calls) -- before the delay: nothing
+        d.t = 300
+        d.fire()
+        assert.equals(2, #calls)
+        assert.equals("gitloom: Fetching origin 0:00 · waiting for the remote", calls[2].msg)
+        assert.equals(1, calls[2].opts.replace)
+        d.t = 900
+        op:report("0:00 · remote: Counting objects")
+        assert.equals(2, #calls) -- throttled
+        d.t = 1300
+        op:report("0:01 · Receiving objects: 10%")
+        assert.equals(3, #calls)
+        assert.equals("gitloom: Fetching origin 0:01 · Receiving objects: 10%", calls[3].msg)
+        assert.same({}, d.notices) -- the provider's own notify is never used for it
+        op:finish("done")
+        assert.equals(3, #calls) -- the outcome notice is the caller's
+    end)
+
+    it("Neovim's built-in notify (no handle): the running message is not notified", function()
+        local d = fake_deps()
+        local f, calls = notifier(nil)
+        local notice = progress.notice(f)
+        notice:show("gitloom: Fetching…")
+        local op = progress.tracker({ provider = "notify", delay = 0 }, d):start("Fetching",
+            { own_notices = true, notice = notice, message = "0:00 · waiting for the remote" })
+        d.t = 5000
+        op:report("0:05 · Receiving objects: 10%")
+        assert.equals(1, #calls)
+        assert.is_nil(notice.handle)
+    end)
+
+    it("under fidget the running message is the entry's message, the notice untouched", function()
+        local reported = {}
+        local fp = { handle = { create = function(o)
+            reported[#reported + 1] = o.message
+            return { report = function(_, r) reported[#reported + 1] = r.message end, finish = function() end }
+        end } }
+        local d = fake_deps({ fidget = function() return fp end })
+        local f, calls = notifier(function(n) return n end)
+        local op = progress.tracker({ provider = "fidget", delay = 0 }, d):start("Fetching",
+            { own_notices = true, notice = progress.notice(f), message = "0:00 · waiting for the remote" })
+        op:report("0:01 · Receiving objects: 10%")
+        assert.same({ "0:00 · waiting for the remote", "0:01 · Receiving objects: 10%" }, reported)
+        assert.equals(0, #calls)
+        assert.is_true(op.fidget)
+    end)
 end)
 
 describe("the real fidget adapter (§19.3)", function()

@@ -239,7 +239,14 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   the `run_checkout` shape with an env: `GIT_TERMINAL_PROMPT=0`;
   `ctx.remote_busy` refuses a second run; success → INFO + resync, failure →
   `format_git_error` over `remote.failure_text` (git's `fatal:`/`error:` line
-  first, stdout when stderr is empty) + resync for a pull only).
+  first, stdout when stderr is empty) + resync for a pull only). §17.4: it
+  streams (`git.run_remote(..., on_chunk)`) into `ctx.remote_log` (the pure
+  `remote.log_feed`), reports `remote.status_text` as the op's message from a 1 s
+  uv timer + output (≤ 4/s), and sends its start / outcome notices through one
+  `progress.notice()` (the notify provider replaces it with the live status when
+  the notifier returned a handle). Success notice = `remote.summary_text` over
+  `remote.ref_summary(res.err)`. `show_remote_log` / `refresh_remote_log` (the
+  palette's *Show fetch log*, `ctx.remote_log_buf`) — no footer segment, no key.
   `ctx.remotes` comes from `load_remotes` (`git remote`, async) at session
   assembly and at the top of every `resync`. Pull's argv is exactly `git pull
   --ff-only`, which overrides any `pull.rebase` / `pull.ff` config, so it never

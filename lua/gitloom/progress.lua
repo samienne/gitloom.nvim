@@ -28,6 +28,8 @@ M.DELAY = 300
 ---@field message? string
 ---@field own_notices? boolean  the operation emits its own start / outcome notices (§19.3)
 ---@field t0? number            clock (ms) when the operation started — not when it was shown
+---@field notice? ProgressNotice  the operation's own replaceable notice: the notify
+---                             provider shows the running message through it (§19.3)
 
 ---@class ProgressSink
 ---@field report fun(message?: string)
@@ -74,10 +76,47 @@ local function load_fidget()
     return nil
 end
 
+---@class ProgressNotice
+---@field id string          the `id` every show passes (snacks.notifier replaces by it)
+---@field handle any         what `vim.notify` returned for the last show; nil = it cannot replace
+---@field shown boolean      shown at least once
+---@field show fun(self: ProgressNotice, msg: string, level?: integer)
+
+local notice_seq = 0
+
+--- An operation's own **replaceable notice** (§19.3, fetch / pull): every `show`
+--- passes the same `id` (snacks.notifier), the previous show's return as
+--- `replace` (nvim-notify) and `title = "gitloom"`. Neovim's built-in
+--- `vim.notify` ignores the options and returns nothing, so `handle` stays nil —
+--- the sign the notifier cannot replace, and the notify provider then never
+--- shows the running message through it. `notify` defaults to the CURRENT
+--- `vim.notify` at each show.
+---@param notify? fun(msg: string, level?: integer, opts?: table): any
+---@return ProgressNotice
+function M.notice(notify)
+    notice_seq = notice_seq + 1
+    return {
+        id = "gitloom.progress." .. notice_seq, handle = nil, shown = false,
+        show = function(self, msg, level)
+            local f = notify or vim.notify
+            local ok, h = pcall(f, msg, level or vim.log.levels.INFO,
+                { id = self.id, replace = self.handle, title = "gitloom" })
+            self.shown = true
+            self.handle = ok and h or nil
+        end,
+    }
+end
+
+--- How often (ms) the notify provider may replace a live notice (§19.3).
+M.NOTICE_INTERVAL = 1000
+
 --- The `notify` provider (§19.3): a start notice only for an Op without notices of
 --- its own, a `done (N s)` end only after that start notice was shown, nothing for
 --- `failed` / `cancelled` (every failure already notifies at ERROR) and nothing for
---- the running message (notices are a log, not a live display).
+--- the running message (notices are a log, not a live display) — except an Op
+--- with its own replaceable `notice` that has been shown and can replace: its
+--- running message replaces that notice as `gitloom: <title> <message>`, at most
+--- once per NOTICE_INTERVAL.
 ---@param deps ProgressDeps
 ---@return ProgressProvider
 function M.notify_provider(deps)
@@ -90,8 +129,17 @@ function M.notify_provider(deps)
                 notify(("gitloom: %s…"):format(op.title), vim.log.levels.INFO)
                 shown = true
             end
+            local notice, last = op.notice, nil
+            local function live(message)
+                if not (message and notice and notice.handle ~= nil) then return end
+                local t = now()
+                if last and t - last < M.NOTICE_INTERVAL then return end
+                last = t
+                notice:show(("gitloom: %s %s"):format(op.title, message))
+            end
+            live(op.message)
             return {
-                report = function() end,
+                report = live,
                 finish = function(outcome)
                     if outcome ~= "done" or not shown then return end
                     local secs = (now() - (op.t0 or now())) / 1000
@@ -147,6 +195,7 @@ end
 ---@field title string
 ---@field message? string
 ---@field own_notices boolean
+---@field notice? ProgressNotice  the operation's own replaceable notice (§19.3), handed to the provider
 ---@field fidget boolean   the resolved provider is fidget (§19.3: drop fetch / pull's own start notice)
 ---@field ended boolean
 ---@field report fun(self: ProgressOp, message?: string)
@@ -166,7 +215,7 @@ end
 ---@field cfg ProgressConfig
 ---@field live table<ProgressOp, boolean>
 ---@field closed boolean
----@field start fun(self: ProgressTracker, title: string, opts?: { message?: string, own_notices?: boolean }): ProgressOp
+---@field start fun(self: ProgressTracker, title: string, opts?: { message?: string, own_notices?: boolean, notice?: ProgressNotice }): ProgressOp
 ---@field close fun(self: ProgressTracker)
 
 --- One tracker per graph session (§19.4).
@@ -201,13 +250,14 @@ function M.tracker(cfg, deps)
         if not provider then return M.null_op() end
         local sink, cancel
         local op = {
-            title = title, message = opts.message, own_notices = opts.own_notices == true,
+            title = title, message = opts.message, own_notices = opts.own_notices == true, notice = opts.notice,
             fidget = is_fidget, ended = false, t0 = now(),
         }
         local function show()
             if op.ended or sink then return end
             local ok, s = pcall(provider.start, {
                 title = op.title, message = op.message, own_notices = op.own_notices, t0 = op.t0,
+                notice = op.notice,
             })
             sink = ok and type(s) == "table" and s or false
         end

@@ -35,7 +35,10 @@ Scope: per-spec coverage of persistence, progress, the open trace, the vendored 
   fidget from the lazy dir (`pending` when absent). The notify provider: a start
   notice + `done (N s)` only for an Op without notices of its own, nothing more for
   `failed` / `cancelled`, nothing at all when it ended before the delay, the running
-  message never notified. Plus the glue paths reachable without a window
+  message never notified — except through an Op's own replaceable
+  `progress.notice` (same `id`, previous handle as `replace`, `title`), only when
+  the notifier returned a handle, at most once per `NOTICE_INTERVAL`; under
+  fidget the message is the entry's (§17.4/§19.3). Plus the glue paths reachable without a window
   (`window._internal.reflow_async` superseded → `cancelled`, erroring → `failed`,
   completing → left to the caller, completing with the window HIDDEN → still
   applied and `done` run (so the open's Op ends; the result is never parked —

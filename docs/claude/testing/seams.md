@@ -43,6 +43,8 @@ cycle; §2), and `selected_ref` /
 `require("gitloom.graph.palette").row_entries`).
 `window._internal` additionally exposes `keys` (the `GRAPH_KEYS` key registry, §17.1),
 `reflow_async` / `resync` (the §19.4 "always ended" glue paths, over a stub ctx),
+`run_remote` / `show_remote_log` / `refresh_remote_log` (the §17.4 fetch / pull glue
+and fetch log float, over a stub ctx against a real scratch repo; `palette_spec`),
 `branch_under_cursor` / `toggle_branch` / `reflow_owners` / `pin_marks` (`<Space>`'s
 target, act and notices, and the §6 expanded set, over a stub ctx; `space_toggle_spec`),
 `effective_pins` / `effective_pinned`, `on_cursor_moved` / `cursor_hash_at` (`cursor_hash`; the

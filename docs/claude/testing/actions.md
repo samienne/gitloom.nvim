@@ -24,8 +24,8 @@ Scope: per-spec coverage of the command palette, checkout, branch sync and check
   well-formed (a desc each, known groups / contexts, no lhs bound twice), motions
   and plumbing ungrouped, `R` once, every key in the help, `<Space>` offered on a
   branch row only where it toggles (not on a `mainline` row; once on expanded /
-  collapsed, as the row entry; on a selected packed marker); `remote.remote_command` (`git fetch --all`, `git fetch <remote>`,
-  `git pull --ff-only`, `GIT_TERMINAL_PROMPT=0` in a fresh env table, pull's
+  collapsed, as the row entry; on a selected packed marker); `remote.remote_command` (`git fetch --progress --all`, `git fetch --progress <remote>`,
+  `git pull --ff-only --progress`, `GIT_TERMINAL_PROMPT=0` in a fresh env table, pull's
   resync-on-failure, never forcing), `remote.parse_remotes` (blank lines, CR), `remote.failure_text`
   (the `fatal:`/`error:` line first, stderr as is, stdout fallback), and
   against REAL scratch repositories (a bare remote + two clones + a second bare
@@ -33,7 +33,17 @@ Scope: per-spec coverage of the command palette, checkout, branch sync and check
   fetch moving only that remote's ref, pull fast-forwarding a strictly-behind
   branch, a diverged pull refused with HEAD unmoved, pull with
   no upstream failing with a code + stderr (HEAD unmoved), and the env reaching
-  the job (a `!echo` alias prints `$GIT_TERMINAL_PROMPT`)
+  the job (a `!echo` alias prints `$GIT_TERMINAL_PROMPT`). §17.4: the pure fetch
+  log (`remote.log_feed` / `log_finish` / `log_lines`: `\r` updates in place, two
+  per chunk, a line split at every offset, `\r\n`, streams apart, the
+  `LOG_MAX` cap), `remote.status_text` (waiting, `m:ss`, `(no output for N s)`),
+  `remote.ref_summary` / `summary_text` (every flag, a translated bracket word,
+  non-ref lines ignored, up to date / plain pull); the streamed `run_remote`
+  (chunks before the resolve, the resolved err = the stderr chunks, `--all`
+  counting both remotes, `fatal:` first on failure, a spawn failure → -1); the
+  `Show fetch log` entry (only with `remote_log`); and the window glue over a stub
+  ctx (`window._internal.run_remote` / `show_remote_log`: log, summary notice,
+  busy refusal, resync, the log float re-rendered live by a second run, `q`)
 - `tests/checkout_spec.lua` — the palette's row entries + checkout (incl. the
   leading `(HEAD → x)` label resolving to branch `x`)
   (§10.4/§10.4.1): `palette.row_entries` order per row kind, scoped to the

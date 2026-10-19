@@ -18,6 +18,17 @@ Scope: the git I/O layer (`gitloom.git`, `fetch.lua`): spawning, the debug hook,
   graph on the chosen repo; its discovery queries take an explicit `cwd` so they
   don't disturb the active root. `nil` active root = Neovim's cwd (the original
   behaviour).
+- **Streamed output (fetch / pull, spec §17.4)** — `fetch.run_remote(argv, root,
+  env, on_chunk)` passes `stdout` / `stderr` FUNCTIONS to `spawn`; vim.system
+  then leaves the completed result's `stdout` / `stderr` **nil**, so the runner
+  collects the pieces itself and still resolves the whole `{ code, out, err }`
+  (err trimmed only at its end, keeping a leading ref line's flag column). Each
+  piece is handed to `on_chunk` through `vim.schedule` (FIFO, so every chunk
+  lands before the resolve). Pieces split anywhere; git's progress is
+  `\r`-separated and needs `--progress` (stderr is not a tty). The parsing is
+  the pure `gitloom.git.remote` (`log_feed`, `status_text`, `ref_summary` — keyed
+  on the untranslated flag column; `fetch --porcelain` exists but `pull`
+  rejects it).
 - **`vim.schedule` does not yield the screen.** A scheduled callback lands on the
   main loop's event queue, which nvim drains to empty before it iterates — so a
   worker that reschedules itself with `vim.schedule` starves the loop for its

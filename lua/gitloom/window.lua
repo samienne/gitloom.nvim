@@ -2595,7 +2595,7 @@ GRAPH_HELPERS.palette = function(ctx)
     local sp = ctx.sel.active and ctx.sel.path
     local entries = require("gitloom.graph.palette").palette_entries({
         row = row, selection = ctx.sel.active, remotes = ctx.remotes,
-        examine = nav.examine[repo.root], has_diff = has_diff, keys = ctx:key_registry(),
+        remote_log = ctx.remote_log ~= nil, examine = nav.examine[repo.root], has_diff = has_diff, keys = ctx:key_registry(),
         head = selectm.head_target(repo.refs),
         newest = sp and #sp > 0 and real_newest(sp[1]) or nil,
     })
@@ -2692,6 +2692,15 @@ end
 -- ERROR level; a pull resyncs anyway (its fetch half may have moved remote-tracking
 -- refs before the fast-forward was refused).
 -- `resync` itself returns early once the graph window is gone (§14).
+--
+-- Live status + log (§17.4): the output is streamed into `ctx.remote_log` (the
+-- pure `remote.log_feed`); the operation's message is `remote.status_text`,
+-- refreshed by a 1 s uv timer (the elapsed clock) and by output at most every
+-- 250 ms; an open log buffer is refreshed with it. The start / outcome notices
+-- go through one replaceable `progress.notice()`, which the notify provider
+-- also shows the live status through when the notifier can replace (§19.3).
+-- The timer stops at the job's end, or on its next tick once the session's
+-- teardown has ended the operation.
 GRAPH_HELPERS.run_remote = function(ctx, kind, remote)
     local cmd = git.remote_command(kind, remote)
     if not cmd then return end
@@ -2700,28 +2709,111 @@ GRAPH_HELPERS.run_remote = function(ctx, kind, remote)
         return
     end
     ctx.remote_busy = cmd.label
+    local function now() return vim.uv.hrtime() / 1e6 end
+    local log = git.new_log(table.concat(cmd.argv, " "), now(), os.time())
+    ctx.remote_log = log
+    local notice = require("gitloom.progress").notice()
     -- A reported operation (§19.1): `Fetching` / `Fetching <remote>` / `Pulling`,
     -- the running notice's own words. Under fidget its entry replaces that notice
     -- (§19.3); the outcome notices below stay under every provider.
     local op = ctx.progress:start(cmd.running:gsub("^gitloom: ", ""):gsub("…$", ""),
-        { own_notices = true })
-    if not op.fidget then vim.notify(cmd.running) end
-    git.run_remote(cmd.argv, ctx.repo.root, cmd.env).next(function(res)
+        { own_notices = true, notice = notice, message = git.status_text(log, log.t0) })
+    if not op.fidget then notice:show(cmd.running) end
+    local timer = vim.uv.new_timer()
+    local function stop_timer()
+        if timer and not timer:is_closing() then
+            timer:stop()
+            timer:close()
+        end
+    end
+    local last, pending = 0, false
+    local function refresh()
+        pending = false
+        if log.code then return end
+        if op.ended then return stop_timer() end -- the session closed (§19.4)
+        last = now()
+        op:report(git.status_text(log, last))
+        ctx:refresh_remote_log()
+    end
+    if timer then timer:start(1000, 1000, vim.schedule_wrap(refresh)) end
+    ctx:refresh_remote_log(true)
+    git.run_remote(cmd.argv, ctx.repo.root, cmd.env, function(stream, data)
+        git.log_feed(log, stream, data, now())
+        if pending then return end
+        local wait = 250 - (now() - last)
+        if wait <= 0 then return refresh() end
+        pending = true
+        vim.defer_fn(refresh, math.ceil(wait))
+    end).next(function(res)
         vim.schedule(function()
+            stop_timer()
+            git.log_finish(log, res.code, now())
+            ctx:refresh_remote_log()
             ctx.remote_busy = nil
             local ok = res.code == 0
             op:finish(ok and "done" or "failed")
             if ok then
-                vim.notify(cmd.done, vim.log.levels.INFO)
+                -- Ref counts by git's flag column (§17.4).
+                notice:show(git.summary_text(cmd, git.ref_summary(res.err)), vim.log.levels.INFO)
             else
                 -- git's fatal:/error: line, not the progress / hints ahead of it.
                 local err = git.failure_text(res.out, res.err)
-                vim.notify(git.format_git_error(cmd.label, { code = res.code, err = err }),
+                notice:show(git.format_git_error(cmd.label, { code = res.code, err = err }),
                     vim.log.levels.ERROR)
             end
             if ok or cmd.resync_on_failure then ctx:resync(false) end
         end)
     end)
+end
+
+-- The fetch log (§17.4): the running or last fetch / pull's `ctx.remote_log` in a
+-- read-only scratch float over the graph (`q` closes). Re-running it while the log
+-- is open focuses that window. `ctx.remote_log_buf` is how `refresh_remote_log`
+-- finds it for the live updates; cleared when the buffer is wiped.
+GRAPH_HELPERS.show_remote_log = function(ctx)
+    if not ctx.remote_log then return end
+    local lb = ctx.remote_log_buf
+    if lb and vim.api.nvim_buf_is_valid(lb) then
+        local w = vim.fn.bufwinid(lb)
+        if w ~= -1 then return vim.api.nvim_set_current_win(w) end
+    end
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].buftype = "nofile"
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].modifiable = false
+    local width = math.max(20, math.min(vim.o.columns - 4, 120))
+    local height = math.max(3, math.floor(vim.o.lines * 0.6))
+    local win = vim.api.nvim_open_win(buf, true, {
+        relative = "editor", width = width, height = height,
+        row = math.floor((vim.o.lines - height) / 2) - 1, col = math.floor((vim.o.columns - width) / 2),
+        style = "minimal", border = "rounded", title = " fetch log  (q close) ",
+        zindex = float_zindex(ctx:win()),
+    })
+    pcall(vim.api.nvim_set_option_value, "winhl", "Normal:NormalFloat", { win = win })
+    ctx.remote_log_buf = buf
+    vim.keymap.set("n", "q", function()
+        if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end
+    end, { buffer = buf, nowait = true, desc = "gitloom: close the fetch log" })
+    vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = function()
+        if ctx.remote_log_buf == buf then ctx.remote_log_buf = nil end
+    end })
+    ctx:refresh_remote_log(true)
+end
+
+-- Re-render the open fetch log buffer (§17.4), if any, from `ctx.remote_log`.
+-- Follows the end when `follow`, or when the cursor was on the last line.
+GRAPH_HELPERS.refresh_remote_log = function(ctx, follow)
+    local buf, log = ctx.remote_log_buf, ctx.remote_log
+    if not (buf and log and vim.api.nvim_buf_is_valid(buf)) then return end
+    local win = vim.fn.bufwinid(buf)
+    if win ~= -1 and not follow then
+        follow = vim.api.nvim_win_get_cursor(win)[1] >= vim.api.nvim_buf_line_count(buf)
+    end
+    local lines = git.log_lines(log, vim.uv.hrtime() / 1e6)
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    if follow and win ~= -1 then vim.api.nvim_win_set_cursor(win, { #lines, 0 }) end
 end
 
 -- Branch sync (§17.2): fast-forward (`op == "fast_forward"`) or reset
@@ -4617,6 +4709,10 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field reset_view fun(self:GraphCtx)  confirm, then reset_view_now (§18.5)
     ---@field reset_view_now fun(self:GraphCtx)  clear the persisted state + restore the configured view (§18.5)
     ---@field run_remote fun(self:GraphCtx, kind:"fetch"|"pull", remote:string?)  palette fetch / pull (§17.3)
+    ---@field remote_log? RemoteLog  the running or last fetch / pull's output (§17.4); nil until one runs
+    ---@field remote_log_buf? integer  the open fetch log buffer, live-refreshed (§17.4); nil when closed
+    ---@field show_remote_log fun(self:GraphCtx)  open the fetch log float (§17.4)
+    ---@field refresh_remote_log fun(self:GraphCtx, follow:boolean?)  re-render the open fetch log (§17.4)
     ---@field branch_sync fun(self:GraphCtx, op:"fast_forward"|"reset_branch", t:SyncTarget)  palette branch sync (§17.2)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
     ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
@@ -7287,6 +7383,10 @@ M._internal = {
     -- §19.4's "always ended" glue paths, driven over a stub ctx; progress_spec
     reflow_async = GRAPH_HELPERS.reflow_async,
     resync = GRAPH_HELPERS.resync,
+    -- The palette fetch / pull glue + the fetch log (§17.4), over a stub ctx; palette_spec
+    run_remote = GRAPH_HELPERS.run_remote,
+    show_remote_log = GRAPH_HELPERS.show_remote_log,
+    refresh_remote_log = GRAPH_HELPERS.refresh_remote_log,
     -- The float z-order layers (§14), read off a host window; zorder_spec.
     host_zindex = host_zindex,
     overlay_zindex = overlay_zindex,

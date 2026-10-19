@@ -4252,8 +4252,8 @@ ordered list, three sections:
 1. the **context** entries — the actions on what the cursor is on (§10.4: a
    commit, a branch, a selected packed marker, a packed line), or, while a §13
    selection is active, the selection's entries instead;
-2. the **global** commands gitloom runs on the repository (Return, fetch, pull)
-   and **Reset view settings** (§18.5);
+2. the **global** commands gitloom runs on the repository (Return, fetch, pull),
+   **Show fetch log** (§17.4) and **Reset view settings** (§18.5);
 3. the graph's **keys** that apply in this context (§17.1), grouped, each showing
    its key — so every keyed action is reachable (and discoverable) from here.
 
@@ -4337,9 +4337,10 @@ first read lands the per-remote entries are simply absent.
 | Command | Key | Runs |
 |---|---|---|
 | **Return to `<orig>`** — only while a Checkout & examine (§10.4.2) is active | — | `git switch <orig>` (or `git checkout --detach <hash>`), then `git stash apply --index <sha>` of the examine's stash if any (a plain apply when git refuses `--index`) |
-| **Fetch** | — | `git fetch --all` |
-| **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch <remote>` |
-| **Pull** | — | `git pull --ff-only` |
+| **Fetch** | — | `git fetch --progress --all` |
+| **Fetch `<remote>`** — one per remote, in `git remote` order | — | `git fetch --progress <remote>` |
+| **Pull** | — | `git pull --ff-only --progress` |
+| **Show fetch log** — only once a fetch or pull has run in this graph session | — | opens the running or last fetch / pull's log (§17.4) |
 | **Reset view settings** | — | after a Reset / Cancel confirmation, clear the persisted view preferences and this repository's pin list and restore the configured values in the live graph (§18.5) |
 
 The in-place resync (§3.4) is the `R` key's registry entry (`Refresh: resync with
@@ -4434,9 +4435,11 @@ except the `Fetching…` notice and the environment, which only the network comm
 need.
 
 - **Asynchronously** — the job runs in the background and the graph stays
-  usable; a `Fetching…` / `Pulling…` notice shows while it runs — or, under the
+  usable; a `Fetching…` / `Pulling…` notice shows when it starts — or, under the
   fidget progress provider, a fidget entry instead of that notice (§19.3). Each
-  job is a reported operation (§19.1), ended on every path.
+  job is a reported operation (§19.1), ended on every path. A fetch or pull (not
+  a branch sync) also reports a **live status** while it runs and keeps a log
+  (§17.4).
 - In the graph's **repository root** (§2.1), which may be a submodule — never
   implicitly Neovim's cwd.
 - With `GIT_TERMINAL_PROMPT=0` in the job's environment, so a credential
@@ -4446,9 +4449,10 @@ need.
   applies to it).
 - **One at a time per graph session**: a second fetch, pull or branch sync while
   one is running (or a Checkout & examine, §10.4.2) is refused with a notice.
-- **On success**: an INFO notice, then the in-place resync (§3.4), so new remote
-  branches, moved tips, a pull's fast-forward and a synced branch appear without
-  a reopen. The cursor stays on the commit it was on (a plain `R`).
+- **On success**: an INFO notice — for a fetch or pull, one that summarises the
+  ref updates git reported (§17.4) — then the in-place resync (§3.4), so new
+  remote branches, moved tips, a pull's fast-forward and a synced branch appear
+  without a reopen. The cursor stays on the commit it was on (a plain `R`).
 - **On failure**: git's error as one line at ERROR level — its `fatal:` /
   `error:` line when there is one, not the progress and hints ahead of it (the same formatting as
   a failed checkout, §10.4.1). A failed **pull** still resyncs, because its
@@ -4457,6 +4461,55 @@ need.
   re-reading.
 - If the graph window has closed by the time the job finishes, the resync is
   skipped (the next open reads the repository afresh).
+
+### 17.4 Live status, summary and the fetch log
+
+A fetch or pull can spend a long time connecting, negotiating or downloading.
+gitloom passes `--progress` (git prints no progress to a non-terminal otherwise)
+and reads git's output **as it arrives**, on both stdout and stderr. This is
+display only: it never changes what the command does.
+
+**Live status.** While the job runs, the operation's progress message (§19.1) is
+
+    0:42 · Receiving objects: 43% (1234/2870), 3.1 MiB | 1.2 MiB/s
+
+- `<elapsed>` — the time since the job started, `m:ss`, refreshed **every
+  second** even when git is silent;
+- `· <latest line>` — the latest line git printed. A progress line that git
+  rewrites in place (ended by `\r`) replaces the previous one; output split
+  across reads at any point is reassembled first, and `\r\n` counts as one line
+  end. Before git has printed anything: `· waiting for the remote` (connecting,
+  authenticating and ref negotiation print nothing). When the latest output is
+  more than 10 s old, ` (no output for N s)` is appended.
+
+The message goes to the **progress provider only** (§19.3): fidget shows it as
+the entry's message under the operation's title; the `notify` provider shows
+`gitloom: <title> <message>` as **one replaceable notice**, updated at most once
+per second, and only when the notifier can replace a notice (otherwise the
+status is not notified — notices stay a log). The graph window itself shows
+nothing extra. Output-driven updates are throttled to a few per second.
+
+**Summary.** The success notice counts git's ref-update lines (`<flag> <what>
+<from> -> <to>`, on stderr) by their one-character **flag column** — which,
+unlike the bracketed words, git does not translate: `*` new, ` ` or `t`
+updated, `+` forced, `-` deleted, `!` rejected (`=`, up to date, is not
+counted). Ref counts only, never per-ref commit counts:
+
+    gitloom: fetched origin — 2 new, 5 updated, 1 forced
+
+Zero counts are left out. A fetch with no ref-update line ends `— up to date`; a
+pull with none is a plain `gitloom: pulled` (its fast-forward, if any, shows
+through the resync's HEAD notice). A pull's counts are its fetch half's.
+
+**The fetch log.** Each graph session keeps the output of its **running or last**
+fetch or pull, in memory only (never persisted; replaced by the next one; at
+most 2000 lines, the oldest dropped): the command line and start time, then each
+line git printed — in-place progress updates collapsed to their latest value —
+prefixed with the time since the start (`+12.3s`), then `exit <code> (<s> s)`
+(or `running <m:ss>` while it runs). The palette's **Show fetch log** (§17.2;
+there is no key) opens it in a read-only scratch buffer in a float over the
+graph (`q` closes it). Opened while the job runs, it **updates live** and
+follows the end unless the cursor was moved off the last line.
 
 ## 18. Persisted view state
 
@@ -4592,7 +4645,7 @@ Reported operations (titles are the user-visible strings):
 |---|---|---|---|
 | Open: refs → commit stream → sort → working tree → first projection (§3.1, §10.5) | `Loading <repo>` | `refs`, `N commits` (per streamed batch), `sorting`, `laying out` | none |
 | Resync, `R` and every post-action resync (§3.4) | `Refreshing` | `refs`, `new commits`, `laying out` | `resynced` / the HEAD notice |
-| Fetch / per-remote fetch / pull (§17.3) | `Fetching` / `Fetching <remote>` / `Pulling` | — | `Fetching…`, then success / error |
+| Fetch / per-remote fetch / pull (§17.3) | `Fetching` / `Fetching <remote>` / `Pulling` | the live status `<m:ss> · <latest line>` (§17.4) | `Fetching…`, then the summary / error |
 | Branch sync: fast-forward / reset (§17.2) — the git command only, not the probe or the prompt | `Fast-forwarding <branch>` / `Resetting <branch>` | — | success / error |
 | Checkout (§10.4.1) | `Checking out <ref>` | — | the HEAD notice / error |
 | Checkout and fast-forward / reset to `<remote>/<b>` (§10.4.1) — the git commands only, not the probe or the prompt | `Checking out <b>` | `fast-forwarding`, `switching` / `resetting` | the HEAD notice / error |
@@ -4663,7 +4716,15 @@ custom one: a provider's `start` is called only once the delay has elapsed.
   `cancelled` end adds nothing either (a superseded or abandoned operation is not
   news).
 - The running message (`N commits`, …) is not notified: notices are a log, not a
-  live display.
+  live display. The one exception is fetch / pull's **live status** (§17.4), and
+  only when `vim.notify` can **replace** a notice. gitloom takes a notifier that
+  returns a handle for the `Fetching…` / `Pulling…` notice (snacks.notifier,
+  nvim-notify) as one that can; Neovim's built-in returns nothing (it only
+  echoes and logs to `:messages`), and so does any notifier that cannot. Then
+  `Fetching…` / `Pulling…`, the live status (at most once per second, once the
+  show delay has passed) and the outcome notice are **one** notice, each
+  replacing the last: gitloom passes the same `id` (snacks.notifier) and the
+  previous notice's handle as `replace` (nvim-notify), with `title = "gitloom"`.
 
 **The `fidget` provider** owns the "running" display, so gitloom's own **start**
 notice for fetch / pull (`Fetching…` / `Pulling…`) is **not** emitted under it —

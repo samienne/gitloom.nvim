@@ -36,6 +36,7 @@ local M = {}
 ---@class PaletteState  the session snapshot the registry's conditions read (§17.1)
 ---@field examine? ExamineState  the repository's active Checkout & examine (§10.4.2)
 ---@field has_diff? boolean      a diff provider is configured (§11.5)
+---@field remote_log? boolean    a fetch / pull has run in this session — its log exists (§17.4)
 ---@field row? PaletteRow        the cursor row (nil while selecting or with no row)
 ---@field newest_at_head? boolean  selecting: the selection's newer end needs no checkout —
 ---                              HEAD's commit or a §4.2 working-tree node (§10.4.2)
@@ -78,6 +79,10 @@ M.COMMANDS = {
         action = function(ctx, remote) ctx:run_remote("fetch", remote) end },
     { id = "pull", label = "Pull", scope = "global",
         action = function(ctx) ctx:run_remote("pull") end },
+    -- The running or last fetch / pull's output (§17.4); listed once one has run.
+    { id = "remote_log", label = "Show fetch log", scope = "global",
+        when = function(st) return st.remote_log == true end,
+        action = function(ctx) ctx:show_remote_log() end },
     -- Reset (§18.5): clear the persisted view settings + this repository's pins and
     -- restore the configured values live. Asks for confirmation itself.
     { id = "reset_view", label = "Reset view settings…", scope = "global",
@@ -375,6 +380,7 @@ end
 ---@field remotes? string[]       the cached `git remote` names (nil until read)
 ---@field examine? ExamineState   the repository's active examine (§10.4.2)
 ---@field has_diff? boolean       a diff provider is configured (§11.5)
+---@field remote_log? boolean     a fetch / pull has run in this session (§17.4)
 ---@field head? string           HEAD's commit hash, from the cached refs — the commit row's
 ---                               Examine vs Checkout & examine (§10.4.2); no git spawn
 ---@field newest? table           selecting: the selection's newer end (a real or §4.2 commit)
@@ -391,7 +397,7 @@ end
 function M.palette_entries(info)
     info = info or {}
     local commands = info.commands or M.COMMANDS
-    local state = { examine = info.examine, has_diff = info.has_diff,
+    local state = { examine = info.examine, has_diff = info.has_diff, remote_log = info.remote_log,
         row = not info.selection and info.row or nil,
         newest_at_head = info.selection and info.newest ~= nil
             and not examine.needs_checkout(info.newest, info.head) or nil }

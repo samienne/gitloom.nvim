@@ -1010,13 +1010,44 @@ end
 --- Run a palette remote command (`remote_command`'s argv + env, §17.3) in the
 --- repository `root` — the graph's `repo.root`, never implicitly Neovim's cwd —
 --- with `env` (`GIT_TERMINAL_PROMPT=0`) added to the job's environment. Resolves
---- `{ code, out, err }`. The argv never forces.
+--- `{ code, out, err }` (err trimmed — when streamed, only at its end, so a
+--- leading ref-table line keeps its flag column, §17.4). The argv never forces.
+---
+--- With `on_chunk`, the output is **streamed** (§17.4): `on_chunk(stream, data)`
+--- is called on the main loop with each piece as it arrives (`stream` "stdout" or
+--- "stderr"; pieces split anywhere), always before the future resolves (both hop
+--- through the FIFO `vim.schedule`). vim.system leaves the completed result's
+--- stdout / stderr nil once a callback is given, so the pieces are collected here
+--- and the future still carries the whole output. A spawn failure resolves
+--- `{ code = -1, err = <message> }`, as `git_code`.
 ---@param argv string[]
 ---@param root string?
 ---@param env table<string, string>?
+---@param on_chunk? fun(stream: "stdout"|"stderr", data: string)
 ---@return table  -- future resolving { code: integer, out: string, err: string }
-function M.run_remote(argv, root, env)
-    return git_code(argv, root, env)
+function M.run_remote(argv, root, env, on_chunk)
+    if not on_chunk then return git_code(argv, root, env) end
+    local future, promise = make_future()
+    local bufs = { stdout = {}, stderr = {} }
+    local function reader(stream)
+        return function(_, data)
+            if not data or data == "" then return end
+            local b = bufs[stream]
+            b[#b + 1] = data
+            vim.schedule(function() on_chunk(stream, data) end)
+        end
+    end
+    local ok, err = pcall(spawn, argv, { cwd = root, env = env, stdout = reader("stdout"),
+        stderr = reader("stderr") }, function(res)
+        vim.schedule(function()
+            promise.resolve({ code = res.code, out = table.concat(bufs.stdout),
+                err = (table.concat(bufs.stderr):gsub("%s+$", "")) })
+        end)
+    end)
+    if not ok then
+        vim.schedule(function() promise.resolve({ code = -1, out = "", err = tostring(err) }) end)
+    end
+    return future
 end
 
 -- ── Checkout & examine (§10.4.2) — the git side. The plans are the pure

@@ -10,7 +10,7 @@
 --- handler-less keys never listed) and the generated `?` help (`help_lines`:
 --- grouped, aliases joined, a newly added fake key picked up) over a FAKE
 --- registry, plus the real `GRAPH_KEYS` checked for well-formedness, the remote argv +
---- env builder (`remote.remote_command` — fetch --all, fetch <remote>, pull
+--- env builder (`remote.remote_command` — fetch --progress --all, fetch --progress <remote>, pull
 --- --ff-only, GIT_TERMINAL_PROMPT=0, never forcing), the `git remote` parse
 --- (`remote.parse_remotes`), the failure text (`remote.failure_text`), and
 --- `run_remote` / `fetch_remotes` against REAL scratch repositories: a bare
@@ -18,8 +18,10 @@
 --- fetch moves only its own remote's refs, a pull fast-forwards a strictly-behind
 --- branch, a diverged pull is refused (even with `pull.rebase=true`) leaving HEAD
 --- unmoved, a pull with no upstream fails with a non-zero code + git's stderr,
---- and the env reaches the job. The window glue
---- (busy flag, notices, resync) is untested like the rest of it.
+--- and the env reaches the job. §17.4: the streamed `run_remote`, the pure fetch
+--- log / live status / ref summary, the `Show fetch log` entry, and the window
+--- glue (`window._internal.run_remote` / `show_remote_log` over a stub ctx: log,
+--- summary notice, busy refusal, resync, the live log float).
 
 local palette = require("gitloom.graph.palette")
 local remote = require("gitloom.git.remote")
@@ -57,6 +59,17 @@ describe("palette_entries (§17.1)", function()
         assert.same({ "Fetch", "Pull", "Reset view settings…" }, labels(e))
         assert.same(ids(e), ids(palette.palette_entries()))
         for _, c in ipairs(palette.COMMANDS) do assert.is_true(c.id ~= "refresh") end
+    end)
+
+    it("lists Show fetch log after Pull only once a fetch / pull has run (§17.4)", function()
+        assert.same({ "fetch", "pull", "reset_view" }, ids(palette.palette_entries({ remote_log = false })))
+        local e = palette.palette_entries({ remote_log = true, remotes = { "origin" } })
+        assert.same({ "fetch", "fetch:origin", "pull", "remote_log", "reset_view" }, ids(e))
+        assert.equals("Show fetch log", e[4].label)
+        assert.is_nil(e[4].key)
+        local called = false
+        e[4].action({ show_remote_log = function() called = true end })
+        assert.is_true(called)
     end)
 
     it("has no per-remote entries while the remote list is unknown or empty", function()
@@ -407,25 +420,25 @@ describe("the real key registry (window.lua GRAPH_KEYS, §17.1)", function()
 end)
 
 describe("remote_command (§17.2/§17.3)", function()
-    it("fetch is git fetch --all", function()
+    it("fetch is git fetch --progress --all", function()
         local c = cmd("fetch")
-        assert.same({ "git", "fetch", "--all" }, c.argv)
+        assert.same({ "git", "fetch", "--progress", "--all" }, c.argv)
         assert.is_false(c.resync_on_failure)
     end)
 
-    it("a per-remote fetch is git fetch <remote>", function()
+    it("a per-remote fetch is git fetch --progress <remote>", function()
         local c = cmd("fetch", "upstream")
-        assert.same({ "git", "fetch", "upstream" }, c.argv)
+        assert.same({ "git", "fetch", "--progress", "upstream" }, c.argv)
         assert.equals("git fetch upstream", c.label)
         assert.is_false(c.resync_on_failure)
     end)
 
-    it("pull is git pull --ff-only, resyncing even on failure", function()
+    it("pull is git pull --ff-only --progress, resyncing even on failure", function()
         local c = cmd("pull")
-        assert.same({ "git", "pull", "--ff-only" }, c.argv)
+        assert.same({ "git", "pull", "--ff-only", "--progress" }, c.argv)
         assert.is_true(c.resync_on_failure)
         -- No per-remote pull: the remote is ignored.
-        assert.same({ "git", "pull", "--ff-only" }, cmd("pull", "origin").argv)
+        assert.same({ "git", "pull", "--ff-only", "--progress" }, cmd("pull", "origin").argv)
     end)
 
     it("sets GIT_TERMINAL_PROMPT=0 on every command, in a fresh table", function()
@@ -604,5 +617,277 @@ describe("run_remote against real repositories (§17.3)", function()
         local res = await(fetch.run_remote(argv, b, cmd("fetch").env))
         assert.equals(0, res.code, res.err)
         assert.equals("[0]", vim.trim(res.out))
+    end)
+
+    -- §17.4: the streamed runner.
+    it("streams the output before resolving, and still resolves the whole of it", function()
+        commit(a, "f", "streamed", "streamed")
+        sh(a, "switch", "-q", "-c", "topic")
+        commit(a, "g", "topic", "topic")
+        sh(a, "push", "-q", "origin", "main", "topic")
+        sh(a, "switch", "-q", "main")
+        local c = cmd("fetch", "origin")
+        local chunks, resolved = {}, false
+        local future = fetch.run_remote(c.argv, b, c.env, function(stream, data)
+            assert.is_false(resolved, "a chunk after the future resolved")
+            chunks[#chunks + 1] = { stream, data }
+        end)
+        local res = await(future.next(function(r)
+            resolved = true
+            return r
+        end))
+        assert.equals(0, res.code, res.err)
+        assert.truthy(#chunks > 0)
+        local err = {}
+        for _, ch in ipairs(chunks) do
+            if ch[1] == "stderr" then err[#err + 1] = ch[2] end
+        end
+        assert.equals((table.concat(err):gsub("%s+$", "")), res.err)
+        -- The ref table survives (flag column intact): main updated, topic new.
+        local s = remote.ref_summary(res.err)
+        assert.equals(1, s.new)
+        assert.equals(1, s.updated)
+        assert.equals("gitloom: fetched origin — 1 new, 1 updated", remote.summary_text(c, s))
+        -- And it reads back through the log the window keeps.
+        local log = remote.new_log("git fetch", 0, 0)
+        for i, ch in ipairs(chunks) do remote.log_feed(log, ch[1], ch[2], i) end
+        remote.log_finish(log, res.code, #chunks + 1)
+        local seen = false
+        for _, l in ipairs(log.lines) do
+            if l.text:match("^ %* %[.-%]%s+topic%s+%->") then seen = true end
+        end
+        assert.is_true(seen)
+    end)
+
+    it("a streamed fetch with nothing new is up to date", function()
+        local c = cmd("fetch", "other")
+        local res = await(fetch.run_remote(c.argv, b, c.env, function() end))
+        assert.equals(0, res.code, res.err)
+        assert.equals("gitloom: fetched other — up to date", remote.summary_text(c, remote.ref_summary(res.err)))
+    end)
+
+    it("--all reports both remotes' ref updates", function()
+        commit(a, "f", "both", "both")
+        sh(a, "push", "-q", "origin", "main")
+        sh(a, "push", "-q", "other", "main")
+        local c = cmd("fetch")
+        local res = await(fetch.run_remote(c.argv, b, c.env, function() end))
+        assert.equals(0, res.code, res.err)
+        assert.equals(2, remote.ref_summary(res.err).updated)
+    end)
+
+    it("a failing streamed fetch still reports git's fatal: line first", function()
+        local argv = { "git", "fetch", "--progress", "no-such-remote" }
+        local res = await(fetch.run_remote(argv, b, cmd("fetch").env, function() end))
+        assert.is_true(res.code ~= 0)
+        local text = remote.failure_text(res.out, res.err)
+        assert.truthy(text:match("^fatal:") or text:match("^error:"), text)
+    end)
+
+    -- The window glue over a stub ctx (window._internal): the log, the summary
+    -- notice, the resync, the busy guard and the live log buffer.
+    it("run_remote keeps the log, notifies the summary, resyncs; the log float follows it", function()
+        local w = require("gitloom.window")._internal
+        local notices = {}
+        local orig = vim.notify
+        ---@diagnostic disable-next-line: duplicate-set-field
+        vim.notify = function(msg, level) notices[#notices + 1] = { msg = msg, level = level } end
+        local ok, err = pcall(function()
+            local resynced = 0
+            local ctx = {
+                repo = { root = b },
+                progress = require("gitloom.progress").tracker({ provider = "notify", delay = 0 }),
+                resync = function() resynced = resynced + 1 end,
+                win = function() return nil end,
+                run_remote = w.run_remote, show_remote_log = w.show_remote_log,
+                refresh_remote_log = w.refresh_remote_log,
+            }
+            commit(a, "f", "glue", "glue")
+            sh(a, "push", "-q", "origin", "main")
+            ctx:run_remote("fetch", "origin")
+            assert.equals("git fetch origin", ctx.remote_busy)
+            ctx:run_remote("pull") -- refused while busy
+            vim.wait(30000, function() return ctx.remote_busy == nil end, 20)
+            assert.is_nil(ctx.remote_busy, "timed out")
+            local log = ctx.remote_log
+            assert.equals("git fetch --progress origin", log.cmd)
+            assert.equals(0, log.code)
+            assert.equals(1, resynced)
+            assert.same({
+                { msg = "gitloom: Fetching origin…", level = vim.log.levels.INFO },
+                { msg = "gitloom: git fetch origin is still running", level = vim.log.levels.WARN },
+                { msg = "gitloom: fetched origin — 1 updated", level = vim.log.levels.INFO },
+            }, notices)
+            -- The log float: the command, git's lines, the exit line; q closes it.
+            ctx:show_remote_log()
+            local buf = ctx.remote_log_buf
+            assert.truthy(buf and vim.api.nvim_buf_is_valid(buf))
+            local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+            assert.truthy(lines[1]:match("^git fetch %-%-progress origin  %(started "))
+            assert.truthy(lines[#lines]:match("^exit 0 %("))
+            assert.is_false(vim.bo[buf].modifiable)
+            -- A second run re-renders the open log live, to its end.
+            ctx:run_remote("fetch", "origin")
+            vim.wait(30000, function() return ctx.remote_busy == nil end, 20)
+            assert.equals("gitloom: fetched origin — up to date", notices[#notices].msg)
+            assert.is_true(ctx.remote_log ~= log)
+            lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+            assert.truthy(lines[#lines]:match("^exit 0 %("))
+            assert.equals(#lines, vim.api.nvim_win_get_cursor(0)[1])
+            vim.api.nvim_feedkeys("q", "x", false)
+            assert.is_false(vim.api.nvim_buf_is_valid(buf))
+            assert.is_nil(ctx.remote_log_buf)
+            ctx.progress:close()
+        end)
+        vim.notify = orig
+        assert(ok, err)
+    end)
+
+    it("a spawn failure resolves code -1 when streaming", function()
+        local res = await(fetch.run_remote({ "git", "status" }, base .. "/missing-dir", nil, function() end))
+        assert.equals(-1, res.code)
+        assert.truthy(res.err ~= "")
+    end)
+end)
+
+describe("the fetch log (§17.4)", function()
+    local function texts(log)
+        local out = {}
+        for _, l in ipairs(log.lines) do out[#out + 1] = l.text end
+        return out
+    end
+
+    it("a \\r progress update replaces the previous one in place", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        remote.log_feed(log, "stderr", "Receiving objects:  10% (1/10)   \r", 1)
+        remote.log_feed(log, "stderr", "Receiving objects:  50% (5/10)   \r", 2)
+        assert.same({ "Receiving objects:  50% (5/10)" }, texts(log))
+        remote.log_feed(log, "stderr", "Receiving objects: 100% (10/10), done.\n", 3)
+        remote.log_feed(log, "stderr", "Resolving deltas: 100% (2/2), done.\n", 4)
+        assert.same({ "Receiving objects: 100% (10/10), done.", "Resolving deltas: 100% (2/2), done." },
+            texts(log))
+    end)
+
+    it("two updates in one chunk keep only the latest", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        remote.log_feed(log, "stderr", "remote: Counting objects:   2% (80/3966)  \rremote: Counting objects:   3% (119/3966)  \r", 1)
+        assert.same({ "remote: Counting objects:   3% (119/3966)" }, texts(log))
+    end)
+
+    it("reassembles a line split across chunks at any point", function()
+        local whole = "From ../remote\r\n * [new branch]      topic      -> origin/topic\r\n"
+        for cut = 1, #whole - 1 do
+            local log = remote.new_log("git fetch", 0, 0)
+            remote.log_feed(log, "stderr", whole:sub(1, cut), 1)
+            remote.log_feed(log, "stderr", whole:sub(cut + 1), 2)
+            assert.same({ "From ../remote", " * [new branch]      topic      -> origin/topic" }, texts(log),
+                "cut at " .. cut)
+        end
+    end)
+
+    it("\\r\\n is one line end, and a closed line is never replaced", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        remote.log_feed(log, "stderr", "a\r\nb\r\n", 1)
+        remote.log_feed(log, "stderr", "c\r", 2)
+        assert.same({ "a", "b", "c" }, texts(log))
+    end)
+
+    it("keeps the streams apart and flushes an unterminated tail at the end", function()
+        local log = remote.new_log("git pull", 0, 0)
+        remote.log_feed(log, "stderr", "Receiving 10%\r", 1)
+        remote.log_feed(log, "stdout", "Updating a..b\n", 2)
+        remote.log_feed(log, "stderr", "Receiving 90%\r", 3)
+        remote.log_feed(log, "stdout", "Fast-forward", 4)
+        remote.log_finish(log, 0, 5)
+        assert.same({ "Receiving 90%", "Updating a..b", "Fast-forward" }, texts(log))
+        assert.equals(0, log.code)
+    end)
+
+    it("caps the log at LOG_MAX lines, dropping the oldest", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        local parts = {}
+        for i = 1, remote.LOG_MAX + 5 do parts[#parts + 1] = "line " .. i .. "\n" end
+        remote.log_feed(log, "stderr", table.concat(parts), 1)
+        assert.equals(remote.LOG_MAX, #log.lines)
+        assert.equals("line 6", log.lines[1].text)
+        -- An open (\r) line still updates in place after the cap shifted it.
+        remote.log_feed(log, "stderr", "p 1\r", 2)
+        remote.log_feed(log, "stderr", "p 2\r", 3)
+        assert.equals(remote.LOG_MAX, #log.lines)
+        assert.equals("p 2", log.lines[#log.lines].text)
+    end)
+
+    it("renders the command, +seconds lines and the exit / running footer", function()
+        local log = remote.new_log("git fetch --progress origin", 1000, 0)
+        remote.log_feed(log, "stderr", "From x\n", 13300)
+        local running = remote.log_lines(log, 73000)
+        assert.truthy(running[1]:match("^git fetch %-%-progress origin  %(started %d%d:%d%d:%d%d%)$"))
+        assert.equals("+12.3s  From x", running[2])
+        assert.equals("running 1:12", running[3])
+        remote.log_finish(log, 1, 5500)
+        assert.equals("exit 1 (4.5 s)", remote.log_lines(log, 99999)[3])
+    end)
+end)
+
+describe("the live status (§17.4)", function()
+    it("waits for the remote before any output", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        assert.equals("0:00 · waiting for the remote", remote.status_text(log, 0))
+        assert.equals("0:09 · waiting for the remote", remote.status_text(log, 9999))
+    end)
+
+    it("shows the elapsed m:ss and the latest line", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        remote.log_feed(log, "stderr", "Receiving objects:  43% (1234/2870), 3.1 MiB | 1.2 MiB/s\r", 40000)
+        assert.equals("0:42 · Receiving objects:  43% (1234/2870), 3.1 MiB | 1.2 MiB/s",
+            remote.status_text(log, 42000))
+        assert.equals("1:05 · Receiving objects:  43% (1234/2870), 3.1 MiB | 1.2 MiB/s (no output for 25 s)",
+            remote.status_text(log, 65000))
+    end)
+
+    it("says how long the remote has been silent past 10 s, even before any line", function()
+        local log = remote.new_log("git fetch", 0, 0)
+        assert.equals("0:10 · waiting for the remote", remote.status_text(log, 10000))
+        assert.equals("0:12 · waiting for the remote (no output for 12 s)", remote.status_text(log, 12000))
+    end)
+end)
+
+describe("the ref summary (§17.4)", function()
+    local err = table.concat({
+        "remote: Enumerating objects: 5, done.",
+        "Receiving objects: 100% (3/3), done.",
+        "Fetching origin",
+        "From ../remote",
+        " * [new branch]      topic      -> origin/topic",
+        " * [new tag]         v1         -> v1",
+        "   abc1234..def5678  main       -> origin/main",
+        " + 1111111...2222222 wip        -> origin/wip  (forced update)",
+        " - [deleted]         (none)     -> origin/gone",
+        " t [tag update]      v0         -> v0",
+        " ! [rejected]        x          -> origin/x  (non-fast-forward)",
+        " = [up to date]      y          -> origin/y",
+        " (refs/remotes/origin/HEAD has become dangling)",
+    }, "\r\n")
+
+    it("counts by the flag column only", function()
+        assert.same({ new = 2, updated = 2, forced = 1, deleted = 1, rejected = 1 }, remote.ref_summary(err))
+    end)
+
+    it("counts a translated bracket word the same (the flag is not translated)", function()
+        local s = remote.ref_summary(" * [neuer Branch]    topic      -> origin/topic\n")
+        assert.equals(1, s.new)
+    end)
+
+    it("formats the counts, zero counts left out", function()
+        local s = { new = 2, updated = 5, forced = 1, deleted = 0, rejected = 0 }
+        assert.equals("gitloom: fetched origin — 2 new, 5 updated, 1 forced",
+            remote.summary_text(cmd("fetch", "origin"), s))
+        assert.equals("gitloom: pulled — 2 new, 5 updated, 1 forced", remote.summary_text(cmd("pull"), s))
+    end)
+
+    it("nothing reported: a fetch is up to date, a pull plain", function()
+        local none = remote.ref_summary("From ../remote\n")
+        assert.equals("gitloom: fetched — up to date", remote.summary_text(cmd("fetch"), none))
+        assert.equals("gitloom: pulled", remote.summary_text(cmd("pull"), none))
     end)
 end)

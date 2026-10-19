@@ -307,12 +307,23 @@ examine selection** — instead. Then the graph-wide commands:
 
 - **Return to `<orig>`** — first, and only while a checkout & examine is active
   (below);
-- **Fetch** — `git fetch --all`;
-- **Fetch `<remote>`** — `git fetch <remote>`, one entry per remote in
+- **Fetch** — `git fetch --progress --all`;
+- **Fetch `<remote>`** — `git fetch --progress <remote>`, one entry per remote in
   `git remote` order (the list is read when the graph opens and on every resync;
   the palette never waits for it, so the entries appear once it has arrived);
-- **Pull** — `git pull --ff-only` (fast-forward only: a branch that has diverged
-  from its upstream is refused with git's error, never merged or rebased);
+- **Pull** — `git pull --ff-only --progress` (fast-forward only: a branch that
+  has diverged from its upstream is refused with git's error, never merged or
+  rebased);
+- **Show fetch log** — once a fetch or pull has run: its output (git's lines
+  with the time since the start, then the exit code) in a float, updating live
+  while it runs; `q` closes it.
+
+  While a fetch or pull runs, its progress entry (fidget) — or, with a notifier
+  that can replace notices such as snacks.notifier or nvim-notify, its one
+  notice — shows the elapsed time and git's latest line
+  (`0:42 · Receiving objects: 43% …`, `waiting for the remote`, `(no output for
+  25 s)`). When it succeeds the notice counts the refs it moved:
+  `gitloom: fetched origin — 2 new, 5 updated, 1 forced` (or `— up to date`);
 - **Reset view settings…** — after a Reset / Cancel prompt, forget the remembered
   view toggles and this repository's pin list and go back to your configuration
   (below, and `:GitloomResetView`).
@@ -738,7 +749,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   replaces the `Fetching…` / `Pulling…` notice); without it, an operation that has
   no notice of its own (the open, a sort, a diff load) gets a `gitloom: <title>…`
   notice and, when it succeeds, a `… — done (N s)` one — operations that already
-  notify (fetch, checkout, …) are not announced twice. Success and error notices
+  notify (fetch, checkout, …) are not announced twice. A fetch / pull's live
+  status goes to the fidget entry, or — only with a notifier that can replace a
+  notice — into its one notice, at most once a second. Success and error notices
   are kept under every provider. `provider = false` (or `progress = false`) turns
   reporting off; a table `{ start = function(op) … end }` plugs in your own.
 - **`zindex`** — the graph window's float zindex (default `41`, §14.1). gitloom
