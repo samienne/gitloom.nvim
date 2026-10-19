@@ -53,6 +53,13 @@ local function setup_decoration(buf, on_redraw)
                     state.top = topline
                     state.bottom = botline
                     vim.schedule(function()
+                        -- By now the window may be closed (snacks hide, host
+                        -- closed) or show another frame's buffer (§14): skip it.
+                        if not (vim.api.nvim_buf_is_valid(bufnr)
+                                and vim.api.nvim_win_is_valid(winid)
+                                and vim.api.nvim_win_get_buf(winid) == bufnr) then
+                            return
+                        end
                         -- Convert from 0-based indexing
                         on_redraw(winid, bufnr, topline + 1, botline + 1)
                     end)

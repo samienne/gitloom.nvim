@@ -162,4 +162,53 @@ describe("multi-line rendering (windowed)", function()
         ctrl.relayout()
         assert.equals(2, vim.api.nvim_buf_line_count(buf))
     end)
+
+    -- The decoration provider defers its redraw through `vim.schedule`; by the
+    -- time the callback runs the window it captured may be closed (snacks hide,
+    -- host closed) or show another frame's buffer (§14). The deferred redraw must
+    -- skip a stale window rather than size it.
+    -- Regression: `listview.lua: Invalid window id: 1022` (on_redraw -> display).
+    for _, case in ipairs({ "closed", "swapped" }) do
+        it("a deferred redraw skips a window that was " .. case .. " meanwhile", function()
+            local drawn = 0
+            local inst = listview.open({
+                win = {},
+                flex = 4,
+                line_count = function() return 1 end,
+                display = function(d)
+                    drawn = drawn + 1
+                    return { line = { "", "", "", "X" .. d.id } }
+                end,
+                on_controller = function(c) ctrl = c end,
+            })
+            buf = inst.win.buf
+            ctrl.insert({ { id = 1 }, { id = 2 }, { id = 3 } }, 1)
+
+            -- Capture the provider's scheduled callbacks instead of letting the
+            -- loop run them, so the window can change in between.
+            local pending = {}
+            local orig = vim.schedule
+            ---@diagnostic disable-next-line: duplicate-set-field
+            vim.schedule = function(fn) pending[#pending + 1] = fn end
+            local ok_redraw, redraw_err = pcall(vim.api.nvim__redraw,
+                { win = inst.win.win, valid = false, flush = true })
+            vim.schedule = orig
+            assert.is_true(ok_redraw, redraw_err)
+            assert.is_true(#pending > 0, "decoration provider scheduled no redraw")
+
+            if case == "closed" then
+                vim.api.nvim_win_close(inst.win.win, true)
+            else
+                vim.api.nvim_win_set_buf(inst.win.win, vim.api.nvim_create_buf(false, true))
+            end
+
+            drawn = 0
+            for _, fn in ipairs(pending) do
+                local ok, err = pcall(fn)
+                assert.is_true(ok, err)
+            end
+            assert.equals(0, drawn) -- the stale window was not drawn
+            if case == "swapped" then vim.api.nvim_win_close(inst.win.win, true) end
+        end)
+    end
 end)
