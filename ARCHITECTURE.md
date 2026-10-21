@@ -1452,7 +1452,11 @@ fallback never fires.
 here cannot take one a terminating child just freed (the §5.1 fan-out placement
 rule — the trap that produced an unsanctioned lane handoff during development), and
 the gutter itself is held against generic fan-out allocation whenever nothing has
-claimed it.
+claimed it. With a **separate split Line** (`sep_split`) only the node column is
+reserved, exactly as in `place_commit`: every child turns in on that Line, above the
+commit Line, so no cell can stack two turns. Reserving every incoming column there
+anyway once pushed a merge's new lane one column out whenever the row above had
+absorbed a lane beside the gutter, alternating columns down a run of merges.
 
 That reservation binds the **freed-column reuse** too, and this is where putting the
 node on `trunk_entry` first bit. `fan_out` used to derive its reuse candidates

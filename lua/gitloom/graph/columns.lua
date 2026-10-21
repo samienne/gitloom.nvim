@@ -1136,6 +1136,12 @@ function M.session(opts, seed)
     -- the §5.2 `allow_merge_on_split` colour handoff, un-sanctioned. `place_commit`
     -- reserves the same columns for the same reason; the trunk reusing its own
     -- child's column is exempt because it keeps that lane's id and colour.
+    -- A SEPARATE split Line (`sep_split`) is the exception, here as in
+    -- `place_commit`: every incoming child turns into the node column on that Line,
+    -- above the commit Line, so their columns are free on the commit Line (no cell
+    -- can hold two turns) and only the node column is reserved. Reserving them
+    -- anyway pushed a merge's new lane one column out whenever the row above had
+    -- absorbed a lane beside the gutter, alternating columns down a run of merges.
     --
     -- THE HANDOVER COLUMN (§5.6). The lane that holds the gutter after this row is
     -- evicted before it next owns a subject row whenever its parent is not the next
@@ -1171,7 +1177,10 @@ function M.session(opts, seed)
         -- the gutter". The claim rule below is designed to make it impossible on a
         -- subject row; the node placement degrades safely if it ever happens.
         local held = g.occ0[GUTTER] and true or false
-        for _, inc in ipairs(incoming) do g.occ0[inc.col] = true end
+        -- Under `sep_split` only the node column is reserved, once it is chosen below.
+        if not state.sep_split then
+            for _, inc in ipairs(incoming) do g.occ0[inc.col] = true end
+        end
 
         local function free_lane_col()
             local c = GUTTER + 1
@@ -1234,6 +1243,8 @@ function M.session(opts, seed)
 
         local commit_incoming = incoming
         if state.sep_split then
+            -- The split Line converges every child into `cc`, so it alone is held.
+            g.occ0[cc] = true
             commit_incoming = { { col = cc, lane = own.lane } }
         end
         state.cc0, state.cc, state.commit_incoming = cc, cc, commit_incoming

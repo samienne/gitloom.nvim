@@ -1045,6 +1045,65 @@ describe("a freed fan-out column is never the node's own (§5.1/§5.6)", functio
     end)
 end)
 
+describe("a separate split Line frees its ended lanes under gutter (§5.1/§5.6)", function()
+    -- REGRESSION (fix/gutter-split-occupancy). With the split on its own Line
+    -- (`split_on_separate_line`), the children a node absorbs end on that Line, so
+    -- the commit Line below holds only the node's own lane and their columns are
+    -- free there (§5.1 fan-out placement: one-column alternation is only for an
+    -- INLINE fan-out sharing the commit Line with the fan-in). `place_commit` frees
+    -- them; `place_gutter` reserved every incoming column regardless, so a run of
+    -- first-parent merges, each forking the next topic, put the side lanes in
+    -- alternating columns (beside the trunk, then one further out, ...), leaving an
+    -- empty column every other merge.
+    local build_graph = require("gitloom.graph")._internal.build_graph
+
+    -- m4..m1 merge a one-commit topic each; topic k forks from m(k-1), so each
+    -- merge row also absorbs the next topic's lane on its split Line.
+    local FIXTURE = {
+        { "m4", { "m3", "a4" } }, { "a4", { "m3" } },
+        { "m3", { "m2", "a3" } }, { "a3", { "m2" } },
+        { "m2", { "m1", "a2" } }, { "a2", { "m1" } },
+        { "m1", { "m0", "a1" } }, { "a1", { "m0" } },
+        { "m0", {} },
+    }
+
+    local function node_col(row)
+        for j, col in ipairs(row.columns) do if col.has_commit then return j end end
+    end
+    -- The farthest column a lane leaves the commit Line downward from: on a merge
+    -- row, where its fan-out put the topic's lane.
+    local function fan_reach(row)
+        local far
+        for j, col in ipairs(row.columns) do
+            for _, s in ipairs(col.lanes or {}) do
+                if s.connectivity.down then far = j end
+            end
+        end
+        return far
+    end
+
+    for _, corpus in ipairs({ "raw", "focused" }) do
+        it("puts every topic lane beside the merge [gutter / split-line / " .. corpus .. "]", function()
+            local opts = policy_opts({ split_on_separate_line = true, merge_on_separate_line = false }, "gutter")
+            local items = h.dag(FIXTURE)
+            if corpus == "focused" then items = h.focused(items) end
+            local rows = build_graph(opts, items)
+            local got, want = {}, {}
+            for _, row in ipairs(rows) do
+                local hash = row.commit and row.commit.hash
+                if hash and hash:match("^m[1-4]$") then
+                    got[#got + 1] = fan_reach(row)
+                    want[#want + 1] = node_col(row) + 1
+                end
+            end
+            assert.equals(4, #got)
+            assert.same(want, got)
+            assert_ok(opts, items, "gutter/split-line/" .. corpus .. "/split-occupancy")
+            assert.equals(0, #h.check_spine(rows, opts))
+        end)
+    end
+end)
+
 describe("a fan line carries no compaction (§5)", function()
     -- On a commit line whose fan is *inline* (no separate split/merge line), a
     -- pass-through lane must cross the fan vertically, never compact horizontally

@@ -113,7 +113,13 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   incoming column) laid out under `gutter` × merge-line / mergesplit, plus a
   matrix-wide projected sweep asserting **no two outgoing lanes ever turn down in
   one column**. Both are unreachable on a raw DAG — a projected view is what
-  produces a row that owns no subject. The `inline+mergesplit` characterization snapshot is pinned
+  produces a row that owns no subject. A
+  `a separate split Line frees its ended lanes under gutter (§5.1/§5.6)` block pins
+  the split-occupancy regression: a run of first-parent merges, each also absorbing
+  the next topic's lane on its split Line, laid out under `gutter` × split-line on
+  both corpora (raw and focused, `◍` topics), asserts every merge fans its topic
+  out into the column beside the node (it alternated one column out when
+  `place_gutter` reserved the absorbed children's columns). The `inline+mergesplit` characterization snapshot is pinned
   to `compact` explicitly (a golden snapshot is a picture of one policy). The
   `invariant checker self-test` block also proves **`check_horizontals`** has teeth:
   a fan-in and a fan-out sharing a run is flagged MIXED-DIRECTION, two arms of the

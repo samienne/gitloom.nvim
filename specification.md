@@ -873,7 +873,12 @@ historical — it is about *reusing* a freed column, not about the compaction mo
   free) or under `allow_merge_on_split` (the sanctioned inline two-turn cell, §5.2).
   Otherwise — an inline fan-out sharing the commit Line with the fan-in — the
   freed column is left for the next Line to reclaim, so two adjacent merges may
-  alternate columns by one. Reusing the column on a separate merge Line is what
+  alternate columns by one. That alternation applies **only** to a fan-in that
+  shares the commit Line: with a **separate split Line** the converging children
+  end on that Line, above the commit Line, so on the commit Line their columns are
+  simply free (only the node's column is held) under every policy, and a run of
+  merges each absorbing the next topic's lane keeps every topic in the same
+  column. Reusing the column on a separate merge Line is what
   keeps that style from leaving an empty-column gap that bounces a right-aligned
   (mirrored, §5.4) graph.
 
