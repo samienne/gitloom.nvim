@@ -2485,7 +2485,9 @@ survives closing and reopening the graph — and resyncs. It shares
 transient, isolated overlay distinct from the §15 picker. The pure core lives in
 the engine: `view.project` takes a **`keep` set** (§16.3) of commit hashes that
 never contract (like junctions, §10.3), and `select.filter_keep` / `smartcase_match`
-build that set from a query over subject+author (§16.2, smartcase substring).
+build that set from a query over subject+author (§16.2, smartcase substring);
+`select.filter_state` turns the live query into the active filter (nil for a blank
+query, so `/` changes nothing until a character is typed, §16.4).
 Tested in `filter_spec`.
 
 The window glue:

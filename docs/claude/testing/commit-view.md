@@ -42,7 +42,8 @@ Scope: per-spec coverage of the commit view, commit selection (range), filter se
 - `tests/filter_spec.lua` — the in-graph filter-search pure core (§16):
   `smartcase_match` (case-insensitive unless the needle has an uppercase; literal
   substring, not a pattern), `filter_keep` (the keep-set from commits × query over
-  subject **or** author; smartcase; blank query → empty), and `view.project`'s
+  subject **or** author; smartcase; blank query → empty), `filter_state` (the
+  live query → active filter, §16.4: blank query → nil, i.e. no filter), and `view.project`'s
   `keep` set (§16.3: a match stays a normal commit while the runs between matches
   collapse; junctions preserved; a kept match is never a node-less junction; nil
   keep = the plain collapse)

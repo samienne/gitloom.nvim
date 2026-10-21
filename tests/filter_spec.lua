@@ -9,6 +9,7 @@ local helpers = require("tests.graph_helpers")
 
 local smartcase_match = graph._internal.smartcase_match
 local filter_keep = graph._internal.filter_keep
+local filter_state = graph._internal.filter_state
 
 describe("smartcase_match (§16.2)", function()
     it("is case-insensitive for an all-lowercase needle", function()
@@ -66,6 +67,27 @@ describe("filter_keep (§16.2/§16.3)", function()
     it("trims surrounding whitespace from the query", function()
         local keep = filter_keep(commits, "  auth  ")
         assert.is_true(keep.h3)
+    end)
+end)
+
+describe("filter_state (§16.4)", function()
+    local commits = {
+        { hash = "h1", message = "Fix login bug", author = "Alice" },
+        { hash = "h2", message = "Add logout",    author = "Bob" },
+    }
+
+    -- Regression: `/` previewed the empty seed query as a real filter that
+    -- matched nothing, contracting the whole graph before anything was typed.
+    it("an empty or blank query is no filter (the graph is left unfiltered)", function()
+        assert.is_nil(filter_state(commits, ""))
+        assert.is_nil(filter_state(commits, "   "))
+        assert.is_nil(filter_state(commits, nil))
+    end)
+
+    it("a non-blank query is the trimmed query and its keep set", function()
+        local f = assert(filter_state(commits, "  log "))
+        assert.equals("log", f.query)
+        assert.same({ h1 = true, h2 = true }, f.keep)
     end)
 end)
 

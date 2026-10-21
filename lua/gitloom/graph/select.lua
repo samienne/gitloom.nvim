@@ -713,6 +713,21 @@ function M.filter_keep(commits, query)
     return keep
 end
 
+--- The active filter for a live query (spec §16.4): nil (no filter — the graph
+--- stays unfiltered) for an empty or blank query, else the trimmed query and its
+--- keep set. Filtering takes effect only once the query has a character in it,
+--- so opening `/` changes nothing and erasing the query restores the graph.
+--- (Not `blank and nil or {...}`: `true and nil` is nil, so that idiom always
+--- yields the table — the bug that previewed the empty seed as a filter.)
+---@param commits table[]  -- Commit-likes with { hash, message?, author? }
+---@param query string?
+---@return { query: string, keep: table<string, boolean>, current?: string }?
+function M.filter_state(commits, query)
+    query = (query or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if query == "" then return nil end
+    return { query = query, keep = M.filter_keep(commits, query) }
+end
+
 -- ── Row actions + checkout (spec §10.4, §10.4.1; listed by the palette, §17) ──
 
 ---@class SelectedRef

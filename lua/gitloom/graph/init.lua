@@ -435,6 +435,7 @@ M._internal = {
     pin_dialog_lines = selectm.pin_dialog_lines,
     smartcase_match = selectm.smartcase_match,
     filter_keep = selectm.filter_keep,
+    filter_state = selectm.filter_state,
     -- gitloom.graph.reach
     reachable_cone = reach.reachable_cone,
     mark_reachable = reach.mark_reachable,

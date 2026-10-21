@@ -4186,6 +4186,9 @@ unaffected.
 `/` opens a single-line **filter input** (a small floating prompt), seeded empty
 from the base graph or with the active query when re-opened over a stamped filter
 (§16.5). As the query changes the graph re-filters **live, debounced** (§16.6).
+An **empty (or blank) query is no filter**: opening `/` leaves the graph exactly
+as it was, filtering takes effect with the first typed character, and erasing the
+query back to empty restores the unfiltered graph.
 The keys while the overlay is open:
 
 - **`<C-j>` / `<C-k>`** move the **current match** down / up — the graph's cursor

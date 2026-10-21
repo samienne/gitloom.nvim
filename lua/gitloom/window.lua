@@ -3613,9 +3613,7 @@ local function h_filter(ctx)
     -- <CR> have a selection — but only re-home it when the cursor fell off a match,
     -- so narrowing the query doesn't yank the view around on every keystroke.
     local function apply(query)
-        query = (query or ""):gsub("^%s+", ""):gsub("%s+$", "")
-        ctx.filter = (query == "") and nil
-            or { query = query, keep = selectm.filter_keep(commits, query) }
+        ctx.filter = selectm.filter_state(commits, query)
         ctx:reflow()
         if ctx.filter then
             local at = ctx:order_at(vim.api.nvim_win_get_cursor(gwin)[1])
@@ -3693,8 +3691,8 @@ local function h_filter(ctx)
     -- re-installs the copy + filter when navigated back to.
     local function do_stamp()
         apply(buf_query()) -- settle the latest query
-        if not ctx.filter then cancel(); return end -- empty query: nothing to stamp
         local filter = ctx.filter
+        if not filter then cancel(); return end -- empty query: nothing to stamp
         filter.current = filter.current or current_match_hash()
         local copy_modes = vim.deepcopy(ctx.view_state.modes)
         local copy_pins = vim.deepcopy(ctx.view_state.pins)
