@@ -4521,7 +4521,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Cycle live with B.
         label_mode = "right",
         -- The dual-mode pair bracket (§6.1): the glyph opening the label row and
-        -- the one closing the message row, each followed by a space.
+        -- the one closing the message row, drawn as-is (`{ "┬ ", "└ " }` for a gap).
         dual_bracket = { "┬", "└" },
         lane_label_colors = true, -- ref labels take their node's lane colour (§6)
         -- External diff provider (§11.5): open is called with a DiffRange; the

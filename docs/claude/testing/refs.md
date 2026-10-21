@@ -112,10 +112,10 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   a crossing keeps only its through-vertical; edge objects shared so §12 dimming
   still applies) and its rendering via `get_column_chars` (only `│`/blanks — no
   node or junctions — each vertical coloured by its lane slot); plus the **pair
-  bracket** through the real `display_item`, mirrored and not: `┬ ` before row 1's
-  labels and `└ ` before row 2's message, the fixed columns untouched, the glyph
+  bracket** through the real `display_item`, mirrored and not: `┬` directly before
+  row 1's labels and `└` directly before row 2's message, the fixed columns untouched, the glyph
   in `palette.pair` and dimmed out of the cone, `pair = false` a same-width blank,
-  a custom `dual_bracket`, `dual_prefix_bytes` (the row-2 cursor byte offset), the
+  a custom `dual_bracket` (and `{ "┬ ", "└ " }` restoring the gap), `dual_prefix_bytes` (the row-2 cursor byte offset), the
   §16 match highlight shifted with it, a labelless dual commit byte-identical to
   `right` and `right`/`inline` unprefixed
 - `tests/listview_spec.lua` — the multi-real-line bookkeeping (spec §6.1 dual):

@@ -975,23 +975,24 @@ end
 --- row, `[2]` closes the message row. Overridden by `opts.dual_bracket`.
 M.DUAL_BRACKET = { "┬", "└" }
 
---- The pair-bracket prefix of a `dual` row's flex column (spec §6.1): the glyph
---- plus one space (`┬ ` on the label row, `└ ` on the message row), in
---- `palette.pair` (nil → `NonText`). `palette.pair = false` blanks it to spaces of
---- the same display width, so alignment is identical. Leading cells INSIDE the
+--- The pair-bracket prefix of a `dual` row's flex column (spec §6.1): exactly
+--- the configured glyph string (`┬` on the label row, `└` on the message row;
+--- a trailing space in the string gives a gap), in `palette.pair` (nil →
+--- `NonText`). `palette.pair = false` blanks it to spaces of the same display
+--- width, so alignment is identical. Leading cells INSIDE the
 --- flex column: the flex column is excluded from the shared column widths, so no
 --- other row moves.
 ---@param opts GraphOptions
 ---@param row 1|2  1 = the label row, 2 = the message row
----@return string text  the prefix text (glyph + space, or its blank equivalent)
+---@return string text  the prefix text (the glyph string, or its blank equivalent)
 ---@return string|nil hl  its highlight group (nil when blanked)
 function M.dual_prefix(opts, row)
     local glyph = (opts.dual_bracket or M.DUAL_BRACKET)[row] or M.DUAL_BRACKET[row]
     local pair = opts.palette and opts.palette.pair
     if pair == false then
-        return (" "):rep(vim.fn.strdisplaywidth(glyph) + 1), nil
+        return (" "):rep(vim.fn.strdisplaywidth(glyph)), nil
     end
-    return glyph .. " ", pair or "NonText"
+    return glyph, pair or "NonText"
 end
 
 --- Byte length of the `dual` message row's pair-bracket prefix (spec §6.1):
@@ -1338,7 +1339,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         if M.dual_two_line(opts, item.commit) then
             -- Two real rows (§6.1): row 1 = graph (node) + labels; row 2 = the
             -- message, the graph continued downward (down-passthrough, no node).
-            -- The pair is tied by the bracket (`┬ ` / `└ `) in a prefix of the
+            -- The pair is tied by the bracket (`┬` / `└`) in a prefix of the
             -- flex column (on the graph side in both orientations: mirrored, the
             -- text still follows the graph); it dims with the row (rh).
             local function prefix(row)

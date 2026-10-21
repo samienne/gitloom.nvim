@@ -1833,8 +1833,8 @@ itself is a behaviour-preserving refactor within the current spec.
   projection of the commit's lanes that continues every down-going lane as a `│`
   (no node), carrying the same edges so §12 dimming still applies. Both rows
   open the flex column with the **pair-bracket prefix** —
-  `render.dual_prefix(opts, row)`: the `dual_bracket` glyph plus a
-  space (`┬ ` / `└ `) in `palette.pair` through `rh()` (so it dims out of the
+  `render.dual_prefix(opts, row)`: exactly the `dual_bracket` string
+  (`┬` / `└`, no added gap) in `palette.pair` through `rh()` (so it dims out of the
   cone), or same-width spaces when `palette.pair = false` — excluded from the
   shared widths, so no other row moves; mirrored, the text still follows the
   graph, so the prefix is on the graph side there too. `place_cursor` adds the

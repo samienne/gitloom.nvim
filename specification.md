@@ -1796,13 +1796,15 @@ selectable order (branch groups then tags; the current branch coloured as HEAD,
   after it; the **second row**, directly below, carries the commit **message**,
   with the graph's lanes continued downward as vertical wires (the same lane
   layout, with **no node placed** on that row). The two rows are tied by a
-  **pair bracket** in a 2-cell prefix of the flex column: `┬ ` before the labels
-  on the first row (marking it as the commit's main row), `└ ` before the message
-  on the second, in `palette.pair` (default `NonText`; `false` leaves the prefix
-  blank — still 2 cells, so the alignment is identical). The glyphs are
-  configurable via `dual_bracket` (§8). The labels and the message are therefore
-  both indented 2 cells from the graph edge, so the pair reads as one unit rather
-  than the message as a commit of its own. The prefix sits inside the flex
+  **pair bracket** in a prefix of the flex column: `┬` directly before the labels
+  on the first row (marking it as the commit's main row), `└` directly before the
+  message on the second — no gap, so `┬(main)` / `└fix the thing` — in
+  `palette.pair` (default `NonText`; `false` leaves the prefix blank — same
+  width, so the alignment is identical). The prefix is exactly the configured
+  `dual_bracket` strings (§8), so a trailing space there restores a gap. The
+  labels and the message are therefore both indented by the bracket's width from
+  the graph edge, so the pair reads as one unit rather than the message as a
+  commit of its own. The prefix sits inside the flex
   column, so the date / author / graph columns of every other row keep their
   widths and alignment. Like the other row fields it dims with the row outside
   the reachability cone (§12). The prefix is on the graph side in both
@@ -2166,8 +2168,9 @@ Endpoint     = Commit | "index" | "worktree"
 - `label_mode` — where ref decorations are placed: `"right"` (default), `"inline"`,
   or `"dual"` (§6.1). Cycle live with `B`.
 - `dual_bracket` — the `dual`-mode pair bracket glyphs (§6.1): `{ label_row,
-  message_row }`, each drawn followed by one space at the start of the flex
-  column. **Default `{ "┬", "└" }`.** Its colour is `palette.pair`.
+  message_row }`, each drawn exactly as given at the start of the flex column
+  (no gap is added: a trailing space in a string, e.g. `{ "┬ ", "└ " }`, gives
+  one). **Default `{ "┬", "└" }`.** Its colour is `palette.pair`.
 - `diff` — the external diff provider (§11.5): `open` is a function called with a
   `DiffRange` to open the diff (default opens diffview in the range's `root`, the
   graph's repository — a custom `open` must honour `root` too), and `label` is the

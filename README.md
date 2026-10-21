@@ -456,8 +456,8 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
 - **inline** — left-aligned right after the graph, before the message.
 - **dual** — a labelled commit spans two rows: the graph + node + labels on the
   first, the message on the second (only for commits that have labels), tied by
-  a muted pair bracket — `┬ ` before the labels, `└ ` before the message
-  (`dual_bracket`, coloured by `palette.pair`). Both are
+  a muted pair bracket — `┬` right before the labels, `└` right before the
+  message (`dual_bracket`, coloured by `palette.pair`). Both are
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
@@ -689,8 +689,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   See [specification.md](specification.md) §6.1.
 - **`dual_bracket`** — the glyphs of the `dual` pair bracket that ties a
   labelled commit's two rows: `{ label_row, message_row }` (default
-  `{ "┬", "└" }`), each followed by a space. Its colour is `palette.pair`
-  (default `NonText`; `false` leaves the 2-cell prefix blank).
+  `{ "┬", "└" }`), drawn exactly as given — add a trailing space
+  (`{ "┬ ", "└ " }`) for a gap before the text. Its colour is `palette.pair`
+  (default `NonText`; `false` leaves the prefix blank at the same width).
 - **`lane_label_colors`** — draw the label of the ref that **owns** a node's lane
   in that lane's colour (default `true`), dimmed with the lane out of the cursor's
   reachability cone: the ref the lane was born for (a pinned branch at its tip, a

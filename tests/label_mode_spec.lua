@@ -131,7 +131,7 @@ describe("branch-line rendering", function()
 end)
 
 -- The dual pair bracket (spec §6.1): a labelled commit's two rows open the flex
--- column with `┬ ` (labels) / `└ ` (message) — inside the flex column, so no fixed
+-- column with `┬` (labels) / `└` (message), no gap — inside the flex column, so no fixed
 -- column changes. Through the real display_item.
 describe("dual pair bracket (§6.1)", function()
     local function o(mode, mirror)
@@ -162,7 +162,7 @@ describe("dual pair bracket (§6.1)", function()
             local one = render(o("dual", mirror), commit())
             assert.equals(2, #two.lines)
             assert.equals("fix the thing", one.line[4].text)
-            assert.equals("└ fix the thing", two.lines[2][4].text)
+            assert.equals("└fix the thing", two.lines[2][4].text)
             -- The fixed columns (date / author / graph) are untouched by the prefix.
             assert.equals("", two.lines[2][1])
             assert.equals("", two.lines[2][2])
@@ -171,7 +171,7 @@ describe("dual pair bracket (§6.1)", function()
 
         it("prefixes row 1's labels with the opening bracket" .. tag, function()
             local two = render(o("dual", mirror), labelled())
-            assert.equals("┬ (alpha)", two.lines[1][4].text)
+            assert.equals("┬(alpha)", two.lines[1][4].text)
         end)
 
         it("draws both glyphs in palette.pair" .. tag, function()
@@ -185,7 +185,7 @@ describe("dual pair bracket (§6.1)", function()
                     if hl.hl == "PairHl" then hit = hl end
                 end
                 assert.is_not_nil(hit, "row " .. row)
-                assert.equals(glyph .. " ", f.text:sub(hit.start_pos + 1, hit.end_pos))
+                assert.equals(glyph, f.text:sub(hit.start_pos + 1, hit.end_pos))
             end
         end)
 
@@ -218,11 +218,11 @@ describe("dual pair bracket (§6.1)", function()
             local opts = o("dual", mirror)
             opts.palette.pair = false
             local two = render(opts, labelled())
-            assert.equals("  (alpha)", two.lines[1][4].text)
-            assert.equals("  fix the thing", two.lines[2][4].text)
+            assert.equals(" (alpha)", two.lines[1][4].text)
+            assert.equals(" fix the thing", two.lines[2][4].text)
             for row = 1, 2 do
                 for _, hl in ipairs(two.lines[row][4].highlight) do
-                    assert.is_true(hl.start_pos >= 2, "no highlight on the blank prefix")
+                    assert.is_true(hl.start_pos >= 1, "no highlight on the blank prefix")
                 end
             end
         end)
@@ -231,8 +231,21 @@ describe("dual pair bracket (§6.1)", function()
             local opts = o("dual", mirror)
             opts.dual_bracket = { "╭", "╰" }
             local two = render(opts, labelled())
-            assert.equals("╭ (alpha)", two.lines[1][4].text)
-            assert.equals("╰ fix the thing", two.lines[2][4].text)
+            assert.equals("╭(alpha)", two.lines[1][4].text)
+            assert.equals("╰fix the thing", two.lines[2][4].text)
+        end)
+
+        it("restores the gap with a trailing space in dual_bracket" .. tag, function()
+            local r = require("gitloom.graph.render")
+            local opts = o("dual", mirror)
+            opts.dual_bracket = { "┬ ", "└ " }
+            local two = render(opts, labelled())
+            assert.equals("┬ (alpha)", two.lines[1][4].text)
+            assert.equals("└ fix the thing", two.lines[2][4].text)
+            assert.equals(4, r.dual_prefix_bytes(opts))
+            assert.equals("fix the thing", two.lines[2][4].text:sub(r.dual_prefix_bytes(opts) + 1))
+            opts.palette.pair = false
+            assert.equals("  (alpha)", render(opts, labelled()).lines[1][4].text)
         end)
 
         it("gives the row-2 cursor the prefix's byte length" .. tag, function()
@@ -240,13 +253,13 @@ describe("dual pair bracket (§6.1)", function()
             local opts = o("dual", mirror)
             local msg = render(opts, labelled()).lines[2][4].text
             local off = r.dual_prefix_bytes(opts)
-            assert.equals(4, off) -- "└" is 3 bytes + the space
+            assert.equals(3, off) -- "└" is 3 bytes, no gap
             assert.equals("fix the thing", msg:sub(off + 1))
             opts.dual_bracket = { "+", "`" }
-            assert.equals(2, r.dual_prefix_bytes(opts))
+            assert.equals(1, r.dual_prefix_bytes(opts))
             opts.palette.pair = false
             opts.dual_bracket = nil
-            assert.equals(2, r.dual_prefix_bytes(opts))
+            assert.equals(1, r.dual_prefix_bytes(opts))
         end)
 
         it("shifts the filter match highlight with the indent" .. tag, function()
