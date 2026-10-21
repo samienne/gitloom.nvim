@@ -72,28 +72,36 @@ refactors without behavior change), skip steps 1–4 and implement directly.
 ## Branch Workflow
 
 All changes go through branches — never commit directly to `master` or
-`unstable`.
+`unstable`. One branch per piece of work.
 
-- **Feature branches**: `feature/<short-name>`; **bugfix**: `fix/<short-name>`.
+- **Branch names**: `feature/<short-name>`, `fix/<short-name>`, `docs/…`,
+  `refactor/…` etc.
 - Branch from `master`. Multiple commits per branch are fine.
+- **`unstable` is a test pointer, not an integration branch.** The user's
+  Neovim config loads gitloom from `unstable`: on this computer from the main
+  worktree (which stays checked out on `unstable`), on other computers by
+  cloning `unstable` from gitcode. To test a branch, point `unstable` at its
+  tip (`git reset --hard <branch>` in the main worktree, when it is clean) —
+  no merge commits on `unstable`. Moving it rewrites its history, so the user
+  force-pushes it.
 - Do **not** create commits automatically — only when the user explicitly
   asks. It is fine to suggest "should we commit this?" at a stopping point.
-- **Every commit on `master` makes one meaningful change.** How a branch lands:
+- **When the branch is ready** (the user's call, after testing via
+  `unstable`), merge it to `master`. **Every commit on `master` makes one
+  meaningful change.** How a branch lands:
   - **One commit** — fast-forward (rebase it onto `master` first if needed).
   - **Several commits that are not each a meaningful step** (work in progress,
     fixups, "address review") — squash them into one commit.
   - **A real merge** (`git merge --no-ff`, with a summary message describing
     *what* and *why*) — only when the branch's commits are carefully curated,
     each a self-contained meaningful step. Curate them before merging.
-- Landing on `unstable` for test-driving is unaffected: it stays a
-  `git merge --no-ff` merge of the branch.
-- **A merged branch is finished.** Once merged (into `unstable` or `master`),
-  never add commits to it or merge it again. Follow-up work — a cleanup, a fix
-  to it, a review change — goes on a **new** branch from the current `master`.
-  Continuing a merged branch makes the history graph messy.
+- **A branch merged to `master` is finished.** Never add commits to it or
+  merge it again. Follow-up work — a cleanup, a fix to it, a review change —
+  goes on a **new** branch from the current `master`. (While a branch is only
+  being tested via `unstable`, keep committing to it and re-point `unstable`.)
 
-The shipped/default branch is `unstable` (what the Neovim config follows);
-`master` is the integration branch.
+`master` is the stable integration branch; `unstable` is what the Neovim
+config loads.
 
 ## Pre-merge checklist (mandatory)
 
