@@ -1924,6 +1924,41 @@ describe("pane.continue — active lanes reach a root (§6.2)", function()
         end
     end)
 
+    -- Two crossing lanes whose first-parent chains meet only AT a root — a fork at
+    -- the root, as LumeEditor's 2.1 line (a separate history: `2.1-lts` and
+    -- `janne/ssaaa-113` both fork off `Initial commit 2.1.113`). The root is both a
+    -- convergence and a root; condense classified it as a node-less junction, so the
+    -- footer ended the two lanes in a bare bracket with no `◎`, reading as history
+    -- with no root (§6.2: the footer runs "down to and including the root commit(s)";
+    -- §5 `◎` = root commit).
+    it("a root that two lanes fork from is drawn as a ◎ root, not a node-less junction", function()
+        local map = by_hash(h.dag({
+            { "A", { "B" } },
+            { "X", { "Y" } },
+            { "B", { "R" } },
+            { "Y", { "R" } },
+            { "R", {} },
+        }))
+        local bnd = {
+            [1] = { id = 1, color = 1, parent = map.A, begin = map.A },
+            [2] = { id = 2, color = 2, parent = map.X, begin = map.X },
+        }
+        local cond = pane.continue(bnd)
+        local n = by_hash(cond.items)
+        assert.is_not_nil(n.R)
+        assert.equals(0, #n.R.parents)
+        assert.is_false(n.R.junction, "the root must stay a real node, not a junction")
+        local opts = vim.tbl_extend("force", h.big_opts(), { junction_markers = true })
+        local res = pane.footer(opts, cond.items, bnd, cond.node_of_hash)
+        local text = {}
+        for _, r in ipairs(res.rows) do
+            local g = get_column_chars(opts, r.columns, false)
+            text[#text + 1] = g.text or ""
+        end
+        assert.is_not_nil(table.concat(text, "\n"):find("◎"),
+            "the footer must draw the shared root as ◎:\n" .. table.concat(text, "\n"))
+    end)
+
     -- The two-lane "loop": two crossing lanes converge on a junction J whose first
     -- parent is a COLLAPSED root region (a `◍` head — synthetic hash
     -- `collapsed:<root>`, which the window's hash-keyed `order_of` cannot rank). The

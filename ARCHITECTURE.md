@@ -297,8 +297,9 @@ told this scroll's panes are current.
    the seam (the footer seam-discontinuity bug).
 3. **Condense + render.** `pane.condense` contracts each linear stretch to an
    edge, keeping only ref heads (`◍` markers — anchor refs only), fork/merge
-   **junctions** (node-less join glyphs), and roots/tips (real nodes); `node_of`
-   maps every member hash to its node. `columns.layout` lays it out in compact
+   **junctions** (node-less join glyphs), and roots/tips (real nodes — a root that
+   lanes fork from stays a `◎`, never a junction); `node_of` maps every member hash
+   to its node. `columns.layout` lays it out in compact
    mode (`pane_opts`: inline joins), the lanes seeded from the boundary; it's
    rendered topology-only, **dashed** (┊ / ╌, junctions solid), aligned under the
    main graph, with a `┊` separator marking the seam. Height grows to a fixed

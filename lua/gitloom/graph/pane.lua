@@ -189,16 +189,20 @@ function M.condense(nodes, anchor_names, up, yield, keep)
     -- re-pointed kept degree) are used because a junction's branches may run off to the
     -- **seam** — distinct boundary lanes with no kept node of their own — which still
     -- make it a real merge (`M.header` wires those lanes in from the boundary).
+    -- A footer **root** is never a junction, even when lanes fork from it: the footer
+    -- runs down to and including the roots (§6.2), so it keeps its `◎` node and the
+    -- lanes converge onto it (a node-less join there reads as history with no root).
     for _, n in ipairs(nodes) do
         local c = copy[n]
         if c then
+            local footer_root = not up and #(n.parents or {}) == 0
             if #c.refs > 0 then
                 c.collapsed, c.junction = true, false
-            elseif keep[n.hash] or #reach(n, "parents") >= 2 or #reach(n, "children") >= 2 then
+            elseif not footer_root
+                and (keep[n.hash] or #reach(n, "parents") >= 2 or #reach(n, "children") >= 2) then
                 -- A forced convergence node (crossing lanes landing on it) has fp
                 -- child-degree <2 in this graph, so render it as a node-less junction —
-                -- the lanes merge there on the seam row rather than through a fan line
-                -- (a seam-adjacent convergence that is also a root reads as this join).
+                -- the lanes merge there on the seam row rather than through a fan line.
                 c.collapsed, c.junction = false, true
             else
                 c.collapsed, c.junction = false, false

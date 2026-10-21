@@ -70,7 +70,8 @@ Scope: per-spec coverage of the header / footer panes, their seams and the scree
   next kept node toward the root/tip, the anchor-ref filter, false junctions
   spliced, root rendered as a real node), `continue` (follow the active seam
   lanes' first-parent chains to a root: both lanes converge at their meeting
-  junction and reach the root, every node's chain terminates at a root — never cut
+  junction and reach the root, a root two lanes fork from stays a `◎` node — not a
+  node-less junction — every node's chain terminates at a root — never cut
   off — and no non-active branch is introduced), and the **chunking hook** (the
   async pane build, §6.2): a deep first-parent chain invokes `continue`/
   `continue_up`/`condense`'s optional `yield`, and the chunked output is identical
