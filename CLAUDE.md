@@ -163,3 +163,4 @@ Topical notes under `docs/claude/` (spec and ARCHITECTURE stay authoritative):
 - [view.md](docs/claude/view.md) — `view.lua`/`sigset.lua`/`select.lua`: projection, focus, signatures, owner coverage, pins, packing, label modes, commit selection.
 - [window.md](docs/claude/window.md) — `window.lua`: `GraphCtx`, z-order, panes + seams + gate, palette/`GRAPH_KEYS`, checkout/sync/examine, reflow, persist, progress.
 - [git-io.md](docs/claude/git-io.md) — `gitloom.git`/`fetch.lua`: spawn + debug hook, `next_tick`, picker cost, sort modes, resync (32766 cap), diff provider.
+- [layout-research.md](docs/claude/layout-research.md) — measured layout findings: crossings, width, reflow stability, the gutter handover trilemma and the shipped swaps; closed questions not to re-open.
