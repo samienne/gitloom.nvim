@@ -455,8 +455,9 @@ Ref labels have three placements, cycled with `B` (`label_mode`):
   don't fit.
 - **inline** — left-aligned right after the graph, before the message.
 - **dual** — a labelled commit spans two rows: the graph + node + labels on the
-  first, the message on the second, indented by two cells (only for commits that
-  have labels). Both are
+  first, the message on the second (only for commits that have labels), tied by
+  a muted pair bracket — `┬ ` before the labels, `└ ` before the message
+  (`dual_bracket`, coloured by `palette.pair`). Both are
   real lines for the same commit; landing on the first row pre-selects the first
   label.
 
@@ -552,6 +553,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         tags = "Comment",
         worktree = "Comment",    -- a linked worktree's HEAD label, {wt:<dir>}
         selected = "Visual",     -- the h/l-selected ref decoration
+        pair = "NonText",        -- the dual-mode pair bracket (§6.1); false = blank
         action = "Special",      -- the commit-view diff action label (§11.5)
         dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
         counterpart_dim = 0.25,  -- lighter blend for a remote counterpart's lane (§5.5)
@@ -591,6 +593,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
+    dual_bracket = { "┬", "└" }, -- dual mode's pair bracket: label row, message row
     lane_label_colors = true, -- the lane's owning label in the lane colour (false: per-kind groups)
     working_tree = true,     -- the ◌ working-tree row above HEAD: true | "dirty" | false (§3.3/§4.2)
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
@@ -684,6 +687,10 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   right-edge layout above), `"inline"` (left-aligned before the message), or
   `"dual"` (on a separate line above the commit's message). Cycle live with `B`.
   See [specification.md](specification.md) §6.1.
+- **`dual_bracket`** — the glyphs of the `dual` pair bracket that ties a
+  labelled commit's two rows: `{ label_row, message_row }` (default
+  `{ "┬", "└" }`), each followed by a space. Its colour is `palette.pair`
+  (default `NonText`; `false` leaves the 2-cell prefix blank).
 - **`lane_label_colors`** — draw the label of the ref that **owns** a node's lane
   in that lane's colour (default `true`), dimmed with the lane out of the cursor's
   reachability cone: the ref the lane was born for (a pinned branch at its tip, a

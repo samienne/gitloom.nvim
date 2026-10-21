@@ -192,8 +192,10 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   keymaps, cursor parking, and the cone viewport, which converts `w0`/`w$` to
   order indices). `DisplayElement.lines` (a list of real rows) generalises `line`;
   `above`/`below` are stacked virtual rows attached to the first/last real line.
-  The message row indents its message `render.DUAL_INDENT` cells inside the flex
-  column (§6.1); `place_cursor` adds it so the cursor parks on the message.
+  Both dual rows open the flex column with the pair bracket
+  (`render.dual_prefix`, §6.1); `place_cursor` adds its byte length
+  (`render.dual_prefix_bytes` on row 2) so the cursor parks on the labels /
+  message, not the multibyte glyph.
   `B` calls `controller.relayout()` (resize the buffer + rebuild the map) because
   it changes per-item line counts; `m`/`M`/`d`/`H`/`i` stay on `refresh()`.
   This is the deferred "real branch line" alternative, now built; the cursor sits

@@ -1795,14 +1795,20 @@ selectable order (branch groups then tags; the current branch coloured as HEAD,
   carries the graph (with the commit's node) and the **ref labels** left-aligned
   after it; the **second row**, directly below, carries the commit **message**,
   with the graph's lanes continued downward as vertical wires (the same lane
-  layout, with **no node placed** on that row). The message on the second row is
-  **indented by 2 cells** from the graph edge, so it reads as belonging to the
-  labelled row above rather than as a commit of its own; the indent sits inside
-  the message (flex) column, so the date / author / graph columns of every other
-  row keep their widths and alignment. The indent is on the graph side in both
-  orientations — under mirroring (§5.4) the message is still drawn after the
-  right-aligned graph, so indenting away from the graph nests it under the labels
-  just as in the unmirrored layout. Only commits that actually have
+  layout, with **no node placed** on that row). The two rows are tied by a
+  **pair bracket** in a 2-cell prefix of the flex column: `┬ ` before the labels
+  on the first row (marking it as the commit's main row), `└ ` before the message
+  on the second, in `palette.pair` (default `NonText`; `false` leaves the prefix
+  blank — still 2 cells, so the alignment is identical). The glyphs are
+  configurable via `dual_bracket` (§8). The labels and the message are therefore
+  both indented 2 cells from the graph edge, so the pair reads as one unit rather
+  than the message as a commit of its own. The prefix sits inside the flex
+  column, so the date / author / graph columns of every other row keep their
+  widths and alignment. Like the other row fields it dims with the row outside
+  the reachability cone (§12). The prefix is on the graph side in both
+  orientations — under mirroring (§5.4) the labels and message are still drawn
+  after the right-aligned graph, so the bracket still opens toward the graph just
+  as in the unmirrored layout. Only commits that actually have
   ref decorations get the second row; a commit without labels stays a single row
   (node + message, as in `right` without the right-pin). Both rows are real buffer
   lines and belong to the same commit: navigation (§2) treats them as two rows of
@@ -2084,8 +2090,8 @@ tracked upstream when its short name differs — §10.6.)
 ```
 GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
-                 message_min, label_mode, diff, working_tree, scrolloff, search,
-                 persist, progress, zindex, lane_label_colors }
+                 message_min, label_mode, dual_bracket, diff, working_tree,
+                 scrolloff, search, persist, progress, zindex, lane_label_colors }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
 LayoutPolicy = "compact" | "survivors" | "linear" | "straight" | "gutter"
 Diff         = { open: fun(range: DiffRange), label: string }
@@ -2104,7 +2110,9 @@ Endpoint     = Commit | "index" | "worktree"
   `nil` = derived from `tracks`/`Normal`; §5.5).
   Includes `selected`, the highlight for the `h`/`l`-selected ref decoration
   (§2; default `Visual`); `search`, the highlight for the matched substring in a
-  filtered commit's subject (§16.7; default `Search`); `diff`, a sub-table of highlight groups for the
+  filtered commit's subject (§16.7; default `Search`); `pair`, the `dual`-mode
+  pair bracket (§6.1; default `NonText`, `false` leaves the prefix blank);
+  `diff`, a sub-table of highlight groups for the
   commit view's diff: `add`, `delete`, `hunk`, `header` (defaults `DiffAdd`,
   `DiffDelete`, `Title`, `Comment`; §11.3); `submodule`, a sub-table of highlight
   groups for the submodule change view (§11.7): `new`, `old`, `base` — the added
@@ -2157,6 +2165,9 @@ Endpoint     = Commit | "index" | "worktree"
   `+N` (§6).
 - `label_mode` — where ref decorations are placed: `"right"` (default), `"inline"`,
   or `"dual"` (§6.1). Cycle live with `B`.
+- `dual_bracket` — the `dual`-mode pair bracket glyphs (§6.1): `{ label_row,
+  message_row }`, each drawn followed by one space at the start of the flex
+  column. **Default `{ "┬", "└" }`.** Its colour is `palette.pair`.
 - `diff` — the external diff provider (§11.5): `open` is a function called with a
   `DiffRange` to open the diff (default opens diffview in the range's `root`, the
   graph's repository — a custom `open` must honour `root` too), and `label` is the

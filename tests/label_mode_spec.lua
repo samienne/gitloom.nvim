@@ -130,10 +130,10 @@ describe("branch-line rendering", function()
     end)
 end)
 
--- The dual message row's indent (spec §6.1): a labelled commit's message, on the
--- second row, sits 2 cells further from the graph than an unlabelled commit's —
--- inside the flex column, so no fixed column changes. Through the real display_item.
-describe("dual message row indent (§6.1)", function()
+-- The dual pair bracket (spec §6.1): a labelled commit's two rows open the flex
+-- column with `┬ ` (labels) / `└ ` (message) — inside the flex column, so no fixed
+-- column changes. Through the real display_item.
+describe("dual pair bracket (§6.1)", function()
     local function o(mode, mirror)
         local base = helpers.opts()
         base.palette.search = "Search"
@@ -157,21 +157,96 @@ describe("dual message row indent (§6.1)", function()
     for _, mirror in ipairs({ false, true }) do
         local tag = mirror and " (mirrored)" or ""
 
-        it("indents row 2's message by 2 cells vs an unlabelled commit" .. tag, function()
+        it("prefixes row 2's message with the closing bracket" .. tag, function()
             local two = render(o("dual", mirror), labelled())
             local one = render(o("dual", mirror), commit())
             assert.equals(2, #two.lines)
             assert.equals("fix the thing", one.line[4].text)
-            assert.equals("  fix the thing", two.lines[2][4].text)
-            -- The fixed columns (date / author / graph) are untouched by the indent.
+            assert.equals("└ fix the thing", two.lines[2][4].text)
+            -- The fixed columns (date / author / graph) are untouched by the prefix.
             assert.equals("", two.lines[2][1])
             assert.equals("", two.lines[2][2])
             assert.equals(two.lines[1][3].text:len(), two.lines[2][3].text:len())
         end)
 
-        it("leaves row 1 (graph + labels) unindented" .. tag, function()
+        it("prefixes row 1's labels with the opening bracket" .. tag, function()
             local two = render(o("dual", mirror), labelled())
-            assert.equals("(alpha)", two.lines[1][4].text)
+            assert.equals("┬ (alpha)", two.lines[1][4].text)
+        end)
+
+        it("draws both glyphs in palette.pair" .. tag, function()
+            local opts = o("dual", mirror)
+            opts.palette.pair = "PairHl"
+            local two = render(opts, labelled())
+            for row, glyph in ipairs({ "┬", "└" }) do
+                local f = two.lines[row][4]
+                local hit
+                for _, hl in ipairs(f.highlight) do
+                    if hl.hl == "PairHl" then hit = hl end
+                end
+                assert.is_not_nil(hit, "row " .. row)
+                assert.equals(glyph .. " ", f.text:sub(hit.start_pos + 1, hit.end_pos))
+            end
+        end)
+
+        it("defaults the bracket to NonText when palette.pair is unset" .. tag, function()
+            local opts = o("dual", mirror)
+            opts.palette.pair = nil
+            local f = render(opts, labelled()).lines[2][4]
+            assert.equals("NonText", f.highlight[1].hl)
+            assert.equals(0, f.highlight[1].start_pos)
+        end)
+
+        it("dims the bracket with the row outside the cone" .. tag, function()
+            local tgc = vim.o.termguicolors
+            vim.o.termguicolors = true
+            local opts = o("dual", mirror)
+            opts.highlight, opts.palette.pair = true, "NonText"
+            local c = labelled()
+            local out = g.display_item(opts, item(c), {}, {}, nil, nil, nil) -- c not in cone
+            local lit = g.display_item(opts, item(c), {}, { [c] = true }, nil, nil, nil)
+            local dim = require("gitloom.graph.render").dim_hl(opts, "NonText")
+            vim.o.termguicolors = tgc
+            assert.is_true(dim ~= "NonText", "the dim group differs from the lit one")
+            for row = 1, 2 do
+                assert.equals(dim, out.lines[row][4].highlight[1].hl, "row " .. row)
+                assert.equals("NonText", lit.lines[row][4].highlight[1].hl, "row " .. row)
+            end
+        end)
+
+        it("leaves a same-width blank prefix with palette.pair = false" .. tag, function()
+            local opts = o("dual", mirror)
+            opts.palette.pair = false
+            local two = render(opts, labelled())
+            assert.equals("  (alpha)", two.lines[1][4].text)
+            assert.equals("  fix the thing", two.lines[2][4].text)
+            for row = 1, 2 do
+                for _, hl in ipairs(two.lines[row][4].highlight) do
+                    assert.is_true(hl.start_pos >= 2, "no highlight on the blank prefix")
+                end
+            end
+        end)
+
+        it("uses custom dual_bracket glyphs" .. tag, function()
+            local opts = o("dual", mirror)
+            opts.dual_bracket = { "╭", "╰" }
+            local two = render(opts, labelled())
+            assert.equals("╭ (alpha)", two.lines[1][4].text)
+            assert.equals("╰ fix the thing", two.lines[2][4].text)
+        end)
+
+        it("gives the row-2 cursor the prefix's byte length" .. tag, function()
+            local r = require("gitloom.graph.render")
+            local opts = o("dual", mirror)
+            local msg = render(opts, labelled()).lines[2][4].text
+            local off = r.dual_prefix_bytes(opts)
+            assert.equals(4, off) -- "└" is 3 bytes + the space
+            assert.equals("fix the thing", msg:sub(off + 1))
+            opts.dual_bracket = { "+", "`" }
+            assert.equals(2, r.dual_prefix_bytes(opts))
+            opts.palette.pair = false
+            opts.dual_bracket = nil
+            assert.equals(2, r.dual_prefix_bytes(opts))
         end)
 
         it("shifts the filter match highlight with the indent" .. tag, function()
@@ -192,6 +267,7 @@ describe("dual message row indent (§6.1)", function()
                 local el = render(o(mode, mirror), labelled())
                 assert.is_nil(el.lines)
                 assert.is_nil(el.line[4].text:find("^ "), mode)
+                assert.is_nil(el.line[4].text:find("┬", 1, true), mode)
             end
         end)
     end

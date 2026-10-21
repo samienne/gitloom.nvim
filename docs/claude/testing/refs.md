@@ -111,11 +111,13 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   entering from above, `down` keeps lanes leaving below — the message row;
   a crossing keeps only its through-vertical; edge objects shared so §12 dimming
   still applies) and its rendering via `get_column_chars` (only `│`/blanks — no
-  node or junctions — each vertical coloured by its lane slot); plus the **message
-  row indent** through the real `display_item`, mirrored and not: row 2's message
-  `DUAL_INDENT` (2) cells past an unlabelled commit's, row 1 and the fixed columns
-  untouched, the §16 match highlight shifted with it, a labelless dual commit
-  byte-identical to `right` and `right`/`inline` unindented
+  node or junctions — each vertical coloured by its lane slot); plus the **pair
+  bracket** through the real `display_item`, mirrored and not: `┬ ` before row 1's
+  labels and `└ ` before row 2's message, the fixed columns untouched, the glyph
+  in `palette.pair` and dimmed out of the cone, `pair = false` a same-width blank,
+  a custom `dual_bracket`, `dual_prefix_bytes` (the row-2 cursor byte offset), the
+  §16 match highlight shifted with it, a labelless dual commit byte-identical to
+  `right` and `right`/`inline` unprefixed
 - `tests/listview_spec.lua` — the multi-real-line bookkeeping (spec §6.1 dual):
   the buffer-line ↔ item offset map (`rebuild_starts`/`item_index_at`: mixed line
   counts, clamping, the incremental append path) and a windowed smoke test (snacks

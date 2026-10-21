@@ -1447,6 +1447,7 @@ end
 ---@field worktree? string  a linked worktree's HEAD label, `{wt:<dir>}` (§3.2/§4.1)
 ---@field selected? string  the h/l-selected ref decoration (§2)
 ---@field search? string  the filter-search matched substring (§16.7)
+---@field pair? string|false  the dual-mode pair bracket (default "NonText"; false leaves the prefix blank); §6.1
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
@@ -1489,6 +1490,7 @@ end
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
+---@field dual_bracket? string[]  the dual-mode pair bracket glyphs { label row, message row } (default { "┬", "└" }); §6.1
 ---@field lane_label_colors? boolean  ref labels in their node's lane colour (default true); §6
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean|"dirty"  the working-tree row above HEAD: true = always (a clean node on a clean tree), "dirty" = only with changes, false = never; §3.3/§4.2
@@ -4431,6 +4433,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             worktree = "Comment",
             selected = "Visual", -- the h/l-selected ref decoration (§2)
             search = "Search",   -- the filter-search matched substring (§16.7)
+            pair = "NonText",    -- the dual-mode pair bracket (§6.1); false = blank
             action = "Special",  -- the commit-view diff action label (§11.5)
             -- Reachability dimming (§12): blend factor toward the bg for the
             -- out-of-cone rows/lanes. Higher = more muted.
@@ -4517,6 +4520,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Ref label placement (§6.1): "right" (default), "inline", or "dual".
         -- Cycle live with B.
         label_mode = "right",
+        -- The dual-mode pair bracket (§6.1): the glyph opening the label row and
+        -- the one closing the message row, each followed by a space.
+        dual_bracket = { "┬", "└" },
         lane_label_colors = true, -- ref labels take their node's lane colour (§6)
         -- External diff provider (§11.5): open is called with a DiffRange; the
         -- default opens diffview. Override open/label to use another diff plugin,
@@ -6953,10 +6959,12 @@ local function place_cursor(ctx)
     end
     if not col and ctx.lv and ctx.lv.controller and ctx.lv.controller.col_offset then
         col = ctx.lv.controller.col_offset(line, "line", COL.flex)
-        -- The dual message row indents its message inside the flex column (§6.1):
-        -- park on the message, not the indent.
-        if sub == 1 and dual_two_line(ctx.opts, item.commit) then
-            col = col + render.DUAL_INDENT
+        -- Both dual rows open the flex column with the pair bracket (§6.1): park
+        -- on the labels / message, not the bracket. The prefix's BYTE length
+        -- (the glyphs are multibyte and configurable).
+        if dual_two_line(ctx.opts, item.commit) then
+            col = col + (sub == 1 and render.dual_prefix_bytes(ctx.opts)
+                or #(render.dual_prefix(ctx.opts, 1)))
         end
     end
     pcall(vim.api.nvim_win_set_cursor, w, { line, col or 0 })
