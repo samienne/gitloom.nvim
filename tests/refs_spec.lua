@@ -226,6 +226,120 @@ describe("track_segments / track_label (§6.3)", function()
     end)
 end)
 
+-- Hand-built refs/upstreams (no commit, partial fields) and parser results known non-nil.
+---@diagnostic disable: missing-fields, need-check-nil
+describe("non-matching upstream (§6.3)", function()
+    local upstream_matches = internal.upstream_matches
+    local mark_same_named = internal.mark_same_named
+    local parse_ref_line = require("gitloom.git.fetch")._internal.parse_ref_line
+    local H = ("a"):rep(40)
+
+    it("parses the remote / branch atoms, empty atoms included", function()
+        local r = parse_ref_line(H .. " refs/heads/feat  origin/dev refs/remotes/origin/dev origin refs/heads/dev"
+            .. " ahead 4, behind 6")
+        assert.same({ short = "origin/dev", ref = "refs/remotes/origin/dev", remote = "origin",
+            merge = "refs/heads/dev", match = false, gone = false, ahead = 4, behind = 6 }, r.upstream)
+        local m = parse_ref_line(H .. " refs/heads/main  origin/main refs/remotes/origin/main origin refs/heads/main ")
+        assert.is_true(m.upstream.match)
+        local l = parse_ref_line(H .. " refs/heads/loc  dev refs/heads/dev . refs/heads/dev gone")
+        assert.same({ remote = ".", match = false, gone = true },
+            { remote = l.upstream.remote, match = l.upstream.match, gone = l.upstream.gone })
+        local plain = parse_ref_line(H .. " refs/heads/plain      ")
+        assert.equals("plain", plain.name)
+        assert.is_nil(plain.upstream)
+        local remote = parse_ref_line(H .. " refs/remotes/origin/dev      ")
+        assert.same({ kind = "remote", name = "origin/dev" }, { kind = remote.kind, name = remote.name })
+    end)
+
+    it("matches only the same-named branch on a remote; a local upstream never", function()
+        assert.is_true(upstream_matches("main", "origin", "refs/heads/main"))
+        assert.is_false(upstream_matches("feat", "origin", "refs/heads/dev"))
+        assert.is_false(upstream_matches("dev", ".", "refs/heads/dev"))
+        assert.is_false(upstream_matches("x", nil, nil))
+    end)
+
+    it("marks the remotes holding a same-named branch, for a non-matching upstream only", function()
+        local feat = { short = "origin/dev", remote = "origin", merge = "refs/heads/dev", match = false }
+        local main = { short = "origin/main", remote = "origin", merge = "refs/heads/main", match = true }
+        local solo = { short = "origin/dev", remote = "origin", merge = "refs/heads/dev", match = false }
+        mark_same_named({
+            { kind = "local", name = "feat", upstream = feat },
+            { kind = "local", name = "main", upstream = main },
+            { kind = "local", name = "solo", upstream = solo },
+            { kind = "remote", name = "fork/feat" },
+            { kind = "remote", name = "origin/feat" },
+            { kind = "remote", name = "origin/main" },
+            { kind = "remote", name = "origin/x/solo" }, -- remote origin, branch "x/solo"
+        })
+        assert.same({ "fork", "origin" }, feat.same)
+        assert.is_nil(main.same)
+        assert.is_nil(solo.same)
+    end)
+
+    it("spells the upstream out before the divergence, as kind upstream", function()
+        local up = { short = "origin/dev", remote = "origin", match = false, ahead = 4, behind = 6 }
+        assert.same({ { text = " →origin/dev", kind = "upstream" }, { text = " ⇡4", kind = "ahead" },
+            { text = "⇣6", kind = "behind" } }, track_segments(up))
+        assert.equals(" →origin/dev ⇡4⇣6", track_label(up))
+    end)
+
+    it("keeps the token in sync and when gone; a matching upstream gives none", function()
+        assert.equals(" →origin/dev", track_label({ short = "origin/dev", remote = "origin", match = false,
+            ahead = 0, behind = 0 }))
+        assert.equals(" →origin/dev gone", track_label({ short = "origin/dev", remote = "origin", match = false,
+            gone = true }))
+        assert.equals("", track_label({ short = "origin/main", remote = "origin", match = true,
+            ahead = 0, behind = 0 }))
+        assert.equals(" ⇡1", track_label({ short = "origin/main", remote = "origin", match = true,
+            ahead = 1, behind = 0 }))
+    end)
+
+    it("writes a local upstream as ./<name>", function()
+        assert.equals(" →./dev ⇡2", track_label({ short = "dev", remote = ".", match = false, ahead = 2, behind = 0 }))
+    end)
+
+    it("icons.upstream = '' drops the glyph, keeping the name; a custom glyph replaces it", function()
+        local up = { short = "origin/dev", remote = "origin", match = false, ahead = 0, behind = 0 }
+        assert.equals(" origin/dev", track_label(up, ""))
+        assert.equals(" ⇢origin/dev", track_label(up, "⇢"))
+    end)
+
+    it("is kind mismatch when a same-named remote branch exists (text unchanged)", function()
+        local up = { short = "origin/dev", remote = "origin", match = false, ahead = 0, behind = 0,
+            same = { "origin" } }
+        assert.same({ { text = " →origin/dev", kind = "mismatch" } }, track_segments(up))
+    end)
+
+    it("decorates the label after the ↑remote list, honouring the glyph", function()
+        local up = { short = "origin/dev", remote = "origin", match = false, ahead = 4, behind = 6,
+            same = { "origin" } }
+        local commit = { refs = {
+            { kind = "local", name = "enne/standard-effect", upstream = up },
+            { kind = "remote", name = "origin/enne/standard-effect" },
+        } }
+        assert.same({ "(enne/standard-effect ↑origin →origin/dev ⇡4⇣6)" }, internal.decoration_texts(commit))
+        assert.same({ "(enne/standard-effect ↑origin ⇢origin/dev ⇡4⇣6)" },
+            internal.decoration_texts(commit, nil, { set = {}, upstream_icon = "⇢" }))
+    end)
+
+    it("the panes carry the token (not the divergence) with its span and kind", function()
+        local up = { short = "origin/dev", remote = "origin", match = false, ahead = 4, behind = 6,
+            same = { "origin" } }
+        local segs = internal.pane_labels({ refs = {
+            { kind = "local", name = "feat", upstream = up },
+            { kind = "remote", name = "origin/feat" },
+        } }, nil)
+        assert.equals("(feat ↑origin →origin/dev)", segs[1].text)
+        assert.equals(" →origin/dev", segs[1].text:sub(segs[1].up[1], segs[1].up[2]))
+        assert.equals("mismatch", segs[1].up_kind)
+        local plain = internal.pane_labels({ refs = { { kind = "local", name = "main",
+            upstream = { short = "origin/main", remote = "origin", match = true, ahead = 1, behind = 0 } } } }, nil)
+        assert.equals("(main)", plain[1].text)
+        assert.is_nil(plain[1].up)
+    end)
+end)
+---@diagnostic enable: missing-fields, need-check-nil
+
 describe("decoration_texts upstream (§6.3)", function()
     local decoration_texts = internal.decoration_texts
 

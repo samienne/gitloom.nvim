@@ -11,6 +11,11 @@ local M = {}
 ---@field ahead integer   commits the local branch is ahead of the upstream (vs last fetch; §6.3)
 ---@field behind integer  commits the local branch is behind the upstream
 ---@field gone boolean     the upstream ref no longer exists (deleted + pruned)
+---@field remote? string  the configured remote (`branch.<name>.remote`; "." for a local upstream)
+---@field merge? string   the branch on it (`branch.<name>.merge`, e.g. `refs/heads/dev`)
+---@field match? boolean  it names the local branch's own name on a remote (§6.3); false = spelled out
+---@field same? string[]  for a non-matching upstream: the remotes holding a same-named
+---                       remote-tracking branch (§6.3 warning); nil when none
 
 ---@class Ref
 ---@field name string

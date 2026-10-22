@@ -2112,9 +2112,10 @@ tokens) and dims with the row (§12.2).
 
 **Same-named remote branch — warning.** When the upstream does not match **and** a
 remote-tracking branch of the local branch's own name exists on some remote
-(`refs/remotes/<r>/<name>` for any remote `r` in the cached remote list, §17.1 —
-read from the refs already loaded, no extra query; a remote's `HEAD` symref never
-counts), the spelled upstream token is drawn in `palette.track.mismatch` instead
+(`refs/remotes/<r>/<name>` for any remote `r` — `r` being the remote-tracking
+ref's first name component, as for the `↑remote` list, §6 — read from the refs
+already loaded, so it holds from the first frame, before the remote list arrives,
+with no extra query; a remote's `HEAD` symref never counts), the spelled upstream token is drawn in `palette.track.mismatch` instead
 (default the highlight group `GitloomTrackMismatch`, defined with `default = true`
 linked to `DiagnosticWarn`, §8). That is the shape where a reader most likely
 expects the branch to track `<r>/<name>` and the counts silently refer to another

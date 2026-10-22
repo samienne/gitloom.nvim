@@ -842,7 +842,8 @@ local function build_commit_rows(opts, spec)
     else
         ---@cast commit Commit
         meta_rows = format_commit_detail(parse_show(spec.meta), {
-            decorations = decoration_texts(commit),
+            -- No pin marks in the commit view; only the §6.3 upstream glyph.
+            decorations = decoration_texts(commit, nil, { set = {}, upstream_icon = opts.icons and opts.icons.upstream }),
             palette = opts.palette,
             width = spec.width, -- the message wrap width (§11.2.1)
         })
@@ -1457,7 +1458,7 @@ end
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
----@field track? { ahead?: string, behind?: string, gone?: string }  upstream divergence indicator tokens (§6.3)
+---@field track? { ahead?: string, behind?: string, gone?: string, upstream?: string, mismatch?: string }  upstream tracking tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
 ---@field counterpart_dim? number  lighter blend factor toward bg for a remote counterpart's lane colour (§5.5)
 ---@field counterpart_dim_out? number  a counterpart lane's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
@@ -1476,6 +1477,7 @@ end
 ---@field head? string  HEAD's node marker (default "●"; "" off); §5.3
 ---@field pin? string   the pinned-anchor label icon (default "⚲"; "" off); §6/§10.6
 ---@field expanded? string  the expanded-ref label icon, after the pin icon (default "▾"; "" off); §6
+---@field upstream? string  the glyph before a non-matching upstream (default "→"; "" leaves the bare name); §6.3
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
@@ -1764,7 +1766,8 @@ GRAPH_HELPERS.effective_pinned = effective_pinned
 GRAPH_HELPERS.pin_marks = function(ctx)
     local icons = ctx.opts.icons
     return { set = effective_pinned(ctx), icon = icons and icons.pin,
-        expanded = ctx.view_state.expanded, expanded_icon = icons and icons.expanded }
+        expanded = ctx.view_state.expanded, expanded_icon = icons and icons.expanded,
+        upstream_icon = icons and icons.upstream }
 end
 
 -- node hash → repo.display index, and packed-head marker locations (§13.4).
@@ -3142,7 +3145,7 @@ GRAPH_HELPERS.ref_picker_format = function(ctx, align)
         local track_hl = (opts.palette and opts.palette.track) or {}
         local ret = {}
         ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
-        for _, seg in ipairs(git.track_segments(item.track)) do
+        for _, seg in ipairs(git.track_segments(item.track, opts.icons and opts.icons.upstream)) do
             ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
         end
         ret[#ret + 1] = { " " }
@@ -4179,6 +4182,9 @@ GRAPH_HELPERS.schedule_wt_refresh = schedule_wt_refresh
 -- Rebuild the dimmed highlight groups after a colorscheme change (the derived
 -- groups are wiped by `hi clear`) and redraw (§12).
 local function on_color_scheme(ctx)
+    -- The §6.3 same-named-remote warning colour; `default = true` so a
+    -- colorscheme's own definition (or `palette.track.mismatch`) wins.
+    pcall(vim.api.nvim_set_hl, 0, "GitloomTrackMismatch", { link = "DiagnosticWarn", default = true })
     reset_dim_cache()
     reset_gen_cache()
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
@@ -4467,6 +4473,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 ahead = "Added",      -- ahead of upstream (pushable)
                 behind = "WarningMsg", -- behind upstream (pull needed)
                 gone = "Comment",     -- upstream deleted
+                upstream = "Comment", -- a spelled-out non-matching upstream →origin/dev
+                mismatch = "GitloomTrackMismatch", -- …when a same-named remote branch exists
             },
             tracks = {
                 --"DiagnosticWarn",
@@ -4564,6 +4572,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             head = "●", -- HEAD's node marker (§5.3); "" turns it off
             pin = "⚲", -- the pinned-anchor label icon (§6/§10.6); "" turns it off
             expanded = "▾", -- the expanded-ref label icon (§6); "" turns it off
+            upstream = "→", -- before a non-matching upstream (§6.3); "" leaves the bare name
         },
     }
     -- The default footer is computed before opts.mirror is resolved; unless the
@@ -5009,7 +5018,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- The current branch's upstream divergence for the footer (§6.3).
             local track_str = nil
             if repo.head and repo.refs[repo.head] then
-                local lbl = git.track_label(repo.refs[repo.head].upstream)
+                local lbl = git.track_label(repo.refs[repo.head].upstream, opts.icons and opts.icons.upstream)
                 if lbl ~= "" then track_str = repo.head .. lbl end
             end
             local status = footer_text(opts.mirror, view_state.modes,
@@ -5363,6 +5372,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
         -- Rebuild the dimmed highlight groups after a colorscheme change (the
         -- derived groups are wiped by `hi clear`) and redraw (§12).
+        pcall(vim.api.nvim_set_hl, 0, "GitloomTrackMismatch", { link = "DiagnosticWarn", default = true })
         vim.api.nvim_create_autocmd("ColorScheme", {
             group = vim.api.nvim_create_augroup("GitloomDim_" .. buf, { clear = true }),
             callback = function() on_color_scheme(ctx) end,
@@ -5677,13 +5687,19 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- `HEAD` the HEAD colour; else the lane colour (or by kind).
                     local g = seg.hl or ((seg.kind == "head" and not seg.arrow) and pal.head)
                         or render.label_hl(opts, seg.key == owner and lane or nil, label_hl[seg.kind])
-                    if seg.arrow and g ~= pal.head then
-                        mark(s, s + seg.arrow[1] - 1, g)
-                        mark(s + seg.arrow[1] - 1, s + seg.arrow[2], pal.head)
-                        mark(s + seg.arrow[2], #text, g)
-                    else
-                        mark(s, #text, g)
+                    -- Sub-spans in their own colour, in text order: the `HEAD → ` prefix
+                    -- (unless the whole label is HEAD-coloured) and the spelled-out
+                    -- upstream (§6.3, palette.track); the rest takes `g`.
+                    local spans = {}
+                    if seg.arrow and g ~= pal.head then spans[#spans + 1] = { seg.arrow, pal.head } end
+                    if seg.up then spans[#spans + 1] = { seg.up, (pal.track or {})[seg.up_kind] } end
+                    local at = s
+                    for _, sp in ipairs(spans) do
+                        mark(at, s + sp[1][1] - 1, g)
+                        mark(s + sp[1][1] - 1, s + sp[1][2], sp[2])
+                        at = s + sp[1][2]
                     end
+                    mark(at, #text, g)
                 end
                 if c and c.collapsed and c.count then
                     local s = #text

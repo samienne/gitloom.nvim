@@ -420,8 +420,8 @@ describe("branch sync against a real repository (§17.2)", function()
         local by = {}
         for _, e in ipairs(res.entries) do by[e.kind .. ":" .. e.name] = e end
         local u = by["local:main"].upstream
-        assert.same({ short = "origin/main", ref = "refs/remotes/origin/main", gone = false, ahead = 0,
-            behind = 2 }, u)
+        assert.same({ short = "origin/main", ref = "refs/remotes/origin/main", remote = "origin",
+            merge = "refs/heads/main", match = true, gone = false, ahead = 0, behind = 2 }, u)
         assert.is_nil(by["remote:origin/main"].upstream)
         assert.equals(upstream, by["remote:origin/main"].hash)
     end)
