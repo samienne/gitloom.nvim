@@ -513,17 +513,18 @@ search (§16): neither matches, lists nor previews them.
 
 **Layout identity follows HEAD.** The empty signature governs *attribution* only
 (display mode, §10.2). For *layout* the working-tree stack is drawn as HEAD's own
-continuation: a working-tree node's **pin rank** (§5 "Lane identity") is the rank
-of the HEAD commit it stands on (the current branch's rank, or the `HEAD` owner's
-when detached), and for a **reserved column** (§10.6.2) it counts as attributed to
-HEAD commit's highest-priority reserved owner. So the lane born at the topmost
-working-tree node carries HEAD's rank and colour into HEAD's row — it **ties**
-there, so the "birth at a pinned tip" overrule (§5) does not fire and the lane
-simply continues — and it is born in HEAD's reserved column when there is one.
-Without this rule the stack would sit on an unranked lane that ends at HEAD
-(HEAD's branch is pinned by default, §10.6), in an unrelated free-list colour and,
-under a reservation, bending in from another column. The rule changes no
-invariant: it only feeds the existing rank and reservation inputs.
+continuation: a working-tree node counts as carrying **HEAD's current branch** as its
+own ranked ref (§5 "Carried refs") — when HEAD is detached it has none, and the
+topmost node selects a generated ref — and for a **reserved column** (§10.6.2) it
+counts as attributed to HEAD commit's highest-priority reserved owner. So the lane
+born at the topmost working-tree node carries HEAD's branch, in that branch's colour,
+into HEAD's row, where it is the same ref and simply continues (detached, the
+generated ref yields to any branch on the HEAD commit); and it is born in HEAD's
+reserved column when there is one. Without this rule the stack would sit on a
+generated ref, in an unrelated colour and, under a reservation, bending in from
+another column. The rule changes no invariant: it only feeds the existing carried-ref
+and reservation inputs. (The working-tree nodes carry no label, so the branch is
+not drawn there; only its colour is.)
 
 The stack is present whenever the `working_tree` option is on and HEAD is born:
 the change nodes while the tree is dirty, the clean node while it is clean
@@ -539,17 +540,18 @@ the model outward:
 - **Lane** — one drawn **edge, child → parent**:
 
   ```
-  Lane = { id, color, begin: Commit, end: Commit, highlighted: bool }
+  Lane = { id, ref, begin: Commit, end: Commit, highlighted: bool }
   ```
 
   `begin` is the child (above), `end` the parent (below); `id` is the lane's
-  stable identity (born once, never reused); `color` is its palette slot, which
-  drives the rendered colour (kept continuous along a first-parent chain, so a
-  line of history reads as one colour); `highlighted` marks it for the
-  reachability emphasis (§12). There is one Lane per parent/child edge. Colours
-  are drawn from a recycling **free list** (§5.5), so concurrent lanes get
-  distinct colours. *(A future **Route** — a contiguous run of Lanes forming a
-  path — is not modelled yet.)*
+  stable identity (born once, never reused, carried along a first-parent chain);
+  `ref` is the **carried ref** (§5 "Carried refs"), whose colour (§5.5) is the
+  edge's rendered colour — so a colour always names a ref, and a line of history
+  reads as one colour until a better-ranked ref takes it over; `highlighted` marks
+  it for the reachability emphasis (§12). There is one Lane per parent/child edge
+  (also called a **track**). Ref colours are drawn from a recycling **free list**
+  (§5.5), so distinct refs alive together get distinct colours. *(A future
+  **Route** — a contiguous run of Lanes forming a path — is not modelled yet.)*
 - **OrderItem** — the visual unit for one Commit: its order position, the Commit
   it shows, the Lanes incident to it (`parent_lanes` out to its parents,
   `child_lanes` in from its children), and its rendered **Lines**. This is the
@@ -587,126 +589,198 @@ the model outward:
 The graph is walked top to bottom (newest heads on top, roots at the bottom), so
 a Lane's `begin` (child) is always already placed when its `end` (parent) is
 reached. A Column's rendered **glyph** is a function of the union of its
-Segments' connectivity; its **colour** is one carried Lane's `color`, chosen by
-a "top" strategy that prefers a highlighted Lane (§12).
+Segments' connectivity; its **colour** is the colour of one Lane's carried ref,
+chosen by a "top" strategy that prefers a highlighted Lane (§12). A commit's
+**node** cell takes the colour of the commit's **selected ref** (§5 "Carried
+refs").
+
+#### Ranked refs and identities
+
+**Colour belongs to refs, not to lanes.** A lane is geometry — where an edge is
+drawn and which chain continues straight down (below). The colour it is drawn in is
+the colour of the ref it **carries** (below), so a colour always names a ref: the
+graph and the labels (§6) say the same thing.
+
+- A **ranked ref** is a **local branch** or a **remote-tracking branch** that is
+  **visible** in the current view — not filtered out (§16), not hidden, and not
+  folded into a collapsed owner (§10.1, §10.3). Tags, `HEAD`, worktree decorations,
+  a remote's default-branch symref (`origin/HEAD`, never a label anyway, §3.2) and
+  pointer marks (§11.7.6) are **not** ranked refs: they never steer a colour, are
+  never carried by a track, and keep their per-kind colours (§6 "Label colour"). A
+  branch that is not visible takes no part in ranking or colouring either; its label,
+  where one is still drawn (a `◍` head's or a packed marker's, §10.4), takes its
+  per-kind colour.
+- An **identity** is the set of refs that share **one hue**: a local branch together
+  with its **paired remotes** — its configured upstream (§6.3) when that is a
+  remote-tracking branch, plus every remote branch of the same short name (the
+  members the `%` local ⇄ remote cycle steps through, §2). Remote branches of one
+  short name with **no** local branch of that name (and claimed by no local's
+  upstream) form **one remote-only identity** — `origin/foo` and `fork/foo` share
+  one hue, every member muted. A remote can be claimed by more
+  than one local only through upstream configuration (`feat` tracking `origin/main`
+  while `main` exists): a same-named local always claims it; otherwise the first
+  claiming local in pin-list order (§10.6), then by name. Pairing is read from the
+  repository's refs and configuration; which members take part is read from the view.
+- A **generated ref** is an anonymous ref the layout creates where a track needs a
+  ref and the commit offers none (below). It is an identity of its own, has no label,
+  and exists only for the layout that created it.
+
+**Rank.** Ranked and generated refs are **totally ordered**, best first:
+
+1. **The identity tier.** Refs of **pinned identities** (§10.6) first — an
+   identity's pin rank is the best rank among the pin-list entries naming one of its
+   refs — by pin rank; then refs of **unpinned identities that have a visible local
+   branch**; then refs of **remote-only identities** (no local branch, or its local
+   not visible in the view); then **generated refs**.
+2. **Within the two unpinned tiers, the ref that stands lower wins** — the one whose
+   **standing row** is later. The base branch owns its own commits, so a branch built
+   on top of another never runs its colour down the other's history. A ref stands at
+   its tip's row, except that a remote whose local branch's tip is **at or above**
+   its own stands at its local's row (so it ties its local, below).
+3. **Within one identity** the local branch outranks its remotes (in every tier).
+   Its remotes rank among themselves by standing row (lower wins), then the
+   configured upstream first, then the `%` cycle order (`git remote` order). The
+   members of a remote-only identity rank the same way: by standing row (their own
+   tip rows, there being no local), then `git remote` order.
+4. **Remaining ties between identities** — two of them standing on one row — go to
+   the current branch's identity first, then by name.
+5. **Among generated refs** the one created first wins.
+
+The order is decidable top to bottom without look-ahead: a comparison happens at a
+commit at or below every compared ref's tip, and a standing row is never below its
+ref's own tip.
+
+#### Carried refs — the colour along the graph
+
+Every **track** — every drawn edge, child → parent (a Lane, above) — **carries
+exactly one ref**. The layout assigns them **top to bottom**, by one rule that
+applies at **every** commit, whatever its number of refs, children or parents:
+
+- **The selected ref.** A commit's **selected ref** is the best-ranked among the
+  refs carried by the tracks **arriving from its children** and the commit's **own**
+  ranked refs. The commit's node takes the selected ref's colour (§5.5).
+- **First parent.** The track to the commit's **first parent** carries the selected
+  ref.
+- **Other parents.** The track to each **second-or-later parent** carries the
+  best-ranked ranked ref **on that parent commit itself** — looked up on that single
+  commit, never further down and never taken from another track arriving there. If
+  the parent commit has no ranked ref, a **generated ref** is created for it, and
+  sits on that commit for the rest of the layout: a later merge edge into the same
+  commit takes the same generated ref (one anonymous state, one colour).
+- **No source.** A commit with no arriving track and no ranked ref of its own (a
+  tag-only tip, a detached checkout) selects a generated ref created there. (A §4.2
+  working-tree node stands in for HEAD's branch, §4.2.)
+
+The other-parent rule reads a merge as merging **that commit**. When a ranked ref
+sits on it, the merge merged that branch, and the edge reads in its colour. When
+none does, an **anonymous state** was merged — even when a branch has since moved
+on from that commit, and even when a ref sits further down — and the merged state
+deserves a colour of its own. The colour then changes at the next ref the track
+meets, which is an allowed place.
+
+```
+ref on the merged parent                no ref on the merged parent
+(master pinned)                         (master pinned)
+
+*   M (master)    M→A: master           *   M (master)      M→A: master
+|\                M→X: feature          |\                  M→X: g1 (X has no ref)
+| * X (feature)   node: feature         | | * F (feature)   F→X: feature
+* | A             node: master          | |/
+|/                                      | * X               feature > g1: X→B feature,
+* B               master > feature:     * | A                 g1's track ends here
+                  feature's track ends  |/
+                                        * B                 master > feature
+```
+
+**Where colour may change.** Followed downward, a track's ref changes **only** at a
+commit carrying an outranking ref of its own, or at a junction where a better-ranked
+track arrives from another child (the track continues in the winner's colour or
+ends there, below). A track never loses rank going down. Known cost, accepted for
+evaluation in practice: every **back-merge** (`dev` merged into a feature whose
+merged commit carries no ref) draws a short generated-colour edge.
+
+A remote ref is always drawn **muted** — the same hue as its identity, lightened
+(§5.5) — and a local one at full strength. With `dev` pinned and `origin/dev` ahead
+of it, the track above `dev`'s tip carries `origin/dev` and reads as muted `dev`; at
+`dev`'s tip `dev` outranks it (rule 3) and the colour turns full. With `origin/dev`
+behind `dev`, `dev`'s track runs through `origin/dev`'s commit at full strength —
+the local outranks its remote — and only the `↑origin` label is muted:
+
+```
+origin/dev ahead of dev                 origin/dev behind dev
+
+* C (origin/dev)   muted dev            * D (dev)           dev
+* D (dev)          dev                  * C (origin/dev)    dev (label muted)
+* E                dev                  * E                 dev
+```
 
 #### Lane identity — which chain continues
 
-A lane's identity is its `id`, its `color` and its **pin rank**. The rank is the
-position, in the resolved pin list (§10.6), of the best-ranked pinned ref at the
-commit where the lane was **born** — 1 is the highest priority. Only the list's
-**entries** are ranked: a pinned local branch's implicit remote counterparts
-(§10.6) carry no rank. A lane born where no ranked ref points is **unranked**,
-which is worse than every rank. An unranked lane may instead be a **counterpart
-lane** of rank `k` (§5.5 — born at a counterpart tip, below; its colour is slot `k`'s
-counterpart variant): its **counterpart rank** `k` orders it among the unranked
-lanes only, never against a ranked one. A continuation carries its lane's rank (and
-counterpart rank) unchanged, exactly as it carries the `id` and the `color`. Which lane continues is decided
-**semantically**, from the DAG, the row order and the pin ranks alone. A §4.2
-working-tree node has no refs but **ranks as the HEAD commit it stands on** (§4.2
-"Layout identity follows HEAD"), so the working-tree lane continues into HEAD in
-HEAD's branch colour rather than ending there.
+A lane's **identity** is its `id`. A lane is **born** — a fresh `id` — only where
+nothing continues: at a commit nothing arrives at (a branch head) and at a merge's
+second-and-later parents. A continuation carries the `id`; the ref it carries
+follows the rules above, so a better-ranked ref appearing on a commit **recolours**
+the continuing lane rather than starting a new one. Which lane continues is decided
+**semantically**, from the DAG, the row order and the ranks alone.
 
 **Which lane a commit's first parent continues.** Among the incoming Lanes, in
 tiers — each tier decides only between the lanes the previous one left tied:
 
-0. **Pin rank.** The best-ranked incoming lane wins. Between unranked lanes, a
-   counterpart lane beats a plain one, the better (smaller) counterpart rank first.
+0. **Carried ref.** The lane carrying the **best-ranked** ref wins — the selected
+   ref's lane when the selected ref arrived on a track; when the commit's own ref
+   outranks every arriving one, the best arriving lane continues and is recoloured.
+   Several lanes may carry the same ref (two merges of one commit, or a merge edge
+   and a first-parent chain both reaching that commit's ref), so the remaining tiers
+   stay as tie-breaks.
 1. **First parent.** A lane whose child **has this commit as its FIRST parent** —
    the child that genuinely continues *into* it — beats one arriving as a merge's
    second-or-later parent edge.
 2. **Newest.** The **newest** lane wins — the largest `id`. Ids are minted in row
    order and carried along a whole first-parent chain, so the largest id is the
-   chain that started **lowest** — nearest this commit. Where nothing pinned and no
+   chain that started **lowest** — nearest this commit. Where no ref and no
    first-parent edge decides, the branch the reader has just followed down into the
    junction carries on, and the older chain ends there. The trunk keeps its colour
-   through such a junction by being **pinned** (tier 0) — `master` / `main` / `dev`
-   and HEAD are pinned by default (§10.6) — not by having started first.
+   through a junction by being **pinned** (tier 0) — `master` / `main` / `dev` and
+   HEAD's branch are pinned by default (§10.6) — not by having started first.
 
-So a first-parent chain reads as one `id` and one `color` end to end, and a lane
-arriving only as a merge's extra-parent edge still continues when nothing better
-arrives — that edge *is* the merged-in branch, and minting afresh there would
-recolour every merged-in branch tip. Every incoming lane that does not continue
-**ends** at this commit, and its colour returns to the free list (§5.5).
+So a first-parent chain reads as one `id`, and a lane arriving only as a merge's
+extra-parent edge still continues when nothing better arrives — that edge *is* the
+merged-in branch. Every incoming lane that does not continue **ends** at this
+commit; a generated ref whose last track ends returns its colour (§5.5).
 
-**Birth at a pinned tip.** The tiers are overruled at a commit a pinned ref points
-at, when that ref's rank (the best one at the commit) **strictly beats** every
-incoming lane's rank — which includes every incoming lane being unranked. Then
-**every** incoming lane **ends** here and the pinned branch's own lane is **born**:
-a fresh `id`, the branch's **pinned colour** (§5.5; a free-list colour past the
-palette), and the pinned rank. That includes a merge's extra-parent edge arriving
-at the tip: a pinned branch that has been merged (`master` merged `dev`, and `dev`
-still points at the merged commit) ends the merge's wire at its tip and starts its
-own lane there, in its own colour — a lane's colour is fixed for life, so the wire
-cannot be recoloured into the pinned one.
-
-So a lower-priority or unpinned branch's colour never runs down a higher-priority
-branch's history. With `dev` pinned and `feature1` branched off `dev`'s newest
-commit, `feature1`'s lane ends at `dev`'s tip and the history below it is drawn in
-`dev`'s own colour — where `feature1`'s colour used to continue down it. A remote
-counterpart is no exception: `origin/x` ahead of a pinned `x` reaches `x`'s tip as
-an unranked lane, so `x`'s pinned lane is born there and `origin/x`'s commits above
-it are drawn in `x`'s **counterpart colour** (§5.5: the same slot, lightly dimmed),
-which brightens to the full pinned colour at `x`'s tip. A pinned lane in turn **ends** where it
-converges into a better-ranked lane (tier 0), as any lane does.
-
-**Birth at a counterpart tip.** The same overrule one step down, for an implicit
-remote counterpart (§10.6) of a pin of rank `k`. At a commit such a counterpart
-points at, when **no ranked ref** points there (a ranked ref wins: the pinned rule
-above applies instead), slot `k` is still **held** (§5.5 — so there is a counterpart
-colour to give), and `k` strictly beats every incoming lane — **none** of them is
-ranked `≤ k` and none is a counterpart lane of rank `≤ k` — **every** incoming lane
-**ends** here and a **counterpart lane** is born: a fresh `id`, unranked, counterpart
-rank `k`, colour `-k` (§5.5). The comparison is by rank, exactly as for a pinned
-birth: an incoming lane of a pin ranked **worse** than `k` (rank `> k`) is beaten and
-ends here — its own commits above keep its colour — while a lane of a pin ranked as
-well or better (rank `≤ k`) still continues through (the counterpart loses to it),
-and so does a counterpart lane of rank `≤ k`. So with `dev` pinned and `origin/dev`
-one commit ahead, the remote's commit reads in `dev`'s counterpart colour even when
-another branch is built on top of it — unpinned, or pinned below `dev` (HEAD's
-branch, a default pin ranked after the trunks, §10.6): that branch's lane ends at
-`origin/dev`'s commit instead of running through it down to `dev`'s tip. Under the four lane-column policies this changes lane
-ids and colours only (0 glyph changes over the fuzz corpus and the large real-world
-topology); under `gutter` it moves geometry like a pinned birth (55 of 2,064 fuzz rows,
-0 of 3,804 on the real topology, every invariant holding), with the same rules: the
-birth claims no gutter when a fan has a Line of its own, declines the parent swap,
-and its spine break is licensed.
-
-A fresh `id` and `color` are therefore taken where a lane is born: a branch head (a
-commit nothing arrives at), a merge's second-and-later parents (born unranked), a
-pinned tip that outranks everything arriving at it, and a counterpart tip that
-outranks everything arriving at it. A lane born at a pinned tip —
-by outranking, or as a head nothing arrives at — takes its branch's pinned colour
-(§5.5) instead of the front of the free list.
+With `dev` pinned and `feature1` branched off `dev`'s newest commit, `feature1`'s
+lane arrives at `dev`'s tip, continues straight down, and is recoloured there: the
+history below is drawn in `dev`'s colour, never `feature1`'s. A §4.2 working-tree
+node carries HEAD's branch (§4.2 "Layout identity follows HEAD"), so the
+working-tree lane continues into HEAD in HEAD's branch colour.
 
 **Identity never depends on placement.** No column, and no ordering by column, may
-influence an `id`, a `color`, a rank, or the order in which colours are returned to
-the free list. This is what makes lane identity **invariant across layout policies**
-(§5.6): the same commits in the same row order under the same pin ranks produce the
-same lane ids and colours under every policy, which differ only in *where* the lanes
-are drawn. Switching policy with `C` moves the graph; it never recolours it.
+influence an `id`, a carried ref, a rank, a colour, or the order in which colours are
+allocated and returned (§5.5). This is what makes lane identity and colour
+**invariant across layout policies** (§5.6): the same commits in the same row order
+under the same ranks produce the same lane ids, carried refs and colours under every
+policy, which differ only in *where* the lanes are drawn. Switching policy with `C`
+moves the graph; it never recolours it.
 
-**The pin ranks are a layout input.** They are part of the layout fingerprint — the
-resumable sweep of §3.1 and the reflow of §10.5 — so a pin, an unpin or a reorder in
-the dialog (§10.6.1) re-lays the layout instead of continuing one laid out under
-other ranks. They are not part of any signature (§10.2), so the signature cache stays
-valid across pin changes. The footer's seeded sweep (§6.2) uses the same ranks, each
-seeded lane carrying its main-view rank, so a lane born inside the pane obeys the
-same rule as one born in the main view. The pinned colours are fixed by the ranks
-alone (§5.5), so they are known before the first row and the resumable sweep's
-prefix property is unaffected.
+**The ranks are a layout input.** The pin ranks, the identity pairing and the set of
+visible refs are part of the layout fingerprint — the resumable sweep of §3.1 and the
+reflow of §10.5 — so a pin, an unpin or a reorder in the dialog (§10.6.1), or a
+change of upstream configuration, re-lays the layout instead of continuing one laid
+out under other ranks. They are not part of any signature (§10.2), so the signature
+cache stays valid across pin changes. The footer's seeded sweep (§6.2) uses the same
+ranks, each seeded lane carrying its main-view ref, so a commit inside the pane
+obeys the same rule as one in the main view. The pinned colours are fixed by the
+ranks alone (§5.5), and every other colour is allocated top to bottom, so the
+resumable sweep's prefix property is unaffected.
 
-> **The `gutter` exception (measured).** Under the four lane-column policies the
-> ranks change colour only: 0 glyph changes over 17,852 fuzz rows and the large
-> real-world topology, with 944 births. Under `gutter` (§5.6) stages *read* the
-> continuing lane, so a birth or a rank-won convergence moves geometry there: 11.5% of
-> fuzz rows change glyphs (Lines 31,394 → 31,149), and on the real topology 65 of
-> 638 rows under the inline-fan-in styles (two Lines fewer) and none under the
-> split-line ones — with every invariant holding, the birth's spine break licensed.
-> A birth claims no gutter when a fan has a Line of its own and declines the parent
-> swap (which would leave the node in neither its own lane's colour above nor below).
-> The parent swap's clause 3 is unchanged: a merge's sole-child edge arriving at a
-> pinned tip ends there, which is a licensed birth like any other.
+> **The `gutter` exception.** Under the four lane-column policies the ranks decide
+> colour only. Under `gutter` (§5.6) stages *read* the continuing lane, so tier 0
+> moves geometry there. The measurements recorded for the former rules — a lane
+> **born** at a pinned tip that outranked every arriving lane, and at a remote
+> counterpart's tip — are superseded with them: neither birth exists any more (a
+> better ref recolours the continuing lane instead), so fewer spine breaks are
+> expected. The carried-ref rule is to be re-measured over the fuzz corpus and the
+> large real-world topology.
 
 > The rule was previously "reuse the **leftmost** incoming lane's id and colour" — a
 > positional proxy for "the trunk", sound only while the trunk happened to sit
@@ -714,6 +788,14 @@ prefix property is unaffected.
 > the whole spine below it were drawn as the topic. Any layout that constrains
 > columns (§5.6 `gutter`) turns that from an edge case into the common one, which is
 > how it was found — but it was never gutter-specific.
+
+> Before colour moved to refs, a lane **owned** its colour for life: a pinned tip
+> that outranked every arriving lane ended them all and was born afresh in its pinned
+> colour, a pinned local's remote counterparts were born as dimmed **counterpart
+> lanes**, and one label per node "owned" the lane colour. That could not say which
+> ref a colour belonged to — a remote-only `origin/foo` inside `dev`'s lane was
+> painted in `dev`'s full colour — and needed separate birth rules per case. The
+> carried-ref model replaces all of it with the one rule above.
 
 ### 5.1 Invariants
 
@@ -746,20 +828,21 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   Segment of the *same* Lane L with `up` in the same Column on the next Line.
 - **The spine through a node.** A commit's node sits in **its own Lane's** column —
   the Lane its first parent continues (§5) — so the wire arriving at the node cell
-  from above and the wire leaving below carry one `id` and one colour, and a line of
-  history reads as one colour straight through its commits. *Exactly two exceptions
+  from above and the wire leaving below carry one `id`, and one colour unless the
+  commit's own ref outranks the arriving one (§5 "Where colour may change": the
+  lane is recoloured at the node, which takes the new colour). *Exactly two exceptions
   are licensed, one per fan, and both belong to the `gutter` policy's handover
   avoidance (§5.6):*
   - the **parent swap**, at a **merge**, which may hand the gutter to a non-first
     parent — so the wire below the node is a non-first parent's and the wire above is
-    still the node's own Lane. The node then takes its colour from the wire **above**,
-    so the break shows as a new lane beginning rather than as the trunk changing
-    colour.
+    still the node's own Lane. The node takes its selected ref's colour (§5), which
+    is its own Lane's below — wherever that is drawn — so the break shows as a new
+    lane beginning rather than as the trunk changing colour.
   - the **split swap**, at a **fork**, which may leave the gutter with a converging
     child that is not the continuation and put the node on it — so the wire above the
     node is that child's and the wire below is still the first parent's. The node's
-    colour needs no adjustment here: it comes from the wire below, which is its own
-    Lane. This one breaks the spine **only where the fan-in shares the commit Line**;
+    colour needs no adjustment here: it is its selected ref's, which the wire below,
+    its own Lane, carries. This one breaks the spine **only where the fan-in shares the commit Line**;
     given a split Line of its own the child terminates up there, the hub descent
     carries the node's own Lane, and nothing is broken at all.
 
@@ -793,9 +876,10 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   crossing a *held* column is not a horizontal crossing a *vertical*, so nothing
   in the crossings check would catch it — which is why it is stated rather than
   left implicit.
-- **Colour comes from a carried Lane.** A Column's colour is the `color` slot of
-  one Lane on one of its Segments (§5.5). Colour is a property of the lane
-  *lifecycle* (born / continued / ended), which no policy varies.
+- **Colour comes from a carried ref.** A Column's colour is the colour of the ref
+  carried by one Lane on one of its Segments (§5.5); a node's is its commit's
+  selected ref's. Colour is a property of the carried refs (§5 "Carried refs"),
+  decided from the DAG, the row order and the ranks, which no policy varies.
 - **Connectivity consistency.** The glyph's wired sides equal the union of the
   Column's Segments' connectivity (every wired side has a Segment providing it).
 - Merges (commit with >1 parent) fan out `parent_lanes`; splits (>1 child) fan in
@@ -891,7 +975,7 @@ historical — it is about *reusing* a freed column, not about the compaction mo
   when the commit is placed, so every later placement on that Line steps over it,
   and only the two sanctioned cases above lift it deliberately. The one exemption
   is a commit's **first parent** re-taking its own trunk child's column — it
-  inherits that lane's `id` and `colour` (§5), so the cell holds one lane, not two.
+  inherits that lane's `id` and its carried ref (§5), so the cell holds one lane, not two.
   A policy that places commits itself and forgets to reserve those columns
   reintroduces the §5.2 lane handoff *unsanctioned*: an ending child's turn and an
   unrelated lane's turn land in one cell, whose single rendered colour then breaks
@@ -1010,21 +1094,52 @@ important labels. A strict mirror image of the label strip is therefore
 deliberately given up — the labels are not beside the flipped graph anyway (it
 stays in its column, left of the message and the labels).
 
-### 5.5 Lane colouring (the free list)
+### 5.5 Ref colouring (the free list)
 
-A lane's colour is a **palette slot** drawn from a recycling **free list**,
-seeded with the curated `palette.tracks` colours (§8). A born lane takes a slot
-from the front; an ended lane returns its slot to the back (FIFO), so a colour is
-not reused immediately. Allocation happens **before** the same line's ended lanes
-return their slots, so concurrent lanes always have distinct colours.
+A colour belongs to a **ref** (§5 "Ranked refs and identities") — more exactly to
+an **identity**, whose members share one hue — and every track and node is drawn in
+the colour of the ref it carries or selects. The colour is a **palette slot** drawn
+from a recycling **free list**, seeded with the curated `palette.tracks` colours
+(§8). An allocation takes a slot from the front; a released slot goes to the back
+(FIFO), so a colour is not reused immediately. Allocation happens **before** the
+same line's releases, so refs alive together always have distinct colours.
 
-**Breathing room.** A returned colour is held out of reuse for the next
-`palette.buffer` allocations (§8); if no colour is free *and* cooled down when a
-lane is born, a colour is **generated** instead. This guarantees at least
-`buffer` other colours are drawn before any colour repeats — a history that ends
-is never immediately followed by a new one in the same colour. Curated colours
-are used first (they start available), so generation only begins once branching
-outpaces the cooled-down curated colours.
+**When a ref gets its colour.** A pinned identity's colour is fixed in advance
+(below). Every other identity gets one **lazily, top to bottom**: the first time
+one of its refs is **selected** for a commit or carried by a track, or its label is
+drawn (§6) — whichever row comes first. At one commit the order is: the selected
+ref, then the refs of its labels in label order (§6), then the refs of its
+second-or-later parent tracks in parent order. A **generated ref** is coloured
+where it is created, from the same allocator.
+
+**When a colour is released.** An unpinned identity's colour returns to the free
+list (with the usual cooldown, below) once **both** hold:
+
+- **it has been outranked** — no live track carries any of its refs any more; and
+- **none of its refs is still to come** — no visible member of the identity (its
+  local branch or a paired remote) has a tip below the current row, i.e. not yet
+  reached by the sweep. This is known without look-ahead: the refs are read up
+  front (§3.2), so a visible member whose tip has not been reached is pending.
+
+Since a track never loses rank going down (§5), an outranked ref can never be
+carried again, so the release is safe: the identity cannot reappear except through
+a member still to come, which holds its colour. This covers refs that never carry
+a track at all — outranked at their own tip, like a `feature` label sitting on
+`dev`'s track: the colour is allocated for the label and released right after,
+unless a member of its identity is still pending below. A generated ref releases
+its colour when the last track carrying it ends. A **pinned** identity's slot is
+never released into the general pool (below).
+
+So two different refs may share a colour at **different heights** of the graph,
+as two generated refs already may; refs alive together never do.
+
+**Breathing room.** A released colour is held out of reuse for the next
+`palette.buffer` allocations (§8); if no colour is free *and* cooled down when one
+is needed, a colour is **generated** instead. This guarantees at least `buffer`
+other colours are drawn before any colour repeats — a ref that ends is never
+immediately followed by another in the same colour. Curated colours are used first
+(they start available), so generation only begins once the visible refs outpace the
+cooled-down curated colours.
 
 **Generation.** Overflow colours are generated in **OKLCH**, rotating hue by the
 golden angle (~137.5°) at a lightness/chroma **anchored to the theme** (derived
@@ -1037,96 +1152,58 @@ colours are never retired.**
 
 Generation requires truecolor. Without `termguicolors`, nothing is generated: the
 curated palette is **shared** on exhaustion (a slot reused, reference-counted so
-it returns only when its last holder ends; a lane is never recoloured, since that
-would break its colour continuity).
+it returns only when its last holder releases it). A ref's colour never changes
+within a layout; only the ref a track carries can change (§5).
 
-A first-parent continuation keeps the continued chain's slot (one colour per
-first-parent chain, §5). Allocation happens at the three places a lane is born (§5
-lane identity): a branch head, a merge's extra parent, and a **pinned tip that
-outranks every lane arriving at it** — the last of these returns every incoming
-colour, so a lower-priority branch's colour never runs down a higher-priority
-branch's history.
-
-**Pinned colours.** A pin-list entry (§10.6) of rank `k` **owns slot `k`** of the
-curated palette — the `k`-th of `palette.tracks`, the same list every lane draws
-from — as its **pinned colour**. From the start of the layout the slot is
-**withheld**: dropped from the free list, never handed to another lane, and never
-shared on exhaustion. The pinned branch's lane is born with it (at its tip, §5), and
-keeps it for life like any colour. Once the branch's start is found the slot is
-**released** into the free list and recycled like any returned colour:
-
-- when the pinned lane **ends** — it converges into a better-ranked lane, or stops
-  at a root; or
-- at the pinned tip itself, when no lane of the branch's own is born there — a
-  better-ranked lane arrives and continues, or a better-ranked ref on the same
-  commit names the lane.
-
-A pinned ref whose commit is never laid out (hidden, not yet streamed) keeps its
-slot withheld for that layout. A released slot goes to the back of the free list
-with the usual cooldown, after the same commit's ended lanes, in slot order.
-Only explicit entries own a colour; a remote counterpart has no rank (§10.6) and
-owns no slot, but **shares its local's** (below).
-
-**Counterpart colours.** A lane **born** at the tip of an implicit remote
-counterpart (§10.6) of a pin of rank `k` — where no ranked ref points: nothing
-arrives at the counterpart's commit, or only lanes it outranks (§5 "Birth at a
-counterpart tip") — takes slot `k` too, marked as a **counterpart lane**. It
-is drawn in the **counterpart variant** of that colour: the same hue, blended
-lightly toward the background by `palette.counterpart_dim` (§8, default `0.25`,
-much lighter than the §12 cone dim), so the local and where each remote thinks it
-is read as one branch while staying distinguishable. Without truecolor the variant
-is the plain slot colour. When several counterparts of different pins point at the
-commit, the best rank's slot is taken. Sharing slot `k` with the pinned lane is
-allowed — they are told apart by the light dim — and slot `k` is handed to
-counterpart lanes **in addition to** the pinned lane and to nothing else: a
-counterpart lane takes it only while it is **held** (still withheld, or held by the
-pinned lane or by another counterpart lane), counted as one more holder; a slot
-already released, or a rank past the palette, gives the counterpart lane an
-ordinary free-list colour with no counterpart mark. The slot returns to the free
-list only when its **last** holder ends — the reservation or pinned lane and every
-counterpart lane holding it. Counterparts still carry no rank, so a pinned lane
-always beats a counterpart lane in tier 0; the birth at a counterpart tip (§5) —
-which ends an arriving pinned lane only when its pin ranks worse than `k` — changes lane
-identity, and glyphs only under `gutter`. A counterpart lane that reaches its
-local's tip ends there and the pinned lane is born (§5), so the colour visibly
-brightens at the local's tip; a counterpart at or behind its local sits on the
-pinned lane itself, in full colour. With `pin_upstream` off there are no
-counterparts and no counterpart colours. The counterpart map (ref id → its local's
-rank) is a layout input beside the pin ranks — part of the layout fingerprint,
-known before the first row (so the §3.1 prefix property holds), carried by the
-footer's seeded lanes (§6.2) inside their colour.
+**Pinned colours.** A pinned identity of rank `k` (§10.6) **owns slot `k`** of the
+curated palette — the `k`-th of `palette.tracks`, the same list every ref draws
+from — as its **pinned colour**. The slot is **withheld** for the whole layout:
+dropped from the free list, never handed to another ref, never shared on
+exhaustion, and not recycled when the identity is outranked. Rank `k` is the entry's position in the resolved pin list, so a slot
+whose entry names no ranked ref (a tag, a detached `HEAD`, a pointer mark), or an
+entry outranked by another entry of the same identity, owns nothing: that slot
+stays in the free list. A pinned ref whose identity has no visible member keeps its
+slot withheld for that layout.
 
 **The cap is the curated palette.** Only ranks `1 … #palette.tracks` own a slot. A
-pin ranked below that keeps its rank (§5 identity is unchanged) but takes a
-free-list colour where its lane is born. The withheld slots shrink the free list,
-so heavy pinning reaches generated colours (or, without truecolor, sharing among
-the slots not withheld) sooner; "comfortably full" for retiring a generated colour
-is measured against the slots not withheld. With every curated slot withheld and no
-truecolor, sharing falls back to all curated slots rather than failing.
+pinned identity ranked below that keeps its rank (§5) but takes a free-list colour
+lazily, like an unpinned one. The withheld slots shrink the free list, so heavy
+pinning reaches generated colours (or, without truecolor, sharing among the slots
+not withheld) sooner; "comfortably full" for retiring a generated colour is measured
+against the slots not withheld. With every curated slot withheld and no truecolor,
+sharing falls back to all curated slots rather than failing.
 
 The pinned colours depend on the pin ranks alone — never on a column or a row — so
 they are identical under every layout policy (§5.6), known before the first row is
 laid out (the resumable sweep of §3.1 keeps its prefix property), and a pin added
 **below** an existing one leaves that one's colour unchanged.
 
-**The free list is order-sensitive, so the return order is fixed by identity too.**
-A returned slot goes to the back of the FIFO, so *which* colour a later lane receives
-depends on the order the ended lanes were returned in. That order is therefore taken
-from the lanes' `id`s — row order — never from their columns; otherwise colour would
-depend on placement through the back door, and two layout policies (§5.6) would
-diverge on colour even with identical identity rules.
+**Muted remotes.** Every member of an identity is drawn in its hue, but a **remote**
+ref in its **muted variant**: the same colour blended lightly toward the background
+by `palette.remote_mute` (§8, default `0.25`, much lighter than the §12 cone dim).
+So a local branch and where each remote thinks it is read as one branch while
+staying distinguishable — for a track carrying a remote ref, a node whose selected
+ref is a remote, and a remote's label (§6) alike. A local ref is drawn at full
+strength. Without truecolor the muted variant is the plain colour. (This
+generalises the former counterpart colour — a dimmed variant only for the remotes
+of a pinned local — to every remote.)
+
+**The free list is order-sensitive, so the allocation and return order is fixed by
+identity too.** A released slot goes to the back of the FIFO, so *which* colour a
+later ref receives depends on the order of earlier allocations and releases. Both
+are therefore taken from row order — allocation as above, and the releases due on
+one row in the order their colours were allocated — never from columns; otherwise colour would depend on
+placement through the back door, and two layout policies (§5.6) would diverge on
+colour even with identical rules.
 
 **Reserved slots.** A slot may be **held out of the free list entirely** for as
 long as something owns it: it is dropped from the FIFO, counted in use, and
 neither recycled nor retired. Three things reserve a slot — a context pane's
-**seeded** boundary lane, so a lane born inside the pane never reuses a colour
-live at the seam (§6.2); a **pinned colour** until its branch's start is found
-(above); and a pinned branch with a **dedicated column** (§10.6.2), which keeps its
-pinned colour for the whole layout. Reserving is the same mechanism in every case.
-A seeded lane that carries a slot still withheld as a pinned colour **is** that
-pinned branch's lane continuing across the seam: it takes the reservation over
-(the slot is counted once), and the slot is released when that lane ends inside the
-pane — never assigned a second time.
+**seeded** boundary track, so a ref coloured inside the pane never reuses a colour
+live at the seam (§6.2); a **pinned colour** (above); and a pinned branch with a
+**dedicated column** (§10.6.2). Reserving is the same mechanism in every case. A
+seeded track that carries a pinned identity's ref takes that reservation over (the
+slot is counted once) — never assigned a second time.
 
 ### 5.6 Layout policy
 
@@ -1288,7 +1365,7 @@ identical to not having the rule at all.
 Clause 3 makes the saving **provable** rather than likely. Clause 2 says the next
 subject row is that parent; it does not say that row will *continue* on the Lane it
 was handed. If another Lane also arrives there — another child of that parent — and
-wins §5 identity over the handed one (a better rank, a first-parent edge, or a
+wins §5 identity over the handed one (a better-ranked carried ref, a first-parent edge, or a
 larger `id`), that Lane is the one continued,
 the handed Lane is evicted after all, and the row pays its handover anyway *on top
 of* a spine break that bought nothing. "Its only in-set child is this merge" removes
@@ -1398,16 +1475,15 @@ anchor contracts to a `◍` head, which claims no gutter (above) — so the gutt
 fork is already the trunk's own and clause 2 declines. Measured: 0 fires over the whole
 focused corpus, and 0 differing over 20,651 cell-for-cell signature Lines.
 
-**The node keeps its own lane's colour.** A Column's colour normally comes from its
-downward wire (§5), which is a stand-in for "the node's own Lane" — exact wherever
-the spine is continuous. At a swapped merge it would name the *arriving branch*, so a
-merge on the trunk would render in the colour of the topic it merged: mechanically
-the same misreading as the fork-hub defect above. So a swapped node's cell is marked
-to take its colour from the wire **above** — the Lane its first parent continues, its
-own. The trunk keeps its colour through the merge and the topic lane simply *begins*
-below it, which reads as "a new lane starts here" rather than "the trunk was
-renamed". The mark is set only on a swapped node, so no other cell's colour changes
-under any policy.
+**The node keeps its own lane's colour.** A node's colour is its commit's
+**selected ref's** (§5 "Carried refs") — the ref its first-parent Lane carries —
+never read off whichever wire happens to sit below its cell. At a swapped merge the
+wire below names the *arriving branch*, so reading the cell's downward wire would
+render a merge on the trunk in the colour of the topic it merged: mechanically the
+same misreading as the fork-hub defect above. The trunk keeps its colour through the
+merge and the topic lane simply *begins* below it, which reads as "a new lane starts
+here" rather than "the trunk was renamed". No other cell's colour changes under any
+policy.
 
 **What it buys, measured** over a 1040-commit repository fully expanded, at
 split-on-its-own-line (against the same policy without the rule):
@@ -1435,8 +1511,9 @@ handover above, and anything like it a future policy adds — therefore get rows
 their own rather than borrowing a commit's.
 
 **Colour and identity are the same under this policy as under every other.** Lane
-identity is chosen from the DAG and the row order alone (§5), so constraining columns
-cannot change it: the same history renders the same lane ids and colours under
+identity and the carried refs are chosen from the DAG, the row order and the ranks
+alone (§5), so constraining columns cannot change them: the same history renders the
+same lane ids, carried refs and colours under
 `compact` and under `gutter`, differing only in where each lane is drawn. That is a
 guarantee, asserted across policies, not an accident — and it is what makes `C` a
 comparison tool rather than a repaint.
@@ -1643,7 +1720,7 @@ for branches and tags; the `wt:` prefix keeps the label self-describing without
 colour. **HEAD always reads as `HEAD`, and its label comes first.** On a
 branch, the **current branch's** group is drawn as one label
 `(HEAD → name …)` — the `HEAD → ` prefix in the **HEAD colour**
-(`palette.head`), the rest in the label colour (below) — and it is moved to the
+(`palette.head`), the rest in its ref's colour (below) — and it is moved to the
 **front** of the row's labels; on a
 **detached HEAD** (no current branch, §3.2) the checked-out commit carries a bare
 `HEAD` label, also first. Being first, HEAD is the label the `+N` overflow
@@ -1657,13 +1734,13 @@ once, followed by the remotes that also point at this commit, as
 keeps the common case (a branch plus its remote-tracking copies all at one
 commit) from repeating the name per remote. A label whose ref is a **pinned
 anchor** (§10.6 — the effective pin set, so the default anchors `master` / `main`
-/ `dev` and a pinned local branch's implicit remote counterparts count too) opens
+/ `dev` and every member of a pinned identity, §5, count too) opens
 with the **pin icon**
 (`icons.pin`, default `⚲`, §8) inside its bracket: `(⚲dev)`,
 `(⚲release/2.1 ↑origin)`, `[⚲v1.0]`, `{⚲wt:review}`. A branch group is marked
 when any ref in it is pinned (its local branch, or one of the listed
-`remote/name` refs — so a remote-only group is marked when its refs are the
-implicit counterparts of a pinned local branch at another commit). **HEAD's
+`remote/name` refs — so a remote-only group is marked when its refs belong to
+the identity of a pinned local branch at another commit). **HEAD's
 label never carries it** — neither
 `(HEAD → name …)` nor a detached `HEAD` — although HEAD (or its branch) is always
 an anchor: HEAD is already marked by its first place and colour. The icon is part
@@ -1691,7 +1768,7 @@ holds the row open is then a branch built on top, which keeps its `▾` on its o
 tip row (and `<Space>` names it). The rule is about
 **deviation from the default**, so:
 
-- an **anchor** (§10.6) — pinned, a default trunk, an implicit counterpart, HEAD's
+- an **anchor** (§10.6) — pinned, a default trunk, a member of a pinned identity, HEAD's
   branch — is never marked: its default is normal, and the pin icon / the HEAD
   label already say why it is open (and that `<Space>` will not fold it);
 - with the first-parent focus **off** (`collapse_merged = false`, `c`) every
@@ -1704,7 +1781,7 @@ icon). **HEAD's label never carries it** — an attached HEAD's branch is an anc
 and a detached `HEAD` label is not a ref label. Like the pin icon it is part of
 the label's text — the width budget, the `+N` windowing, the `h`/`l` selection
 and the cursor parking all measure it — it is drawn in the label's own colour (no
-separate highlight, so lane ownership, dimming and `palette.selected` apply
+separate highlight, so ref colour, muting, dimming and `palette.selected` apply
 unchanged), it appears in every label mode (§6.1), on packed marker lines and in
 the context panes (§6.2), and it follows the view state live (every reflow).
 `icons.expanded = ""` turns it off.
@@ -1713,67 +1790,48 @@ Anonymous owners (§10.2 — merge parents, uncovered tips) carry no label, so a
 expanded one cannot be marked on its row; the palette's collapse entry (§10.4)
 names it instead.
 
-**Label colour.** A node's **lane colour** — exactly the colour its node glyph gets
-(§5, §12.2): the cell's top Segment's palette slot, including a `gutter`
-parent-swapped node that takes its colour from the wire arriving from above (§5.6),
-and a collapsed `◍` head's or a labelled junction's `◍` colour — goes to **one**
-label on the node: the label of the ref that **owns** the lane. Every other label on
-the node is drawn in its **per-kind** colour (`palette.branch` / `remote` / `tags` /
-`worktree`, the current branch's whole label in `palette.head` — what
-`lane_label_colors = false` gives), so a label only reads as belonging to a lane
-when the lane is its own.
+**Label colour.** Colour belongs to refs (§5 "Ranked refs and identities"), so
+every **ranked ref's** label is drawn in **its own ref's colour** (§5.5): a local
+branch at full strength, a remote branch in its identity's **muted** variant. A
+label therefore names its branch's colour wherever it sits — inside its own track
+or inside another branch's — and no label "owns" a node's colour on behalf of the
+others. A branch drawn on a track that a better-ranked ref has taken over still
+shows its own colour on its label, which is how the reader sees that it is not the
+branch the track continues.
 
-The **owner** is decided per node, in two steps:
+A **branch group** (§6 above) splits its colour by member: the bracket, the pin and
+expanded icons and the **name** take the local branch's colour, and each
+`↑remote` takes that remote's muted colour — `(foo ↑origin)` reads as `foo` with
+`↑origin` in muted `foo`. A group without its local branch (only remotes of that
+short name at this commit) draws the bracket, icons and name in its first listed
+remote's colour and each `↑remote` in its own. (Remotes of one short name are
+one identity — paired with their local, or remote-only — so the group reads as one
+muted hue.)
 
-1. **The ref the lane was born for.** If the node's lane colour is the **pinned
-   colour** (§5.5) of a pinned ref pointing at this node — rank `k`, slot `k` — or
-   the **counterpart colour** `-k` of an implicit remote counterpart pointing at it,
-   that ref's label owns the lane. A pinned colour is withheld until its ref's tip
-   (§5.5), and only a counterpart lane carries `-k`, so this is exactly "the lane
-   was born here for that ref" (a birth at a pinned or a counterpart tip, §5, or a
-   pinned branch's own tip lane) — read off the colour, so the panes, which carry
-   the main view's colours (§6.2), agree without any layout data. A pin past the
-   curated palette has no pinned colour, and falls to step 2.
-2. **Otherwise the first label** in logical order: the current branch's group (the
-   `(HEAD → x …)` label), then the other branch groups, then tags, then worktree
-   labels. A detached HEAD's bare `HEAD` marker is never an owner candidate (it is
-   always `palette.head`) — and that holds when the lane was born for a pinned
-   detached `HEAD` (step 1) too: since the `HEAD` label can never show the lane
-   colour, ownership passes to the **first other label** on the node (this step), so
-   a branch sitting on a detached HEAD reads in its lane's colour. With no other
-   label, no label carries it.
-
-A **branch group** (a local and its `↑remote,…` list) is **one** label: it owns when
-any of its refs does, and then the whole label takes the lane colour — brackets, the
-pin icon, the name and the remote list. A remote's default-branch symref
-(`origin/HEAD`) is never a label (§3.2), so it can never take ownership from the
-branch it points at. So on a commit carrying `origin/dev` (the counterpart of a
-pinned `dev`, whose counterpart lane is born there), `origin/HEAD` and
-`origin/feature`, only `(dev ↑origin)` shows `dev`'s dimmed counterpart colour;
-`(feature ↑origin)` is in the remote colour. A counterpart in sync with its local
-sits on the pinned lane, in its local's group, in full colour.
+Labels that are **not** ranked refs keep their **per-kind** colour: tags
+(`palette.tags`), worktree labels (`palette.worktree`), and a branch that is not
+visible in the view (a collapsed `◍` head's or a packed marker's labels, §10.4;
+`palette.branch` / `palette.remote`).
 
 Three things keep their own highlight on every label: the **HEAD marker** (a
 detached `HEAD` label, and the `HEAD → ` prefix of the current branch's label) stays
 in `palette.head`, even though HEAD's node glyph is itself drawn in `palette.head`
-(§5.3) — the branch name after the arrow takes the lane colour when it owns; the
-upstream tracking tokens — the spelled-out upstream and the divergence — keep
-`palette.track` (§6.3); and a ref carrying its own
-colour (a submodule pointer mark, §11.7.6) keeps it. The `h`/`l`-**selected** label
-(§2) still draws in `palette.selected`. On a **packed marker row** (§10.4) each
-marker is its own node, with its own owner among its labels and *that marker's* node
-colour (a non-owner marker label is `palette.branch`); in the **context panes**
-(§6.2) a pane row's node colour goes to its owner the same way. The ref **kind** is
+(§5.3) — the branch name after the arrow takes its ref's colour; the upstream
+tracking tokens — the spelled-out upstream and the divergence — keep
+`palette.track` (§6.3); and a ref carrying its own colour (a submodule pointer mark,
+§11.7.6) keeps it. The `h`/`l`-**selected** label (§2) still draws in
+`palette.selected`. The same rules hold on a **packed marker row** (§10.4) and in
+the **context panes** (§6.2), with the main view's ref colours. The ref **kind** is
 carried by the bracket — `( )` branch, `[ ]` tag, `{ }` worktree — and `↑` for
 remotes. `lane_label_colors = false` (§8) gives every label its per-kind colour.
-Out-of-cone labels dim like their lane (§12.2), owner or not.
+Out-of-cone labels dim with their row (§12.2).
 
 **Ref width budget.** The refs use the row's free width: they may take
 everything the message does not need — its natural width, but never reserving
 more than `message_min` (§8). So refs fill empty space when the message is
 short, while a long message still keeps at least `message_min` columns
 (truncated with `…`). Each field is colored by its `palette` highlight group;
-lanes are colored by a palette slot allocated from a recycling free list (§5.5).
+lanes are colored by their carried ref's palette slot, allocated from a recycling free list (§5.5).
 
 **Overflow is windowed around the selection.** With **no ref selected**, labels
 are shown in order (leftmost first) until the budget is reached and the rest
@@ -1869,8 +1927,8 @@ branch, folding toward the checked-out commit.
 **What they show.** Panes render **topology-only** (§10.4): graph glyphs and ref
 labels only — no date, author, or message. The labels read as in the main view
 (§6): HEAD's label — `(HEAD → <branch>)` or the detached `HEAD` — first, its
-HEAD marker in the HEAD colour, and the label owning its pane row's node lane in
-that lane's colour, the others per-kind (§6 "Label colour"). Off-screen topology is folded onto
+HEAD marker in the HEAD colour, and every other label in its own ref's colour
+(remotes muted, non-ranked labels per-kind; §6 "Label colour"). Off-screen topology is folded onto
 the **pinned anchors** (§10.6): an anchor's line is drawn; everything else is
 contracted.
 
@@ -1965,19 +2023,20 @@ lane stretch with no head, junction, or anchor on it) costs **zero** rows — it
 vertical continuation. This is the same "wires must connect" grid invariant (§5.1)
 lifted to the window edge: no lane dangles, none stops in mid-air.
 
-**Colour.** Each lane is drawn in **its own colour — the same colour the main view
-gives that lane** (§5.5), so a branch reads identically in the pane and the graph
-and forking branches are visually distinct. A fork's mainline continuation keeps the
-incoming lane's colour; each *extra* fork child takes its own. (A pane that drew
-every branch one colour would read as a single discontinuous tangle.) Where two lanes
-alive together arrive sharing a main-view colour (the main view recycles colours),
-the header gives one of them a different colour, and that replacement is never a
-**pinned colour** (§5.5) — a pinned branch's colour stays its own in the pane too.
-A counterpart lane (§5.5) keeps its main-view counterpart colour in the header, light
-dim included. The footer's seeded sweep obeys §5.5 directly: a seed holding a pinned
-colour takes its reservation over, a seed holding a counterpart colour is one more
-holder of that slot, and a pinned tip or a counterpart tip born inside the footer
-takes its pinned or counterpart colour.
+**Colour.** Each lane is drawn in **its carried ref's colour — the same colour the
+main view gives that ref** (§5, §5.5), so a branch reads identically in the pane and
+the graph and forking branches are visually distinct. A pane commit applies the same
+carried-ref rule as the main view (§5 "Carried refs"): a fork's continuation keeps
+the selected ref, each *extra* parent track takes its parent commit's own ref or a
+generated one, and remotes are muted. (A pane that drew every branch one colour
+would read as a single discontinuous tangle.) Where two lanes alive together arrive
+carrying **different** refs that share a main-view colour (the main view recycles
+colours, §5.5), the header gives one of them a different colour, and that
+replacement is never a **pinned colour** (§5.5) — a pinned identity's colour stays
+its own in the pane too. Two lanes carrying the **same** ref legitimately share its
+colour. The footer's seeded sweep obeys §5.5 directly: a seed carrying a pinned
+identity's ref takes its reservation over, and a ref first reached inside the footer
+is coloured there, never with a colour live at the seam.
 
 **Reachability emphasis (§12).** When reachability emphasis is on, the panes dim
 out-of-cone topology exactly like the main view: a pane lane (and its labels)
@@ -2107,7 +2166,7 @@ token is part of the branch decoration exactly like the indicator — not separa
 selectable, counted by the ref width budget and the `+N` overflow, identical in
 every label mode (§6.1), on packed marker rows (§10.4), in the context panes
 (§6.2) and in the `<leader>b` ref picker — and is coloured `palette.track.upstream`
-(§8). It does not take the lane colour when the label owns (§6, like the divergence
+(§8). It does not take its ref's colour (§6 "Label colour", like the divergence
 tokens) and dims with the row (§12.2).
 
 **Same-named remote branch — warning.** When the upstream does not match **and** a
@@ -2131,10 +2190,12 @@ of your last `git fetch`*, not the live remote. gitloom never fetches on its own
 (§17, which resyncs when it finishes), or a `git fetch` outside gitloom followed
 by `R` (resync, §3.4), refreshes it.
 
-The same tracking data drives a current-branch status in the window footer. (It
-no longer alone decides which remote refs a pinned branch pins implicitly: those
-are its **counterparts** — every remote branch of the same short name, plus the
-tracked upstream when its short name differs — §10.6.)
+The same tracking data drives a current-branch status in the window footer, and
+it pairs a local branch with its upstream into one **identity** (§5 "Ranked refs and
+identities"): every remote branch of the same short name, plus the tracked upstream
+when its short name differs, shares the local's hue (muted) and its pin (§10.6).
+Same-named remote branches with no local branch form one remote-only identity of
+their own (one muted hue).
 
 ## 7. Rendering behavior
 
@@ -2198,14 +2259,22 @@ Endpoint     = Commit | "index" | "worktree"
   blend factor (`0`–`1`) toward the window background used to de-emphasise
   out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
   terminals without true colour, dimming falls back to a flat `NonText`
-  highlight instead. `counterpart_dim` is the lighter blend factor of a remote
-  counterpart lane's colour (§5.5; default `0.25`); without true colour a
-  counterpart lane is drawn in the plain slot colour. `counterpart_dim_out` is a
-  counterpart lane's blend **out of the cone** (§12.2; default `0.75 × dim`, so
-  it stays brighter than every other dimmed lane).
-- `lane_label_colors` — draw the label of the ref that owns a node's lane in the
-  node's lane colour (§6 "Label colour"; the other labels stay per-kind). **Default
-  true.** `false` restores the per-kind palette groups for every label. No toggle key.
+  highlight instead. `remote_mute` is the lighter blend factor of a **remote**
+  ref's muted variant — its tracks, its node and its label (§5.5; default `0.25`);
+  without true colour a remote is drawn in the plain colour. `remote_mute_out` is a
+  remote's blend **out of the cone** (§12.2; default `0.75 × dim`, so it stays
+  brighter than every other dimmed colour). The former names `counterpart_dim` /
+  `counterpart_dim_out` are accepted as aliases. `branch`, `remote`, `tags`,
+  `worktree` and `head` are the **per-kind** label colours (§6 "Label colour"):
+  `branch` / `remote` colour a branch label only when `lane_label_colors` is off or
+  the branch is not visible as a ranked ref; `remote` is also the default of
+  `track.upstream`.
+- `lane_label_colors` — draw every ranked ref's label in its own ref's colour,
+  remotes muted (§6 "Label colour"; tags, worktree labels and HEAD stay per-kind).
+  **Default true.** `false` restores the per-kind palette groups for every label;
+  tracks and nodes are coloured by ref either way. No toggle key. (The name predates
+  colour moving from lanes to refs; it is kept so existing configurations keep
+  working.)
 - `highlight` — whether reachability dimming (§12) starts enabled. **Default
   true.** Toggle live with `H`.
 - `branches` — ref argument(s) for `git log` (default `--all`).
@@ -2259,14 +2328,9 @@ Endpoint     = Commit | "index" | "worktree"
   `10`**). Set explicitly so the windows don't inherit the global value. Note: a
   non-zero value interacts with the context-pane overlays (§6.2); set `0` to
   restore the prior always-zero behaviour if the panes' scrolling misbehaves.
-- `pin_upstream` — when a local branch is pinned, also pin its **remote
-  counterparts** implicitly — every remote branch of the same short name, plus its
-  tracked upstream (§6.3) — for the focus default and the pin icon; they take no
-  rank, and a lane born at one shares its local's pinned colour, lightly dimmed
-  (§5.5, §10.6). **Default true.** Set
-  false to pin only the local branch. (The name predates the generalisation from
-  "the tracked upstream" to "the counterparts"; it is kept so existing
-  configurations keep working.)
+- `pin_upstream` — **removed.** A pin applies to the whole identity (§5, §10.6), so
+  a pinned local branch's paired remotes are always pinned with it; a set value is
+  ignored. To fold one remote anyway, unpin that ref explicitly (`P`, §10.6).
 - `persist` — remember the view toggles (`m C M B d H S c p F i`) and each
   repository's pin list across Neovim sessions in `stdpath("state")/gitloom.json`
   (§18). **Default true.** Set false to neither read nor write the file. A
@@ -2931,7 +2995,7 @@ so the checked-out commit is always a normal, visible row — never folded into 
   branch the `HEAD` ref is not an owner (it duplicates the branch's), so an entry
   for it is not part of the resolved list then.
 
-Every pinned ref's label — an implicit remote counterpart's (below) included —
+Every pinned ref's label — a paired remote's of a pinned identity (below) included —
 shows the **pin icon** (`⚲`, `icons.pin`; §6), so the anchor set is visible on
 the graph itself — except HEAD's label, which is already singled out.
 
@@ -2949,11 +3013,12 @@ implies unreserving** (the flag leaves with its entry). The order is the
 **anchor priority**: first entry wins wherever one anchor has to be named. An
 entry's **rank** is its 1-based position in the resolved list.
 
-**Order matters for every entry.** The rank drives lane identity (§5): where two
-lanes meet, the better-ranked one continues, and a pinned tip that outranks every
-lane arriving at it starts its own lane — in its **pinned colour**, slot `k` of the
-curated palette for rank `k` (§5.5). So moving any entry — reserved or not — can
-change which lanes continue and how they are coloured. Among
+**Order matters for every entry.** The rank is **priority** (§5): a pinned
+identity outranks every unpinned one and a better-ranked one outranks a worse, so
+where tracks meet the better-ranked ref is the one carried on and drawn, and a
+pinned identity of rank `k` is drawn in its **pinned colour**, slot `k` of the
+curated palette (§5.5). So moving any entry — reserved or not — can change which
+refs are carried where and how the graph is coloured. Among
 **reserved** entries the order additionally decides the dedicated columns
 (§10.6.2 — left to right in list order, skipping unreserved ones).
 
@@ -2973,36 +3038,33 @@ This order is **not** the order labels are drawn in. HEAD's label is drawn first
 on its row, as `(HEAD → x …)` or a bare `HEAD` (§6), whatever HEAD's rank — that
 is a rendering rule about "you are here", unchanged by pin priority.
 
-**Implicit remote counterparts.** Pinning a local branch also pins its **remote
-counterparts** implicitly (config `pin_upstream`, default on): every remote branch
-with the same short name — the same members, in the same order, that the `%`
-local ⇄ remote cycle steps through (§2: the remotes in `git remote` order, then any
-remote not listed there, by name) — plus the branch's **tracked upstream** (§6.3)
-when its short name differs. A logical branch is the local *and* where each remote
-thinks it is, so anchoring them together keeps every one of those lanes in full
-under focus — and where they have diverged the fork between them is drawn instead
-of a remote collapsing to a `◍` head. The counterparts:
+**A pin covers the identity.** Pinning a branch pins its whole **identity** (§5
+"Ranked refs and identities"): a local branch together with its paired remotes —
+every remote branch with the same short name (the members the `%` cycle steps
+through, §2) plus its **tracked upstream** (§6.3) when its short name differs. A
+logical branch is the local *and* where each remote thinks it is, so anchoring them
+together keeps every one of those lanes in full under focus — and where they have
+diverged the fork between them is drawn instead of a remote collapsing to a `◍`
+head. Every member of a pinned identity:
 
-- are pinned for the **focus default** (§10.7) and the **pin icon** (§6): they
-  have **no rank** (§5), so they never steer lane identity, and no slot of their
-  own — a lane born at one **shares its local's pinned colour, lightly dimmed** (the
-  counterpart colour, §5.5). A counterpart **diverged** from its local draws its own
-  lane in that colour; one **ahead** of its local starts that lane at its own tip
-  (even under another branch built on top of it, §5 "Birth at a counterpart tip")
-  and reaches the local's tip as an unranked lane in that colour, so the local's pinned lane is born there and the
-  colour brightens to full; one at or behind the local is on the local's own
-  (pinned) lane, in full colour;
-- are **not listed** in the pinned-branches dialog (§10.6.1) — they are not entries
-  of their own, they follow their local's;
-- carry the **pin icon** like any pinned ref (§6);
-- are dropped when the local is unpinned (or `pin_upstream` is false).
+- is pinned for the **focus default** (§10.7) and carries the **pin icon** (§6);
+- ranks with the identity (§5): the local branch first, its remotes after it, all
+  in the identity's colour — the remotes muted (§5.5). A remote **ahead** of its
+  local carries its muted colour down to the local's tip, where it turns full; one
+  at or behind the local sits on the local's track, at full strength;
+- is **not listed** in the pinned-branches dialog (§10.6.1) unless it is itself an
+  entry — the members follow their identity's entry;
+- is dropped when the identity's last entry is unpinned.
 
-An explicit choice on a counterpart still wins. `P` on a counterpart while it is
-implicitly pinned records an explicit **unpinned** override for that one ref: it
-loses its pin (icon, focus default) while its local and the other
-counterparts keep theirs. Pinning a remote branch **explicitly** (`P` on an
-unpinned one, or "Pin new branch…") gives it its own row in the dialog, at its own
-priority, which is then its rank — with a pinned colour of its own.
+There is no separate implicit-pin mechanism and no switch for it (`pin_upstream` is
+removed, §8). An explicit choice on one member still wins for **anchoring**: `P` on
+a member that is pinned only through its identity records an explicit **unpinned**
+override for that one ref — it loses the pin icon and the focus default — while its
+rank and colour still follow its identity, because colour belongs to the identity.
+Pinning a remote branch **explicitly** (`P` on an unpinned one, or "Pin new
+branch…") gives it its own row in the dialog at its own priority: for a remote-only
+identity that row is its rank and pinned colour; for a remote paired with a local
+it pins the identity, whose rank is the best of its entries.
 
 Anchors drive three things — the focus default, the panes, and lane identity
 with a **fixed colour** — and, deliberately, nothing more:
@@ -3016,21 +3078,22 @@ with a **fixed colour** — and, deliberately, nothing more:
   is drawn only until it merges into an anchor, and otherwise terminated
   minimally. The boundary lane-continuity invariant and pane sizing are
   specified in §6.
-- **Lane identity and a fixed colour (§5, §5.5).** The pin ranks of the list's
-  entries decide which lane continues where lanes meet, and where a pinned branch's
-  own lane is born — so a pinned branch's history is drawn in its own colour rather
-  than in the colour of whatever branched off its tip. That colour is **fixed**: the
-  entry of rank `k` owns slot `k` of the curated palette (ranks past the palette
-  take a free-list colour), withheld from every other lane until the branch's lane
-  ends and then recycled. A pinned branch therefore reads as the same colour across
-  reflows, policies and scrolling, and adding a pin below it never recolours it.
-  Implicit remote counterparts take no part (above). (Under `gutter` the continuing
+- **Priority and a fixed colour (§5, §5.5).** The pin ranks of the list's entries
+  rank the identities they name above every unpinned one — so a pinned branch's
+  history is drawn in its own colour rather than in the colour of whatever branched
+  off its tip, and which lane continues at a junction follows. That colour is
+  **fixed**: the identity of rank `k` owns slot `k` of the curated palette (ranks
+  past the palette take a free-list colour), withheld from every other ref for the
+  whole layout. A pinned branch therefore reads as the same colour across reflows,
+  policies and scrolling, and adding a pin below it never recolours it. Entries
+  naming no ranked ref (a tag, a detached `HEAD`, a pointer mark) are anchors for
+  the focus default and the panes only. (Under `gutter` the continuing
   lane also steers placement — see the implementation risk noted in §5.)
 - **Nothing else.** In particular pin does **not** claim columns: a pinned branch
   is placed by exactly the same rules as any other. A **dedicated column** is a
   separate, explicitly-set flag (§10.6.2), never a consequence of pinning. This is
   deliberate and load-bearing — a typical repository pins up to four branches by
-  default (the trunks and HEAD, plus their remote counterparts), so "pin ⇒ held
+  default (the trunks and HEAD, plus their paired remotes), so "pin ⇒ held
   column" would silently hold several columns open for a user who asked for none.
 
 Pin is part of the view state; changing it — pinning, unpinning, or reordering —
@@ -3057,10 +3120,10 @@ Pinned branches                    ◆ = dedicated lane
 - Each row is one entry: its **priority number**, the **`◆` marker** when the
   entry is reserved (§10.6.2) and blank when it is not, and the ref name. The
   numbering runs over the whole list — it is every entry's rank, which drives
-  lane identity (§5) — while the `◆` picks out the subsequence that also claims
-  columns. A pinned local branch's implicit remote counterparts (§10.6) have **no**
-  rows: they follow their local's row, and have no rank of their own (§10.6). An explicitly pinned remote branch
-  has a row of its own.
+  ref priority and colour (§5) — while the `◆` picks out the subsequence that also claims
+  columns. The other members of a pinned identity (§10.6) — a pinned local
+  branch's paired remotes — have **no** rows: they follow their identity's entry
+  and share its rank. An explicitly pinned remote branch has a row of its own.
 - `<C-j>` / `<C-k>` move the entry under the cursor **down / up**, clamped at
   the ends; the cursor follows it so a move is repeatable.
 - `<Space>` toggles the entry's reserve flag.
@@ -3068,8 +3131,8 @@ Pinned branches                    ◆ = dedicated lane
 - The last row, **`+ Pin new branch…`**, opens the existing ref picker (§2,
   `<leader>b`); the chosen ref is appended to the **bottom** of the list, pinned
   and **not** reserved. Refs already on the list are omitted from that picker (an
-  implicit counterpart is not on it, so it is offered — picking it pins it
-  explicitly, with a row and rank of its own), and so is
+  identity member pinned only through its identity is not on it, so it is offered
+  — picking it adds a row of its own, §10.6), and so is
   `HEAD` while it is on a branch (its branch is the owner); a **detached** `HEAD`
   is offered, so it can be pinned back after an unpin.
 - `<CR>` on an entry closes the dialog and **jumps the graph to that branch**,
@@ -3081,65 +3144,32 @@ Every edit is applied immediately: the view state changes, the projection
 reflows (§10.5), and the graph cursor is restored to the commit it was on. The
 dialog's keys are buffer-local, so they do not collide with the graph's own
 bindings. `P` (§10.6) remains the in-graph shortcut for pin/unpin of the branch
-under the cursor; it appends to the bottom of the list, unreserved (on an
-implicitly pinned counterpart it unpins that one ref instead, §10.6).
+under the cursor; it appends to the bottom of the list, unreserved (on a member
+pinned only through its identity it unpins that one ref for anchoring instead,
+§10.6).
 
 **Honesty about unimplemented effect.** The reserve flag is recorded and
 displayed before the layout honours it (§10.6.2 is staged). While that is true,
 the dialog says so on its own last line — a control whose effect is not yet
 built must be visibly labelled as such rather than appear to work.
 
-#### 10.6.2 Dedicated lanes (reserved columns)
+#### 10.6.2 Dedicated lanes (reserved columns) — deferred
 
-A pin entry may be **reserved**: the branch is given a **dedicated column** in
-the graph, held for it whether or not a lane of that branch is drawn on a given
-row. Reserved branches take columns **left to right in pin-list order**,
-skipping unreserved entries. Reserving is always explicit (§10.6.1); the default
-for every entry, including the defaulted anchors, is **pinned but not
-reserved**.
+A pin entry may be **reserved**: the branch is to be given a **dedicated column**
+in the graph, held for it whether or not a lane of that branch is drawn on a given
+row, reserved branches taking columns left to right in pin-list order. Reserving is
+always explicit (§10.6.1); the default for every entry is **pinned but not
+reserved**. The flag is recorded, persisted (§18) and shown in the dialog
+(§10.6.1).
 
-- **A reserved column is occupied for placement purposes.** It is exactly the
-  existing **root column break** (§5.1) mechanism generalised: the sweep's own
-  column bookkeeping marks the column taken, so tip placement, fan-out and any
-  compaction move all skip it. Nothing new is asked of §5.1 — its "stopping at
-  the first occupied column" stays literally true, with a reserved column being
-  one of the things that counts as occupied.
-- **Stop, never a skip.** A lane compacting leftward that meets a reserved
-  column **halts there**. It must never lay a horizontal *across* the reserved
-  column to reach a farther gap: that would be a wire crossing a held column,
-  and — unlike a horizontal crossing a *vertical* — it is invisible to the
-  crossing checker (§5.1 tests a horizontal against a vertical bar), so it would
-  pass every existing test while looking wrong.
-- **Birth, not re-jog.** The reservation is enforced where a lane is **born**
-  (and by "not compacted away" thereafter), never by moving an already-placed
-  lane rightward into its column. Compaction redraws leftward only; a rightward
-  jog has no redraw and fails the layout's completeness check.
-- **A reserved branch keeps its colour slot for the whole layout.** Every pinned
-  entry already owns a pinned colour (§5.5) until its lane ends; a reserved one's
-  slot is not released then — it stays dropped from the free list, counted in use,
-  and never recycled or retired while the reservation stands. (A reserved entry
-  ranked past the curated palette has a free-list colour, held the same way.) This
-  generalises the context-pane **seed** carve-out (§6.2), which removes a live seam
-  lane's colour from the free list for exactly the same reason.
-- **Attribution tie-break.** A commit's signature is a *set* of owners (§10.2),
-  so a commit may belong to several reserved branches at once. The column is
-  chosen deterministically: the **highest-priority reserved owner in the
-  signature** — the earliest such entry in the pin list. This is where pin-list
-  order decides *placement*; lane identity (§5) is where it decides colour. A §4.2
-  working-tree node, whose signature is empty, is placed as if attributed to the
-  HEAD commit's highest-priority reserved owner (§4.2 "Layout identity follows
-  HEAD"), so the stack is born in HEAD's reserved column instead of bending in.
-- **The context panes are exempt.** Neither the footer nor the header honours
-  reservations. The footer is a *seeded* sweep whose seam row must reproduce the
-  main view's boundary columns exactly (§6.2), and the header is a direct
-  seam-up grid that never runs the column sweep at all. Holding a column in
-  either would break the seam or mean nothing. This is deliberate, not an
-  oversight: the §6.2 seam invariants are unchanged by reservation.
-
-Under the `straight` layout policy (§5.6) nothing compacts, so reservation
-reduces to a birth-placement constraint alone; under the other three it is both
-a birth constraint and a barrier the compaction moves stop at. No policy is
-exempt — the reserved column is occupancy, and occupancy is universal (§5.1).
+**The reservation layout is deferred.** It is **not part of the ref-colour model**
+(§5, §5.5): its former design placed a pinned branch's lane in its column where that
+lane was **born** at the pinned tip, and the ref-colour model has no such birth (an
+arriving lane continues and is recoloured). Until it is redesigned, the flag has no
+effect on layout or colour — no column is held, no slot is reserved for it — and the
+dialog labels it as not yet honoured (§10.6.1). The references to reserved columns
+in §4.2, §5.1, §5.5 and §5.6 describe that deferred design and do not apply until
+then.
 
 ### 10.7 First-parent default
 
@@ -3739,9 +3769,9 @@ Content **outside** the cone is rendered **dimmed**; the cone keeps full colour:
 
 - a commit **row** — its date, author, message, refs, and commit marker — dims
   when that commit is not in the cone (not a `begin`/`end` of any highlighted
-  Lane). Its ref labels, drawn in their node's lane colour (§6), dim as that
-  lane does: the same hue-preserving blend of the lane colour (the flat
-  fallback without true colour), not a generic dim group; a packed marker's
+  Lane). Its ref labels, each drawn in its own ref's colour (§6), dim with the
+  row: the same hue-preserving blend of that colour (the flat fallback without
+  true colour), not a generic dim group; a packed marker's
   labels dim with that marker, a pane label with its pane row;
 - a **Segment** dims unless a Lane it carries is highlighted. Because a Segment
   carries the exact edge(s) it draws (§5.1), a cone wire stays lit through every
@@ -3760,16 +3790,15 @@ Dimming preserves colour identity rather than flattening to one grey: each
 field's / Lane's own highlight colour is blended toward the window background by
 `palette.dim` (§8), so a dimmed Lane keeps its hue and stays individually
 recognisable. On terminals without true colour, dimming falls back to a single
-flat highlight group (`NonText`). A remote counterpart lane (§5.5) is already
-lightly dimmed in the cone (`counterpart_dim`, default `0.25`). Out of the cone
-the dims do **not** compose: its slot colour is blended by
-`palette.counterpart_dim_out` (§8), **default `0.75 × palette.dim`** (`0.3375` at
-the default `dim`), so an out-of-cone counterpart lane reads a shade **brighter**
-than every other dimmed lane — its own pinned lane's included — while still dim.
-In the cone: pinned lane full, counterpart `0.25`, others full; out of it: pinned
-lane and others `dim`, counterpart `0.75 × dim`. Its label follows (§6 "Label
-colour"). Without true colour every out-of-cone lane, a counterpart's included,
-takes the flat fallback.
+flat highlight group (`NonText`). A **remote** ref's colour — its tracks, its
+node and its label — is already lightly muted in the cone (`remote_mute`, default
+`0.25`, §5.5). Out of the cone the blends do **not** compose: its colour is blended
+by `palette.remote_mute_out` (§8), **default `0.75 × palette.dim`** (`0.3375` at the
+default `dim`), so an out-of-cone remote reads a shade **brighter** than every other
+dimmed colour — its own local's included — while still dim. In the cone: locals
+full, remotes `0.25`; out of it: locals `dim`, remotes `0.75 × dim`. Labels follow
+their own ref (§6 "Label colour"). Without true colour every out-of-cone colour, a
+remote's included, takes the flat fallback.
 
 The emphasis is **on by default** and follows the cursor; it is recomputed when
 the cursor moves to a new row and when the view scrolls (the window-bounded cone
@@ -4751,8 +4780,8 @@ created. The saved list omits what the open-time resolution re-derives anyway:
 an **unreserved** entry that is a **default anchor** at the time of saving
 (`master` / `main` / `dev`, a seeded mark, HEAD's branch) **and still sits in its
 default place** — in the leading run of defaults, above every explicitly placed
-entry, where the resolution (§10.6) puts it back. Implicit remote counterparts
-(§10.6) are never entries, so they are never saved. So pinning a branch while on
+entry, where the resolution (§10.6) puts it back. Members pinned only through
+their identity (§10.6) are never entries, so they are never saved. So pinning a branch while on
 `feature/x` does not make `feature/x` an anchor forever after the user checks out
 something else; an unpinned default stays unpinned, and a reserved entry keeps
 its flag and place. Because the order of every entry now matters (it is the lane
