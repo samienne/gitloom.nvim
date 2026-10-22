@@ -57,30 +57,84 @@ function M.worktree_refs(entries, taken)
     return out
 end
 
---- The divergence indicator's pieces for a tracked branch (§6.3), as
---- `{ text, kind }` segments whose concatenated `text` is `track_label` and whose
---- `kind` ("ahead"|"behind"|"gone") selects the colour. Empty for no upstream or
---- an in-sync branch (no news is good news). Pure.
+--- Whether a branch's configured upstream **matches** it (§6.3): the branch it
+--- names on its remote (`%(upstream:remoteref)`) is the local branch's own name.
+--- A local upstream (`remote = .`) never matches. Pure.
+---@param name string     the local branch
+---@param remote string?  `%(upstream:remotename)` (`branch.<name>.remote`)
+---@param merge string?   `%(upstream:remoteref)` (`branch.<name>.merge`)
+---@return boolean
+function M.upstream_matches(name, remote, merge)
+    return remote ~= nil and remote ~= "." and merge == "refs/heads/" .. name
+end
+
+--- Mark each local branch whose upstream does not match (§6.3) with the remotes
+--- that hold a remote-tracking branch of its own name (`Upstream.same`, the
+--- §6.3 warning) — read from the same ref list, no extra query. `entries` is a
+--- parsed ref read (`{ name, kind, upstream? }`); a remote ref's remote is its
+--- first name component, as for the `↑remote` list (group_refs), and a remote's
+--- `HEAD` symref is not in the list (classify_ref drops it). Mutates the
+--- upstreams in place; `same` is nil when there are none (or the upstream
+--- matches). Pure otherwise.
+---@param entries { name: string, kind: string, upstream?: Upstream }[]
+function M.mark_same_named(entries)
+    local by_branch = {} -- remote branch short name -> remotes holding it, in read order
+    for _, e in ipairs(entries) do
+        if e.kind == "remote" then
+            local remote, short = e.name:match("^([^/]+)/(.+)$")
+            if short then
+                by_branch[short] = by_branch[short] or {}
+                table.insert(by_branch[short], remote)
+            end
+        end
+    end
+    for _, e in ipairs(entries) do
+        local up = e.upstream
+        if e.kind == "local" and up then
+            up.same = (not up.match) and by_branch[e.name] and vim.list_extend({}, by_branch[e.name]) or nil
+        end
+    end
+end
+
+--- The upstream tracking pieces of a tracked branch (§6.3), as `{ text, kind }`
+--- segments whose concatenated `text` is `track_label` and whose `kind` selects
+--- the colour: first the spelled-out **non-matching** upstream ` →<upstream>`
+--- ("upstream", or "mismatch" when a same-named remote branch exists — `same`),
+--- with `./` before a local upstream; then the divergence ("ahead"|"behind"|
+--- "gone"). A matching upstream in sync, or no upstream, gives none (no news is
+--- good news). `icon` is `icons.upstream` (default "→"; "" leaves the bare
+--- name). Pure.
 ---@param track Upstream?
+---@param icon string?
 ---@return { text: string, kind: string }[]
-function M.track_segments(track)
+function M.track_segments(track, icon)
     if not track then return {} end
-    if track.gone then return { { text = " gone", kind = "gone" } } end
-    local a, b = track.ahead or 0, track.behind or 0
     local segs = {}
+    if track.match == false then
+        local dot = (track.remote == "." and "./" or "")
+        segs[1] = { text = " " .. (icon or "→") .. dot .. track.short,
+            kind = (track.same and #track.same > 0) and "mismatch" or "upstream" }
+    end
+    if track.gone then
+        segs[#segs + 1] = { text = " gone", kind = "gone" }
+        return segs
+    end
+    local a, b = track.ahead or 0, track.behind or 0
     if a > 0 then segs[#segs + 1] = { text = " ⇡" .. a, kind = "ahead" } end
     if b > 0 then segs[#segs + 1] = { text = (a > 0 and "⇣" or " ⇣") .. b, kind = "behind" } end
     return segs
 end
 
---- The plain-text divergence indicator (§6.3) — the concatenation of
+--- The plain-text tracking tokens (§6.3) — the concatenation of
 --- `track_segments`' texts, so the rendered (coloured) and plain (selection/
---- cursor) forms stay byte-identical. "" when in sync or untracked. Pure.
+--- cursor) forms stay byte-identical. "" when in sync with a matching upstream,
+--- or untracked. Pure.
 ---@param track Upstream?
+---@param icon string?  `icons.upstream` (default "→")
 ---@return string
-function M.track_label(track)
+function M.track_label(track, icon)
     local s = ""
-    for _, seg in ipairs(M.track_segments(track)) do s = s .. seg.text end
+    for _, seg in ipairs(M.track_segments(track, icon)) do s = s .. seg.text end
     return s
 end
 
@@ -102,7 +156,7 @@ end
 ---@field name string
 ---@field has_local boolean
 ---@field remotes string[]
----@field track? Upstream   the local branch's upstream divergence, if it tracks one
+---@field track? Upstream   the local branch's upstream (divergence + match, §6.3), if it tracks one
 ---@field current? boolean  the branch HEAD is on — drawn `(HEAD → name …)`, first
 ---@param refs Ref[]?
 ---@param head_branch? string  the current branch, when the head ref does not name it
@@ -155,6 +209,20 @@ function M.group_refs(refs, head_branch)
         if by_name[short] ~= current then branches[#branches + 1] = by_name[short] end
     end
     return { head = head, current = current, branches = branches, tags = tags, worktrees = worktrees }
+end
+
+--- The commit view's tracking entries (§11.2) before the probe: one per local
+--- branch on the commit, in decoration order (`group_refs`, HEAD's branch first),
+--- carrying its cached upstream. Remote-only groups, tags and worktree labels get
+--- none. Pure.
+---@param refs Ref[]?
+---@return TrackingEntry[]
+function M.tracking_entries(refs)
+    local out = {}
+    for _, g in ipairs(M.group_refs(refs).branches) do
+        if g.has_local then out[#out + 1] = { branch = g.name, upstream = g.track } end
+    end
+    return out
 end
 
 --- The text HEAD's label opens with on a branch (§6): `(HEAD → name …)`.

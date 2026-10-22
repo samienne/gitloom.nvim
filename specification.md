@@ -28,9 +28,11 @@ gitloom never stages, commits or rewrites history by itself. The exceptions to
 an otherwise read-only view are actions the user explicitly picks: **checkout**
 (§10.4.1), which only moves HEAD and the working tree; **checkout & examine**
 (§10.4.2), which may also **stash** the uncommitted changes (after asking) and
-re-apply them on Return; **fetch** / **pull** from the command palette (§17); and
+re-apply them on Return; **fetch** / **pull** from the command palette (§17);
 the palette's **branch sync** (§17.2): **fast-forward** a branch to its upstream,
-or **reset** it to its upstream. Reset is the one action gitloom offers that can
+or **reset** it to its upstream; and the palette's **set / unset upstream**
+(§17.2), which only rewrites a branch's tracking configuration
+(`branch.<b>.remote` / `merge`) — no ref, commit or file. Reset is the one action gitloom offers that can
 **discard work** (local commits, uncommitted changes to tracked files), so it
 always asks first and says what would be lost.
 The view-transformation features in §10 are the direction this is built
@@ -1670,8 +1672,10 @@ selection and the cursor parking (§2) all measure the label as drawn; packed
 marker labels (§10.4) and the context panes' labels (§6.2) carry it too. It
 follows the pin set live (`P`, the dialog §10.6.1, a resync), and
 `icons.pin = ""` turns it off. A local branch that **tracks an
-upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`) — see
-§6.3.
+upstream** also carries a terse divergence indicator (`⇡N⇣M` / `gone`), and —
+when that upstream is not the same-named branch on its remote — the upstream
+spelled out before it (`→origin/dev ⇡4⇣6`) — see §6.3. Note the `↑remote,…` list
+is *which same-named remotes sit at this commit*, not *what the branch tracks*.
 
 **Expanded marker.** A label whose ref is **expanded** opens with the
 **expanded icon** (`icons.expanded`, default `▾`, §8) inside its bracket, after
@@ -1753,7 +1757,8 @@ Three things keep their own highlight on every label: the **HEAD marker** (a
 detached `HEAD` label, and the `HEAD → ` prefix of the current branch's label) stays
 in `palette.head`, even though HEAD's node glyph is itself drawn in `palette.head`
 (§5.3) — the branch name after the arrow takes the lane colour when it owns; the
-upstream divergence tokens keep `palette.track` (§6.3); and a ref carrying its own
+upstream tracking tokens — the spelled-out upstream and the divergence — keep
+`palette.track` (§6.3); and a ref carrying its own
 colour (a submodule pointer mark, §11.7.6) keeps it. The `h`/`l`-**selected** label
 (§2) still draws in `palette.selected`. On a **packed marker row** (§10.4) each
 marker is its own node, with its own owner among its labels and *that marker's* node
@@ -2045,10 +2050,16 @@ yet read from the options.)
 A local branch may **track an upstream** — a remote-tracking ref configured as
 its `@{upstream}` (`branch.<name>.remote` / `merge`). gitloom reads this
 relationship from git directly (`for-each-ref %(upstream:short)`,
-`%(upstream)` — the full refname, which the branch sync runs against, §17.2 — and
-`%(upstream:track)`); it does **not** infer it from a shared short name (a branch
+`%(upstream)` — the full refname, which the branch sync runs against, §17.2 —
+`%(upstream:remotename)` / `%(upstream:remoteref)` — the configured remote and
+the branch on it, `branch.<name>.remote` / `merge` — and `%(upstream:track)`); it
+does **not** infer it from a shared short name (a branch
 named `x` and a remote `r/x` are not assumed to track unless git says so), which
 keeps it correct under mirrored/many-remote setups where short names collide.
+git's configured upstream is the **source of truth** — gitloom never substitutes
+a same-named remote branch for it — but a configured upstream that is *not* the
+same-named branch is made **visible** (below), because that is the case where the
+`↑remote` list (§6) and the divergence disagree about "the" remote branch.
 
 **Divergence indicator.** A tracked local branch carries a terse indicator after
 its name in the ref decoration:
@@ -2066,6 +2077,52 @@ remotes also at this commit, `(master ↑fork ⇡2⇣3)`. The `⇡`/`⇣`/`gone`
 colored by `palette.track` (§8). The indicator is part of the branch decoration
 (it is not separately selectable), so the rendered text and the selection/cursor
 target stay byte-identical (§2).
+
+**Non-matching upstream — spelled out.** The upstream **matches** when the branch
+it names on its remote is the local branch's own name
+(`%(upstream:remoteref)` = `refs/heads/<name>`); a local upstream
+(`branch.<name>.remote = .`) never matches. A matching upstream renders exactly as
+above — the bare `↑origin` already says it. A **non-matching** upstream is spelled
+out as one more token, ` →<upstream>` (the glyph is `icons.upstream`, §8), placed **after** the `↑remote,…` list and
+**directly before** the divergence indicator it qualifies:
+
+- `(enne/standard-effect →origin/dev ⇡4⇣6)` — tracks `origin/dev`, 4 ahead, 6
+  behind it;
+- `(enne/standard-effect ↑origin →origin/dev ⇡4⇣6)` — the same, while
+  `origin/enne/standard-effect` also sits at this commit (the `↑origin` list,
+  §6);
+- `(feature →origin/dev)` — in sync with a non-matching upstream (the token stays:
+  the mismatch is the news, not the counts);
+- `(feature →origin/dev gone)` — its non-matching upstream was deleted;
+- `(feature →./dev ⇡2)` — tracks the **local** branch `dev`, written in git's own
+  `remote = .` notation so a local upstream is told apart from a remote one at a
+  glance.
+
+`<upstream>` is `%(upstream:short)` (with `./` prefixed for a local upstream). The
+glyph is deliberately not `↑`: `↑` lists same-named remotes *at this commit*, `→`
+names *what the branch tracks*, so the two never read as one list.
+`icons.upstream = ""` drops the glyph, leaving the bare name (the token itself is
+not optional). The
+token is part of the branch decoration exactly like the indicator — not separately
+selectable, counted by the ref width budget and the `+N` overflow, identical in
+every label mode (§6.1), on packed marker rows (§10.4), in the context panes
+(§6.2) and in the `<leader>b` ref picker — and is coloured `palette.track.upstream`
+(§8). It does not take the lane colour when the label owns (§6, like the divergence
+tokens) and dims with the row (§12.2).
+
+**Same-named remote branch — warning.** When the upstream does not match **and** a
+remote-tracking branch of the local branch's own name exists on some remote
+(`refs/remotes/<r>/<name>` for any remote `r` — `r` being the remote-tracking
+ref's first name component, as for the `↑remote` list, §6 — read from the refs
+already loaded, so it holds from the first frame, before the remote list arrives,
+with no extra query; a remote's `HEAD` symref never counts), the spelled upstream token is drawn in `palette.track.mismatch` instead
+(default the highlight group `GitloomTrackMismatch`, defined with `default = true`
+linked to `DiagnosticWarn`, §8). That is the shape where a reader most likely
+expects the branch to track `<r>/<name>` and the counts silently refer to another
+branch; the palette then offers a one-step **Track `<r>/<name>`** (§17.2). The
+text is unchanged — only the colour warns — so selection and cursor targets stay
+byte-identical. Without true colour or with a colourscheme that clears the group,
+the spelled-out name alone still carries the information.
 
 **Computed against the last fetch.** The ahead/behind counts are git's own,
 computed against the **local remote-tracking ref** — i.e. the remote's state *as
@@ -2133,7 +2190,11 @@ Endpoint     = Commit | "index" | "worktree"
   highlight for the commit view's diff action label (default `Special`; §11.5);
   `track`, a sub-table of highlight groups for the upstream divergence indicator
   (§6.3): `ahead`, `behind`, `gone` — the `⇡N` / `⇣N` / `gone` tokens (defaults
-  `Added`, `WarningMsg`, `Comment`); and `dim`, the
+  `Added`, `WarningMsg`, `Comment`) — plus `upstream`, the spelled-out
+  non-matching upstream `→<upstream>` (default `Comment`, the `palette.remote`
+  default), and `mismatch`, that token when a same-named remote branch also
+  exists (default `GitloomTrackMismatch`, defined with `default = true` linked to
+  `DiagnosticWarn`); and `dim`, the
   blend factor (`0`–`1`) toward the window background used to de-emphasise
   out-of-cone rows and lanes (§12; default `0.45`; higher is more muted). On
   terminals without true colour, dimming falls back to a flat `NonText`
@@ -2150,8 +2211,10 @@ Endpoint     = Commit | "index" | "worktree"
 - `branches` — ref argument(s) for `git log` (default `--all`).
 - `icons` — glyph overrides: `merge` (the folded merge marker, §5.3; unset by
   default), `head` (HEAD's node, §5.3; default `●`), `pin` (the pinned-anchor
-  label icon, §6; default `⚲`) and `expanded` (the expanded-ref label icon, §6;
-  default `▾`). `""` turns `head` / `pin` / `expanded` off.
+  label icon, §6; default `⚲`), `expanded` (the expanded-ref label icon, §6;
+  default `▾`) and `upstream` (the glyph before a spelled-out non-matching
+  upstream, §6.3; default `→`). `""` turns `head` / `pin` / `expanded` off;
+  `upstream = ""` only drops the glyph — the upstream name stays.
 - `sort_mode` — the initial **row sort mode** (§3.1): `"topo"` (default,
   gitloom's own order reproducing git's `--topo-order`), `"date"`, or `"author"`.
   Cycle live with `S`.
@@ -2248,9 +2311,11 @@ The exceptions are actions the user explicitly picks — **checkout** (§10.4.1)
 which only moves HEAD and the working tree; **checkout & examine** (§10.4.2),
 which additionally stashes uncommitted changes when the user confirms the prompt
 and re-applies them on Return; **fetch** / **pull** from the command palette
-(§17); and the palette's **branch sync** (§17.2) — fast-forward a branch to its
+(§17); the palette's **branch sync** (§17.2) — fast-forward a branch to its
 upstream, or reset it to its upstream, the latter the one action that can discard
-work and therefore always confirmed with what would be lost. What is
+work and therefore always confirmed with what would be lost; and the palette's
+**set / unset upstream** (§17.2), which changes only which upstream a branch
+tracks (its `branch.<b>.*` config). What is
 permanently out of scope is **implicit index or history mutation as a side
 effect of viewing** — gitloom never stages, unstages, commits, resets, or
 rewrites history silently while you browse.
@@ -3189,12 +3254,24 @@ graph model. The graph model (§3, §4) deliberately carries only what the graph
 needs (author, author date, subject); the richer per-commit detail (email,
 committer, full message body) is read only when a commit is actually opened, so
 the streaming path stays lean. The refs shown are the row's existing decorations
-(§6), reused from the model rather than re-queried.
+(§6), reused from the model rather than re-queried; so are each local branch's
+upstream and ahead / behind counts (§6.3) in the **tracking** lines (§11.2). The
+two tracking facts the ref read does not carry are fetched on demand alongside
+the metadata, and only when the commit carries a local branch: per local branch,
+its **push target** (`git rev-parse --symbolic-full-name <b>@{push}` — git's own
+answer for `push.default` / `remote.pushDefault` / `branch.<b>.pushRemote`, which
+gitloom does not re-implement; on failure git's `fatal:` line is kept as the
+note), and — when the upstream does not match (§6.3) and a same-named remote
+branch exists — that branch's counts
+(`git rev-list --left-right --count refs/heads/<b>...refs/remotes/<r>/<b>`). A
+failed count shows the line without counts; neither query ever blocks the view
+from rendering the rest.
 
 The diff is fetched the same way, on demand, by a second `git show --format= -p`
 for the commit, chained after the metadata fetch; the view renders once both
 arrive. The same on-demand fetch and formatter are reused by the commit-search
-preview (§15.3).
+preview (§15.3), which leaves out the tracking lines (a preview follows the
+cursor through the picker; it spawns no per-branch queries).
 
 ### 11.2 Content
 
@@ -3204,7 +3281,9 @@ configured — and the cursor is parked on it when the view opens, so `<CR>`
 it the view shows, in order:
 
 1. the full commit hash;
-2. the ref decorations on the commit (the same compact groups as §6), when any;
+2. the ref decorations on the commit (the same compact groups as §6), when any,
+   followed by the **tracking** lines of each **local branch** on the commit
+   (below), when any;
 3. the **author** — name, email, and date;
 4. the **committer** — name, email, and date — shown **only when it differs**
    from the author (the common case where they match is omitted to reduce
@@ -3218,6 +3297,34 @@ it the view shows, in order:
 The author and committer dates are shown as `git show` renders them
 (`--date=iso`); the structured `Timestamp` formatting of §6 applies to the graph
 date column, not here.
+
+**Tracking lines.** Each local branch on the commit (in its decoration order;
+remote-only groups, tags and worktree labels get none) gets one `Tracking:` field,
+at most three lines, spelling out what the compact §6.3 tokens abbreviate:
+
+```
+Refs:       (enne/standard-effect ↑origin →origin/dev ⇡4⇣6)
+Tracking:   enne/standard-effect → origin/dev  4 ahead, 6 behind
+              push: cannot resolve 'simple' push to a single destination
+              same name: origin/enne/standard-effect  in sync
+```
+
+- **First line** — `<b> → <upstream>` and its state: `N ahead`, `M behind`,
+  `N ahead, M behind`, `in sync`, or `gone`; `<b> → no upstream` when it tracks
+  none. The upstream name takes the §6.3 colours: `palette.track.upstream` when it
+  does not match, `palette.track.mismatch` when additionally a same-named remote
+  branch exists.
+- **`push:`** — the push target `@{push}` (short name), or git's reason when it
+  cannot be resolved (as above: `push.default = simple` with a non-matching
+  upstream); **omitted** when the push target is the upstream itself (the common
+  case adds no line).
+- **`same name:`** — only for a non-matching upstream, each existing
+  `<r>/<b>` (remotes in `git remote` order) with its counts relative to the local
+  branch (`3 ahead, 8 behind`, `in sync`).
+
+So a plain `main` tracking `origin/main` that pushes there is the single line
+`Tracking:   main → origin/main  in sync`. A §13.5 range view and the §11.8
+working-tree view carry no tracking lines.
 
 #### 11.2.1 Message wrapping
 
@@ -4298,7 +4405,7 @@ There is no examine entry: `<CR>` examines directly (§11). Many terminals send
 | Context | When | Row entries (§10.4) |
 |---|---|---|
 | `commit` | a plain commit row, cursor on its message, no ref selected | open diff, checkout (detached), checkout & examine (examine on HEAD's commit) |
-| `branch` | a ref selected with `h`/`l`, or a collapsed head; also a packed line **with** a marker selected | checkout, branch sync (fast-forward / reset to upstream, §17.2), collapse / expand, hide — of that branch (or that one marker) |
+| `branch` | a ref selected with `h`/`l`, or a collapsed head; also a packed line **with** a marker selected | checkout, branch sync (fast-forward / reset to upstream, §17.2), upstream (track same name / set / unset, §17.2), collapse / expand, hide — of that branch (or that one marker) |
 | `markers` | a packed line with **no** marker selected | expand / hide per marker |
 | `selection` | a §13 selection is active | the `selection` commands (below) |
 
@@ -4448,7 +4555,8 @@ entry. Since the counts are as of the last ref read, the commands re-check:
   the current branch with a dirty tree (`N` = changed paths, each counted once;
   **untracked files are never touched** by `reset --hard` and do not count); the
   reflog line whenever something is lost. When nothing is lost (strictly behind,
-  clean) the prompt is the first line alone. Immediately before running, gitloom
+  clean) the prompt is the first line alone (plus the mismatch line below, when
+  it applies). Immediately before running, gitloom
   reads the same state again; if the branch tip, the upstream tip, which branch is
   current, or the dirty count changed since the prompt, it **aborts** with a WARN
   notice and runs nothing. git refuses `branch -f` for a branch checked out in
@@ -4456,14 +4564,59 @@ entry. Since the counts are as of the last ref read, the commands re-check:
   form instead). Success notice names the old tip:
   `<b> reset to <upstream> — was <short>`.
 
+  When the upstream does **not match** (§6.3) the prompt adds, before the reflog
+  line, `origin/dev is not enne/standard-effect's same-named branch` — and, when
+  a same-named remote branch exists, `(origin/enne/standard-effect exists — see
+  Track origin/enne/standard-effect)`, on the same line — since resetting to a
+  differently named upstream is the likeliest case of resetting to the wrong
+  branch. It is shown even when nothing is lost.
+
 Neither entry touches the network, merges, rebases, commits or pushes; they run as
 §17.3 says.
 
+**Upstream.** In the same `branch` context, the same branch the sync entries act
+on (**Which branch**, above — including the remote-branch exception: a selected
+`origin/foo` whose local `foo` exists offers `foo`'s entries, labelled with `foo`)
+gets the entries that change **what it tracks**, listed after the sync entries:
+
+| Entry | Offered when | Runs |
+|---|---|---|
+| **Track `<r>/<b>`** | the upstream does not match, or there is none, **and** `refs/remotes/<r>/<b>` exists — one entry per such remote, in `git remote` order (in the remote-branch exception: just the selected one) | `git branch --set-upstream-to=refs/remotes/<r>/<b> <b>` |
+| **Set upstream of `<b>`…** | any local branch | a `vim.ui.select` over the cached **remote-tracking** branches only (no remote `HEAD` symrefs; local branches are not offered as upstreams — a local upstream set outside gitloom is still shown, §6.3, and can be unset), same-named ones first then by name, the current upstream marked `(current)`; choosing one runs `git branch --set-upstream-to=<full refname> <b>` (choosing the current one runs nothing) |
+| **Unset upstream of `<b>`** | the branch has an upstream (`gone` included) | `git branch --unset-upstream <b>` |
+
+So for the case §6.3 warns about, **Track `origin/enne/standard-effect`** is one
+step and comes *before* any Reset in the list (it is placed ahead of the sync
+entries only in that case — the mismatch warning is the reason to show it first).
+A matching upstream never gets a Track entry (it already tracks that branch).
+When the repository has no remote-tracking branches, **Set upstream of `<b>`…**
+shows a WARN notice (`no remote-tracking branches to track`) instead of an empty
+picker and runs nothing.
+
+- **Visibility from cached state only**, as for the sync: the mismatch, the
+  existing same-named branches and the remote-tracking list come from the refs and
+  remotes already read (§6.3, §17.1); the palette spawns nothing to build them.
+- **No confirmation.** These rewrite only `branch.<b>.remote` / `merge` in the
+  repository config — no ref, commit, index or file — and the previous upstream is
+  named in the success notice, so the change is one palette step to undo:
+  `<b> now tracks <r>/<b> (was origin/dev)` / `(had no upstream)`, and
+  `<b> no longer tracks origin/dev`. Like the sync they need no network and never
+  fetch: the new counts are against the last fetch (§6.3).
+- **Run as §17.3 says** — asynchronously, in the repository root, one at a time
+  with the other palette jobs, git's error at ERROR on failure (e.g. a ref that
+  vanished since the last read: `the requested upstream branch … does not exist`),
+  and the in-place resync on success, which re-reads the refs so the label, its
+  colour and the counts (§6.3) follow the new upstream.
+
+`push.default`, `remote.pushDefault` and `branch.<b>.pushRemote` are **not**
+changed by any of these: the push target is shown (§11.2) but never configured —
+gitloom does not push (§9).
+
 ### 17.3 How fetch, pull and the branch sync run
 
-Everything below applies to the branch sync entries too (fast-forward, reset),
-except the `Fetching…` notice and the environment, which only the network commands
-need.
+Everything below applies to the branch sync entries (fast-forward, reset) and the
+upstream entries (track, set, unset, §17.2) too, except the `Fetching…` notice and
+the environment, which only the network commands need.
 
 - **Asynchronously** — the job runs in the background and the graph stays
   usable; a `Fetching…` / `Pulling…` notice shows when it starts — or, under the

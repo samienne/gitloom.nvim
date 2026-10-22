@@ -321,15 +321,18 @@ local SUBMODULE_LOG_FMT = "%H%x1f%P%x1f%an%x1f%at%x1f%ai%x1f%ct%x1f%s%x1f%d"
 
 -- `git for-each-ref` format shared by the initial ref read and the resync (§3.2,
 -- §6.3). Space-separated like the original (for-each-ref does NOT interpret a
--- `%x1f` hex escape — it would print it literally). The first four atoms never
+-- `%x1f` hex escape — it would print it literally). The first seven atoms never
 -- contain a space (object name, refname, annotated-tag deref, upstream short
--- name, upstream full refname), so `%(upstream:track)` — the one field with
--- spaces ("ahead N, behind M") — is placed **last** and parsed as everything
--- from field 6 on. The upstream atoms populate only for a local branch that
--- tracks an upstream; the full refname is what the branch sync runs against
--- (§17.2), unambiguous where a short name might not be.
+-- name, upstream full refname, upstream remote — `.` for a local upstream — and
+-- the branch on it), so `%(upstream:track)` — the one field with spaces ("ahead
+-- N, behind M") — is placed **last** and parsed as everything from field 8 on.
+-- Empty atoms still leave their separator, so the split is positional. The
+-- upstream atoms populate only for a local branch that tracks an upstream; the
+-- full refname is what the branch sync runs against (§17.2), unambiguous where a
+-- short name might not be; remote + branch decide whether it matches (§6.3).
 local REF_FMT =
-    "%(objectname) %(refname) %(*objectname) %(upstream:short) %(upstream) %(upstream:track,nobracket)"
+    "%(objectname) %(refname) %(*objectname) %(upstream:short) %(upstream)"
+    .. " %(upstream:remotename) %(upstream:remoteref) %(upstream:track,nobracket)"
 
 -- Parse one REF_FMT line into `{ kind, name, hash, upstream? }`, or nil to skip
 -- (classify_ref returns nil — a remote HEAD symref, etc.). The upstream is set
@@ -342,26 +345,30 @@ local function parse_ref_line(line)
     local parts = vim.split(line, " ")
     local hash, refname, deref, up_short = parts[1], parts[2], parts[3], parts[4]
     local up_ref = (parts[5] and parts[5] ~= "") and parts[5] or nil
-    local track = table.concat(parts, " ", 6) -- field 6..end (may hold spaces); "" if none
+    local up_remote = (parts[6] and parts[6] ~= "") and parts[6] or nil
+    local up_merge = (parts[7] and parts[7] ~= "") and parts[7] or nil
+    local track = table.concat(parts, " ", 8) -- field 8..end (may hold spaces); "" if none
     local kind, name = classify_ref(refname or "")
     if not (kind and name and hash) then return nil end
     local target = (deref and deref ~= "") and deref or hash
     local upstream = nil
     if up_short and up_short ~= "" then
-        if track == "gone" then
-            upstream = { short = up_short, ref = up_ref, ahead = 0, behind = 0, gone = true }
-        else
-            upstream = {
-                short = up_short,
-                ref = up_ref,
-                gone = false,
-                ahead = tonumber((track or ""):match("ahead (%d+)")) or 0,
-                behind = tonumber((track or ""):match("behind (%d+)")) or 0,
-            }
-        end
+        local gone = track == "gone"
+        upstream = {
+            short = up_short,
+            ref = up_ref,
+            remote = up_remote,
+            merge = up_merge,
+            match = refs.upstream_matches(name, up_remote, up_merge),
+            gone = gone,
+            ahead = (not gone) and tonumber(track:match("ahead (%d+)")) or 0,
+            behind = (not gone) and tonumber(track:match("behind (%d+)")) or 0,
+        }
     end
     return { kind = kind, name = name, hash = target, upstream = upstream }
 end
+
+M._internal.parse_ref_line = parse_ref_line -- the REF_FMT parser (§6.3); refs_spec
 
 --- Read the linked worktrees' HEADs as refs (spec §3.2). `taken` is the set of
 --- commit hashes the refs already read point at — the skip-if-already-referenced
@@ -390,14 +397,14 @@ function M.fetch_refs(repo)
     local taken = {}
     return run({ "git", "for-each-ref", "--format=" .. REF_FMT,
         "refs/heads", "refs/remotes", "refs/tags" }).next(function(res)
+        local parsed = {}
         for _, line in ipairs(lines_of(res.out)) do
-            if line ~= "" then
-                local r = parse_ref_line(line)
-                if r then
-                    add_ref(repo, r.name, r.kind, r.hash, r.upstream)
-                    taken[r.hash] = true
-                end
-            end
+            if line ~= "" then parsed[#parsed + 1] = parse_ref_line(line) end
+        end
+        refs.mark_same_named(parsed) -- the §6.3 warning
+        for _, r in ipairs(parsed) do
+            add_ref(repo, r.name, r.kind, r.hash, r.upstream)
+            taken[r.hash] = true
         end
         return read_worktree_refs(taken).next(function(wts)
             for _, w in ipairs(wts) do add_ref(repo, w.name, w.kind, w.hash) end
@@ -473,6 +480,7 @@ function M.fetch_ref_entries()
                 end
             end
         end
+        refs.mark_same_named(entries) -- the §6.3 warning
         -- Chain HEAD's symbolic-ref so the head binding can be reconciled in the
         -- same pass. When detached (no branch), chain `rev-parse HEAD` so the
         -- checked-out commit can still be marked (§3.2).
@@ -1123,6 +1131,61 @@ function M.sync_probe(t, root)
                 end)
             end)
     end)
+end
+
+--- The commit view's on-demand tracking facts (§11.1), read in `root` for each
+--- entry (one at a time; the caller renders without waiting): the push target
+--- (`git rev-parse --symbolic-full-name <b>@{push}` → `push`, or git's `fatal:`
+--- reason, prefix dropped → `push_err`), and — for a non-matching upstream — the
+--- counts against each same-named remote branch (`git rev-list --left-right
+--- --count refs/heads/<b>...refs/remotes/<r>/<b>` → `same`; nil counts when the
+--- count fails). Fills the entries in place and resolves them.
+---@param entries TrackingEntry[]
+---@param root string?
+---@return table  -- future resolving TrackingEntry[]
+function M.tracking_probe(entries, root)
+    local function step(i)
+        local e = entries[i]
+        if not e then
+            local future, promise = make_future()
+            promise.resolve(entries)
+            return future
+        end
+        local bref = "refs/heads/" .. e.branch
+        -- `<b>@{push}` takes the branch's short name: git rejects
+        -- `refs/heads/<b>@{push}` ("no such branch").
+        return git_code({ "git", "rev-parse", "--symbolic-full-name", e.branch .. "@{push}" }, root)
+            .next(function(pr)
+                local out = trim_ws(pr.out or "")
+                if pr.code == 0 and out ~= "" then
+                    e.push = out
+                else
+                    local msg = (pr.err or ""):match("[^\n]+") or ""
+                    msg = trim_ws((msg:gsub("^fatal: ", "")))
+                    e.push_err = msg ~= "" and msg or ("git rev-parse exited " .. tostring(pr.code))
+                end
+                local u = e.upstream
+                local remotes = (u and u.match == false and u.same) or {}
+                local same = {}
+                local function count(j)
+                    local r = remotes[j]
+                    if not r then
+                        if #remotes > 0 then e.same = same end
+                        return step(i + 1)
+                    end
+                    return git_code({ "git", "rev-list", "--left-right", "--count",
+                        bref .. "...refs/remotes/" .. r .. "/" .. e.branch }, root).next(function(cr)
+                        local a, b = trim_ws(cr.out or ""):match("^(%d+)%s+(%d+)$")
+                        same[#same + 1] = { remote = r,
+                            ahead = cr.code == 0 and tonumber(a) or nil,
+                            behind = cr.code == 0 and tonumber(b) or nil }
+                        return count(j + 1)
+                    end)
+                end
+                return count(1)
+            end)
+    end
+    return step(1)
 end
 
 --- The commit `stash@{0}` names now, or nil when the stash is empty.

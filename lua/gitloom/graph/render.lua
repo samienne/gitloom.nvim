@@ -199,6 +199,7 @@ end
 ---@field icon? string  the label prefix (default "⚲"; "" turns it off)
 ---@field expanded? table<string, boolean>  expanded ref ids (§6); nil = none
 ---@field expanded_icon? string  their prefix, after the pin icon (default "▾"; "" turns it off)
+---@field upstream_icon? string  the glyph before a spelled-out upstream (§6.3; default "→")
 
 --- The expanded icon (§6), or "" when `marks` has none.
 ---@param pins PinMarks?
@@ -268,7 +269,7 @@ function M.decoration_texts(commit, head_branch, pins)
         if #b.remotes > 0 then
             t = t .. " ↑" .. table.concat(b.remotes, ",")
         end
-        out[#out + 1] = t .. git.track_label(b.track) .. ")"
+        out[#out + 1] = t .. git.track_label(b.track, pins and pins.upstream_icon) .. ")"
     end
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = "[" .. M.name_pin(pins, tag) .. tag .. "]"
@@ -292,7 +293,10 @@ end
 ---@param commit { refs: Ref[] }?
 ---@param head_branch string?  -- the current branch (coloured as HEAD); nil when detached
 ---@param pins? PinMarks  the pin set + icon (§6/§10.6); nil = no pin icons
----@return { text: string, kind: string, key: string, hl: string?, arrow: integer[]? }[]
+--- A tracked branch's spelled-out non-matching upstream (§6.3) is part of its
+--- label text; `up` is that token's byte span (1-based, inclusive) and `up_kind`
+--- its `palette.track` key ("upstream"|"mismatch"), so the pane colours it apart.
+---@return { text: string, kind: string, key: string, hl: string?, arrow: integer[]?, up: integer[]?, up_kind: string? }[]
 function M.pane_labels(commit, head_branch, pins)
     local g = git.group_refs(commit and commit.refs or {}, head_branch)
     -- Per-ref colour override (§11.7.6): a tag with `hl` (a pointer mark) keeps
@@ -307,11 +311,21 @@ function M.pane_labels(commit, head_branch, pins)
     for _, b in ipairs(g.branches) do
         local t = "(" .. (b.current and git.HEAD_ARROW or "") .. M.group_pin(pins, b) .. b.name
         if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
+        -- Only the spelled-out upstream (§6.3) — the panes carry no divergence.
+        local up = git.track_segments(b.track, pins and pins.upstream_icon)[1]
+        local up_span = nil
+        if up and (up.kind == "upstream" or up.kind == "mismatch") then
+            up_span = { #t + 1, #t + #up.text }
+            t = t .. up.text
+        else
+            up = nil
+        end
         -- The current branch takes the HEAD colour; others their own kind. `arrow`
         -- is the `HEAD → ` prefix's byte span (1-based, inclusive): it keeps the
         -- HEAD colour when the rest takes the lane colour (§6 "Label colour").
         out[#out + 1] = { text = t .. ")", kind = b.current and "head" or (b.has_local and "branch" or "remote"),
-            key = "b:" .. b.name, arrow = b.current and { 2, 1 + #git.HEAD_ARROW } or nil }
+            key = "b:" .. b.name, arrow = b.current and { 2, 1 + #git.HEAD_ARROW } or nil,
+            up = up_span, up_kind = up and up.kind or nil }
     end
     for _, tag in ipairs(g.tags) do
         out[#out + 1] = { text = "[" .. M.name_pin(pins, tag) .. tag .. "]", kind = "tag", key = "t:" .. tag,
@@ -1082,8 +1096,8 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- overflow never hides it: the **current branch** is drawn `(HEAD → name …)` in
     -- the HEAD colour (palette.head) instead of the branch colour ("you are here");
     -- a detached HEAD (head marker present, no current branch) a bare `HEAD`.
-    -- A tracked local branch appends its upstream divergence "⇡N⇣M"/"gone" (§6.3),
-    -- each token coloured by palette.track.
+    -- A tracked local branch appends its non-matching upstream "→origin/dev" and
+    -- its divergence "⇡N⇣M"/"gone" (§6.3), each token coloured by palette.track.
     -- The `selected`-th decoration (branches then tags) is drawn with
     -- palette.selected (§2). The listview packs these against the right edge
     -- with a width budget and a "+N" overflow marker.
@@ -1121,11 +1135,12 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 if #b.remotes > 0 then
                     segs[#segs + 1] = rh(" ↑" .. table.concat(b.remotes, ","), M.label_hl(opts, blane, palette.remote))
                 end
-                -- Upstream divergence (§6.3): each ⇡/⇣/gone token coloured by kind
-                -- via palette.track; the concatenated text equals git.track_label
+                -- Upstream tracking (§6.3): the spelled-out non-matching upstream
+                -- and each ⇡/⇣/gone token, coloured by kind via palette.track (never
+                -- the lane colour); the concatenated text equals git.track_label
                 -- (used by decoration_texts), so the selection target stays aligned.
                 local track = palette.track or {}
-                for _, seg in ipairs(git.track_segments(b.track)) do
+                for _, seg in ipairs(git.track_segments(b.track, pins and pins.upstream_icon)) do
                     segs[#segs + 1] = rh(seg.text, track[seg.kind])
                 end
                 segs[#segs + 1] = rh(")", name_hl)

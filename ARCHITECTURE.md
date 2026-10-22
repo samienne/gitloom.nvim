@@ -674,15 +674,22 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
 ### Git I/O
 
 - `fetch_refs(repo)` — `git for-each-ref --format="%(objectname) %(refname)
-  %(*objectname) %(upstream:short) %(upstream:track,nobracket)" refs/heads
+  %(*objectname) %(upstream:short) %(upstream) %(upstream:remotename)
+  %(upstream:remoteref) %(upstream:track,nobracket)" refs/heads
   refs/remotes refs/tags` (the deref hash resolves annotated tags). Space-
   separated, **not** `%x1f` (for-each-ref does not interpret that hex escape); the
-  first four atoms are space-free, so the one field with spaces —
-  `%(upstream:track)`, "ahead N, behind M" — is **last** and parsed from field 5
+  atoms before it are space-free (empty for a ref without an upstream, so fields
+  are split on single spaces, positionally), so the one field with spaces —
+  `%(upstream:track)`, "ahead N, behind M" — is **last** and parsed from field 8
   on. `parse_ref_line` turns the upstream atoms into a local branch's
-  `Ref.upstream` (`{ short, ahead, behind, gone }`, §6.3) — only when git reports a
+  `Ref.upstream` (`{ short, ref, remote, merge, ahead, behind, gone }`, §6.3) —
+  only when git reports a
   tracked upstream, so divergence comes from real tracking config, never a shared
-  short name. `fetch_ref_entries` (the resync read) carries the same upstream so
+  short name. `remote` / `merge` (`%(upstream:remotename)` / `remoteref`) decide
+  the **match** (`merge == "refs/heads/" .. name`, never for `remote == "."`); the
+  **mismatch warning** (a same-named `refs/remotes/<r>/<name>` exists) is derived
+  at grouping time from the refs already in the model, not read here.
+  `fetch_ref_entries` (the resync read) carries the same upstream so
   `R` refreshes the indicator. Both then chain `read_worktree_refs` (below), so
   the ref set the open path builds and the one the resync reconciles are the same.
 - `read_worktree_refs(taken)` — `git worktree list --porcelain`, parsed by the
@@ -732,6 +739,17 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
 - `fetch_commit_diff(hash)` — `git show --format= -p <hash>`, buffered and
   resolved as the raw patch string. The commit view's diff source (§11.3),
   fetched on demand and chained after `fetch_commit_detail`.
+- **Commit-view tracking probe** (`tracking_probe(entries, root)`, §11.1 / §11.2;
+  entries from the pure `tracking_entries(commit.refs)`, rendered by
+  `format_tracking`) — for each local branch on the
+  opened commit, `git rev-parse --symbolic-full-name <b>@{push}` (a failure keeps
+  git's `fatal:` line as the note) and, for a non-matching upstream, one
+  `git rev-list --left-right --count` per existing same-named remote branch. Run
+  through `spawn` alongside `fetch_commit_detail`, results merged into the
+  formatter's input; a failure degrades the line, never the view. The view
+  renders the first lines from the cached upstream at once and re-renders in
+  place when the probe answers (`build_commit_rows`' `track_edge` / `track_n`
+  keep the cursor on the same content). Not run for the §15.3 preview.
 - **Working-tree state** (specification.md §3.3) — small porcelain queries that
   run *after* the commit stream (so HEAD is in the model). `fetch_worktree_state`
   resolves `{ head_hash (rev-parse HEAD), status (parse_status of git status
@@ -2324,6 +2342,16 @@ A fast-forward runs at once; a reset `vim.ui.select`s `{ "Cancel", "Reset" }` wi
 `sync_stale(t, before, after)` names a change. Both run through `run_checkout`
 (`git_code` in `repo.root`); success → `ff_done` / `reset_done` at INFO +
 `resync(false)`, failure → `ctx:git_failure` at ERROR.
+
+**Upstream entries** (specification.md §17.2) — *Track `<r>/<b>`* / *Set upstream
+of `<b>`…* / *Unset upstream of `<b>`*, built by the same pure module from the
+same target ref (h/l selection, else `sole_local_ref`): `upstream_offers(ref,
+refs, remotes)` decides them from the cached `Ref.upstream` match and the cached
+remote-tracking refs, and `set_upstream_command(b, full_ref)` /
+`unset_upstream_command(b)` build the argv. The ops run like a fast-forward — claim
+`ctx.remote_busy`, `run_checkout` in `repo.root`, no prompt, success notice naming
+the previous upstream + `resync(false)` — so no new run path and no new
+`window.lua` module local (the glue is a `GRAPH_HELPERS` method).
 
 ### Persisted view state
 

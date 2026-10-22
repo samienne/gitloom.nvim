@@ -298,7 +298,16 @@ Counts are git's own, computed against the **last-fetched** remote state (gitloo
 never fetches on its own; **Fetch** from the `<C-Space>` palette, or `git fetch`
 then `R`, refreshes them). The upstream is read from
 git's tracking config, not a shared name, so it stays correct across mirrored or
-many-remote setups. Colors are configurable via `palette.track`.
+many-remote setups. When a branch tracks something **other than its same-named
+remote branch**, the label spells the upstream out before the counts —
+`(enne/standard-effect →origin/dev ⇡4⇣6)` (a local upstream reads `→./dev`; the glyph is `icons.upstream`) —
+and draws it in a warning colour when a same-named remote branch
+(`origin/enne/standard-effect`) also exists, since the counts then are not
+against the branch you probably expect. (The bare `↑origin` list means "the
+same-named `origin` branch is at this commit", not "tracks origin".) The commit
+view (`<CR>`) spells it all out per local branch: upstream and counts, the push
+target (or why git cannot resolve one), and any same-named remote branch.
+Colors are configurable via `palette.track`.
 
 **Command palette.** `<C-Space>` (or `<C-@>`, which many terminals send for it)
 opens gitloom's single action menu. Its first entries are the **context**: the
@@ -366,6 +375,20 @@ offers, based on its `⇡⇣` counts:
 A branch checked out in another worktree is refused by git for both. They run like
 fetch / pull below (one at a time, then a resync); the counts are against the last
 fetch, so **Fetch** first to sync with the remote's current state.
+
+**Upstream.** The same branch also gets entries that change what it tracks — only
+its tracking config, no refs or files, so there is no prompt and the notice names
+the previous upstream (`foo now tracks origin/foo (was origin/dev)`):
+
+- **Track `origin/foo`** — when `foo` tracks a differently named branch (or
+  nothing) and `origin/foo` exists; listed *before* the sync entries when the label
+  warns about the mismatch. `git branch --set-upstream-to=origin/foo foo`.
+- **Set upstream of `foo`…** — pick any remote-tracking branch (same-named first;
+  local branches are not offered).
+- **Unset upstream of `foo`** — `git branch --unset-upstream foo`.
+
+gitloom never changes push settings (`push.default` etc.); the commit view only
+shows where a push would go.
 
 **Checkout & examine.** From the `<C-Space>` palette — a commit's entry (on its
 message) or, with a `V` selection active, the selection's: gitloom checks the newest
@@ -565,8 +588,11 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         -- colours (foreground only; darker muted green/red by default). base = nil
         -- means "use lane 1's colour" (tracks[1]).
         submodule = { new = "GitloomSubmoduleAdd", old = "GitloomSubmoduleDel", base = nil },
-        -- upstream divergence indicator (§6.3): the ⇡N / ⇣N / gone tokens.
-        track = { ahead = "Added", behind = "WarningMsg", gone = "Comment" },
+        -- upstream tracking (§6.3): the ⇡N / ⇣N / gone tokens; `upstream` the
+        -- spelled-out non-matching upstream (→origin/dev), `mismatch` that token
+        -- when a same-named remote branch also exists.
+        track = { ahead = "Added", behind = "WarningMsg", gone = "Comment",
+                  upstream = "Comment", mismatch = "GitloomTrackMismatch" },
 
         tracks = { "Constant", "String", "Number", "Function", "DiagnosticInfo", "Identifier" },
     },
@@ -580,6 +606,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         head = "●",          -- HEAD's node marker (§5.3); "" = off
         pin = "⚲",           -- pinned-anchor label icon (§6/§10.6); "" = off
         expanded = "▾",      -- label icon of a branch you opened (§6); "" = off
+        upstream = "→",      -- before a non-matching upstream, →origin/dev (§6.3)
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     layout_policy = "compact", -- lane placement (§5.6); cycle with C:

@@ -813,10 +813,12 @@ end
 ---   root?         string   parent repo root; enables submodule commit links
 ---   action?       boolean  include the diff action label (§11.5); default true
 ---   width?        integer  the message wrap width (§11.2.1); nil = as is
+---   tracking?     TrackingEntry[]  the §11.2 tracking lines (single commit only);
+---                          nil = none (the §15.3 preview never passes them)
 ---@param opts GraphOptions
 ---@param spec table
 ---@return table[] rows
----@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch?, meta_end }
+---@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch?, meta_end, track_edge, track_n }
 local function build_commit_rows(opts, spec)
     local commit, range, root = spec.commit, spec.range, spec.root
     local sub_results = spec.sub_results or {}
@@ -834,19 +836,24 @@ local function build_commit_rows(opts, spec)
     end
     -- Metadata: the selected-commit list in range mode (§13.5), the working-tree
     -- state header for a virtual commit (§11.8), else the single commit's detail.
-    local meta_rows
+    local meta_rows, track_at, track_n = nil, 0, 0
     if range then
         meta_rows = format_range_detail(range.commits, opts.palette)
     elseif commit and commit.virtual then
         meta_rows = format_worktree_detail(commit, opts.palette)
     else
         ---@cast commit Commit
-        meta_rows = format_commit_detail(parse_show(spec.meta), {
-            decorations = decoration_texts(commit),
+        meta_rows, track_at, track_n = format_commit_detail(parse_show(spec.meta), {
+            -- No pin marks in the commit view; only the §6.3 upstream glyph.
+            decorations = decoration_texts(commit, nil, { set = {}, upstream_icon = opts.icons and opts.icons.upstream }),
             palette = opts.palette,
             width = spec.width, -- the message wrap width (§11.2.1)
+            tracking = spec.tracking, -- §11.2; nil in the §15.3 preview
         })
     end
+    -- The row the tracking lines follow: an in-place re-render that adds them
+    -- (the §11.1 probe answering) shifts only what lies below it.
+    local track_edge = #rows + track_at
     for _, r in ipairs(meta_rows) do
         rows[#rows + 1] = r
     end
@@ -933,6 +940,8 @@ local function build_commit_rows(opts, spec)
         diff_start = diff_start,
         diff_buf_to_patch = diff_buf_to_patch,
         meta_end = meta_end,
+        track_edge = track_edge,
+        track_n = track_n,
     }
 end
 -- Exposed on the module so the search picker (§15.3) can reach it directly.
@@ -1007,6 +1016,15 @@ local function open_commit_view(opts, commit, range, root)
     -- filled asynchronously after the first render and triggering an in-place
     -- re-render. Read by render() when it splices each change block.
     local sub_results = {}
+    -- Tracking lines (§11.2): one entry per local branch on a single real commit
+    -- (none for a range, §13.5, or a working-tree node, §11.8), first from the
+    -- cached upstream; the §11.1 probe fills push / same-name in place and
+    -- triggers an in-place re-render. nil = no tracking lines.
+    local tracking = nil
+    if not range and commit and not commit.virtual then
+        tracking = git.tracking_entries(commit.refs)
+        if #tracking == 0 then tracking = nil end
+    end
 
     local function set_lines(lines)
         if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -1307,7 +1325,7 @@ local function open_commit_view(opts, commit, range, root)
     -- filetype=diff, so the metadata header stays clean §11.3). While laying out
     -- the rows, record each diffstat file row -> its diff section line (§11.4).
     -- The last render's inputs + wrap width + metadata end, for a re-wrap.
-    ---@type { meta: string?, diff: string?, width: integer?, meta_end: integer }?
+    ---@type { meta: string?, diff: string?, width: integer?, meta_end: integer, track_edge: integer, track_n: integer }?
     local last_render = nil
     local function render(meta_output, diff_output, keep_view)
         if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -1323,18 +1341,26 @@ local function open_commit_view(opts, commit, range, root)
         local rows, info = build_commit_rows(opts, {
             commit = commit, range = range, root = root,
             meta = meta_output, diff = diff_output, diff_error = diff_error,
-            sub_results = sub_results, width = width,
+            sub_results = sub_results, width = width, tracking = tracking,
         })
         -- A re-wrap moves everything below the message by the change in its line
-        -- count: keep the user on the same content (§11.2.1).
+        -- count: keep the user on the same content (§11.2.1). Tracking lines the
+        -- probe added (§11.1) likewise move everything below them.
         local prev_end = last_render and last_render.meta_end
         local delta = prev_end and (info.meta_end - prev_end) or 0
-        if saved_view and prev_end and delta ~= 0 then
-            local edge = prev_end
-            if saved_view.lnum > edge then saved_view.lnum = saved_view.lnum + delta end
-            if saved_view.topline > edge then saved_view.topline = saved_view.topline + delta end
+        local tdelta = last_render and (info.track_n - last_render.track_n) or 0
+        if saved_view and last_render then
+            local tedge = last_render.track_edge
+            for _, k in ipairs({ "lnum", "topline" }) do
+                if saved_view[k] > prev_end then
+                    saved_view[k] = saved_view[k] + delta
+                elseif saved_view[k] > tedge then
+                    saved_view[k] = saved_view[k] + tdelta
+                end
+            end
         end
-        last_render = { meta = meta_output, diff = diff_output, width = width, meta_end = info.meta_end }
+        last_render = { meta = meta_output, diff = diff_output, width = width, meta_end = info.meta_end,
+            track_edge = info.track_edge, track_n = info.track_n }
         action_line = info.action_line
         file_jumps = info.file_jumps
         sub_jumps = info.sub_jumps
@@ -1403,6 +1429,13 @@ local function open_commit_view(opts, commit, range, root)
         end)
     else
         ---@cast commit Commit
+        -- The tracking probe (§11.1) runs alongside the fetch and never blocks
+        -- it: whichever lands second re-renders (in place, after the first).
+        if tracking then
+            git.tracking_probe(tracking, root).next(function()
+                if last_render then render(last_render.meta, last_render.diff, true) end
+            end)
+        end
         fetched = fetch_commit_detail(commit.hash).next(function(meta_output)
             return fetch_commit_diff(commit.hash).next(function(diff_output)
                 return { meta = meta_output, diff = diff_output }
@@ -1457,7 +1490,7 @@ end
 ---@field action? string  the commit-view diff action label (§11.5)
 ---@field diff? { add?: string, delete?: string, hunk?: string, header?: string }  commit-view diff colors (§11.3)
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
----@field track? { ahead?: string, behind?: string, gone?: string }  upstream divergence indicator tokens (§6.3)
+---@field track? { ahead?: string, behind?: string, gone?: string, upstream?: string, mismatch?: string }  upstream tracking tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
 ---@field counterpart_dim? number  lighter blend factor toward bg for a remote counterpart's lane colour (§5.5)
 ---@field counterpart_dim_out? number  a counterpart lane's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
@@ -1476,6 +1509,7 @@ end
 ---@field head? string  HEAD's node marker (default "●"; "" off); §5.3
 ---@field pin? string   the pinned-anchor label icon (default "⚲"; "" off); §6/§10.6
 ---@field expanded? string  the expanded-ref label icon, after the pin icon (default "▾"; "" off); §6
+---@field upstream? string  the glyph before a non-matching upstream (default "→"; "" leaves the bare name); §6.3
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
@@ -1764,7 +1798,8 @@ GRAPH_HELPERS.effective_pinned = effective_pinned
 GRAPH_HELPERS.pin_marks = function(ctx)
     local icons = ctx.opts.icons
     return { set = effective_pinned(ctx), icon = icons and icons.pin,
-        expanded = ctx.view_state.expanded, expanded_icon = icons and icons.expanded }
+        expanded = ctx.view_state.expanded, expanded_icon = icons and icons.expanded,
+        upstream_icon = icons and icons.upstream }
 end
 
 -- node hash → repo.display index, and packed-head marker locations (§13.4).
@@ -2604,7 +2639,7 @@ GRAPH_HELPERS.palette = function(ctx)
     local entries = require("gitloom.graph.palette").palette_entries({
         row = row, selection = ctx.sel.active, remotes = ctx.remotes,
         remote_log = ctx.remote_log ~= nil, examine = nav.examine[repo.root], has_diff = has_diff, keys = ctx:key_registry(),
-        head = selectm.head_target(repo.refs),
+        head = selectm.head_target(repo.refs), refs = repo.refs,
         newest = sp and #sp > 0 and real_newest(sp[1]) or nil,
     })
     if #entries == 0 then return end
@@ -2664,6 +2699,8 @@ GRAPH_HELPERS.palette = function(ctx)
         elseif op == "fast_forward" or op == "reset_branch" or op == "checkout_ff"
             or op == "checkout_reset" then
             ctx:branch_sync(op, e.sync)
+        elseif op == "track" or op == "set_upstream" or op == "unset_upstream" then
+            ctx:change_upstream(op, e.upstream, e.choice)
         elseif e.marker then
             local u = units[e.marker]
             if op == "expand" then
@@ -2919,6 +2956,54 @@ GRAPH_HELPERS.branch_sync = function(ctx, op, t)
     end)
 end
 
+-- Palette upstream entries (§17.2): Track `<r>/<b>` (`choice`), Set upstream…
+-- (a `vim.ui.select` over `u.choices`; the current one runs nothing) and Unset.
+-- No confirmation — only `branch.<b>.remote` / `merge` change and the notice
+-- names the previous upstream. Run as §17.3: async in the repository root through
+-- `run_checkout` (fetch.lua's spawn), sharing `ctx.remote_busy`; failure → git's
+-- error at ERROR; success → INFO + the in-place resync (the label follows).
+GRAPH_HELPERS.change_upstream = function(ctx, op, u, choice)
+    if not u then return end
+    local function start(cmd, title, notice)
+        if ctx.remote_busy then
+            vim.notify(("gitloom: %s is still running"):format(ctx.remote_busy), vim.log.levels.WARN)
+            return
+        end
+        ctx.remote_busy = "upstream change of " .. u.branch
+        local pop = ctx.progress:start(title, { own_notices = true })
+        git.run_checkout(cmd.argv, ctx.repo.root).next(function(res)
+            vim.schedule(function()
+                ctx.remote_busy = nil
+                if res.code ~= 0 then
+                    pop:finish("failed")
+                    vim.notify(ctx:git_failure(cmd.label, res), vim.log.levels.ERROR)
+                    return
+                end
+                pop:finish("done")
+                vim.notify(notice, vim.log.levels.INFO)
+                ctx:resync(false)
+            end)
+        end)
+    end
+    if op == "unset_upstream" then
+        return start(git.unset_upstream_command(u.branch), "Unsetting upstream of " .. u.branch,
+            git.unset_upstream_done(u.branch, u.upstream))
+    end
+    local function set(c)
+        if c.current then return end
+        start(git.set_upstream_command(u.branch, c.ref), "Setting upstream of " .. u.branch,
+            git.set_upstream_done(u.branch, c.name, u.upstream))
+    end
+    if op == "track" then return choice and set(choice) end
+    local choices = u.choices or {}
+    if #choices == 0 then
+        vim.notify("gitloom: no remote-tracking branches to track", vim.log.levels.WARN)
+        return
+    end
+    vim.ui.select(choices, { prompt = ("Set upstream of %s"):format(u.branch),
+        format_item = git.upstream_choice_label }, function(c) if c then set(c) end end)
+end
+
 -- ── Checkout & examine (§10.4.2) — window glue. The decisions are the pure
 -- `gitloom.git.examine` plans, the git side `fetch.examine_probe/_run/_return`;
 -- these prompt, notify, open the provider, keep `nav.examine[root]` and resync.
@@ -3142,7 +3227,7 @@ GRAPH_HELPERS.ref_picker_format = function(ctx, align)
         local track_hl = (opts.palette and opts.palette.track) or {}
         local ret = {}
         ret[#ret + 1] = { align(item.name, 28, { truncate = true }), kind_hl }
-        for _, seg in ipairs(git.track_segments(item.track)) do
+        for _, seg in ipairs(git.track_segments(item.track, opts.icons and opts.icons.upstream)) do
             ret[#ret + 1] = { seg.text, track_hl[seg.kind] }
         end
         ret[#ret + 1] = { " " }
@@ -4179,6 +4264,9 @@ GRAPH_HELPERS.schedule_wt_refresh = schedule_wt_refresh
 -- Rebuild the dimmed highlight groups after a colorscheme change (the derived
 -- groups are wiped by `hi clear`) and redraw (§12).
 local function on_color_scheme(ctx)
+    -- The §6.3 same-named-remote warning colour; `default = true` so a
+    -- colorscheme's own definition (or `palette.track.mismatch`) wins.
+    pcall(vim.api.nvim_set_hl, 0, "GitloomTrackMismatch", { link = "DiagnosticWarn", default = true })
     reset_dim_cache()
     reset_gen_cache()
     if ctx.lv and ctx.lv.controller then ctx.lv.controller.refresh() end
@@ -4467,6 +4555,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 ahead = "Added",      -- ahead of upstream (pushable)
                 behind = "WarningMsg", -- behind upstream (pull needed)
                 gone = "Comment",     -- upstream deleted
+                upstream = "Comment", -- a spelled-out non-matching upstream →origin/dev
+                mismatch = "GitloomTrackMismatch", -- …when a same-named remote branch exists
             },
             tracks = {
                 --"DiagnosticWarn",
@@ -4564,6 +4654,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             head = "●", -- HEAD's node marker (§5.3); "" turns it off
             pin = "⚲", -- the pinned-anchor label icon (§6/§10.6); "" turns it off
             expanded = "▾", -- the expanded-ref label icon (§6); "" turns it off
+            upstream = "→", -- before a non-matching upstream (§6.3); "" leaves the bare name
         },
     }
     -- The default footer is computed before opts.mirror is resolved; unless the
@@ -4724,6 +4815,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field show_remote_log fun(self:GraphCtx)  open the fetch log float (§17.4)
     ---@field refresh_remote_log fun(self:GraphCtx, follow:boolean?)  re-render the open fetch log (§17.4)
     ---@field branch_sync fun(self:GraphCtx, op:"fast_forward"|"reset_branch", t:SyncTarget)  palette branch sync (§17.2)
+    ---@field change_upstream fun(self:GraphCtx, op:"track"|"set_upstream"|"unset_upstream", u:UpstreamTarget?, choice:UpstreamChoice?)  palette Track / Set / Unset upstream (§17.2)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
     ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
     ---@field examine_selection fun(self:GraphCtx)  Checkout & examine the §13 selection
@@ -5009,7 +5101,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- The current branch's upstream divergence for the footer (§6.3).
             local track_str = nil
             if repo.head and repo.refs[repo.head] then
-                local lbl = git.track_label(repo.refs[repo.head].upstream)
+                local lbl = git.track_label(repo.refs[repo.head].upstream, opts.icons and opts.icons.upstream)
                 if lbl ~= "" then track_str = repo.head .. lbl end
             end
             local status = footer_text(opts.mirror, view_state.modes,
@@ -5363,6 +5455,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
 
         -- Rebuild the dimmed highlight groups after a colorscheme change (the
         -- derived groups are wiped by `hi clear`) and redraw (§12).
+        pcall(vim.api.nvim_set_hl, 0, "GitloomTrackMismatch", { link = "DiagnosticWarn", default = true })
         vim.api.nvim_create_autocmd("ColorScheme", {
             group = vim.api.nvim_create_augroup("GitloomDim_" .. buf, { clear = true }),
             callback = function() on_color_scheme(ctx) end,
@@ -5677,13 +5770,19 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- `HEAD` the HEAD colour; else the lane colour (or by kind).
                     local g = seg.hl or ((seg.kind == "head" and not seg.arrow) and pal.head)
                         or render.label_hl(opts, seg.key == owner and lane or nil, label_hl[seg.kind])
-                    if seg.arrow and g ~= pal.head then
-                        mark(s, s + seg.arrow[1] - 1, g)
-                        mark(s + seg.arrow[1] - 1, s + seg.arrow[2], pal.head)
-                        mark(s + seg.arrow[2], #text, g)
-                    else
-                        mark(s, #text, g)
+                    -- Sub-spans in their own colour, in text order: the `HEAD → ` prefix
+                    -- (unless the whole label is HEAD-coloured) and the spelled-out
+                    -- upstream (§6.3, palette.track); the rest takes `g`.
+                    local spans = {}
+                    if seg.arrow and g ~= pal.head then spans[#spans + 1] = { seg.arrow, pal.head } end
+                    if seg.up then spans[#spans + 1] = { seg.up, (pal.track or {})[seg.up_kind] } end
+                    local at = s
+                    for _, sp in ipairs(spans) do
+                        mark(at, s + sp[1][1] - 1, g)
+                        mark(s + sp[1][1] - 1, s + sp[1][2], sp[2])
+                        at = s + sp[1][2]
                     end
+                    mark(at, #text, g)
                 end
                 if c and c.collapsed and c.count then
                     local s = #text
