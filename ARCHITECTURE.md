@@ -739,13 +739,17 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
 - `fetch_commit_diff(hash)` — `git show --format= -p <hash>`, buffered and
   resolved as the raw patch string. The commit view's diff source (§11.3),
   fetched on demand and chained after `fetch_commit_detail`.
-- **Commit-view tracking probe** (§11.1 / §11.2) — for each local branch on the
+- **Commit-view tracking probe** (`tracking_probe(entries, root)`, §11.1 / §11.2;
+  entries from the pure `tracking_entries(commit.refs)`, rendered by
+  `format_tracking`) — for each local branch on the
   opened commit, `git rev-parse --symbolic-full-name <b>@{push}` (a failure keeps
   git's `fatal:` line as the note) and, for a non-matching upstream, one
   `git rev-list --left-right --count` per existing same-named remote branch. Run
   through `spawn` alongside `fetch_commit_detail`, results merged into the
-  formatter's input; a failure degrades the line, never the view. Not run for the
-  §15.3 preview.
+  formatter's input; a failure degrades the line, never the view. The view
+  renders the first lines from the cached upstream at once and re-renders in
+  place when the probe answers (`build_commit_rows`' `track_edge` / `track_n`
+  keep the cursor on the same content). Not run for the §15.3 preview.
 - **Working-tree state** (specification.md §3.3) — small porcelain queries that
   run *after* the commit stream (so HEAD is in the model). `fetch_worktree_state`
   resolves `{ head_hash (rev-parse HEAD), status (parse_status of git status

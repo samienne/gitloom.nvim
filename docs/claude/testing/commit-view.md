@@ -2,6 +2,12 @@
 
 Scope: per-spec coverage of the commit view, commit selection (range), filter search and the search snippet. [specification.md](../../../specification.md) and [ARCHITECTURE.md](../../../ARCHITECTURE.md) remain authoritative. Index: [../testing.md](../testing.md).
 
+- `tests/commit_tracking_spec.lua` — the **tracking lines** (§11.1/§11.2):
+  `format_tracking` (one-line common case, states, no upstream, push reason /
+  target, same-name counts, upstream colours), `tracking_entries` (local
+  branches in decoration order), their place after `Refs:` in
+  `build_commit_rows` (`track_edge`/`track_n`; none in the preview, range or
+  working-tree rows), and `fetch.tracking_probe` against a scratch repo.
 - `tests/commit_view_spec.lua` — the commit view's pure pieces (spec §11):
   `parse_show` (git-show field splitting, multi-line body, empty parents),
   `format_commit_detail` (committer-differs branch, refs line, body indent),

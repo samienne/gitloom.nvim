@@ -184,15 +184,116 @@ function M.commit_view_buf_name(root, title)
     return root .. " (gitloom) " .. (title:gsub("^Commit ", ""))
 end
 
+--- One local branch's tracking facts for the commit view (§11.2 Tracking lines):
+--- the cached upstream (§6.3) plus what the on-demand probe (§11.1) adds. `push`
+--- / `push_err` / `same` stay nil until the probe answers, so the first render
+--- shows only the first line.
+---@class TrackingEntry
+---@field branch string        the local branch
+---@field upstream? Upstream   its upstream (nil: tracks none)
+---@field push? string         the `@{push}` full refname, when it resolves
+---@field push_err? string     git's reason when `@{push}` does not resolve
+---@field same? { remote: string, ahead?: integer, behind?: integer }[]  for a
+---                            non-matching upstream: each same-named `<r>/<b>`
+---                            with its counts (nil counts: the count failed)
+
+--- `N ahead` / `M behind` / `N ahead, M behind` / `in sync`.
+---@param a integer
+---@param b integer
+---@return string
+local function counts_text(a, b)
+    if a > 0 and b > 0 then return a .. " ahead, " .. b .. " behind" end
+    if a > 0 then return a .. " ahead" end
+    if b > 0 then return b .. " behind" end
+    return "in sync"
+end
+
+--- A full refname's short form for a tracking line (`refs/remotes/origin/x` →
+--- `origin/x`, `refs/heads/x` → `./x`, as the §6.3 label spells a local upstream).
+---@param ref string
+---@return string
+local function tracking_ref_short(ref)
+    local r = ref:match("^refs/remotes/(.+)$")
+    if r then return r end
+    local h = ref:match("^refs/heads/(.+)$")
+    if h then return "./" .. h end
+    return ref
+end
+
+--- The commit view's `Tracking:` field rows (spec §11.2): per entry, the first
+--- line `<b> → <upstream>  <state>` (`<b> → no upstream` when it tracks none),
+--- then `push:` — the push target or git's reason it cannot be resolved —
+--- omitted when the push target is the upstream itself, then one `same name:`
+--- line per same-named remote branch of a non-matching upstream. Continuation
+--- lines are indented past the 12-cell label. Pure.
+---@param entries TrackingEntry[]
+---@param palette? GraphPalette
+---@return table[]
+function M.format_tracking(entries, palette)
+    palette = palette or {}
+    local track = palette.track or {}
+    local lines = {}
+    local label = highlight_text(("%-12s"):format("Tracking:"), palette.author)
+    local cont = highlight_text(("%-14s"):format(""))
+    for _, e in ipairs(entries or {}) do
+        local u = e.upstream
+        local segs = { label, highlight_text(e.branch, palette.branch),
+            highlight_text(" → ", palette.author) }
+        if not u then
+            segs[#segs + 1] = highlight_text("no upstream", palette.author)
+        else
+            local up_hl = palette.remote
+            if u.match == false then
+                up_hl = (u.same and #u.same > 0) and track.mismatch or track.upstream
+            end
+            local name = (u.remote == "." and "./" or "") .. u.short
+            segs[#segs + 1] = highlight_text(name, up_hl)
+            if u.gone then
+                segs[#segs + 1] = highlight_text("  gone", track.gone)
+            else
+                segs[#segs + 1] = highlight_text("  " .. counts_text(u.ahead or 0, u.behind or 0),
+                    palette.message)
+            end
+        end
+        lines[#lines + 1] = compose(segs)
+
+        if e.push_err then
+            lines[#lines + 1] = compose({ cont, highlight_text("push: ", palette.author),
+                highlight_text(e.push_err, track.mismatch) })
+        elseif e.push and not (u and u.ref == e.push) then
+            lines[#lines + 1] = compose({ cont, highlight_text("push: ", palette.author),
+                highlight_text(tracking_ref_short(e.push), palette.remote) })
+        end
+
+        if u and u.match == false then
+            for _, s in ipairs(e.same or {}) do
+                local segs2 = { cont, highlight_text("same name: ", palette.author),
+                    highlight_text(s.remote .. "/" .. e.branch, palette.remote) }
+                if s.ahead and s.behind then
+                    segs2[#segs2 + 1] = highlight_text("  " .. counts_text(s.ahead, s.behind),
+                        palette.message)
+                end
+                lines[#lines + 1] = compose(segs2)
+            end
+        end
+    end
+    return lines
+end
+
 --- Render a CommitDetail into the commit view's display lines (one compose-style
 --- `{ text, highlight }` per buffer line). The committer block is shown only
 --- when it differs from the author (the common case is omitted). `opts` carries
 --- the row's `decorations` (refs, reused from the model; §6), the `palette`
---- for highlights and the `width` the message is wrapped to (§11.2.1; nil = as
---- is). Pure; exposed for testing.
+--- for highlights, the `width` the message is wrapped to (§11.2.1; nil = as
+--- is) and the `tracking` entries (§11.2; nil = no tracking lines — the §15.3
+--- preview). Also returns where the tracking lines sit — `track_at`, the row
+--- they follow, and `track_n`, how many there are — so an in-place re-render
+--- can keep the cursor on the same content. Pure; exposed for testing.
 ---@param detail CommitDetail
----@param opts? { decorations?: string[], palette?: GraphPalette, width?: integer }
----@return table[]
+---@param opts? { decorations?: string[], palette?: GraphPalette, width?: integer, tracking?: TrackingEntry[] }
+---@return table[] lines
+---@return integer track_at
+---@return integer track_n
 function M.format_commit_detail(detail, opts)
     opts = opts or {}
     local palette = opts.palette or {}
@@ -212,6 +313,11 @@ function M.format_commit_detail(detail, opts)
     if #decorations > 0 then
         field("Refs:", table.concat(decorations, " "), palette.branch)
     end
+    local track_at = #lines
+    for _, r in ipairs(M.format_tracking(opts.tracking, palette)) do
+        lines[#lines + 1] = r
+    end
+    local track_n = #lines - track_at
     field("Author:", detail.author_name .. " <" .. detail.author_email .. ">", palette.message)
     field("AuthorDate:", detail.author_date, palette.date)
 
@@ -241,7 +347,7 @@ function M.format_commit_detail(detail, opts)
         add({ highlight_text(MESSAGE_INDENT .. l, palette.message) })
     end
 
-    return lines
+    return lines, track_at, track_n
 end
 
 --- The §13.5 range list's identity cell for one selected node: the abbreviated

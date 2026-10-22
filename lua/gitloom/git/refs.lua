@@ -211,6 +211,20 @@ function M.group_refs(refs, head_branch)
     return { head = head, current = current, branches = branches, tags = tags, worktrees = worktrees }
 end
 
+--- The commit view's tracking entries (§11.2) before the probe: one per local
+--- branch on the commit, in decoration order (`group_refs`, HEAD's branch first),
+--- carrying its cached upstream. Remote-only groups, tags and worktree labels get
+--- none. Pure.
+---@param refs Ref[]?
+---@return TrackingEntry[]
+function M.tracking_entries(refs)
+    local out = {}
+    for _, g in ipairs(M.group_refs(refs).branches) do
+        if g.has_local then out[#out + 1] = { branch = g.name, upstream = g.track } end
+    end
+    return out
+end
+
 --- The text HEAD's label opens with on a branch (§6): `(HEAD → name …)`.
 M.HEAD_ARROW = "HEAD → "
 

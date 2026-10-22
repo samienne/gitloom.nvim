@@ -813,10 +813,12 @@ end
 ---   root?         string   parent repo root; enables submodule commit links
 ---   action?       boolean  include the diff action label (§11.5); default true
 ---   width?        integer  the message wrap width (§11.2.1); nil = as is
+---   tracking?     TrackingEntry[]  the §11.2 tracking lines (single commit only);
+---                          nil = none (the §15.3 preview never passes them)
 ---@param opts GraphOptions
 ---@param spec table
 ---@return table[] rows
----@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch?, meta_end }
+---@return table info  -- { action_line?, file_jumps, sub_jumps, diff_ctx?, diff_start?, diff_buf_to_patch?, meta_end, track_edge, track_n }
 local function build_commit_rows(opts, spec)
     local commit, range, root = spec.commit, spec.range, spec.root
     local sub_results = spec.sub_results or {}
@@ -834,20 +836,24 @@ local function build_commit_rows(opts, spec)
     end
     -- Metadata: the selected-commit list in range mode (§13.5), the working-tree
     -- state header for a virtual commit (§11.8), else the single commit's detail.
-    local meta_rows
+    local meta_rows, track_at, track_n = nil, 0, 0
     if range then
         meta_rows = format_range_detail(range.commits, opts.palette)
     elseif commit and commit.virtual then
         meta_rows = format_worktree_detail(commit, opts.palette)
     else
         ---@cast commit Commit
-        meta_rows = format_commit_detail(parse_show(spec.meta), {
+        meta_rows, track_at, track_n = format_commit_detail(parse_show(spec.meta), {
             -- No pin marks in the commit view; only the §6.3 upstream glyph.
             decorations = decoration_texts(commit, nil, { set = {}, upstream_icon = opts.icons and opts.icons.upstream }),
             palette = opts.palette,
             width = spec.width, -- the message wrap width (§11.2.1)
+            tracking = spec.tracking, -- §11.2; nil in the §15.3 preview
         })
     end
+    -- The row the tracking lines follow: an in-place re-render that adds them
+    -- (the §11.1 probe answering) shifts only what lies below it.
+    local track_edge = #rows + track_at
     for _, r in ipairs(meta_rows) do
         rows[#rows + 1] = r
     end
@@ -934,6 +940,8 @@ local function build_commit_rows(opts, spec)
         diff_start = diff_start,
         diff_buf_to_patch = diff_buf_to_patch,
         meta_end = meta_end,
+        track_edge = track_edge,
+        track_n = track_n,
     }
 end
 -- Exposed on the module so the search picker (§15.3) can reach it directly.
@@ -1008,6 +1016,15 @@ local function open_commit_view(opts, commit, range, root)
     -- filled asynchronously after the first render and triggering an in-place
     -- re-render. Read by render() when it splices each change block.
     local sub_results = {}
+    -- Tracking lines (§11.2): one entry per local branch on a single real commit
+    -- (none for a range, §13.5, or a working-tree node, §11.8), first from the
+    -- cached upstream; the §11.1 probe fills push / same-name in place and
+    -- triggers an in-place re-render. nil = no tracking lines.
+    local tracking = nil
+    if not range and commit and not commit.virtual then
+        tracking = git.tracking_entries(commit.refs)
+        if #tracking == 0 then tracking = nil end
+    end
 
     local function set_lines(lines)
         if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -1308,7 +1325,7 @@ local function open_commit_view(opts, commit, range, root)
     -- filetype=diff, so the metadata header stays clean §11.3). While laying out
     -- the rows, record each diffstat file row -> its diff section line (§11.4).
     -- The last render's inputs + wrap width + metadata end, for a re-wrap.
-    ---@type { meta: string?, diff: string?, width: integer?, meta_end: integer }?
+    ---@type { meta: string?, diff: string?, width: integer?, meta_end: integer, track_edge: integer, track_n: integer }?
     local last_render = nil
     local function render(meta_output, diff_output, keep_view)
         if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -1324,18 +1341,26 @@ local function open_commit_view(opts, commit, range, root)
         local rows, info = build_commit_rows(opts, {
             commit = commit, range = range, root = root,
             meta = meta_output, diff = diff_output, diff_error = diff_error,
-            sub_results = sub_results, width = width,
+            sub_results = sub_results, width = width, tracking = tracking,
         })
         -- A re-wrap moves everything below the message by the change in its line
-        -- count: keep the user on the same content (§11.2.1).
+        -- count: keep the user on the same content (§11.2.1). Tracking lines the
+        -- probe added (§11.1) likewise move everything below them.
         local prev_end = last_render and last_render.meta_end
         local delta = prev_end and (info.meta_end - prev_end) or 0
-        if saved_view and prev_end and delta ~= 0 then
-            local edge = prev_end
-            if saved_view.lnum > edge then saved_view.lnum = saved_view.lnum + delta end
-            if saved_view.topline > edge then saved_view.topline = saved_view.topline + delta end
+        local tdelta = last_render and (info.track_n - last_render.track_n) or 0
+        if saved_view and last_render then
+            local tedge = last_render.track_edge
+            for _, k in ipairs({ "lnum", "topline" }) do
+                if saved_view[k] > prev_end then
+                    saved_view[k] = saved_view[k] + delta
+                elseif saved_view[k] > tedge then
+                    saved_view[k] = saved_view[k] + tdelta
+                end
+            end
         end
-        last_render = { meta = meta_output, diff = diff_output, width = width, meta_end = info.meta_end }
+        last_render = { meta = meta_output, diff = diff_output, width = width, meta_end = info.meta_end,
+            track_edge = info.track_edge, track_n = info.track_n }
         action_line = info.action_line
         file_jumps = info.file_jumps
         sub_jumps = info.sub_jumps
@@ -1404,6 +1429,13 @@ local function open_commit_view(opts, commit, range, root)
         end)
     else
         ---@cast commit Commit
+        -- The tracking probe (§11.1) runs alongside the fetch and never blocks
+        -- it: whichever lands second re-renders (in place, after the first).
+        if tracking then
+            git.tracking_probe(tracking, root).next(function()
+                if last_render then render(last_render.meta, last_render.diff, true) end
+            end)
+        end
         fetched = fetch_commit_detail(commit.hash).next(function(meta_output)
             return fetch_commit_diff(commit.hash).next(function(diff_output)
                 return { meta = meta_output, diff = diff_output }

@@ -4589,6 +4589,9 @@ So for the case §6.3 warns about, **Track `origin/enne/standard-effect`** is on
 step and comes *before* any Reset in the list (it is placed ahead of the sync
 entries only in that case — the mismatch warning is the reason to show it first).
 A matching upstream never gets a Track entry (it already tracks that branch).
+When the repository has no remote-tracking branches, **Set upstream of `<b>`…**
+shows a WARN notice (`no remote-tracking branches to track`) instead of an empty
+picker and runs nothing.
 
 - **Visibility from cached state only**, as for the sync: the mismatch, the
   existing same-named branches and the remote-tracking list come from the refs and

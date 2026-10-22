@@ -27,7 +27,7 @@ Shared fixtures: `tests/graph_helpers.lua` (with `graph_layout_spec`, see layout
 | [refs.md](testing/refs.md) | `refs_spec`, `head_marker_spec`, `label_color_spec`, `ref_picker_spec`, `ref_cycle_spec`, `selection_spec`, `ref_window_spec`, `label_mode_spec`, `listview_spec`, `pin_spec`, `detached_head_spec`, `own_owners_spec`, `space_toggle_spec` |
 | [git-io.md](testing/git-io.md) | `commit_spec`, `stream_complete_spec`, `stream_tick_spec`, `git_debug_spec`, `repo_picker_spec`, `fetch_spec`, `ordering_spec`, `worktree_spec`, `diff_provider_spec` |
 | [actions.md](testing/actions.md) | `palette_spec`, `checkout_spec`, `sync_spec`, `upstream_spec`, `examine_spec` |
-| [commit-view.md](testing/commit-view.md) | `commit_view_spec`, `commit_selection_spec`, `filter_spec`, `snippet_spec` |
+| [commit-view.md](testing/commit-view.md) | `commit_view_spec`, `commit_tracking_spec`, `commit_selection_spec`, `filter_spec`, `snippet_spec` |
 | [infra.md](testing/infra.md) | `persist_spec`, `progress_spec`, `open_trace_spec`, `future_spec`, `color_spec`, `gitloom_spec` |
 | [seams.md](testing/seams.md) | the `_internal` test seams (`graph`, `window`, `listview`, `graph_helpers`) |
 

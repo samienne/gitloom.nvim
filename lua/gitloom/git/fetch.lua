@@ -1133,6 +1133,61 @@ function M.sync_probe(t, root)
     end)
 end
 
+--- The commit view's on-demand tracking facts (§11.1), read in `root` for each
+--- entry (one at a time; the caller renders without waiting): the push target
+--- (`git rev-parse --symbolic-full-name <b>@{push}` → `push`, or git's `fatal:`
+--- reason, prefix dropped → `push_err`), and — for a non-matching upstream — the
+--- counts against each same-named remote branch (`git rev-list --left-right
+--- --count refs/heads/<b>...refs/remotes/<r>/<b>` → `same`; nil counts when the
+--- count fails). Fills the entries in place and resolves them.
+---@param entries TrackingEntry[]
+---@param root string?
+---@return table  -- future resolving TrackingEntry[]
+function M.tracking_probe(entries, root)
+    local function step(i)
+        local e = entries[i]
+        if not e then
+            local future, promise = make_future()
+            promise.resolve(entries)
+            return future
+        end
+        local bref = "refs/heads/" .. e.branch
+        -- `<b>@{push}` takes the branch's short name: git rejects
+        -- `refs/heads/<b>@{push}` ("no such branch").
+        return git_code({ "git", "rev-parse", "--symbolic-full-name", e.branch .. "@{push}" }, root)
+            .next(function(pr)
+                local out = trim_ws(pr.out or "")
+                if pr.code == 0 and out ~= "" then
+                    e.push = out
+                else
+                    local msg = (pr.err or ""):match("[^\n]+") or ""
+                    msg = trim_ws((msg:gsub("^fatal: ", "")))
+                    e.push_err = msg ~= "" and msg or ("git rev-parse exited " .. tostring(pr.code))
+                end
+                local u = e.upstream
+                local remotes = (u and u.match == false and u.same) or {}
+                local same = {}
+                local function count(j)
+                    local r = remotes[j]
+                    if not r then
+                        if #remotes > 0 then e.same = same end
+                        return step(i + 1)
+                    end
+                    return git_code({ "git", "rev-list", "--left-right", "--count",
+                        bref .. "...refs/remotes/" .. r .. "/" .. e.branch }, root).next(function(cr)
+                        local a, b = trim_ws(cr.out or ""):match("^(%d+)%s+(%d+)$")
+                        same[#same + 1] = { remote = r,
+                            ahead = cr.code == 0 and tonumber(a) or nil,
+                            behind = cr.code == 0 and tonumber(b) or nil }
+                        return count(j + 1)
+                    end)
+                end
+                return count(1)
+            end)
+    end
+    return step(1)
+end
+
 --- The commit `stash@{0}` names now, or nil when the stash is empty.
 ---@param root string?
 ---@return table  -- future resolving string?
