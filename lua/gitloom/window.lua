@@ -2607,7 +2607,7 @@ GRAPH_HELPERS.palette = function(ctx)
     local entries = require("gitloom.graph.palette").palette_entries({
         row = row, selection = ctx.sel.active, remotes = ctx.remotes,
         remote_log = ctx.remote_log ~= nil, examine = nav.examine[repo.root], has_diff = has_diff, keys = ctx:key_registry(),
-        head = selectm.head_target(repo.refs),
+        head = selectm.head_target(repo.refs), refs = repo.refs,
         newest = sp and #sp > 0 and real_newest(sp[1]) or nil,
     })
     if #entries == 0 then return end
@@ -2667,6 +2667,8 @@ GRAPH_HELPERS.palette = function(ctx)
         elseif op == "fast_forward" or op == "reset_branch" or op == "checkout_ff"
             or op == "checkout_reset" then
             ctx:branch_sync(op, e.sync)
+        elseif op == "track" or op == "set_upstream" or op == "unset_upstream" then
+            ctx:change_upstream(op, e.upstream, e.choice)
         elseif e.marker then
             local u = units[e.marker]
             if op == "expand" then
@@ -2920,6 +2922,54 @@ GRAPH_HELPERS.branch_sync = function(ctx, op, t)
             end)
         end)
     end)
+end
+
+-- Palette upstream entries (§17.2): Track `<r>/<b>` (`choice`), Set upstream…
+-- (a `vim.ui.select` over `u.choices`; the current one runs nothing) and Unset.
+-- No confirmation — only `branch.<b>.remote` / `merge` change and the notice
+-- names the previous upstream. Run as §17.3: async in the repository root through
+-- `run_checkout` (fetch.lua's spawn), sharing `ctx.remote_busy`; failure → git's
+-- error at ERROR; success → INFO + the in-place resync (the label follows).
+GRAPH_HELPERS.change_upstream = function(ctx, op, u, choice)
+    if not u then return end
+    local function start(cmd, title, notice)
+        if ctx.remote_busy then
+            vim.notify(("gitloom: %s is still running"):format(ctx.remote_busy), vim.log.levels.WARN)
+            return
+        end
+        ctx.remote_busy = "upstream change of " .. u.branch
+        local pop = ctx.progress:start(title, { own_notices = true })
+        git.run_checkout(cmd.argv, ctx.repo.root).next(function(res)
+            vim.schedule(function()
+                ctx.remote_busy = nil
+                if res.code ~= 0 then
+                    pop:finish("failed")
+                    vim.notify(ctx:git_failure(cmd.label, res), vim.log.levels.ERROR)
+                    return
+                end
+                pop:finish("done")
+                vim.notify(notice, vim.log.levels.INFO)
+                ctx:resync(false)
+            end)
+        end)
+    end
+    if op == "unset_upstream" then
+        return start(git.unset_upstream_command(u.branch), "Unsetting upstream of " .. u.branch,
+            git.unset_upstream_done(u.branch, u.upstream))
+    end
+    local function set(c)
+        if c.current then return end
+        start(git.set_upstream_command(u.branch, c.ref), "Setting upstream of " .. u.branch,
+            git.set_upstream_done(u.branch, c.name, u.upstream))
+    end
+    if op == "track" then return choice and set(choice) end
+    local choices = u.choices or {}
+    if #choices == 0 then
+        vim.notify("gitloom: no remote-tracking branches to track", vim.log.levels.WARN)
+        return
+    end
+    vim.ui.select(choices, { prompt = ("Set upstream of %s"):format(u.branch),
+        format_item = git.upstream_choice_label }, function(c) if c then set(c) end end)
 end
 
 -- ── Checkout & examine (§10.4.2) — window glue. The decisions are the pure
@@ -4733,6 +4783,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field show_remote_log fun(self:GraphCtx)  open the fetch log float (§17.4)
     ---@field refresh_remote_log fun(self:GraphCtx, follow:boolean?)  re-render the open fetch log (§17.4)
     ---@field branch_sync fun(self:GraphCtx, op:"fast_forward"|"reset_branch", t:SyncTarget)  palette branch sync (§17.2)
+    ---@field change_upstream fun(self:GraphCtx, op:"track"|"set_upstream"|"unset_upstream", u:UpstreamTarget?, choice:UpstreamChoice?)  palette Track / Set / Unset upstream (§17.2)
     ---@field git_failure fun(self:GraphCtx, label:string, res:table):string  a failed git step as one line
     ---@field examine fun(self:GraphCtx, newer:Commit, older:Commit)  Checkout & examine (§10.4.2)
     ---@field examine_selection fun(self:GraphCtx)  Checkout & examine the §13 selection

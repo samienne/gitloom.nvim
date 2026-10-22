@@ -95,6 +95,17 @@ Scope: per-spec coverage of the command palette, checkout, branch sync and check
   step 2 leaving the branch fast-forwarded, `switch -C` resetting a diverged
   branch and checking it out (upstream kept, old tip in the reflog), and refusing
   over a conflicting dirty file. The window glue is untested
+- `tests/upstream_spec.lua` — the upstream entries (§17.2 "Upstream"). Pure
+  (`gitloom.git.sync`): `upstream_target` (any local branch; a remote branch's
+  counterpart with Track limited to it; a tag / plain remote / worktree none),
+  `upstream_offers` (Track per same-named remote in `git remote` order when the
+  upstream does not match or is absent, first only when the label warns; never
+  for a matching / gone-matching upstream; Unset whenever there is an upstream;
+  the Set picker remote-tracking only, no `HEAD`, same-named first, `(current)`),
+  the argv, the notices and the reset prompt's mismatch line; the row entries'
+  order (Track ahead of Reset on a mismatch). Then against a REAL scratch
+  repository: Track / Unset through `run_checkout` changing only
+  `branch.<b>.remote` / `merge`, and a vanished ref's one-line `fatal:` error.
 - `tests/examine_spec.lua` — Checkout & examine (§10.4.2). Pure:
   `range.examine_range` (ONE rev — the older end's first parent — `to =
   "worktree"`, `-C<root> <base>` as diffview args; a root older end → the empty

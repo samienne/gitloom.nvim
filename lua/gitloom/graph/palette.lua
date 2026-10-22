@@ -89,7 +89,7 @@ M.COMMANDS = {
         action = function(ctx) ctx:reset_view() end },
 }
 
----@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"examine"|"examine_worktree"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"
+---@alias PaletteOp "diff"|"checkout"|"checkout_examine"|"examine"|"examine_worktree"|"collapse"|"expand"|"hide"|"fast_forward"|"reset_branch"|"checkout_ff"|"checkout_reset"|"track"|"set_upstream"|"unset_upstream"
 
 ---@class PaletteEntry
 ---@field id string              `fetch:origin`, `collapse`, `hide:2`, `key:R`, …
@@ -102,6 +102,9 @@ M.COMMANDS = {
 ---@field checkout? CheckoutSpec checkout: what to run
 ---@field marker? integer        expand/hide on a packed line: the marker index
 ---@field sync? SyncTarget       fast_forward / reset_branch: the branch + its upstream (§17.2)
+---@field upstream? UpstreamTarget  track / set_upstream / unset_upstream: the branch (§17.2;
+---                              `choices` = Set's picker items)
+---@field choice? UpstreamChoice track: the remote-tracking branch it sets
 
 ---@class PaletteRow  the cursor row, as window.lua classifies it
 ---@field kind "plain"|"branch"|"markers"
@@ -160,14 +163,22 @@ end
 --- gets `checkout_ff` / `checkout_reset` (or, when that branch is current, its
 --- `fast_forward` / `reset_branch`) first, then the detached checkout.
 ---
+--- The upstream entries (§17.2) act on the same branch — any local one, or a
+--- selected remote branch's counterpart: Track `<r>/<b>` (ahead of the sync
+--- entries when the label warns of a mismatch, else after them), Set upstream…
+--- and Unset upstream; decided from the cached `refs` / `remotes` only.
+---
 --- Open diff and checkout & examine need a diff provider (`has_diff`, §11.5); a
 --- §4.2 virtual commit gets neither checkout but **Examine working tree** (also
 --- provider-gated). Pure.
 ---@param row PaletteRow?
 ---@param diff boolean?
 ---@param head string?  HEAD's commit hash, from the cached refs (nil when unknown)
+---@param refs table<string, Ref>?  the repo's ref registry — the upstream entries' remote-tracking
+---                    branches (§17.2); nil (a test seam) lists no upstream entries
+---@param remotes string[]?  the cached `git remote` names (Track's order)
 ---@return PaletteEntry[]
-function M.row_entries(row, diff, head)
+function M.row_entries(row, diff, head, refs, remotes)
     local out = {}
     if not row then return out end
     local function add(e)
@@ -178,9 +189,36 @@ function M.row_entries(row, diff, head)
     local function checkout()
         if spec then add({ id = "checkout", op = "checkout", label = spec.label, checkout = spec }) end
     end
+    -- The branch the sync and upstream entries act on (§17.2 Which branch).
+    local function target_ref()
+        return row.ref or selectm.sole_local_ref(row.head or selectm.menu_target(row.commit))
+    end
+    -- §17.2 Upstream: Track (before the sync when the label warns, `lead`),
+    -- then Set upstream… and Unset after the sync.
+    local up_offers, up_target
+    if refs then
+        up_target = sync.upstream_target(target_ref())
+        up_offers = sync.upstream_offers(up_target, refs, remotes)
+    end
+    local function track_entries(lead)
+        if not up_target or up_offers.first ~= lead then return end
+        for _, c in ipairs(up_offers.track) do
+            add({ id = "track:" .. c.name, op = "track", label = (sync.upstream_labels(up_target, c)),
+                upstream = up_target, choice = c })
+        end
+    end
+    local function upstream_entries()
+        if not up_target then return end
+        track_entries(false)
+        local _, set_label, unset_label = sync.upstream_labels(up_target)
+        local u = vim.tbl_extend("force", up_target, { choices = up_offers.choices })
+        add({ id = "set_upstream", op = "set_upstream", label = set_label, upstream = u })
+        if up_offers.unset then
+            add({ id = "unset_upstream", op = "unset_upstream", label = unset_label, upstream = up_target })
+        end
+    end
     local function sync_entries()
-        local ref = row.ref
-        if not ref then ref = selectm.sole_local_ref(row.head or selectm.menu_target(row.commit)) end
+        local ref = target_ref()
         local t = sync.sync_target(ref)
         local offers = sync.sync_offers(t)
         if not t then return end
@@ -243,7 +281,9 @@ function M.row_entries(row, diff, head)
         local texts = row.markers or {}
         if row.selected then
             checkout()
+            track_entries(true)
             sync_entries()
+            upstream_entries()
             marker(row.selected, texts[row.selected] or "")
         else
             for i, text in ipairs(texts) do marker(i, text) end
@@ -251,7 +291,9 @@ function M.row_entries(row, diff, head)
     elseif row.kind == "branch" then
         counterpart_entries()
         checkout()
+        track_entries(true)
         sync_entries()
+        upstream_entries()
         -- Collapse / expand are <Space>'s (§10.4): they act on the row's own owners,
         -- which the entry names (`own`), and a collapse a branch built on top will
         -- leave open says so (`keepers`). A mainline row has neither entry.
@@ -383,6 +425,7 @@ end
 ---@field remote_log? boolean     a fetch / pull has run in this session (§17.4)
 ---@field head? string           HEAD's commit hash, from the cached refs — the commit row's
 ---                               Examine vs Checkout & examine (§10.4.2); no git spawn
+---@field refs? table<string, Ref>  the repo's cached ref registry — the §17.2 upstream entries
 ---@field newest? table           selecting: the selection's newer end (a real or §4.2 commit)
 ---@field keys? GraphKey[]        the key registry (window.lua's `GRAPH_KEYS`); no keys listed when nil
 ---@field commands? PaletteCommand[]  defaults to the registry (a test seam)
@@ -402,7 +445,7 @@ function M.palette_entries(info)
         newest_at_head = info.selection and info.newest ~= nil
             and not examine.needs_checkout(info.newest, info.head) or nil }
     local out = info.selection and scoped(commands, "selection", info.remotes, state)
-        or M.row_entries(info.row, info.has_diff, info.head)
+        or M.row_entries(info.row, info.has_diff, info.head, info.refs, info.remotes)
     for _, e in ipairs(scoped(commands, "global", info.remotes, state)) do out[#out + 1] = e end
     if info.keys then
         local taken = {}

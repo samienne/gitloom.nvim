@@ -4555,7 +4555,8 @@ entry. Since the counts are as of the last ref read, the commands re-check:
   the current branch with a dirty tree (`N` = changed paths, each counted once;
   **untracked files are never touched** by `reset --hard` and do not count); the
   reflog line whenever something is lost. When nothing is lost (strictly behind,
-  clean) the prompt is the first line alone. Immediately before running, gitloom
+  clean) the prompt is the first line alone (plus the mismatch line below, when
+  it applies). Immediately before running, gitloom
   reads the same state again; if the branch tip, the upstream tip, which branch is
   current, or the dirty count changed since the prompt, it **aborts** with a WARN
   notice and runs nothing. git refuses `branch -f` for a branch checked out in
@@ -4566,8 +4567,9 @@ entry. Since the counts are as of the last ref read, the commands re-check:
   When the upstream does **not match** (§6.3) the prompt adds, before the reflog
   line, `origin/dev is not enne/standard-effect's same-named branch` — and, when
   a same-named remote branch exists, `(origin/enne/standard-effect exists — see
-  Track origin/enne/standard-effect)` — since resetting to a differently named
-  upstream is the likeliest case of resetting to the wrong branch.
+  Track origin/enne/standard-effect)`, on the same line — since resetting to a
+  differently named upstream is the likeliest case of resetting to the wrong
+  branch. It is shown even when nothing is lost.
 
 Neither entry touches the network, merges, rebases, commits or pushes; they run as
 §17.3 says.
