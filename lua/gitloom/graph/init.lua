@@ -383,6 +383,7 @@ M._internal = {
     format_relative = git.format_relative,
     parse_show = git.parse_show,
     format_commit_detail = git.format_commit_detail,
+    commit_view_buf_name = git.commit_view_buf_name,
     wrap_message = git.wrap_message,
     message_width = git.message_width,
     format_diff = git.format_diff,

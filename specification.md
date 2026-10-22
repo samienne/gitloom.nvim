@@ -136,7 +136,9 @@ persistent view.
   is additionally **named** after the repository root (`<root path> (gitloom)`), so
   an external GUI window title — e.g. Neovide's OS titlebar, which Neovim derives
   from the active buffer — identifies the repo by path instead of showing an
-  unnamed scratch buffer. The footer shows
+  unnamed scratch buffer. A commit view's buffer (§11) is named the same way,
+  `<root path> (gitloom) <view title>`, the view title keeping buffer names
+  unique. The footer shows
   live status (the active merge mode and ref label mode, a `N collapsed, M hidden`
   summary when any branch modes are set, and `(mirrored)` when mirroring is on).
 - **Navigation.** Navigation is line-by-line (`j`/`k`, arrows, etc. move whole
@@ -3171,6 +3173,13 @@ While a §13 selection is active `<CR>` opens the range view instead (§13.5).
 `<C-o>` returns to the graph; `q` hides the host window (§14.1). Like the
 graph, it is a viewer — it never mutates the repository (§9; checkout, §10.4.1,
 lives in the graph's command palette, not here).
+
+The view's buffer is **named** `<root path> (gitloom) <view title>` — the graph
+buffer's name (§2) plus the view's title without its `Commit ` prefix: the short
+hash for one commit, the range title for a §13.5 range, the working-tree title
+for §11.8 — so a GUI window title shows the repo path here too. Buffer names must
+be unique: if the name is taken (the same view already open), the buffer is left
+unnamed rather than failing to open.
 
 ### 11.1 Data source
 

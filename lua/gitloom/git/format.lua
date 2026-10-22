@@ -173,6 +173,17 @@ function M.wrap_message(message, width)
     return out
 end
 
+--- The commit view buffer's name (§11): `<root> (gitloom) <view title>`, the
+--- graph buffer's `<root> (gitloom)` (§2) plus the view title minus a leading
+--- "Commit " — so a GUI title (e.g. Neovide's) shows the repo path, while the
+--- title keeps buffer names unique. Pure; exposed for testing.
+---@param root string
+---@param title string
+---@return string
+function M.commit_view_buf_name(root, title)
+    return root .. " (gitloom) " .. (title:gsub("^Commit ", ""))
+end
+
 --- Render a CommitDetail into the commit view's display lines (one compose-style
 --- `{ text, highlight }` per buffer line). The committer block is shown only
 --- when it differs from the author (the common case is omitted). `opts` carries

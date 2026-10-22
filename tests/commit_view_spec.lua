@@ -11,6 +11,7 @@ local diffstat_files = internal.diffstat_files
 local diff_contexts = internal.diff_contexts
 local format_diffstat = internal.format_diffstat
 local commit_range = internal.commit_range
+local commit_view_buf_name = internal.commit_view_buf_name
 
 -- Build a `git show -s` output line for the documented format:
 -- %H %an %ae %ad %cn %ce %cd %P %B, separated by \x1f, body last.
@@ -518,5 +519,30 @@ describe("build_commit_rows offsets after a wrapped body (§11.2.1/§11.4/§11.6
         for k, l in ipairs(plines) do
             assert.equals(l, rows[info.diff_start + k - 1].text)
         end
+    end)
+end)
+
+describe("commit_view_buf_name (§11)", function()
+    it("names a single commit view `<root> (gitloom) <short hash>`", function()
+        assert.equal("/repo (gitloom) abc1234", commit_view_buf_name("/repo", "Commit abc1234"))
+    end)
+
+    it("keeps a range / working-tree title whole", function()
+        assert.equal("/repo (gitloom) abc1234..def5678",
+            commit_view_buf_name("/repo", "abc1234..def5678"))
+        assert.equal("C:/src/x (gitloom) Working tree",
+            commit_view_buf_name("C:/src/x", "Working tree"))
+    end)
+
+    it("strips only a leading `Commit `", function()
+        assert.equal("/r (gitloom) Range Commit x", commit_view_buf_name("/r", "Range Commit x"))
+    end)
+
+    it("leaves a named scratch buffer nofile (no write prompt)", function()
+        local buf = vim.api.nvim_create_buf(false, true)
+        vim.api.nvim_buf_set_name(buf, commit_view_buf_name("/repo", "Commit abc1234"))
+        assert.equal("nofile", vim.bo[buf].buftype)
+        assert.is_true(vim.api.nvim_buf_get_name(buf):find("(gitloom) abc1234", 1, true) ~= nil)
+        vim.api.nvim_buf_delete(buf, { force = true })
     end)
 end)

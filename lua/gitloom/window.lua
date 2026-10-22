@@ -967,6 +967,12 @@ local function open_commit_view(opts, commit, range, root)
     -- can revisit it; the frame is pushed at the end, once its keymaps are bound.
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].bufhidden = "hide"
+    -- Name it like the graph buffer (§2, §11), so a GUI title (Neovide) shows
+    -- the repo path here too. pcall: a duplicate (E95, the same commit opened
+    -- twice) just leaves this buffer unnamed.
+    if root then
+        pcall(vim.api.nvim_buf_set_name, buf, git.commit_view_buf_name(root, title))
+    end
 
     -- The host window IFF it is currently showing this frame's buffer (§14.3):
     -- nil when the user has navigated to another frame or hidden the host, so the
