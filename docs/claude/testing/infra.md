@@ -7,10 +7,12 @@ Scope: per-spec coverage of persistence, progress, the open trace, the vendored 
   resolved over the built-in), `overlay` (a stored value wins only while its
   `base` equals today's configuration-resolved value; a wrong-typed / value-less
   entry is ignored), `set_pref` (stores `{ value, base }`, prunes other stale
-  entries), `pins_for_save` (only the leading run of unreserved defaults still in
-  default order dropped — a default moved below an explicit entry, or reserved,
-  is kept with its place; order and reserve flags kept), `set_repo` / `repo_state` (per-root round trip, junk
-  sanitised, an empty state removes the entry); and against a scratch file: round
+  entries), `pins_for_save` (only the leading run of defaults still in default order
+  dropped — a default moved below an explicit entry is kept with its place; order
+  kept; entries written as `{ id }`, a legacy `reserved` flag dropped),
+  `set_repo` / `repo_state` (per-root round trip, junk sanitised, an empty state
+  removes the entry, a persisted `reserved` field ignored on read and never written
+  back); and against a scratch file: round
   trip, rename-over-existing leaving no temp files, **two writers with different
   keys both surviving** (re-read before write), a corrupt / non-object file ignored
   with ONE warning and replaced by the next write, `persist = false` neither

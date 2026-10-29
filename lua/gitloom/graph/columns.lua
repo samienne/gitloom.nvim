@@ -492,19 +492,45 @@ function M.session(opts, seed)
     -- `RankInfo`); colour state is kept per REF KEY — the identity key of a ranked
     -- ref (members share one hue), the info table itself for a generated ref.
     --   `tip_row[name]`  — the row a ranked ref's tip was swept at (rank's standing rows)
-    --   `pending[key]`   — visible members of the identity whose tip is still below
+    --   `pending[key]`   — visible members of the identity this sweep will still reach
+    --                      (`counted` and not yet `reached`, spec §5.5): a tip on a
+    --                      LOADED row below, or — while the stream runs — a ref the
+    --                      running load is known to deliver (`rr.coming`). A ref whose
+    --                      tip is neither is not pending and holds nothing.
     --   `live[key]`      — live tracks (active edges) carrying a member
     --   `color_of[key]`  — the slot the key holds while it holds one
     --   `ref_colors`     — ref name → its label colour, the identity colour at its tip
+    --   `ref_levels`     — ref name → the brightness level its label is drawn at (§5.5)
     -- A key's colour is released once no live track carries it AND no member is still
     -- pending (spec §5.5) — never a pinned slot. The releases due on one row go in
     -- the order their colours were allocated (`alloc_seq`), after its allocations.
-    local tip_row, reached, pending, live = {}, {}, {}, {}
+    local tip_row, reached, pending, live, counted = {}, {}, {}, {}, {}
     local color_of, alloc_seq, nalloc = {}, {}, 0
-    local ref_colors = {}
+    local ref_colors, ref_levels = {}, {}
     local ngen = 0
     local gen_on = {} -- commit → the generated ref sitting on it (§5 "Other parents")
-    for _, info in pairs(infos) do pending[info.ident] = (pending[info.ident] or 0) + 1 end
+    local function count_pending(info)
+        if counted[info.name] then return end
+        counted[info.name] = true
+        pending[info.ident] = (pending[info.ident] or 0) + 1
+    end
+    local coming = rr and rr.coming
+    for name, info in pairs(infos) do
+        if coming == true or (type(coming) == "table" and coming[name]) then count_pending(info) end
+    end
+    -- Rows `items[from..]` are LOADED (§5.5): every visible ranked ref on them is
+    -- pending until the sweep reaches it. Run before those rows are swept.
+    local function load_rows(items, from)
+        for i = from, #items do
+            local C = items[i].commit
+            if C and not C.virtual then
+                for _, ref in ipairs(C.refs or {}) do
+                    local info = (ref.kind == "local" or ref.kind == "remote") and infos[ref.name] or nil
+                    if info then count_pending(info) end
+                end
+            end
+        end
+    end
     local function key_of(info) return info.ident or info end
     local function gen()
         ngen = ngen + 1
@@ -561,8 +587,8 @@ function M.session(opts, seed)
             end
             local k = key_of(info)
             live[k] = (live[k] or 0) + 1
-            -- A seed's colour is its drawn colour: `-k` (slot k muted) for a remote.
-            local slot = lane.color and math.abs(lane.color)
+            -- A seed's colour is its DRAWN colour (slot + brightness level, §5.5).
+            local slot = lane.color and rankm.slot_of(lane.color)
             if not color_of[k] and slot then
                 nalloc = nalloc + 1
                 color_of[k], alloc_seq[k] = slot, nalloc
@@ -710,9 +736,10 @@ function M.session(opts, seed)
             if info and not reached[ref.name] then
                 reached[ref.name] = true
                 tip_row[ref.name] = state_index
-                pending[info.ident] = (pending[info.ident] or 1) - 1
-                -- A collapsed head / kept junction folds its refs (§5): not ranked here.
-                if not C.collapsed and not C.junction then own[#own + 1] = info end
+                if counted[ref.name] then pending[info.ident] = (pending[info.ident] or 1) - 1 end
+                -- A collapsed head / kept junction's refs are its own too (§5): ranked
+                -- at their (muted, unless pinned) level like any other.
+                own[#own + 1] = info
             end
         end
         return own
@@ -724,20 +751,18 @@ function M.session(opts, seed)
     local below = setmetatable({}, { __index = tip_row })
     local function parent_ref(p)
         local best
-        if not p.collapsed and not p.junction then
-            local cands = {}
-            for _, ref in ipairs(p.refs or {}) do
-                local info = (ref.kind == "local" or ref.kind == "remote") and infos[ref.name] or nil
-                if info and not reached[ref.name] then
-                    cands[#cands + 1] = info
-                    below[ref.name] = math.huge
-                end
+        local cands = {}
+        for _, ref in ipairs(p.refs or {}) do
+            local info = (ref.kind == "local" or ref.kind == "remote") and infos[ref.name] or nil
+            if info and not reached[ref.name] then
+                cands[#cands + 1] = info
+                below[ref.name] = math.huge
             end
-            for _, info in ipairs(cands) do
-                if not best or rankm.better(info, best, below) then best = info end
-            end
-            for _, info in ipairs(cands) do below[info.name] = nil end
         end
+        for _, info in ipairs(cands) do
+            if not best or rankm.better(info, best, below) then best = info end
+        end
+        for _, info in ipairs(cands) do below[info.name] = nil end
         if best then return best end
         local g = gen_on[p]
         if not g then
@@ -775,16 +800,17 @@ function M.session(opts, seed)
         local touched = {}
         local sel_color = ensure(sel)
         touched[key_of(sel)] = true
-        local labels = {}
+        local labels, levels = {}, {}
         for _, info in ipairs(own) do
             local c = ensure(info)
-            labels[info.name] = c
-            ref_colors[info.name] = c
+            labels[info.name], levels[info.name] = c, rankm.drawn_level(info)
+            ref_colors[info.name], ref_levels[info.name] = c, levels[info.name]
             touched[key_of(info)] = true
         end
-        -- A track's drawn colour: its ref's identity slot, `-k` (the muted variant)
-        -- for a remote ref (§5.5 "Muted remotes") — so every copy of the colour, the
-        -- panes' included (§6.2), draws a remote muted without consulting its ref.
+        -- A track's drawn colour: its ref's identity slot at the ref's brightness
+        -- level (`rank.drawn`: `k` full, `-k` slightly muted, `-(k + MUTED)` muted;
+        -- §5.5 "Muting") — so every copy of the colour, the panes' included (§6.2),
+        -- draws at the right level without consulting its ref.
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
             local info = (i == 1) and sel or parent_ref(p)
@@ -792,7 +818,7 @@ function M.session(opts, seed)
             local k = key_of(info)
             live[k] = (live[k] or 0) + 1
             local c = ensure(info)
-            outgoing[#outgoing + 1] = { lane = { id = id, color = info.remote and -c or c, ref = info,
+            outgoing[#outgoing + 1] = { lane = { id = id, color = rankm.drawn(c, rankm.drawn_level(info)), ref = info,
                 begin = C, parent = p, highlighted = false } }
         end
         -- Every incoming edge ends here; then the releases, after every allocation.
@@ -805,6 +831,7 @@ function M.session(opts, seed)
         state.outgoing = outgoing
         state.trunk_in = trunk
         state.selected, state.selected_color, state.ref_colors = sel, sel_color, labels
+        state.selected_level, state.ref_levels = rankm.drawn_level(sel), levels
         -- The incoming ENTRY carrying that lane, so a placement stage can ask "which
         -- column is this commit's own lane in?" without re-deriving identity. The
         -- entry table is what the gutter's handover rows mutate (`e.col`), so holding
@@ -1461,7 +1488,9 @@ function M.session(opts, seed)
             -- and its own ranked refs' label colours (ref name → slot, §5.5).
             selected = state.selected,
             selected_color = state.selected_color,
+            selected_level = state.selected_level,
             ref_colors = state.ref_colors,
+            ref_levels = state.ref_levels,
         }
         for _, o in ipairs(state.outgoing) do row.parent_lanes[#row.parent_lanes + 1] = o.lane end
         for _, inc in ipairs(state.incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
@@ -1692,8 +1721,11 @@ function M.session(opts, seed)
     ---@field ref_colors table<string, integer>  ref name → its label colour (§5.5): the
     ---                         identity's colour at the ref's tip row, for every visible
     ---                         ranked ref swept so far — carried or not
+    ---@field ref_levels table<string, integer>  ref name → the brightness level (1 full,
+    ---                         2 slightly muted, 3 muted; §5.5) its label is drawn at
     ---@field extend fun(items: table[], from: integer?, yield: (fun())?): table[]
-    local session = { n = 0, rows = rows, lookahead = policy.prepass ~= nil, ref_colors = ref_colors }
+    local session = { n = 0, rows = rows, lookahead = policy.prepass ~= nil, ref_colors = ref_colors,
+        ref_levels = ref_levels }
 
     --- Sweep `items[from..]` onto the end of the session and return **just the rows
     --- it appended** (`session.rows` holds the whole sweep). `from` defaults to 1;
@@ -1705,6 +1737,7 @@ function M.session(opts, seed)
     function session.extend(items, from, yield)
         local pre = policy.prepass and policy.prepass(opts, items) or nil
         local out, since = {}, 0
+        load_rows(items, from or 1)
         for i = from or 1, #items do
             run_item(items[i], i, pre, (seed and session.n == 0) and policy.seam or policy.body)
             session.n = session.n + 1

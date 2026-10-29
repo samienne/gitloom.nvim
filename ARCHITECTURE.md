@@ -418,7 +418,7 @@ to each other and to the lanes crossing the cutoff:
    "alive together" is what is drawn, and heads get no extra rule. Two units of ONE
    identity sharing its colour (a local and its remote alive together, §5.5) are not a
    clash, as in the graph. A replacement skips the pinned slots (`avoid`, from
-   `opts.pin_rank`), never moves a muted `-k` (a remote's colour), and without generated colours
+   `opts.pin_rank`), never moves a negative colour (a muted brightness level, `rank.drawn`), and without generated colours
    (`ncolors`, no truecolor) shares the least-held curated slot instead of minting
    one past the palette, which the renderer would wrap onto an arbitrary colour.
 4. **Size + render.** `converge_header` does a **min-fit search**: start at
@@ -774,9 +774,7 @@ modifiers + fork-on-push) and F (durable persistence, deferred).
   `fetch_worktree_diff` is never called for it. For layout a working-tree node
   carries HEAD's current branch as its own ref (`own_refs` reads `ref_rank.head`;
   spec §4.2) without reaching it — its tip is the HEAD commit below — so the stack
-  carries HEAD's identity and continues into HEAD's lane in its colour. (The §10.6.2
-  reservation owner pick must resolve the same way once dedicated columns are
-  consumed by the layout — today only the flag is stored.) Attribution
+  carries HEAD's identity and continues into HEAD's lane in its colour. Attribution
   (`sigset`/`view`) is unchanged and still gives it the empty signature.
 
 `git log` is porcelain, but an explicit `--pretty=format:` is a stable,
@@ -1068,16 +1066,31 @@ layout half is `columns.lua`'s carried refs and colour session, below).
 `rank.pair(refs, {remotes, pins})` groups every local / remote-tracking branch into
 an **identity** (`IdentityPairing`: a local, its configured upstream, every remote of
 its short name; same-named remote-only refs form one remote-only identity) — repo
-state only, no view state. `rank.infos(pairing, {visible, pins, current, remotes})`
-precomputes one static `RankInfo` per **visible** ranked ref: `name`, `ident`,
+state only, no view state. `rank.infos(pairing, {visible, collapsed, pins, current,
+remotes})` precomputes one static `RankInfo` per **visible** ranked ref (a ref folded
+into a collapsed region is visible, and listed in `collapsed`): `name`, `ident`,
 `remote`, `tier` (1 pinned, 2 unpinned with a visible local, 3 remote-only, 4
-generated) and the tie-break fields. `rank.better(a, b, rows)` is the total order;
-its one row-dependent rule, the **standing row** (`rank.standing_row`), is read at
+generated), the **brightness `level`** (spec §5: 1 a pinned or expanded local, 2 a
+pinned or expanded remote, 3 collapsed and unpinned, 4 generated) and the tie-break
+fields. `rank.better(a, b, rows)` is the total order, lexicographic with the level
+first, then pin rank, tier, standing row, member order, current branch, name; its
+one row-dependent rule, the **standing row** (`rank.standing_row`), is read at
 compare time from the tip rows known so far, which is what lets the layout compare
-top-down while rows stream in. `rank.generated(seq)` is the `seq`-th generated ref,
-`rank.order` the whole order at once (tests). `rank.input` bundles the infos, the
-pinned identities' slots, the current branch and a fingerprint `key` into the
-layout input `opts.ref_rank` (window.lua's `GRAPH_HELPERS.sync_ref_rank`). The same
+top-down while rows stream in. `rank.generated(seq)` is the `seq`-th generated ref
+(level 4: ranked last, yet `rank.drawn_level` draws it at level 1), `rank.order`
+the whole order at once (tests). `rank.input` bundles the infos, the pinned
+identities' slots, the current branch, `remote_only` (the members of every
+remote-only identity, from the repository's pairing — the refs whose label carries
+`icons.remote`), `coming` (below) and a fingerprint `key` into the layout input
+`opts.ref_rank` (window.lua's `GRAPH_HELPERS.sync_ref_rank`).
+`rank.start_set(branches, refs)` is the refspec's start set: `true` for `--all`,
+else the refs named outright (or as `refs/heads/<x>` / `refs/remotes/<x>`), every
+local for `--branches` and every remote for `--remotes`; any other refspec word
+starts no ranked ref. It is published as `coming` while the open-time stream runs
+(spec §5.5 "pending") and is part of the key. The **drawn-colour codec** packs a
+slot and a level into one integer: `rank.drawn(k, level)` is `k` (level 1), `-k`
+(level 2) or `-(k + rank.MUTED)` (level 3, `MUTED = 2^20`); `rank.slot_of` /
+`rank.level_of` decode it. The same
 pairing feeds `select.pin_anchors` (a pin covers the identity, §10.6).
 
 ### Lane layout — Phase 1 (`columns.lua`)
@@ -1136,8 +1149,10 @@ the current row. For each commit `C`:
    parent commit (`parent_ref`, compared as standing at the parent's row), else that
    parent's **generated** ref (tier 4, created at the first such edge and shared by
    every later one); a commit with no arriving lane and no own ref creates a
-   generated ref. The row records `selected`, `selected_color` and `ref_colors`
-   (its own refs → label colour) for the renderer.
+   generated ref. A collapsed head's or kept junction's folded refs are its own refs
+   like any other (ranked at their level, muted unless pinned). The row records
+   `selected`, `selected_color`, `selected_level`, `ref_colors` and `ref_levels` (its
+   own refs → label colour slot and drawn level) for the renderer.
    The first parent **continues the identity** of one incoming lane (spec §5 "Lane
    identity"), chosen in tiers: the lane carrying the best-ranked ref, then a lane
    whose child has this commit as its FIRST parent (a merge's second-parent edge is
@@ -1157,10 +1172,13 @@ the current row. For each commit `C`:
    `state.trunk_in`). A fresh id is taken only for a branch head (a tip's first
    parent) and every extra parent of a merge.
    **Ranking input.** `opts.ref_rank` (`rank.input`, published by window.lua's
-   `GRAPH_HELPERS.sync_ref_rank`): the visible ranked refs' infos, the pinned
-   identities' slots and the current branch, plus a fingerprint `key` that is part of
-   the layout fingerprint `graph.extend_columns` checks. The only row-dependent rank
-   rule is the **standing row** (spec §5 rank rule 2), read at compare time from the
+   `GRAPH_HELPERS.sync_ref_rank`): the visible ranked refs' infos (each with its
+   **brightness level**, 1 full / 2 slightly muted / 3 muted — the rank's first axis,
+   spec §5 — from whether it is a remote, pinned, and drawn collapsed), the pinned
+   identities' slots, the current branch and, while the open-time stream runs, the
+   refspec's start set (`coming`, `rank.start_set`), plus a fingerprint `key` that is
+   part of the layout fingerprint `graph.extend_columns` checks. The only
+   row-dependent rank rule is the **standing row** (spec §5 rank rule 4), read at compare time from the
    tips swept so far (`tip_row`), so every comparison happens at or below both tips
    and the streaming prefix property holds. nil ranks nothing: every lane carries a
    generated ref.
@@ -1169,8 +1187,10 @@ the current row. For each commit `C`:
    allocates the identity's slot the first time a member is selected, carried or
    labelled; allocation order on a row is the selected ref, the labels' refs in label
    order, then the other parents' refs in parent order. `release` returns a key's
-   slot once no live lane carries a member (`live`) AND no visible member's tip is
-   still below (`pending`), never a pinned slot — after the row's allocations, in
+   slot once no live lane carries a member (`live`) AND no visible member is
+   `pending` — its tip on a LOADED row below (`load_rows` counts each `extend`'s rows
+   before sweeping them), or in the stream's `coming` start set (a pane sweep, which
+   shares `rr`, treats `coming` refs as pending too) — never a pinned slot — after the row's allocations, in
    allocation order (`alloc_seq`), so release order is row order alone and placement
    cannot reach colour through the back door. Slots come from a recycling FIFO
    **free list** seeded with `palette.tracks`: taken from the front, returned to the
@@ -1186,20 +1206,39 @@ the current row. For each commit `C`:
    slots not held. Known up front, so the streaming prefix property holds; the
    header pane passes `columns.pinned_slots(opts.pin_rank, #tracks)` as `pane.header`'s
    `avoid` so its de-collision never hands one out.
-   **Muted remotes — the signed colour.** A lane carrying a **remote** ref gets the
-   colour **`-k`** — "slot `k`, muted variant" — so the mark rides every copy of a
-   lane's `color` (Segments, the header's `lane_of`/de-collision, footer seeds and
-   rebuilt pane cells) with no lookup of the ref. A footer seed reserves `abs(color)`
+   **Brightness levels — the drawn colour.** A lane's `color` packs the slot and its
+   ref's drawn level (`rank.drawn`): `k` full, **`-k`** slightly muted (a pinned or
+   expanded remote), **`-(k + rank.MUTED)`** muted (a collapsed, unpinned ref) — so
+   the level rides every copy of a lane's `color` (Segments, the header's
+   `lane_of`/de-collision, which never recolours a negative colour, footer seeds,
+   rebuilt pane cells and packed marker rows) with no lookup of the ref;
+   `rank.slot_of` / `rank.level_of` decode it. A footer seed reserves `slot_of(color)`
    for its ref's key (counted once when it is a pinned slot). Phase 2's
-   `render.slot_hl` maps `-k` to `mute_hl(tracks[k])` — a cached `GitloomMute_*`
-   blend toward the background by `palette.remote_mute` (alias `counterpart_dim`),
-   cleared with the dim cache on ColorScheme (plain `tracks[k]` without truecolor).
-   Out of the cone `dim_hl` recognises a `GitloomMute_*` group (`mute_source`) and
-   blends the SLOT colour by `palette.remote_mute_out` (alias `counterpart_dim_out`,
-   default `0.75 * dim`) into a `GitloomMuteDim_*` group, so an out-of-cone remote
-   stays brighter than every other dimmed lane — the two dims do not compose.
-   `row.selected_color` is unsigned; the node glyph draws the muted variant when the
-   selected ref is a remote.
+   `render.slot_hl` maps level 2 (`-k`) to `mute_hl(tracks[k])` — a cached
+   `GitloomMute_*` blend toward the background by `palette.remote_mute` (default
+   `0.25`, alias `counterpart_dim`) — and level 3 to a `GitloomCMute_*` blend by
+   `palette.collapsed_mute` (default `0.45`), which replaces `remote_mute` rather than
+   composing with it; both are cleared with the dim cache on ColorScheme (plain
+   `tracks[k]` without truecolor). A factor that is not a number in `0`–`1`
+   (`palette_factor`) reads as unset, so its default applies. Out of the cone
+   `dim_hl` recognises a `GitloomMute_*` group (`mute_source`) and blends the SLOT
+   colour by `palette.remote_mute_out` (alias `counterpart_dim_out`, default
+   `0.75 * dim`) into a `GitloomMuteDim_*` group, so an out-of-cone remote stays
+   brighter than every other dimmed lane — the two dims do not compose; a
+   `GitloomCMute_*` group (`cmute_source`) instead blends the slot colour
+   by `palette.collapsed_mute_out` (default `0.45`, the level-1 out-of-cone level, same `palette_factor` validation, no alias; no stacking) into `GitloomCMuteDim_*` (spec §12.2).
+   In the cone with the emphasis active, `render.lit_hl` maps either source group
+   (`mute_source` / `cmute_source`) to its slot colour blended by
+   `palette.highlight_mute` (default `0.1`, same validation) as `GitloomHMute_*`
+   (spec §12.2); level 1 and non-muted groups pass through. It is applied where
+   `dim_hl` would be on the lit side: `get_column_chars` cells and connectors, the
+   row `rh`, the packed-marker `mrh`, and the pane label `mark` in window.lua.
+   `GitloomHMute_*` groups are never registered as sources, so neither function
+   re-maps them.
+   `row.selected_color` is unsigned and `row.selected_level` its drawn level;
+   `row.ref_colors` / `row.ref_levels` give each own ranked ref's (collapsed ones
+   included) label slot and level, unioned on a packed marker row, whose
+   `marker_items` keep the per-marker rows.
 4. **Compaction** (under the `compact` / `survivors` layout policies, §5.6; the
    others hold every survivor in its column): each survivor shifts left through
    the run of *row-start* gaps
@@ -1321,20 +1360,6 @@ the later stages instead of spelling out `occ0 or blocked` inline.
 (A first grid attempt reserved whole fan spans and pushed inline merges wider;
 reserving only endpoints restores fan sharing and byte-identity — a good
 confirmation the sharing rule is the right one.)
-
-**Where dedicated lanes will plug in (§10.6.2, not yet built).** A column held
-for a *reserved* pinned branch is occupancy, so `grid_taken` is the single seam:
-one more term beside `blocked`, and tip placement, the slide, survivor compaction
-and fan-out all skip the column for free — the spec's "stop, never a skip" then
-follows from the guard the stages already obey, with nothing to add per stage.
-The pin list supplies the order (`select.reserved_order`, above); the tie-break
-for a commit whose signature names several reserved owners is the earliest of
-them in that list. Enforcement is at lane **birth** plus "not compacted away" —
-never a rightward re-jog, which `compact`'s leftward-only redraw cannot express
-and `complete_check` would reject. The colour side reuses the pane **seed**
-carve-out in `columns.layout` (drop the slot from the free FIFO, bump `in_use`).
-Panes are exempt (§6.2): the footer's seam must reproduce the main view's
-boundary columns exactly, and the header never runs this sweep.
 
 **The stages.** Three **shell steps** run first (setup): `classify` (read `active`
 into incoming/survivors), `spawn_lanes` (mint one outgoing Lane per parent — the
@@ -1838,8 +1863,10 @@ itself is a behaviour-preserving refactor within the current spec.
   OKLCH hue realised lazily by `gitloom.color` into a cached `GitloomGen_*`
   highlight group (same pattern as `dim_hl`, rebuilt on `ColorScheme`; §5.5). The
   generated colours' lightness/chroma anchor is derived once from the curated
-  `tracks` (or `Normal`). A negative slot `-k` (a lane carrying a remote ref) is
-  slot `k` through `mute_hl` (Phase 1, "Muted remotes", above).
+  `tracks` (or `Normal`). A negative colour is a muted brightness level
+  (`rank.drawn`): `-k` is slot `k` through `mute_hl` (`remote_mute`), `-(k +
+  rank.MUTED)` slot `k` through the `collapsed_mute` blend (Phase 1, "Brightness
+  levels — the drawn colour", above).
 - `mirror_columns(columns)` — when `opts.mirror` is set, `get_column_chars` runs
   the cells through this first: it reverses the column order and swaps each
   cell's `left`/`right` connectivity. Because the glyph is a pure function of
@@ -1874,20 +1901,31 @@ itself is a behaviour-preserving refactor within the current spec.
   graph, so the prefix is on the graph side there too. `place_cursor` adds the
   prefix's BYTE length (`render.dual_prefix_bytes` on row 2; the glyphs are
   multibyte and configurable) to the flex offset to park on the labels / message. A `dual` commit with no labels stays a single row. `B` cycles the mode. **Label colour** (spec §6 "Label colour"): every visible
-  ranked ref's label takes ITS OWN ref's colour — `row.ref_colors` (ref name → its
-  identity's slot at its tip, filled by the layout's colour session) through
-  `ref_label_hl`, the muted variant (`-k`) for a remote — and is dimmed with
-  `dim_hl`. A branch group (`group_members`) draws its bracket, icons and name in
-  the local's colour (else its first remote's, muted) and each `↑remote` in that
-  remote's own muted colour; the current branch's `HEAD → ` prefix and a detached
-  `HEAD` marker keep `palette.head`. Tags, worktrees, a collapsed `◍` head's refs
-  (not visible ranked refs) and every label with `lane_label_colors = false` take
-  the per-kind group (`decoration_kinds` lists the kinds in label order). A packed
-  marker's labels are per-kind too; only its count-only unit shows the node's colour
-  (`node_lane_hl` — the SAME `top_lane` + `seg_color` + slot lookup the node glyph
-  uses, minus the HEAD-node override). The panes have no `ref_colors` of their own:
-  they look the commit's main-view row up through `ctx.display_index` and use its
-  `ref_colors`, so a label agrees with the main view with no extra plumbing.
+  ranked ref's label — a collapsed `◍` head's, a kept junction's and a packed
+  marker's included — takes ITS OWN ref's colour at its brightness level:
+  `row.ref_colors` (ref name → its identity's slot at its tip, filled by the
+  layout's colour session) and `row.ref_levels` (ref name → level) through
+  `ref_label_hl(opts, colors, name, remote, kind_group, levels)`, which packs them
+  with `rank.drawn` for `slot_hl`; a ref with a colour but no level entry reads as
+  expanded (level 2 for a remote, else 1), and a ref with no colour on the row (not
+  a visible ranked ref, e.g. filtered out) takes `kind_group`. The label is dimmed
+  with `dim_hl`. A branch group (`group_members`) draws its bracket, icons and name
+  in the local's colour (else its first remote's) and each `↑remote` in that
+  remote's own colour at its own level; the current branch's `HEAD → ` prefix and a
+  detached `HEAD` marker keep `palette.head`. A **tag** takes its node's colour as
+  drawn: `node_drawn(item, commit)` is the row's `rank.drawn(selected_color,
+  selected_level)` (on a packed marker row, the marker's own row from
+  `marker_items`), and `tag_label_hl` uses it, falling back to `palette.tags`
+  without one. Worktrees, and every label with `lane_label_colors = false` (tags
+  included), take the per-kind group. A packed marker's labels go through the same
+  `get_ref_items` as a row's (with the marker's own dimming, `mk.rh`, and no HEAD
+  fallback), reading the row's unioned `ref_colors` / `ref_levels`; only its
+  count-only unit shows the node's colour (`node_lane_hl` — the SAME `top_lane` +
+  `seg_color` + slot lookup the node glyph uses, minus the HEAD-node override). The
+  panes have no `ref_colors` of their own: they look the commit's main-view row up
+  through `ctx.display_index` (else `ctx.node_loc`, for a commit drawn on a packed
+  marker row) and use its `ref_colors` / `ref_levels` and node colour, so a label
+  agrees with the main view with no extra plumbing.
 - `passthrough_columns(columns, dir)` — builds a vertical-only `GraphColumn` per
   input column (`dir = "up"` keeps lanes entering from above, `"down"` lanes
   leaving below; the rest blank), reused through `get_column_chars` for
@@ -1936,7 +1974,10 @@ normal while their §10.7 default is collapsed — focus on and not an anchor;
 `owner_tip`) and `expanded_icon` (`icons.expanded`), and the group/name icon
 helpers (`group_pin` / `name_pin`) emit it after the pin icon, so it too is in
 the label text everywhere a label is measured. The set is resolved per reflow
-(it changes only with the view state), not per call. The
+(it changes only with the view state), not per call. The remote-only marker (§6)
+rides it too: `remote_only` (the ref set `rank.input` publishes) and
+`remote_icon` (`icons.remote`); `group_pin` appends it after the expanded icon for
+a group with no local branch whose remotes are in that set. The
 `<Space>` toggle, the palette's collapse / expand, `expand_to_hash` (filter
 jump), the §11.7.6 reveal and the §13.4 selection toggle all act on one set,
 the commit's **own owners** (§10.2):
@@ -1976,23 +2017,18 @@ commit selection build on.
 
 **Pinned branches — the ordered list and its dialog** (specification.md §10.6 /
 §10.6.1). The anchor set is stored as **one ordered list** of `PinEntry`
-(`{ id, reserved }`), not a set: `view_state.pins` holds the user's explicitly
+(`{ id }`), not a set: `view_state.pins` holds the user's explicitly
 ordered entries and `view_state.unpinned` the ids they removed (which suppress
 the built-in defaults). `select.lua` owns the pure core — `pin_resolve` (the
 unplaced defaults `master` / `main` / `dev` / seeded marks / HEAD's anchor first,
 then the stored entries, minus the unpinned and minus refs that no longer exist;
 a new pin always lands at the bottom), `pin_rank` / `pin_anchors` (below),
-`pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add`, and the two readers
-`pin_ids` (the membership set) and `reserved_order` (the reserved ids in priority
-order — the ordering's meaning for *columns*; its meaning for lane identity is
-the per-ref rank, spec §5). All are copy-in/copy-out, so the glue assigns the
-result back.
-
-Putting `reserved` **on** the entry rather than in a second list is what makes
-`reserved ⊆ pinned` and "unpin implies unreserve" structural instead of
-remembered: the flag has nowhere to survive its entry. Pinning alone claims **no
-column** — the flag is set only in the dialog — but per spec §5 it does feed lane
-identity through the ranks.
+`pin_move` / `pin_remove` / `pin_add`, and the reader `pin_ids` (the membership
+set). All are copy-in/copy-out, so the glue assigns the result back. Pinning
+claims **no column**; per spec §5 it feeds ref priority and colour through the
+ranks. (The former per-entry `reserved` flag for a dedicated column is gone:
+`pin_copy` / `pin_resolve` and `persist.repo_state` drop a stray `reserved`
+field, and `pins_for_save` writes `{ id }` alone.)
 
 `ctx:effective_pins()` resolves the live list — exactly the dialog's rows. A pin
 **covers its identity** (spec §10.6): the other members of a pinned entry's
@@ -2010,8 +2046,15 @@ branch and the visible refs, spec §5 "The ranks are a layout input") on both. I
 runs at the top of every `reflow_build` (which `P`, every dialog key, the reset, a
 resync and a HEAD move all go through) and before the open-time stream;
 `reflow_build` calls `sync_ref_rank` again with the projection's **visible** refs
-(those on a node not folded into a collapsed head or kept junction), since
-visibility changes the ranks (§5).
+(those on a node — a collapsed head's or ref-bearing kept junction's folded refs
+included, and marked **collapsed**; under the filter, §16.3, folded refs are
+filtered out), since visibility and collapse change the ranks (§5). `ctx.streaming`
+(set for the open-time stream) makes it publish the refspec's start set
+(`rank.start_set(opts.branches, refs)`) as `coming`, i.e. pending; it is cleared when
+the stream completes. A failed stream leaves it set, so colours of start-set refs
+that never load are held longer than necessary (harmless: it only delays a
+release). `ctx:pin_marks()` reads `remote_only` off the published `opts.ref_rank`,
+so the `icons.remote` marker appears only once `sync_ref_rank` has run.
 
 `L` opens the dialog (`GRAPH_HELPERS.pin_dialog`): a `float_zindex` float over
 the graph, with `select.pin_dialog_lines` producing the buffer lines and a
@@ -2369,10 +2412,11 @@ way the renderer reads it — `x ~= false` keys as booleans, a merge style
 deep-extended over the built-in one); `overlay` applies a stored `{ value, base }`
 only while `base` equals that resolved value (a changed `setup()` wins);
 `set_pref` records one key and prunes every other stale entry; `pins_for_save`
-drops what the open-time resolution re-derives — the leading run of unreserved
-default anchors still in default order (§18.2), so a then-current HEAD branch does
-not become a permanent pin, while a default moved below an explicit entry is saved
-with its place (order is the identity rank). The I/O half reads lazily once (`load`) for opens and, for every change,
+drops what the open-time resolution re-derives — the leading run of default
+anchors still in default order (§18.2), so a then-current HEAD branch does not
+become a permanent pin, while a default moved below an explicit entry is saved
+with its place (order is the identity rank). Entries are written as `{ id }`;
+`repo_state` ignores a `reserved` field an older version wrote. The I/O half reads lazily once (`load`) for opens and, for every change,
 re-reads → merges the one key → writes a temp file → `fs_rename`s it over the
 original (unlinking first where rename cannot replace), so concurrent instances
 keep each other's keys. A corrupt file is `{}` with one WARN. `set_path` redirects
@@ -2669,7 +2713,11 @@ rows, walking the **Lane graph** (no flood, no id heuristics):
   `display_item`. Each Lane is one edge, so the walk is **exact**: a sibling
   sharing a fan is a distinct Lane and never lights. Bounded to the visible rows.
   Lanes are attached by Phase 1 (`columns.layout`), so no separate build step is
-  needed.
+  needed. A **packed marker row** (§10.4) has no `commit`: each of its `markers`
+  is a visible cone node in its own right — walked through the Lanes of its
+  original `marker_items` row, its marker lit on the packed row — so a reached
+  packed head lights its `◍` and label like any commit, and the walk continues
+  through it.
 - `get_column_chars(opts, columns, emphasis)` renders the cone by unioning the
   highlighted Segments' connectivity (above) and dims everything out-of-cone:
   a glyph whose top Segment draws no highlighted edge, the commit marker by the

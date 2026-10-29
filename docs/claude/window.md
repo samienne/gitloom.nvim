@@ -84,7 +84,7 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   junctions keep their own line) BEFORE the de-collision, which recolours only lanes
   sharing a drawn row (the unit is a lane id IN one main-view colour, since a lane is
   recoloured at an outranking ref; two units of one identity sharing its colour are
-  no clash; a muted `-k` is never moved), never onto a pinned slot, and within the
+  no clash; a negative, muted-level colour — `rank.drawn` level 2 or 3 — is never moved), never onto a pinned slot, and within the
   palette without truecolor (`ncolors`); `cap`; §6.2). **Both panes are wired** via
   graph.lua `update_panes` (gated by `opts.panes`, toggled by `F`): borderless
   overlays (footer at the bottom, header at the top). Both seams are computed by

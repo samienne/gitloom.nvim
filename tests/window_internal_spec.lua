@@ -78,19 +78,18 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.same({ "master", "main", "dev", "feature" }, ids(internal.effective_pins(new_ctx(repo))))
     end)
 
-    it("no anchor is reserved by default (pinning alone claims no column, §10.6.2)", function()
+    it("entries are { id } alone (no dedicated-column flag, §10.6)", function()
         for _, e in ipairs(internal.effective_pins(new_ctx(repo_with_branches()))) do
-            assert.is_false(e.reserved)
+            assert.same({ id = e.id }, e)
         end
     end)
 
-    it("unplaced defaults come first, then the user's ordered entries with their flags", function()
+    it("unplaced defaults come first, then the user's ordered entries", function()
         local ctx = new_ctx(repo_with_branches(),
-            { view_state = vs({ { id = "dev", reserved = true }, { id = "feature", reserved = false } }) })
+            { view_state = vs({ { id = "dev" }, { id = "feature" } }) })
         local list = internal.effective_pins(ctx)
         -- No auto entry: identity members are not rows (§10.6.1).
         assert.same({ "master", "main", "dev", "feature" }, ids(list))
-        assert.is_true(list[3].reserved)
     end)
 
     it("a pin covers the identity: its remotes are anchors, not entries (§10.6)", function()
@@ -170,7 +169,7 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
     it("drops a HEAD entry pinned while detached once HEAD is on a branch again", function()
         local repo = repo_with_branches()
         git.add_ref(repo, "HEAD", "head", "h_main").branch = "main"
-        local ctx = new_ctx(repo, { view_state = vs({ { id = "HEAD", reserved = false } }) })
+        local ctx = new_ctx(repo, { view_state = vs({ { id = "HEAD" } }) })
         assert.same({ "master", "main", "dev" }, ids(internal.effective_pins(ctx)))
     end)
 end)

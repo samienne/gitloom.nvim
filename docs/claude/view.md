@@ -93,7 +93,8 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
 - **Pin axis** (spec §10.6, toggled by `P`, managed by `L`): pin is the **anchor**
   set the focus default folds toward — it *generalises the trunk* (one anchor → a
   set). It is stored as **one ordered list**, `view_state.pins` (`PinEntry` =
-  `{ id, reserved }`, priority order) plus `view_state.unpinned` (ids explicitly
+  `{ id }`, priority order; a stray `reserved` field from an older version is
+  dropped) plus `view_state.unpinned` (ids explicitly
   removed, which suppress the HEAD / `master` / `main` / `dev` / seeded-mark
   defaults; HEAD is its branch when attached, the `HEAD` ref itself when detached).
   `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`: unplaced
@@ -108,34 +109,32 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   solely for the header: it gets `columns.pinned_slots(pane_opts.pin_rank, #tracks)`
   as `pane.header`'s `avoid`, so its colour de-collision never hands out a pinned
   slot. The **layout** ranks by `opts.ref_rank` (`rank.input`: pairing, pin list,
-  current branch, visible refs — spec §5 "The ranks are a layout input"), published
-  by `GRAPH_HELPERS.sync_ref_rank`: `ctx:sync_pin_rank()` calls it at the top of
-  every `reflow_build` and before the open stream (every pin change reflows, so
-  that is the refresh), and `reflow_build` calls it again with the projection's
-  **visible** refs (on a node not folded into a collapsed head or kept junction)
-  before laying out. Pinned identities' colours, carried refs and the muted
-  remotes are layout matters — see layout.md "Colour session".
+  current branch, visible and collapsed refs, and while streaming the refspec's
+  start set — spec §5 "The ranks are a layout input"), published by
+  `GRAPH_HELPERS.sync_ref_rank(ctx, visible, collapsed)`: `ctx:sync_pin_rank()`
+  calls it at the top of every `reflow_build` and before the open stream (every pin
+  change reflows, so that is the refresh), and `reflow_build` calls it again with
+  the projection's **visible** refs — every ref on a node, those folded into a `◍`
+  head or kept junction included and also marked **collapsed** (brightness level 3
+  unless pinned); under the filter (§16.3) folded refs count as filtered out —
+  before laying out. Pinned identities' colours, carried refs and the brightness
+  levels are layout matters — see layout.md "Colour session".
   Pinning changes only the default *mode* and the ranks, not `fp_only` or the
   owner tips, so it does **not** invalidate the signature cache
   (like a mode toggle). `P` uses `branch_under_cursor`, pins only real refs (drops
   anonymous merge owners), appends to the list, reflows, and repositions the
   cursor. Anchors are the foundation for the context panes (spec §6.2).
-- **Dedicated lanes + the pinned-branches dialog** (spec §10.6.1/§10.6.2, `L`):
-  "holds a reserved graph column" is a **flag on the pin entry**, not a second
-  list — so `reserved ⊆ pinned` and *unpin implies unreserve* are structural, and
-  **pinning alone claims no column** (up to four are pinned by default). Every
-  entry's place is its identity's rank (§5, `rank.input`'s pin tier); among reserved
-  entries it also orders the columns (`select.reserved_order`). The other members
+- **The pinned-branches dialog** (spec §10.6.1, `L`): **pinning claims no
+  column** (up to four are pinned by default; the former dedicated-lane flag was
+  dropped). Every entry's place is its identity's pin rank (§5, `rank.better`'s
+  second key, after the brightness level). The other members
   of a pinned identity have no rows; `P` on one records an explicit unpin of just
   that ref. `L` opens a `float_zindex` float rendered
   by the pure `select.pin_dialog_lines` (lines + a line → entry-index row map);
-  its buffer-local keys `<C-j>`/`<C-k>`/`<Space>`/`D`/`<CR>`/`q` each write
-  `view_state.pins`, reflow, and restore the graph cursor by hash like `P`.
+  its buffer-local keys are `<C-j>`/`<C-k>`/`D`/`<CR>`/`q`; each edit writes
+  `view_state.pins`, reflows, and restores the graph cursor by hash like `P`.
   `<CR>` and "Pin new branch…" reuse the `<leader>b` picker pieces extracted as
-  `ctx:ref_picker_format` / `ctx:jump_to_ref`. **The layout does not honour the
-  reserve flag yet** — the follow-up plugs it into `columns.lua`'s `grid_taken`
-  (see ARCHITECTURE) — and the dialog's last line says so, since a control whose
-  effect is unbuilt must not look like it works.
+  `ctx:ref_picker_format` / `ctx:jump_to_ref`.
   **NB:** these helpers are `GRAPH_HELPERS` fields rather than module locals
   because window.lua is at LuaJIT's **200-local chunk limit** (a second ceiling
   beyond the 60-upvalue one); new window helpers must go into the tables.

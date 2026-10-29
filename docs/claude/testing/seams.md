@@ -35,8 +35,8 @@ helpers `next_mode` / `selected_owner_ids` (§10), `pack_markers` (the
 marker-packing pass; §10.4), `own_owners` / `open_owners` / `toggle_target` / `owner_label` (a row's own
 owners, what `<Space>` collapses or expands, and their naming; §10.2/§10.4 —
 `own_owners_spec`), the ordered-pin-list helpers `pin_resolve` /
-`pin_move` / `pin_toggle_reserved` / `pin_remove` / `pin_add` / `pin_ids` /
-`reserved_order` / `pin_dialog_lines` (§10.6/§10.6.1), `smartcase_match` /
+`pin_move` / `pin_remove` / `pin_add` / `pin_ids` /
+`pin_dialog_lines` (§10.6/§10.6.1), `smartcase_match` /
 `filter_keep` / `filter_state` (the filter-search matcher + keep-set, and the query → active filter with blank = none; §16.2/§16.4), `ref_cycle_members` / `ref_cycle_next` / `cycle_source` / `visible_hashes` (the `%` local ⇄ remote
 cycle; §2), and `selected_ref` /
 `checkout_spec` (checkout; §10.4/§10.4.1 — the row entries themselves are

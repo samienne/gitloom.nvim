@@ -5,6 +5,7 @@
 --- glue owns the buffer; this owns the picture. Part of the gitloom graph engine.
 
 local color = require("gitloom.graph.color")
+local rank = require("gitloom.graph.rank")
 local util = require("gitloom.util")
 local git = require("gitloom.git")
 
@@ -27,19 +28,34 @@ M.DIM_FALLBACK = DIM_FALLBACK
 local dim_cache = {}
 -- Muted-variant group name → the slot group it was blended from (§5.5). Names
 -- are deterministic (group + factor), so this survives a ColorScheme reset intact.
+-- `mute_source` holds the level-2 (slightly muted, `remote_mute`) groups,
+-- `cmute_source` the level-3 (muted, `collapsed_mute` / `collapsed_mute_out`) ones: `dim_hl` reads them to
+-- give each level its own out-of-cone blend (§12.2).
 local mute_source = {}
+local cmute_source = {}
+local CMUTE_PREFIX = "GitloomCMute_"
 
 --- A palette blend factor by its current name, else its former alias (§8:
 --- `remote_mute` / `counterpart_dim`, `remote_mute_out` / `counterpart_dim_out`).
+--- Validated: only a number in `0`–`1` counts; anything else reads as unset, so the
+--- caller's default applies.
 ---@param opts GraphOptions
 ---@param key string
----@param alias string
+---@param alias? string
 ---@return number?
 local function palette_factor(opts, key, alias)
     local pal = opts.palette or {}
-    if type(pal[key]) == "number" then return pal[key] end
-    if type(pal[alias]) == "number" then return pal[alias] end
+    local function ok(v) return type(v) == "number" and v >= 0 and v <= 1 end
+    if ok(pal[key]) then return pal[key] end
+    if alias and ok(pal[alias]) then return pal[alias] end
     return nil
+end
+
+--- The level-3 blend factor (§5.5 "Muting"): `palette.collapsed_mute`, default 0.45.
+---@param opts GraphOptions
+---@return number
+local function collapsed_factor(opts)
+    return palette_factor(opts, "collapsed_mute") or 0.45
 end
 
 ---@param fg integer
@@ -66,14 +82,23 @@ function M.dim_hl(opts, group)
     if not group then return nil end
     if not vim.o.termguicolors then return DIM_FALLBACK end
     local factor = (opts.palette and type(opts.palette.dim) == "number") and opts.palette.dim or 0.45
-    -- A REMOTE ref's colour out of the cone (§12.2): not the cone dim on top of its
-    -- light mute, but ITS SLOT COLOUR blended by the out-of-cone remote factor —
-    -- `palette.remote_mute_out`, default `0.75 * dim` — so it reads a shade BRIGHTER
-    -- than every other dimmed colour, its own local's included.
+    -- A level-2 (pinned / expanded REMOTE) colour out of the cone (§12.2): not the
+    -- cone dim on top of its slight mute, but ITS SLOT COLOUR blended by the
+    -- out-of-cone remote factor — `palette.remote_mute_out`, default `0.75 * dim` —
+    -- so it reads a shade BRIGHTER than every other dimmed colour, its own local's
+    -- included.
     local src_group = mute_source[group]
     if src_group then
         local out = palette_factor(opts, "remote_mute_out", "counterpart_dim_out") or (0.75 * factor)
         return M.mute_hl(opts, src_group, out, "GitloomMuteDim_")
+    end
+    -- A level-3 (collapsed, unpinned) colour out of the cone does NOT stack: its SLOT
+    -- COLOUR is blended by `palette.collapsed_mute_out` (default 0.45, §12.2, the level of a
+    -- level-1 colour out of the cone, independent of `dim`).
+    local csrc = cmute_source[group]
+    if csrc then
+        local out = palette_factor(opts, "collapsed_mute_out") or 0.45
+        return M.mute_hl(opts, csrc, out, "GitloomCMuteDim_")
     end
     local key = group .. "\x1f" .. tostring(factor)
     if dim_cache[key] then return dim_cache[key] end
@@ -93,17 +118,18 @@ function M.dim_hl(opts, group)
     return name
 end
 
---- The **muted variant** of colour `group` (spec §5.5 "Muted remotes"): the same
---- hue blended lightly toward the Normal background by `palette.remote_mute`
---- (alias `counterpart_dim`; default 0.25 — much lighter than the §12 cone dim),
---- the colour of every remote ref's tracks, node and label. Cached in the dim cache
---- (so the ColorScheme reset clears it too). Without truecolor it is `group`
---- itself. Out of the cone `dim_hl` of this group does NOT compose: it blends the
---- slot colour by `remote_mute_out` (default `0.75 * dim`), lighter than the cone
---- dim every other colour gets (§12.2).
+--- The **slightly muted variant** of colour `group` (spec §5.5 "Muting", level 2):
+--- the same hue blended lightly toward the Normal background by
+--- `palette.remote_mute` (alias `counterpart_dim`; default 0.25 — much lighter than
+--- the §12 cone dim), the colour of every pinned or expanded remote ref's tracks,
+--- node and label. Cached in the dim cache (so the ColorScheme reset clears it
+--- too). Without truecolor it is `group` itself. Out of the cone `dim_hl` of this
+--- group does NOT compose: it blends the slot colour by `remote_mute_out` (default
+--- `0.75 * dim`), lighter than the cone dim every other colour gets (§12.2).
 ---
 --- `factor` / `prefix` override the blend and the group-name prefix: `dim_hl` uses
---- them for the same lane OUT of the cone (§12.2), which is not a composition.
+--- them for the same lane OUT of the cone (§12.2), and `slot_hl` for level 3
+--- (`collapsed_mute`, prefix `GitloomCMute_`).
 ---@param opts GraphOptions
 ---@param group string|nil
 ---@param factor? number
@@ -125,7 +151,25 @@ function M.mute_hl(opts, group, factor, prefix)
     pcall(vim.api.nvim_set_hl, 0, name, { fg = blend_color(fg, bg, factor) })
     dim_cache[key] = name
     if prefix == "GitloomMute_" then mute_source[name] = group end
+    if prefix == CMUTE_PREFIX then cmute_source[name] = group end
     return name
+end
+
+--- The IN-cone colour of `group` while the §12 reachability highlight is active
+--- (§12.2): a level-2 (`GitloomMute_*`) or level-3 (`GitloomCMute_*`) muted colour
+--- is re-blended from its SLOT colour by `palette.highlight_mute` (default 0.1, so
+--- almost full brightness) into a `GitloomHMute_*` group; any other group (level 1,
+--- a per-kind or palette group) is returned unchanged. Callers apply it only to lit
+--- cells/labels with the highlight active; out of the cone `dim_hl` applies instead,
+--- and with the highlight off the levels keep `remote_mute` / `collapsed_mute`.
+---@param opts GraphOptions
+---@param group string|nil
+---@return string|nil
+function M.lit_hl(opts, group)
+    if not group then return nil end
+    local src = mute_source[group] or cmute_source[group]
+    if not src then return group end
+    return M.mute_hl(opts, src, palette_factor(opts, "highlight_mute") or 0.1, "GitloomHMute_")
 end
 
 --- Clear the dim-group cache (the derived groups are wiped by `hi clear` on a
@@ -212,6 +256,11 @@ end
 ---@field expanded? table<string, boolean>  expanded ref ids (§6); nil = none
 ---@field expanded_icon? string  their prefix, after the pin icon (default "▾"; "" turns it off)
 ---@field upstream_icon? string  the glyph before a spelled-out upstream (§6.3; default "→")
+---@field remote_only? table<string, boolean>  the remote-tracking branches of a
+---   **remote-only identity** (§5: no local branch anywhere, claimed by no local's
+---   upstream), read from the repository's pairing; nil = none
+---@field remote_icon? string  their branch group's icon, after the pin and expanded
+---   icons, directly before the name (§6 "Remote-only marker"; default "⇣"; "" off)
 
 --- The expanded icon (§6), or "" when `marks` has none.
 ---@param pins PinMarks?
@@ -252,8 +301,11 @@ local function group_in(set, b)
 end
 
 --- The label icons for a branch group (§6): the pin icon when any ref of it is
---- pinned, then the expanded icon when any is expanded. HEAD's group (`current`)
---- never carries either — HEAD is already singled out by its place and colour.
+--- pinned, then the expanded icon when any is expanded, then the remote icon when
+--- the group is a **remote-only identity's** (no local branch in the group, its
+--- remotes in `pins.remote_only`; §6 "Remote-only marker"). HEAD's group
+--- (`current`) never carries any — HEAD is already singled out by its place and
+--- colour, and is never on a remote-tracking branch.
 ---@param pins PinMarks?
 ---@param b RefGroup
 ---@return string
@@ -261,6 +313,11 @@ function M.group_pin(pins, b)
     if b.current or not pins then return "" end
     local out = group_in(pins.set, b) and (pins.icon or "⚲") or ""
     if group_in(pins.expanded, b) then out = out .. expanded_icon(pins) end
+    if not b.has_local and #b.remotes > 0 and group_in(pins.remote_only, b) then
+        local ri = pins.remote_icon
+        if ri == nil then ri = "⇣" end
+        out = out .. ri
+    end
     return out
 end
 
@@ -360,18 +417,18 @@ end
 --- The selectable units of a packed marker-group row (spec §10.4): one per
 --- marker, its text being the marker's ref decoration(s) or a "(N)" count when
 --- it carries no ref. Used for rendering, `h`/`l` selection, and `<CR>` expand.
---- `decos` / `kinds` are the separate labels (empty for a count-only unit) and their
---- per-kind label kinds (`decoration_kinds`): a packed marker's refs are not visible
---- ranked refs, so each label takes its per-kind colour (§6 "Label colour").
+--- `decos` are the separate labels (empty for a count-only unit); the renderer
+--- colours them like any row's (§6 "Label colour": a packed marker's refs are
+--- visible ranked refs, in their own identity colours).
 ---@param item OrderItem  -- a type == "markers" item
 ---@param pins? PinMarks  the pin set + icon (§6/§10.6); nil = no pin icons
----@return { marker: table, text: string, decos: string[], kinds: string[] }[]
+---@return { marker: table, text: string, decos: string[] }[]
 function M.marker_units(item, pins)
     local units = {}
     for _, m in ipairs(item.markers or {}) do
         local decos = M.decoration_texts(m, nil, pins)
         local text = (#decos > 0) and table.concat(decos, " ") or ("(" .. (m.count or 0) .. ")")
-        units[#units + 1] = { marker = m, text = text, decos = decos, kinds = M.decoration_kinds(m) }
+        units[#units + 1] = { marker = m, text = text, decos = decos }
     end
     return units
 end
@@ -478,14 +535,22 @@ M.top_lane = top_lane
 
 --- Resolve a palette slot (1-based, from Phase 1's free list) to its highlight
 --- group: a curated slot indexes `palette.tracks`; a slot beyond the curated set
---- is a generated OKLCH colour (§5.5). A negative slot `-k` is slot `k`'s muted
---- variant (a track or node carrying a remote ref, §5.5): `mute_hl`.
+--- is a generated OKLCH colour (§5.5). A negative value is a DRAWN colour at a muted
+--- brightness level (`rank.drawn`, §5.5 "Muting"): `-k` slightly muted (level 2, a
+--- pinned or expanded remote: `remote_mute`), `-(k + rank.MUTED)` muted (level 3,
+--- collapsed and unpinned: `collapsed_mute`, which replaces `remote_mute`).
 ---@param opts GraphOptions
 ---@param slot integer|nil
 ---@return string?
 function M.slot_hl(opts, slot)
     if not slot then return nil end
-    if slot < 0 then return M.mute_hl(opts, M.slot_hl(opts, -slot)) end
+    if slot < 0 then
+        local base = M.slot_hl(opts, rank.slot_of(slot))
+        if rank.level_of(slot) == 3 then
+            return M.mute_hl(opts, base, collapsed_factor(opts), CMUTE_PREFIX)
+        end
+        return M.mute_hl(opts, base)
+    end
     local n = #opts.palette.tracks
     if slot <= n then return opts.palette.tracks[slot] end
     return generated_hl(opts, slot - n)
@@ -506,8 +571,8 @@ function M.node_lane_hl(opts, columns, emphasis, commit)
     return M.slot_hl(opts, M.node_lane_slot(columns, emphasis, commit))
 end
 
---- The palette slot behind `node_lane_hl` (negative `-k` for a track carrying a
---- remote ref, drawn muted, §5.5). nil without a node cell.
+--- The drawn colour behind `node_lane_hl` (`rank.drawn`: negative for a track
+--- carrying a slightly muted or muted ref, §5.5). nil without a node cell.
 ---@param columns GraphColumn[]?
 ---@param emphasis boolean|nil
 ---@param commit table?
@@ -522,36 +587,60 @@ function M.node_lane_slot(columns, emphasis, commit)
     return nil
 end
 
---- The per-kind label kinds of `decoration_texts`, in the same order (§6 "Label
---- colour"): "branch" for a branch group with its local branch, "remote" for one of
---- remotes only, "tag", "worktree".
----@param commit { refs: Ref[]? }?
----@param head_branch string?
----@return string[]
-function M.decoration_kinds(commit, head_branch)
-    local g = git.group_refs(commit and commit.refs or {}, head_branch)
-    local out = {}
-    for _, b in ipairs(g.branches) do out[#out + 1] = b.has_local and "branch" or "remote" end
-    for _ in ipairs(g.tags) do out[#out + 1] = "tag" end
-    for _ in ipairs(g.worktrees) do out[#out + 1] = "worktree" end
-    return out
-end
-
 --- The highlight of one ranked ref's label (§6 "Label colour"): the ref's OWN
---- colour — `colors[name]`, its identity's slot at its tip (`row.ref_colors`, §5.5)
---- — in the muted variant for a remote; or the per-kind group `kind_group` when
---- `lane_label_colors` is off or the ref has no colour here (not a visible ranked
---- ref: a collapsed `◍` head's or a packed marker's label, §10.4).
+--- colour — `colors[name]`, its identity's slot at its tip (`row.ref_colors`, §5.5;
+--- a collapsed `◍` head's, a kept junction's and a packed marker's refs included) —
+--- at its brightness level `levels[name]` (`row.ref_levels`: 1 full, 2 slightly
+--- muted, 3 muted). Without a level the ref reads as expanded: 2 for a remote, else
+--- 1. The per-kind group `kind_group` when `lane_label_colors` is off or the ref has
+--- no colour here (not a visible ranked ref: hidden or filtered out, §5).
 ---@param opts GraphOptions
 ---@param colors table<string, integer>?  ref name → slot (the row's `ref_colors`)
 ---@param name string?                    the ref's full name
----@param remote boolean?                 a remote-tracking branch (drawn muted)
+---@param remote boolean?                 a remote-tracking branch (level fallback)
 ---@param kind_group string?
+---@param levels table<string, integer>?  ref name → level (the row's `ref_levels`)
 ---@return string?
-function M.ref_label_hl(opts, colors, name, remote, kind_group)
+function M.ref_label_hl(opts, colors, name, remote, kind_group, levels)
     local slot = opts.lane_label_colors ~= false and colors and name and colors[name]
     if not slot then return kind_group end
-    return M.slot_hl(opts, remote and -slot or slot)
+    local level = levels and levels[name] or (remote and 2 or 1)
+    return M.slot_hl(opts, rank.drawn(slot, level))
+end
+
+--- The drawn colour (`rank.drawn`: slot + level) of a row's node — its selected
+--- ref's identity colour at that ref's brightness level (`selected_color` /
+--- `selected_level`, §5 "Carried refs"). On a packed "markers" row, the node of
+--- `commit` (one of its markers), read from `marker_items`. nil without a colour.
+---@param item OrderItem?
+---@param commit table?
+---@return integer?
+function M.node_drawn(item, commit)
+    if not item then return nil end
+    if item.type == "markers" then
+        for _, mi in ipairs(item.marker_items or {}) do
+            if mi.commit == commit or (commit and mi.commit and mi.commit.hash == commit.hash) then
+                item = mi
+                break
+            end
+        end
+        if item.type == "markers" then return nil end
+    end
+    if not item.selected_color then return nil end
+    return rank.drawn(item.selected_color, item.selected_level)
+end
+
+--- The highlight of a TAG's label (§6 "Tags take their node's colour"): its node's
+--- colour as drawn (`node_drawn`), at the selected ref's brightness level; the
+--- per-kind `kind_group` (`palette.tags`) when `lane_label_colors` is off or the
+--- node has no colour.
+---@param opts GraphOptions
+---@param drawn integer?  the node's drawn colour (`node_drawn`)
+---@param kind_group string?
+---@return string?
+function M.tag_label_hl(opts, drawn, kind_group)
+    if opts.lane_label_colors == false or not drawn then return kind_group end
+    return M.slot_hl(opts, drawn)
 end
 
 --- A branch group's members for its colouring (§6 "Label colour"): the ref whose
@@ -805,7 +894,11 @@ function M.get_column_chars(opts, columns, emphasis)
         end
         local cell_hl = get_highlight(track_color)
         if (is_head or is_wt) and track.override == nil and opts.palette.head then cell_hl = opts.palette.head end
-        if not cell_active then cell_hl = M.dim_hl(opts, cell_hl) end
+        if not cell_active then
+            cell_hl = M.dim_hl(opts, cell_hl)
+        elseif emphasis then
+            cell_hl = M.lit_hl(opts, cell_hl) -- in the cone: near-full brightness (§12.2)
+        end
         result = compose({ result, highlight_text(char, cell_hl) })
 
         -- Connector colour: the lane its horizontal run terminates at, found by
@@ -856,7 +949,7 @@ function M.get_column_chars(opts, columns, emphasis)
 
         if next ~= nil and (track.connectivity.right and next.connectivity.left) then
             local hl = get_highlight(conn_color)
-            if emphasis and not conn_lit then hl = M.dim_hl(opts, hl) end
+            if emphasis then hl = conn_lit and M.lit_hl(opts, hl) or M.dim_hl(opts, hl) end
             result = compose({ result, highlight_text("─", hl) })
         elseif next ~= nil and (track.connectivity.right and not next.connectivity.left) then
             result = compose({ result, "╴" })
@@ -1044,7 +1137,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- the message, palette.message = nil) dims its default `Normal` foreground so
     -- it recedes with the rest of the row rather than staying full-bright.
     local function rh(text, group)
-        if row_active then return highlight_text(text, group) end
+        if row_active then return highlight_text(text, emphasis and M.lit_hl(opts, group) or group) end
         return highlight_text(text, M.dim_hl(opts, group or "Normal"))
     end
 
@@ -1061,40 +1154,50 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- palette.selected (§2). The listview packs these against the right edge
     -- with a width budget and a "+N" overflow marker.
     -- Every ranked ref's label takes ITS OWN ref's colour (`colors`, the row's
-    -- `ref_colors`: ref name → slot), a remote's muted (§6 "Label colour"); a ref
-    -- with no colour there (`colors` nil: a collapsed head's) its per-kind group.
-    local get_ref_items = function(commit, colors)
-        local g = git.group_refs(commit.refs, head_branch)
-        local texts = M.decoration_texts(commit, head_branch, pins) -- same order + text; shared with the cursor target
+    -- `ref_colors`: ref name → slot) at its brightness level (`levels`, the row's
+    -- `ref_levels`; §6 "Label colour") — a collapsed head's, a kept junction's and a
+    -- packed marker's included; a ref with no colour there its per-kind group. A
+    -- tag takes its node's colour as drawn (`node`, `node_drawn`).
+    -- `mk` renders one packed marker's labels (§10.4): `mk.rh` replaces the row's
+    -- `rh` (a marker dims with its own cone membership), and the text is exactly
+    -- `decoration_texts(commit, nil, pins)` (no current-branch fallback, no bare
+    -- detached `HEAD`), matching `marker_units`.
+    local get_ref_items = function(commit, colors, levels, node, mk)
+        local rhf = mk and mk.rh or rh
+        local hb = (not mk) and head_branch or nil
+        local g = git.group_refs(commit.refs, hb)
+        local texts = M.decoration_texts(commit, hb, pins) -- same order + text; shared with the cursor target
+        local sel_i = (not mk) and selected or nil
         local items = {}
         -- Per-ref colour override (§11.7.6): a tag carrying `hl` — the submodule
         -- new/old **pointer marks**, injected as refs so they pin / show in the
-        -- panes / picker — renders in that colour instead of the tag default.
+        -- panes / picker — renders in that colour instead of its node's.
         local hl_by_name = {}
         for _, r in ipairs(commit.refs or {}) do
             if r.hl and r.name then hl_by_name[r.name] = r.hl end
         end
-        if g.head and not g.current then
-            items[#items + 1] = rh("HEAD", palette.head)
+        if g.head and not g.current and not mk then
+            items[#items + 1] = rhf("HEAD", palette.head)
         end
         local di = 0
         for _, b in ipairs(g.branches) do
             di = di + 1
-            if di == selected then
+            if di == sel_i then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
                 -- The bracket, icons and name in the local's colour (else the first
-                -- remote's), each `↑remote` in its own muted colour (§6 "Label
-                -- colour"); the current branch's `HEAD → ` prefix keeps the HEAD colour.
+                -- remote's), each `↑remote` in its own colour at its own level (§6
+                -- "Label colour"); the current branch's `HEAD → ` prefix keeps the
+                -- HEAD colour.
                 local nref, nremote, rnames = M.group_members(b)
                 local name_hl = M.ref_label_hl(opts, colors, nref, nremote,
-                    b.current and palette.head or (b.has_local and palette.branch or palette.remote))
-                local segs = { rh("(", name_hl) }
-                if b.current then segs[#segs + 1] = rh(git.HEAD_ARROW, palette.head) end
-                segs[#segs + 1] = rh(M.group_pin(pins, b) .. b.name, name_hl)
+                    b.current and palette.head or (b.has_local and palette.branch or palette.remote), levels)
+                local segs = { rhf("(", name_hl) }
+                if b.current then segs[#segs + 1] = rhf(git.HEAD_ARROW, palette.head) end
+                segs[#segs + 1] = rhf(M.group_pin(pins, b) .. b.name, name_hl)
                 for i, r in ipairs(b.remotes) do
-                    segs[#segs + 1] = rh((i == 1 and " ↑" or ",") .. r,
-                        M.ref_label_hl(opts, colors, rnames[i], true, palette.remote))
+                    segs[#segs + 1] = rhf((i == 1 and " ↑" or ",") .. r,
+                        M.ref_label_hl(opts, colors, rnames[i], true, palette.remote, levels))
                 end
                 -- Upstream tracking (§6.3): the spelled-out non-matching upstream
                 -- and each ⇡/⇣/gone token, coloured by kind via palette.track (never
@@ -1102,19 +1205,21 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 -- (used by decoration_texts), so the selection target stays aligned.
                 local track = palette.track or {}
                 for _, seg in ipairs(git.track_segments(b.track, pins and pins.upstream_icon)) do
-                    segs[#segs + 1] = rh(seg.text, track[seg.kind])
+                    segs[#segs + 1] = rhf(seg.text, track[seg.kind])
                 end
-                segs[#segs + 1] = rh(")", name_hl)
+                segs[#segs + 1] = rhf(")", name_hl)
                 items[#items + 1] = compose(segs)
             end
         end
+        -- Tags take their node's colour as drawn (§6 "Tags take their node's colour").
+        local tag_hl = M.tag_label_hl(opts, node, palette.tags)
         for _, t in ipairs(g.tags) do
             di = di + 1
-            if di == selected then
+            if di == sel_i then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                items[#items + 1] = rh("[" .. M.name_pin(pins, t) .. t .. "]",
-                    hl_by_name[t] or palette.tags)
+                items[#items + 1] = rhf("[" .. M.name_pin(pins, t) .. t .. "]",
+                    hl_by_name[t] or tag_hl)
             end
         end
         -- Linked-worktree labels (§3.2) come last: they are the least branch-like
@@ -1122,10 +1227,10 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         -- "on" nearest the graph when the width budget starts hiding labels (§6).
         for _, w in ipairs(g.worktrees) do
             di = di + 1
-            if di == selected then
+            if di == sel_i then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                items[#items + 1] = rh("{" .. M.name_pin(pins, w) .. w .. "}",
+                items[#items + 1] = rhf("{" .. M.name_pin(pins, w) .. w .. "}",
                     palette.worktree or palette.tags)
             end
         end
@@ -1184,30 +1289,30 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             -- branch renders in its normal colour and the others — out of its cone
             -- — dim, exactly like selecting a normal head. (`sel` still windows the
             -- selected label into view via line_right_sel.)
-            -- A packed marker's refs are not visible ranked refs: each label takes
-            -- its per-kind colour (§6 "Label colour"). A count-only unit has no
-            -- label, so it shows its node's colour (`palette.branch` with
-            -- `lane_label_colors` off).
+            -- A packed marker's refs are visible ranked refs (§5): each label in its
+            -- own identity colour at its level (the row's merged `ref_colors` /
+            -- `ref_levels`), a tag in its own marker's node colour (§6 "Label
+            -- colour"), dimmed with the marker. A count-only unit has no label, so
+            -- it shows its node's colour (`palette.branch` with `lane_label_colors`
+            -- off).
             local dim = emphasis and not (cone and cone[u.marker])
-            local kind_hl = { branch = palette.branch, remote = palette.remote, tag = palette.tags,
-                worktree = palette.worktree or palette.tags }
-            local function hl_of(kind)
-                local g = kind_hl[kind]
-                if kind == nil then
-                    g = opts.lane_label_colors ~= false
-                        and M.node_lane_hl(opts, item.columns, emphasis, u.marker) or palette.branch
-                end
-                return dim and M.dim_hl(opts, g) or g
+            local function mrh(text, g)
+                if not emphasis then return highlight_text(text, g) end
+                return highlight_text(text, dim and M.dim_hl(opts, g or "Normal") or M.lit_hl(opts, g))
             end
             if u.marker == sel_cursor then
                 labels[#labels + 1] = highlight_text(u.text, palette.selected)
             elseif #u.decos == 0 then
-                labels[#labels + 1] = highlight_text(u.text, hl_of(nil))
+                local g = opts.lane_label_colors ~= false
+                    and M.node_lane_hl(opts, item.columns, emphasis, u.marker) or palette.branch
+                labels[#labels + 1] = mrh(u.text, g)
             else
                 local segs = {}
-                for i, d in ipairs(u.decos) do
+                local ritems = get_ref_items(u.marker, item.ref_colors, item.ref_levels,
+                    M.node_drawn(item, u.marker), { rh = mrh })
+                for i, it in ipairs(ritems) do
                     if i > 1 then segs[#segs + 1] = " " end
-                    segs[#segs + 1] = highlight_text(d, hl_of(u.kinds[i]))
+                    segs[#segs + 1] = it
                 end
                 labels[#labels + 1] = compose(segs)
             end
@@ -1232,8 +1337,9 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         -- only to show the region's existence and how it connects to the trunk —
         -- uncollapse for detail.
         local parts = {}
-        -- A collapsed head's refs are not visible ranked refs: per-kind (§6).
-        for _, it in ipairs(get_ref_items(head, nil)) do
+        -- A collapsed head's refs are visible ranked refs (§5): each in its own
+        -- colour at its level (muted unless pinned), a tag in the node's (§6).
+        for _, it in ipairs(get_ref_items(head, item.ref_colors, item.ref_levels, M.node_drawn(item))) do
             parts[#parts + 1] = it
             parts[#parts + 1] = " "
         end
@@ -1250,7 +1356,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         local graph_item = M.get_column_chars(opts, item.columns, emphasis)
         local above, below = fan_lines()
         local parts = {}
-        for _, it in ipairs(get_ref_items(item.commit, item.ref_colors)) do
+        for _, it in ipairs(get_ref_items(item.commit, item.ref_colors, item.ref_levels, M.node_drawn(item))) do
             parts[#parts + 1] = it
             parts[#parts + 1] = " "
         end
@@ -1304,7 +1410,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         else
             message = rh(msg_text, palette.message) or ""
         end
-        local ref_items = get_ref_items(item.commit, item.ref_colors)
+        local ref_items = get_ref_items(item.commit, item.ref_colors, item.ref_levels, M.node_drawn(item))
 
         local date_item = rh(git.format_date(item.commit.date, opts) .. " ", palette.date)
         local author_item = rh((item.commit.author or "") .. " ", palette.author)

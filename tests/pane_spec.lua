@@ -2409,14 +2409,14 @@ describe("pane.header — colours follow the main view (§6.2 Colour)", function
     end)
 
     it("draws a lane recoloured at an outranking ref in its colour above it (§5/§5.5)", function()
-        -- The LumeScene shape: `dev` pinned rank 1 at X, its remote `origin/dev` on X's
-        -- child Y, and HEAD's branch `enne` (rank 2) three commits above Y. In the main
-        -- view enne's lane (slot 2) runs down to Y, where `origin/dev` (dev's identity,
-        -- pinned 1) outranks enne and the SAME lane continues recoloured in dev's slot 1
-        -- (§5 "Carried refs") — muted, as it carries a remote (§5.5). The
-        -- header, cut below Y, gets that lane at the seam; the stretch from Y up to
-        -- enne's tip must be drawn as the main view draws it — enne's slot 2 — not the
-        -- seam lane's colour carried on up through Y.
+        -- The LumeScene shape, adapted to brightness-first ranking (§5: a pinned
+        -- identity's REMOTE no longer outranks an expanded local, so the outranking ref
+        -- is `dev` itself): `dev` pinned rank 1 at Y, and HEAD's branch `enne` (rank 2)
+        -- three commits above Y. In the main view enne's lane (slot 2) runs down to Y,
+        -- where `dev` outranks enne and the SAME lane continues recoloured in dev's slot
+        -- 1 (§5 "Carried refs"). The header, cut below Y, gets that lane at the seam;
+        -- the stretch from Y up to enne's tip must be drawn as the main view draws it —
+        -- enne's slot 2 — not the seam lane's colour carried on up through Y.
         local function ref(items, hash, name, kind)
             for _, it in ipairs(items) do
                 if it.commit.hash == hash then
@@ -2431,25 +2431,24 @@ describe("pane.header — colours follow the main view (§6.2 Colour)", function
                 { "Y", { "X" } }, { "X", { "W" } }, { "W", { "V" } }, { "V", {} },
             })
             ref(items, "H", "enne")
-            ref(items, "Y", "origin/dev", "remote")
-            ref(items, "X", "dev")
+            ref(items, "Y", "dev")
             local opts = h.big_opts()
             opts.layout_policy = pol
             h.ranked(opts, items, { pins = { "dev", "enne" }, current = "enne" })
             local res, boundary, _, _, lane_of =
-                header_of(items, opts, 5, { dev = true, enne = true, ["origin/dev"] = true })
+                header_of(items, opts, 5, { dev = true, enne = true })
             local enne = lane_of({ hash = "H" })
             local cp = lane_of({ hash = "Y" })
             if not (enne and cp) then error("fixture: no main-view lanes") end
             assert.equals(2, enne.color, pol .. ": fixture: enne's lane is slot 2")
-            assert.equals(-1, cp.color, pol .. ": fixture: the lane is recoloured dev's (muted: origin/dev) at Y")
+            assert.equals(1, cp.color, pol .. ": fixture: the lane is recoloured dev's at Y")
             assert.equals(enne.id, cp.id, pol .. ": fixture: one lane, recoloured, not a birth")
             local by = node_colors(res)
             assert.is_not_nil(by.H, pol .. ": enne shown")
             assert.equals(2, by.H.color, pol .. ": enne's head took the recoloured lane's colour")
-            assert.is_not_nil(by.Y, pol .. ": origin/dev shown")
-            assert.equals(-1, by.Y.color, pol .. ": origin/dev's node is in dev's colour, muted (§5.5)")
-            -- every segment above origin/dev's row (the last header row) is enne's
+            assert.is_not_nil(by.Y, pol .. ": dev shown")
+            assert.equals(1, by.Y.color, pol .. ": dev's node is in dev's colour (§5.5)")
+            -- every segment above dev's row (the last header row) is enne's
             for i = 1, #res.rows - 1 do
                 for _, cell in ipairs(res.rows[i].columns) do
                     for _, s in ipairs(cell.lanes or {}) do

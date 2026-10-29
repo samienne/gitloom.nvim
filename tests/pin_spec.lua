@@ -1,26 +1,20 @@
 --- Tests for the ordered pin list (spec §10.6) and the pinned-branches dialog's
 --- pure layout (§10.6.1). The list is ONE list — the pinned branches, in priority
---- order — with the dedicated-lane flag (§10.6.2) living ON each entry, so
---- `reserved ⊆ pinned` and "unpin implies unreserve" hold by construction. These
---- are the pure pieces; the dialog's window glue is untested like the rest of it.
+--- order, each entry `{ id }` (the former per-entry dedicated-lane flag was
+--- dropped). These are the pure pieces plus a windowed smoke of the dialog.
 
 local internal = require("gitloom.graph")._internal
 local pin_resolve = internal.pin_resolve
 local pin_move = internal.pin_move
-local pin_toggle_reserved = internal.pin_toggle_reserved
 local pin_remove = internal.pin_remove
 local pin_add = internal.pin_add
 local pin_ids = internal.pin_ids
-local reserved_order = internal.reserved_order
 local pin_dialog_lines = internal.pin_dialog_lines
 
--- A pin list from `"name"` / `"name*"` (the star = reserved) shorthand.
+-- A pin list from names.
 local function pins(...)
     local out = {}
-    for _, s in ipairs({ ... }) do
-        local name, star = s:match("^(.-)(%*?)$")
-        out[#out + 1] = { id = name, reserved = star == "*" }
-    end
+    for _, s in ipairs({ ... }) do out[#out + 1] = { id = s } end
     return out
 end
 
@@ -28,13 +22,6 @@ end
 local function ids(list)
     local out = {}
     for _, e in ipairs(list) do out[#out + 1] = e.id end
-    return out
-end
-
--- The `"name"`/`"name*"` shorthand of a pin list, so order AND flags assert as one.
-local function shorthand(list)
-    local out = {}
-    for _, e in ipairs(list) do out[#out + 1] = e.id .. (e.reserved and "*" or "") end
     return out
 end
 
@@ -51,16 +38,16 @@ describe("pin_resolve (§10.6)", function()
         assert.same({ "master", "dev" }, ids(out))
     end)
 
-    it("defaults are pinned but NOT reserved", function()
-        local out = pin_resolve({}, {}, { "master", "dev" }, registry("master", "dev"))
-        for _, e in ipairs(out) do assert.is_false(e.reserved) end
-        assert.same({}, reserved_order(out))
+    it("entries are { id } alone — a stray legacy `reserved` field is not carried", function()
+        local out = pin_resolve({ { id = "topic1", reserved = true } }, {}, { "master" },
+            registry("master", "topic1"))
+        assert.same({ { id = "master" }, { id = "topic1" } }, out)
     end)
 
-    it("unplaced defaults come first; stored entries keep their order and flags after", function()
-        local out = pin_resolve(pins("topic1*", "master"), {}, { "master", "main" },
+    it("unplaced defaults come first; stored entries keep their order after", function()
+        local out = pin_resolve(pins("topic1", "master"), {}, { "master", "main" },
             registry("master", "main", "topic1"))
-        assert.same({ "main", "topic1*", "master" }, shorthand(out))
+        assert.same({ "main", "topic1", "master" }, ids(out))
     end)
 
     it("defaults keep their order with HEAD's anchor last, a new pin at the bottom", function()
@@ -72,8 +59,8 @@ describe("pin_resolve (§10.6)", function()
     end)
 
     it("does not duplicate a default already on the stored list", function()
-        local out = pin_resolve(pins("master*"), {}, { "master" }, registry("master"))
-        assert.same({ "master*" }, shorthand(out))
+        local out = pin_resolve(pins("master"), {}, { "master" }, registry("master"))
+        assert.same({ "master" }, ids(out))
     end)
 
     it("an explicitly unpinned id is suppressed, stored or defaulted", function()
@@ -83,7 +70,7 @@ describe("pin_resolve (§10.6)", function()
     end)
 
     it("drops an entry whose ref no longer exists", function()
-        local out = pin_resolve(pins("gone*", "master"), {}, {}, registry("master"))
+        local out = pin_resolve(pins("gone", "master"), {}, {}, registry("master"))
         assert.same({ "master" }, ids(out))
     end)
 
@@ -93,9 +80,9 @@ describe("pin_resolve (§10.6)", function()
     end)
 
     it("does not mutate the stored list", function()
-        local stored = pins("master*")
+        local stored = pins("master")
         pin_resolve(stored, {}, { "dev" }, registry("master", "dev"))
-        assert.same({ "master*" }, shorthand(stored))
+        assert.same({ "master" }, ids(stored))
     end)
 end)
 
@@ -110,11 +97,6 @@ describe("pin_move (§10.6.1 <C-j>/<C-k>)", function()
         local out, at = pin_move(pins("a", "b", "c"), 3, -1)
         assert.same({ "a", "c", "b" }, ids(out))
         assert.equals(2, at)
-    end)
-
-    it("carries the reserve flag with the entry", function()
-        local out = pin_move(pins("a", "b*"), 2, -1)
-        assert.same({ "b*", "a" }, shorthand(out))
     end)
 
     it("clamps at both ends (a repeatable key is a no-op there)", function()
@@ -138,36 +120,10 @@ describe("pin_move (§10.6.1 <C-j>/<C-k>)", function()
     end)
 end)
 
-describe("pin_toggle_reserved (§10.6.1 <Space>)", function()
-    it("flips the entry's flag and leaves the others alone", function()
-        local out = pin_toggle_reserved(pins("a", "b"), 2)
-        assert.same({ "a", "b*" }, shorthand(out))
-        assert.same({ "a", "b" }, shorthand(pin_toggle_reserved(out, 2)))
-    end)
-
-    it("does not mutate the input", function()
-        local list = pins("a")
-        pin_toggle_reserved(list, 1)
-        assert.same({ "a" }, shorthand(list))
-    end)
-end)
-
-describe("pin_remove (§10.6.1 D) — unpin implies unreserve", function()
+describe("pin_remove (§10.6.1 D)", function()
     it("removes the entry", function()
         local out = pin_remove(pins("a", "b", "c"), 2)
         assert.same({ "a", "c" }, ids(out))
-    end)
-
-    it("takes the reserve flag with it — nothing is left to clear", function()
-        local list = pins("a*", "b*")
-        local out = pin_remove(list, 1)
-        assert.same({ "b" }, ids(out))
-        assert.same({ "b" }, reserved_order(out)) -- only the surviving entry reserves
-        -- Re-pinning the removed branch brings it back UNRESERVED: the flag was
-        -- never stored anywhere but on the entry that left.
-        local back = pin_add(out, "a")
-        assert.same({ "b*", "a" }, shorthand(back))
-        assert.same({ "b" }, reserved_order(back))
     end)
 
     it("is a no-op on a missing index and does not mutate the input", function()
@@ -179,12 +135,12 @@ describe("pin_remove (§10.6.1 D) — unpin implies unreserve", function()
 end)
 
 describe("pin_add", function()
-    it("appends unreserved", function()
-        assert.same({ "a*", "b" }, shorthand(pin_add(pins("a*"), "b")))
+    it("appends at the bottom", function()
+        assert.same({ { id = "a" }, { id = "b" } }, pin_add(pins("a"), "b"))
     end)
 
-    it("is idempotent — an already-pinned branch keeps its place and its flag", function()
-        assert.same({ "a*", "b" }, shorthand(pin_add(pins("a*", "b"), "a")))
+    it("is idempotent — an already-pinned branch keeps its place", function()
+        assert.same({ "a", "b" }, ids(pin_add(pins("a", "b"), "a")))
     end)
 
     it("does not mutate the input", function()
@@ -196,53 +152,24 @@ end)
 
 describe("pin_ids", function()
     it("is the membership set — what view.owners / toggle_target consume", function()
-        local set = pin_ids(pins("a*", "b"))
+        local set = pin_ids(pins("a", "b"))
         assert.is_true(set.a)
         assert.is_true(set.b)
         assert.is_nil(set.c)
     end)
 end)
 
-describe("reserved_order (§10.6.2)", function()
-    it("is the reserved ids in list order, skipping the unreserved between them", function()
-        assert.same({ "a", "d" }, reserved_order(pins("a*", "b", "c", "d*")))
-    end)
-
-    it("is empty when nothing is reserved — the default state", function()
-        assert.same({}, reserved_order(pins("a", "b", "c")))
-    end)
-
-    it("an unreserved entry's position is LATENT: moving it changes nothing", function()
-        local list = pins("a*", "b", "c*")
-        local before = reserved_order(list)
-        local moved = pin_move(list, 2, 1) -- move the unreserved `b` past `c*`
-        assert.same({ "a", "c" }, before)
-        assert.same(before, reserved_order(moved))
-        -- …and becomes meaningful the moment it is reserved, at the position it
-        -- was quietly holding all along.
-        assert.same({ "a", "c", "b" }, reserved_order(pin_toggle_reserved(moved, 3)))
-    end)
-
-    it("reordering reserved entries reorders the columns they claim", function()
-        local list = pins("a*", "b", "c*")
-        assert.same({ "c", "a" }, reserved_order((pin_move(list, 3, -2))))
-    end)
-end)
-
 describe("pin_dialog_lines (§10.6.1)", function()
     local function joined(lines) return table.concat(lines, "\n") end
 
-    it("numbers every entry and marks only the reserved ones", function()
-        local lines, rows = pin_dialog_lines(pins("master*", "topic1*", "origin/release", "dev"))
+    it("numbers every entry, with no dedicated-lane marker", function()
+        local lines, rows = pin_dialog_lines(pins("master", "topic1", "origin/release", "dev"))
         local text = joined(lines)
-        assert.truthy(text:find("1  ◆  master", 1, true))
-        assert.truthy(text:find("2  ◆  topic1", 1, true))
-        assert.truthy(text:find("3     origin/release", 1, true))
-        assert.truthy(text:find("4     dev", 1, true))
-        -- Exactly one ◆ per reserved entry (2), plus the title row's legend and
-        -- the closing note — the unreserved entries carry none.
-        local n = select(2, text:gsub("◆", ""))
-        assert.equals(4, n)
+        assert.truthy(text:find("1  master", 1, true))
+        assert.truthy(text:find("2  topic1", 1, true))
+        assert.truthy(text:find("3  origin/release", 1, true))
+        assert.truthy(text:find("4  dev", 1, true))
+        assert.is_nil(text:find("◆", 1, true))
         -- The row map addresses each entry and the "pin new" row.
         local seen = {}
         for _, v in pairs(rows) do seen[tostring(v)] = true end
@@ -260,18 +187,14 @@ describe("pin_dialog_lines (§10.6.1)", function()
         assert.truthy(lines[by_index[3]]:find("c", 1, true))
     end)
 
-    it("shows the key help and the add-a-branch row", function()
+    it("shows the key help and the add-a-branch row — no <Space> lane toggle", function()
         local text = joined((pin_dialog_lines(pins("master"))))
-        for _, key in ipairs({ "<C-j>/<C-k>", "<Space>", "D", "<CR>", "q" }) do
+        for _, key in ipairs({ "<C-j>/<C-k>", "D", "<CR>", "q" }) do
             assert.truthy(text:find(key, 1, true))
         end
+        assert.is_nil(text:find("<Space>", 1, true))
+        assert.is_nil(text:lower():find("lane", 1, true))
         assert.truthy(text:find("Pin new branch", 1, true))
-    end)
-
-    it("says the dedicated-lane flag is not honoured yet (an inert control must say so)", function()
-        local text = joined((pin_dialog_lines(pins("master*"))))
-        assert.truthy(text:lower():find("not", 1, true))
-        assert.truthy(text:find("◆", 1, true))
     end)
 
     it("renders an empty list as just the add row (no entries, no crash)", function()
@@ -345,45 +268,45 @@ describe("pinned-branches dialog (§10.6.1) — windowed smoke", function()
         return vim.api.nvim_buf_get_lines(0, l - 1, l, false)[1] or ""
     end
 
-    it("opens focused, listing the anchors with no dedicated lane claimed", function()
+    it("opens focused, listing the anchors", function()
         local ctx, hwin = stub()
         ctx:pin_dialog()
         assert.is_true(vim.api.nvim_get_current_win() ~= hwin)
         local t = text()
-        assert.truthy(t:find("1     master", 1, true)) -- no ◆: pinning claims nothing
-        assert.truthy(t:find("2     dev", 1, true))
+        assert.truthy(t:find("1  master", 1, true))
+        assert.truthy(t:find("2  dev", 1, true))
         assert.truthy(t:find("Pin new branch", 1, true))
         feed("q")
         assert.equals(hwin, vim.api.nvim_get_current_win())
     end)
 
-    it("<Space> reserves the entry under the cursor and reflows", function()
+    it("<Space> is not bound — it edits nothing and does not reflow", function()
         local ctx = stub()
         ctx:pin_dialog()
         feed("<Space>")
-        assert.truthy(text():find("1  ◆  master", 1, true))
-        assert.equals(1, ctx.reflows)
-        assert.same({ "master" }, reserved_order(ctx:effective_pins()))
+        assert.equals(0, ctx.reflows)
+        assert.same({ { id = "master" }, { id = "dev" } }, ctx:effective_pins())
         feed("q")
     end)
 
-    it("<C-j> moves the entry down, carrying its flag, with the cursor following", function()
+    it("<C-j> moves the entry down, with the cursor following", function()
         local ctx = stub()
         ctx:pin_dialog()
-        feed("<Space><C-j>")
+        feed("<C-j>")
         local t = text()
-        assert.truthy(t:find("1     dev", 1, true))
-        assert.truthy(t:find("2  ◆  master", 1, true))
+        assert.truthy(t:find("1  dev", 1, true))
+        assert.truthy(t:find("2  master", 1, true))
         assert.truthy(cursor_line():find("master", 1, true)) -- followed the move
+        assert.same({ { id = "dev" }, { id = "master" } }, ctx:effective_pins())
         feed("q")
     end)
 
-    it("D unpins — the entry and its reserve flag both go", function()
+    it("D unpins the entry", function()
         local ctx = stub()
         ctx:pin_dialog()
-        feed("<Space>D")
+        feed("D")
         assert.is_nil(text():find("master", 1, true))
-        assert.same({}, reserved_order(ctx:effective_pins()))
+        assert.same({ "dev" }, ids(ctx:effective_pins()))
         assert.is_true(ctx.view_state.unpinned.master) -- the default anchor stays gone
         feed("q")
     end)

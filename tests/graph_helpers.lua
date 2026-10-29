@@ -99,32 +99,40 @@ function M.big_opts(merge_style)
 end
 
 --- Set `opts.ref_rank` (spec §5 "Ranked refs and identities") from the refs on
---- `items`: every local / remote branch on a visible node (not a collapsed head or a
---- kept junction) is a visible ranked ref, paired into identities as the window
---- does. `o.pins` is a list of ref names (pin-list order, 1 best), `o.current` the
---- current branch, `o.remotes` the `git remote` order (default `{ "origin" }`), and
---- `o.upstream` a map local name → configured upstream (short name).
+--- `items`: every local / remote branch on a node is a visible ranked ref — one on a
+--- collapsed head or a kept junction also COLLAPSED (§5 brightness level 3) —
+--- paired into identities as the window does. `o.pins` is a list of ref names
+--- (pin-list order, 1 best), `o.current` the current branch, `o.remotes` the `git
+--- remote` order (default `{ "origin" }`), `o.upstream` a map local name →
+--- configured upstream (short name), `o.extra_refs` refs whose tips are not on
+--- `items` (name → RankRef), `o.visible` overrides the visible set, and `o.coming`
+--- is the running stream's start set (`rank.input`, §5.5).
 ---@param opts table
 ---@param items table[]
----@param o? { pins?: string[], current?: string, remotes?: string[], upstream?: table<string, string> }
+---@param o? { pins?: string[], current?: string, remotes?: string[], upstream?: table<string, string>, extra_refs?: table<string, RankRef>, visible?: table<string, boolean>, coming?: true|table<string, boolean> }
 ---@return table opts
 function M.ranked(opts, items, o)
     o = o or {}
-    local refs, visible = {}, {}
+    local refs, visible, collapsed = {}, {}, {}
     for _, it in ipairs(items) do
         local c = it.commit
         for _, r in ipairs((c and c.refs) or {}) do
             if r.kind == "local" or r.kind == "remote" then
                 local up = o.upstream and o.upstream[r.name]
                 refs[r.name] = { name = r.name, kind = r.kind, upstream = up and { short = up } or nil }
-                if not c.collapsed and not c.junction then visible[r.name] = true end
+                -- A ref folded into a collapsed head / kept junction is visible and
+                -- collapsed (§5), as the window's reflow publishes it.
+                visible[r.name] = true
+                if c.collapsed or c.junction then collapsed[r.name] = true end
             end
         end
     end
+    for name, ref in pairs(o.extra_refs or {}) do refs[name] = ref end
     local pins = {}
     for i, id in ipairs(o.pins or {}) do pins[i] = { id = id } end
     opts.ref_rank = require("gitloom.graph.rank").input(refs, {
-        remotes = o.remotes or { "origin" }, pins = pins, current = o.current, visible = visible,
+        remotes = o.remotes or { "origin" }, pins = pins, current = o.current,
+        visible = o.visible or visible, collapsed = collapsed, coming = o.coming,
     })
     return opts
 end

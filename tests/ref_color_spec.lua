@@ -88,7 +88,7 @@ local function own_refs(rr, C)
         if rr.head and rr.infos[rr.head] then out[1] = rr.infos[rr.head] end
         return out
     end
-    if C.collapsed or C.junction then return out end
+    -- A collapsed head's / kept junction's folded refs are its own too (§5).
     for _, r in ipairs(C.refs or {}) do
         if (r.kind == "local" or r.kind == "remote") and rr.infos[r.name] then out[#out + 1] = rr.infos[r.name] end
     end
@@ -152,12 +152,29 @@ local function check_refs(o, rows)
                 if l.ref and better(l.ref, out[1].ref) then err(where .. ": the first parent lost rank") end
             end
         end
+        -- brightness wins (§5.1): the selected ref is never drawn dimmer than a ranked
+        -- ref competing for this commit (arriving or own) — a track never steps DOWN in
+        -- brightness, and a dim colour never runs over a bright ref's history
+        if r.selected and r.selected.level <= 3 then
+            local function check(info, what)
+                if info and info.level <= 3 and info.level < r.selected.level then
+                    err(where .. ": a dimmer ref (" .. r.selected.name .. ") beat a brighter " .. what)
+                end
+            end
+            for _, l in ipairs(inc) do check(l.ref, "arriving ref") end
+            for _, info in ipairs(own) do check(info, "own ref") end
+        end
         -- other parents: the best ranked ref ON that parent, else its one generated ref
         for k = 2, #out do
             local p = out[k].parent
             local expect
-            if p and not p.collapsed and not p.junction then
-                local rows_at = setmetatable({}, { __index = tip })
+            if p then
+                -- Only tips swept so far are known (a ref not yet reached stands
+                -- below); the candidates stand at the parent's unswept row.
+                local rows_at = setmetatable({}, { __index = function(_, k)
+                    local t = tip[k]
+                    if t and t <= i then return t end
+                end })
                 local cands = {}
                 for _, rf in ipairs(p.refs or {}) do
                     if (rf.kind == "local" or rf.kind == "remote") and rr.infos[rf.name] then
@@ -181,18 +198,18 @@ local function check_refs(o, rows)
             end
         end
         -- colour is a function of the ref key, and refs alive together differ (big palette);
-        -- a track carrying a remote draws the muted variant `-k`, every other one `k`
-        -- (§5.5 "Muted remotes")
+        -- a track draws its slot at its ref's brightness level (`rank.drawn`, §5.5
+        -- "Muting": a pinned / expanded remote `-k`, a collapsed unpinned ref muted)
         local kc, ck = {}, {}
         for _, line in ipairs(h.row_lines(r)) do
             for _, col in ipairs(line.line or {}) do
                 for _, s in ipairs(col.lanes or {}) do
                     local k = key_of(s.ref)
                     if k then
-                        if (s.color < 0) ~= (s.ref.remote == true) then
-                            err(where .. ": a track is muted iff it carries a remote")
+                        if rank.level_of(s.color) ~= rank.drawn_level(s.ref) then
+                            err(where .. ": a track is not drawn at its ref's brightness level")
                         end
-                        local slot = math.abs(s.color)
+                        local slot = rank.slot_of(s.color)
                         if kc[k] and kc[k] ~= slot then err(where .. ": one identity in two colours") end
                         if ck[slot] and ck[slot] ~= k then err(where .. ": two refs alive together share a colour") end
                         kc[k], ck[slot] = slot, k
@@ -203,7 +220,18 @@ local function check_refs(o, rows)
         for name, c in pairs(r.ref_colors or {}) do
             local k = key_of(rr.infos[name])
             if kc[k] and kc[k] ~= c then err(where .. ": label " .. name .. " not in its identity's colour") end
+            if (r.ref_levels or {})[name] ~= rank.drawn_level(rr.infos[name]) then
+                err(where .. ": label " .. name .. " not at its ref's brightness level")
+            end
         end
+        -- every own ranked ref is labelled (a collapsed one included), and the node's
+        -- level is its selected ref's
+        if not C.virtual then
+            for _, info in ipairs(own) do
+                if not (r.ref_colors or {})[info.name] then err(where .. ": own ref " .. info.name .. " has no label colour") end
+            end
+        end
+        if r.selected_level ~= rank.drawn_level(r.selected) then err(where .. ": selected_level is not the selected ref's") end
     end
     return errs
 end
@@ -319,6 +347,45 @@ describe("carried refs (§5)", function()
         end
     end)
 
+    it("a pinned identity's remote yields to an expanded local: brightness first (§5 Rank)", function()
+        -- dev pinned, origin/dev ahead of it; feature forked from origin/dev's new
+        -- commit keeps its colour where the tracks meet, down to dev's tip.
+        for _, pol in ipairs(POLICIES) do
+            local items = h.dag({
+                { "f", { "o1" } }, { "o2", { "o1" } }, { "o1", { "d" } }, { "d", { "r" } }, { "r", {} },
+            })
+            ref(items, "f", "feature")
+            ref(items, "o2", "origin/dev", "remote")
+            ref(items, "d", "dev")
+            local o = h.ranked(opts(STYLES[1].s, pol), items, { pins = { "dev" } })
+            local rows = columns.layout(o, items)
+            assert.equals("feature", row_of(rows, "o1").selected.name, pol)
+            assert.equals(2, rank.level_of(row_of(rows, "o2").parent_lanes[1].color), pol .. ": origin/dev slightly muted")
+            assert.equals("dev", row_of(rows, "d").selected.name, pol)
+            assert.equals(1, row_of(rows, "d").parent_lanes[1].color, pol .. ": dev's pinned slot, full")
+        end
+    end)
+
+    it("a collapsed ref carries its track in its own colour, muted unless pinned (§5)", function()
+        for _, pinned in ipairs({ false, true }) do
+            local items = h.dag({ { "m1", { "m0" } }, { "x1", { "m0" } }, { "m0", { "r" } }, { "r", {} } })
+            ref(items, "m1", "main")
+            ref(items, "x1", "topic").collapsed = true -- a ◍ head folding `topic`
+            local o = h.ranked(opts(STYLES[1].s, "compact"), items, { pins = pinned and { "topic" } or nil })
+            local rows = columns.layout(o, items)
+            local x = row_of(rows, "x1")
+            local what = pinned and "pinned" or "unpinned"
+            assert.equals("topic", x.selected.name, what)
+            assert.equals(pinned and 1 or 3, x.selected_level, what)
+            assert.equals(pinned and 1 or 3, rank.level_of(x.parent_lanes[1].color), what)
+            assert.equals(x.selected_color, rank.slot_of(x.parent_lanes[1].color), what)
+            assert.equals(x.selected_color, x.ref_colors.topic, what .. ": the label is coloured")
+            assert.equals(pinned and 1 or 3, x.ref_levels.topic, what)
+            -- where the tracks meet, the brighter (or, equal, the pinned) ref continues
+            assert.equals(pinned and "topic" or "main", row_of(rows, "m0").selected.name, what)
+        end
+    end)
+
     it("draws a remote in its identity's colour: ahead of its local, then the local from its tip", function()
         local items = h.dag({ { "c", { "d" } }, { "d", { "e" } }, { "e", {} } })
         ref(items, "c", "origin/dev", "remote")
@@ -431,7 +498,7 @@ describe("ref colours (§5.5)", function()
             local rows = columns.layout(h.ranked(opts(STYLES[1].s, pol), it, { pins = { "B" } }), it)
             for _, r in ipairs(rows) do
                 for _, l in ipairs(r.parent_lanes or {}) do
-                    if math.abs(l.color) == 1 then assert.equals("B", l.ref.ident, pol) end
+                    if rank.slot_of(l.color) == 1 then assert.equals("B", l.ref.ident, pol) end
                 end
             end
         end
@@ -470,6 +537,25 @@ describe("ref colours (§5.5)", function()
         assert.is_true(row_of(rows, "k").selected_color ~= 1)
     end)
 
+    it("a member whose tip never loads holds no colour; a coming one does (§5.5)", function()
+        -- `origin/feature` is a visible ranked ref whose tip is not on any loaded row.
+        -- Not coming: feature's colour is released at its root and `k` reuses slot 1.
+        -- Coming (the running stream will deliver it): held, so `k` mints slot 2.
+        for _, coming in ipairs({ false, true }) do
+            local items = h.dag({ { "f", { "fz" } }, { "fz", {} }, { "k", { "kw" } }, { "kw", {} } })
+            ref(items, "f", "feature")
+            local o = small(h.ranked(opts(STYLES[1].s, "compact"), items, {
+                extra_refs = { ["origin/feature"] = { name = "origin/feature", kind = "remote" } },
+                visible = { feature = true, ["origin/feature"] = true },
+                coming = coming or nil,
+            }), 1, true, 0)
+            assert.is_not_nil(o.ref_rank.infos["origin/feature"])
+            local rows = columns.layout(o, items)
+            assert.equals(1, row_of(rows, "f").selected_color)
+            assert.equals(coming and 2 or 1, row_of(rows, "k").selected_color, tostring(coming))
+        end
+    end)
+
     it("a released colour waits `buffer` allocations before it is reused", function()
         -- one curated slot, generation on, buffer 2: a1 takes 1 and releases it at its
         -- root; b1 and c1 cannot reuse it yet (cooldown) and mint; d1 takes 1 again.
@@ -504,7 +590,7 @@ describe("ref colours (§5.5)", function()
                     end
                 end
                 seen(r.selected, r.selected_color)
-                for k = 2, #(r.parent_lanes or {}) do seen(r.parent_lanes[k].ref, math.abs(r.parent_lanes[k].color)) end
+                for k = 2, #(r.parent_lanes or {}) do seen(r.parent_lanes[k].ref, rank.slot_of(r.parent_lanes[k].color)) end
             end
         end
     end)
@@ -528,9 +614,11 @@ describe("ref ranking input (§5 'The ranks are a layout input')", function()
                 local items = h.dag(fix.dag)
                 local pins = scatter(items, 3)
                 local o = h.ranked(opts(st.s, pol), items, { pins = pins })
+                -- The stream runs under `--all` (§5.5): every ref is coming.
+                local os = h.ranked(opts(st.s, pol), items, { pins = pins, coming = true })
                 local one = columns.layout(o, items)
-                local a = stream(o, o, items, 37)
-                local b = stream(opts(st.s, pol), o, items, 37)
+                local a = stream(os, os, items, 37)
+                local b = stream(opts(st.s, pol), os, items, 37)
                 for i = 1, #one do
                     if h.row_sig(one[i]) ~= h.row_sig(a[i]) and #bad < 3 then
                         bad[#bad + 1] = ("%s/%s carried row %d"):format(st.name, pol, i)

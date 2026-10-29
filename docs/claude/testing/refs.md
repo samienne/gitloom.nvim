@@ -37,24 +37,36 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   laid-out graph marks exactly HEAD's row, mirrored or not
 - `tests/label_color_spec.lua` — every ranked ref's label takes **its own ref's
   colour** (§6 "Label colour"), through the real `display_item` with the row's
-  `ref_colors`: a branch group's bracket and name in the local's colour, each
-  `↑remote` in its own muted colour, a tag per-kind; a label keeps its own colour on
+  `ref_colors` / `ref_levels`: a branch group's bracket and name in the local's
+  colour, each `↑remote` in its own slightly muted colour, a tag in its node's
+  colour **as drawn** (at the selected ref's level); a label keeps its own colour on
   another ref's track (no lane owner); a remotes-only group in its first remote's
-  muted colour; a ref without a colour on its row, a collapsed `◍` head's labels and
-  a packed marker's labels per-kind (a count-only unit in its node's colour); the
-  **lumeeditor shape** through a real `columns.layout` (every policy: `origin/dev`
-  and its node muted dev, the remote-only label keeping its own colour); the
-  attached label's `HEAD → ` prefix and a detached `HEAD` in `palette.head`, the
-  h/l-selected label `palette.selected`, a pointer mark its `hl`;
-  `lane_label_colors = false` → per-kind everywhere with tracks still coloured;
-  panes: `pane_labels`' `arrow` span and each group's colouring members and
-  `↑remote` spans. Plus **muted remotes** (§5.5, §12.2): `slot_hl(-k)` the
-  `remote_mute` blend of slot k (default 0.25, cached, flat without truecolor),
-  `counterpart_dim` as its alias (the new name winning), out of the cone the
-  `remote_mute_out` blend (default `0.75 * dim`) brighter than every dimmed colour,
-  a remote's label and node muted in the cone / brighter-dimmed out of it, a local's
-  label out of the cone the plain dim. The pane window glue (`render_pane`) is
-  untested
+  colour; a ref without a colour on its row per-kind; a collapsed `◍` head's labels
+  in their identity colour at their level; a packed marker row's labels in identity
+  colour and a tag in its own marker's node colour (a count-only unit in its node's
+  colour); the **lumeeditor shape** through a real `columns.layout` (every policy:
+  `origin/dev` and its node muted dev, the remote-only label keeping its own
+  colour); the attached label's `HEAD → ` prefix and a detached `HEAD` in
+  `palette.head`, the h/l-selected label `palette.selected`, a pointer mark its
+  `hl`; `lane_label_colors = false` → per-kind everywhere (tags included) with
+  tracks still coloured; panes: `pane_labels`' `arrow` span and each group's
+  colouring members and `↑remote` spans. Plus **muted remotes** (§5.5, §12.2):
+  `slot_hl(-k)` the `remote_mute` blend of slot k (default 0.25, cached, flat without
+  truecolor), `counterpart_dim` as its alias (the new name winning), out of the cone
+  the `remote_mute_out` blend (default `0.75 * dim`) brighter than every dimmed
+  colour, a remote's label and node muted in the cone / brighter-dimmed out of it, a
+  local's label out of the cone the plain dim. **Three brightness levels**: levels
+  1/2/3 draw distinct groups (full, `remote_mute` 0.25, `collapsed_mute` 0.45);
+  `collapsed_mute` replaces `remote_mute`, is configurable, `0` turns it off and a
+  junk value falls back to the default; out of the cone level 3 blends its slot colour by `collapsed_mute_out`
+  (default 0.45, the level of a level-1 colour out of the cone, configurable, junk falls back; no stacking); in the cone with the
+  highlight on levels 2 and 3 both blend by `highlight_mute` (default 0.1,
+  configurable, junk falls back) while the highlight off keeps 0.25 / 0.45; a `◍` head's label dims by that composed
+  blend. **Remote-only marker** (`icons.remote`): `rank.input`'s `remote_only` lists
+  exactly the remote-only identities' members; `⇣` on a remote-only group, never on
+  a paired remote or a local group; order pin, expanded, remote, name; `""` off;
+  drawn in the label's colour; in pane labels (the `↑remote` spans shifted) and on
+  packed marker units. The pane window glue (`render_pane`) is untested
 - `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
   `bump_recent` (the session MRU list — newest first, deduped, input not mutated),
   `ref_picker_items` (name → Ref registry → ordered picker entries: session-
@@ -135,16 +147,15 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
 - `tests/pin_spec.lua` — the ordered pin list (§10.6) + the dialog (§10.6.1):
   `pin_resolve` (the unplaced defaults first — HEAD's anchor last among them —
   then the stored entries, a new pin at the bottom; unpinned suppressed,
-  stale refs dropped, defaults never reserved), `pin_move` (clamped at both ends,
-  reports the new index, carries the flag), `pin_toggle_reserved`, `pin_remove`
-  (**unpin implies unreserve** — re-adding comes back unreserved), `pin_add`
-  (idempotent), `pin_ids`, `reserved_order` (reserved-only, in list order — the
-  order's meaning for *columns*; for lane identity every entry's place is its
-  rank, `pin_rank`), and `pin_dialog_lines` (numbering, `◆` on reserved
-  rows only, the key help, the add row, the row map, the aligned help column, the
-  "not honoured yet" note). Plus a **windowed smoke** block driving the real
-  dialog in a real float over a stub ctx (open/`<Space>`/`<C-j>`/`D`/`q`) — the
-  keymaps, re-render and focus handoff, which the pure tests cannot reach.
+  stale refs dropped, entries `{ id }` alone — a stray legacy `reserved` field not
+  carried), `pin_move` (clamped at both ends, reports the new index), `pin_remove`,
+  `pin_add` (appends at the bottom, idempotent), `pin_ids`, and `pin_dialog_lines`
+  (numbering with no dedicated-lane marker, the key help without a `<Space>`
+  toggle, the add row, the row map, the aligned help column). Plus a **windowed
+  smoke** block driving the real dialog in a real float over a stub ctx
+  (open/`<C-j>`/`D`/`q`, and `<Space>` unbound — it edits nothing and does not
+  reflow) — the keymaps, re-render and focus handoff, which the pure tests cannot
+  reach.
   Plus **a pin covers the identity** (§10.6): `pin_rank` (entries only, by place)
   and `pin_anchors` (pinning a local anchors its paired remotes and a differently
   named upstream; pinning a paired remote anchors the whole identity, local
@@ -152,8 +163,8 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   drops one member, never an entry; a tag entry anchors itself only) and dialog
   lines without identity-member rows.
   `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`/
-  `pin_rank`/`sync_pin_rank` (default order with HEAD's anchor last, nothing
-  reserved by default, a pinned identity's remotes anchors but not entries and never
+  `pin_rank`/`sync_pin_rank` (default order with HEAD's anchor last, entries
+  `{ id }` alone, a pinned identity's remotes anchors but not entries and never
   rows, dropped with the identity's last entry or by an explicit unpin, the removed
   `pin_upstream` ignored, the ranks published on `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
   unpinnable / dropped once attached), and `reconcile_refs` stamping
