@@ -168,7 +168,7 @@ showing an unnamed scratch buffer. (Requires `:set title`.)
 | `H` | Toggle reachability highlighting (dimming) off / on |
 | `c` | Toggle first-parent focus — collapse every non-mainline branch, or show the full graph |
 | `P` | Pin / unpin the branch under the cursor as an anchor — pinned branches stay shown in full under focus (HEAD is pinned by default) |
-| `L` | **Pinned branches** — a dialog listing the pinned branches in priority order: `<C-j>`/`<C-k>` reorder, `<Space>` flags a branch for a dedicated graph lane, `D` unpins, `<CR>` jumps to a branch, the last row adds one via the ref picker, `q` closes |
+| `L` | **Pinned branches** — a dialog listing the pinned branches in priority order: `<C-j>`/`<C-k>` reorder, `D` unpins, `<CR>` jumps to a branch, the last row adds one via the ref picker, `q` closes |
 | `p` | Toggle marker packing — merge concurrent collapsed heads onto shared lines, or one per line |
 | `R` | Resync with the repository — re-read refs, pull new commits, prune unreachable ones, re-sort, and rebuild the working-tree changes (`◌` nodes), keeping your cursor / scroll / selection |
 | `<C-Space>` | **Command palette** (also `<C-@>`, what many terminals send) — the single action menu, scoped to what the cursor is on: the commit's or the branch's actions first (the selection's while `V` is active), then return / fetch / pull, then the keys that apply there with their key shown; see below |
@@ -257,15 +257,32 @@ colour, which no other branch ever takes (pins past the palette size draw an
 ordinary colour).
 
 **Colours follow branches.** A colour belongs to a branch, not to a lane: every
-lane carries the best-ranked branch that reaches it (pinned first, then by tip
-height), and a branch's label is drawn in that branch's colour. A local branch and
-its remotes share one hue, the remotes always **muted** (`palette.remote_mute`;
-out of the reachability focus `palette.remote_mute_out`, default `0.75 × dim`, so
-they stay a shade brighter than other dimmed lanes). An unpinned branch's colour is
-freed once it is outranked and no member is still to come below, so colours are
-reused down a long graph (specification.md §5, §5.5). Every pinned
-branch's label carries a pin icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except
-HEAD's own label (`icons.pin`; `""` turns it off).
+lane carries the best-ranked branch that reaches it (brighter first, then pinned,
+then by tip height), and a branch's label is drawn in that branch's colour. A local
+branch and its remotes share one hue, drawn at one of **three brightness levels**:
+
+| level | branches | drawn |
+|---|---|---|
+| full | local branches that are pinned or expanded | full strength |
+| slightly muted | remote branches that are pinned or expanded | `palette.remote_mute` (default `0.25`) |
+| muted | any collapsed, unpinned branch, local or remote | `palette.collapsed_mute` (default `0.45`, replacing `remote_mute`) |
+
+A brighter branch always outranks a dimmer one where lanes meet. Out of the
+reachability focus the dim is applied on top: a pinned or expanded remote takes
+`palette.remote_mute_out` (default `0.75 × dim`, so it stays a shade brighter than
+other dimmed lanes), and a collapsed one takes `palette.collapsed_mute_out` (default `0.45`, the same level as a dimmed local branch). Inside the
+focus, while the reachability highlight is on, both muted levels are lifted to almost
+full brightness by `palette.highlight_mute` (default `0.1`; `0` = full strength).
+Collapsed branches (on a `◍` head, a packed marker or a kept junction) are coloured
+like any other, in their own colour at the muted level. A tag takes the colour of
+the node it sits on. An unpinned branch's colour is freed once it is outranked and
+no member is still to come below, so colours are reused down a long graph
+(specification.md §5, §5.5). Every pinned branch's label carries a pin icon —
+`(⚲dev)`, `(⚲release/2.1 ↑origin)` — except HEAD's own label (`icons.pin`; `""`
+turns it off). A remote branch with no local branch of its name anywhere carries
+the remote icon, after the pin and expanded icons and directly before the name:
+`(⇣origin/foo)`, `(⚲⇣origin/foo)`, `(▾⇣origin/foo)` (`icons.remote`; `""` turns
+it off).
 
 Press `L` for the **pinned-branches dialog** — the anchors in priority order,
 where they are managed together. The defaults come first (the trunks, then
@@ -274,23 +291,18 @@ every entry: where lanes meet, the higher-priority branch keeps its lane and
 colour (§5), so reordering re-lays the graph.
 
 ```
-Pinned branches                    ◆ = dedicated lane
+Pinned branches
 
-  1  ◆  master              <C-j>/<C-k>  move
-  2  ◆  topic1              <Space>      toggle lane
-  3     origin/release      D            unpin
-  4     dev                 <CR>         jump to branch
-     + Pin new branch…      q            close
+  1  master              <C-j>/<C-k>  move
+  2  topic1              D            unpin
+  3  origin/release      <CR>         jump to branch
+  4  dev                 q            close
+     + Pin new branch…
 ```
 
 `<C-j>`/`<C-k>` reorder, `D` unpins, the last row adds a branch through the
-ref picker, and `<CR>` jumps the graph to a branch. `<Space>` flags a branch for
-a **dedicated lane** — a graph column held for it, marked `◆`. Pinning by itself
-never claims a column (up to four branches are pinned by default, so it must not); only
-this flag does, and the list order decides which reserved branch gets which
-column, left to right. **The dedicated-lane flag is currently recorded but not yet
-honoured by the layout** — the dialog says so on its last line — so today it sets
-up the ordering the layout work will read (§10.6.1, §10.6.2).
+ref picker, and `<CR>` jumps the graph to a branch. Pinning never claims a graph
+column: a pinned branch is placed like any other (§10.6.1).
 
 **Upstream tracking.** A local branch that tracks a remote shows a terse
 divergence indicator after its name: `⇡N` ahead, `⇣N` behind, `⇡N⇣M` diverged,
@@ -583,9 +595,13 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         pair = "NonText",        -- the dual-mode pair bracket (§6.1); false = blank
         action = "Special",      -- the commit-view diff action label (§11.5)
         dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
-        remote_mute = 0.25,      -- lighter blend of a remote ref's muted colour (§5.5)
+        -- brightness levels (§5.5): 0–1 blends toward bg, 0 = off; anything else = default
+        remote_mute = 0.25,      -- slightly muted: a pinned or expanded remote branch
         -- remote_mute_out = nil, -- its blend out of focus (§12.2); nil = 0.75 * dim
         -- (the former names counterpart_dim / counterpart_dim_out still work as aliases)
+        collapsed_mute = 0.45,   -- muted: any collapsed, unpinned branch (replaces remote_mute)
+        -- collapsed_mute_out = 0.45, -- its blend out of focus (§12.2)
+        -- highlight_mute = 0.1,  -- both muted levels IN focus while highlighting (§12.2)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
         -- submodule change view (§11.7): added / removed / common-ancestor marker
@@ -611,6 +627,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         pin = "⚲",           -- pinned-anchor label icon (§6/§10.6); "" = off
         expanded = "▾",      -- label icon of a branch you opened (§6); "" = off
         upstream = "→",      -- before a non-matching upstream, →origin/dev (§6.3)
+        remote = "⇣",        -- label icon of a remote branch with no local (§6); "" = off
     },
     branches = { "--all" },  -- refspec(s) passed to `git log`
     layout_policy = "compact", -- lane placement (§5.6); cycle with C:
@@ -626,7 +643,7 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     dual_bracket = { "┬", "└" }, -- dual mode's pair bracket: label row, message row
-    lane_label_colors = true, -- each branch label in its own ref's colour, remotes muted (false: per-kind groups)
+    lane_label_colors = true, -- each branch label in its own ref's colour at its brightness level, tags in their node's (false: per-kind groups)
     working_tree = true,     -- the ◌ working-tree row above HEAD: true | "dirty" | false (§3.3/§4.2)
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
     persist = true,          -- remember the view toggles + pin lists across sessions (§18)
@@ -659,8 +676,17 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   window background applied to everything outside the cursor row's reachability
   cone (§12); each field keeps its own colour, just muted (a higher factor is
   more muted). Falls back to a flat `NonText` on non-truecolor terminals.
-  `remote_mute` / `remote_mute_out` are a remote branch's lighter blend in and out
-  of the cone (formerly `counterpart_dim` / `counterpart_dim_out`, still accepted).
+  `remote_mute` (default `0.25`) and `collapsed_mute` (default `0.45`) are the two
+  muted **brightness levels** (§5.5): a pinned or expanded remote branch, and any
+  collapsed, unpinned branch (which takes `collapsed_mute` instead of
+  `remote_mute`). `remote_mute_out` is a pinned or expanded remote's blend out of
+  the cone (default `0.75 × dim`); a collapsed branch out of the cone takes
+  `collapsed_mute_out` (default `0.45`). While the reachability highlight is on,
+  both muted levels take `highlight_mute` (default `0.1`, almost full brightness)
+  inside the cone instead. `0` turns a level's muting off, and a value that is
+  not a number in `0`–`1` falls back to its default. (`remote_mute` /
+  `remote_mute_out` were formerly `counterpart_dim` / `counterpart_dim_out`, still
+  accepted.)
 - **`merge_style`** — controls whether merges/splits get their own virtual
   line above/below the commit, or are folded onto the commit line.
 - **`layout_policy`** — the lane **layout policy** (default `"compact"`): which
@@ -727,12 +753,13 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   (`{ "┬ ", "└ " }`) for a gap before the text. Its colour is `palette.pair`
   (default `NonText`; `false` leaves the prefix blank at the same width).
 - **`lane_label_colors`** — draw every branch label in **its own ref's colour**
-  (default `true`) — the colour of that branch's identity, a remote's muted — dimmed
-  out of the cursor's reachability cone. Tags, worktree labels and a collapsed
-  head's labels keep their per-kind colour; the `HEAD` marker keeps `palette.head`,
-  the `h`/`l`-selected label `palette.selected`. `false` restores the per-kind
-  groups (`palette.branch` / `remote` / `tags` / `worktree`) for every label; lanes
-  and nodes are coloured by ref either way. See
+  (default `true`) — the colour of that branch's identity at its brightness level
+  (collapsed branches on `◍` heads and packed markers included) — dimmed out of the
+  cursor's reachability cone. A tag takes its node's colour; worktree labels keep
+  their per-kind colour; the `HEAD` marker keeps `palette.head`, the
+  `h`/`l`-selected label `palette.selected`. `false` restores the per-kind groups
+  (`palette.branch` / `remote` / `tags` / `worktree`) for every label, tags
+  included; lanes and nodes are coloured by ref either way. See
   [specification.md](specification.md) §6 "Label colour".
 - **`pin_upstream`** — removed: a pin always covers the branch's identity
   (local + remotes); a set value is ignored (§10.6).
@@ -781,6 +808,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   expand choices are not remembered. **Reset view settings…** in the `<C-Space>`
   palette, or `:GitloomResetView`, clears the toggles and the current repository's
   pin list (other repositories keep theirs) and restores your configuration live.
+  A pin entry's `reserved` flag saved by an older version (the dropped dedicated
+  lane) is ignored and no longer written.
   A corrupt file is ignored with one warning. `persist = false` neither reads nor
   writes the file.
 - **`progress`** — how gitloom reports operations that take a while (§19):

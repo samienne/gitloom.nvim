@@ -104,44 +104,45 @@ describe("persist precedence (§18.3)", function()
 end)
 
 describe("persist pin state (§18.2)", function()
-    it("pins_for_save drops the leading run of unreserved defaults in default order", function()
+    it("pins_for_save drops the leading run of defaults in default order", function()
         local defaults = { "master", "main", "dev", "feature/x" } -- HEAD's branch last
         local pins = {
-            { id = "master", reserved = false },    -- leading default → dropped
-            { id = "dev", reserved = false },       -- still in default order → dropped
-            { id = "feature/x", reserved = false }, -- HEAD's branch, in place → dropped
-            { id = "release", reserved = false },   -- explicit → kept
-            { id = "main", reserved = false },      -- default MOVED below an explicit entry → kept
+            { id = "master" },    -- leading default → dropped
+            { id = "dev" },       -- still in default order → dropped
+            { id = "feature/x" }, -- HEAD's branch, in place → dropped
+            { id = "release" },   -- explicit → kept
+            { id = "main" },      -- default MOVED below an explicit entry → kept
         }
-        assert.same({ { id = "release", reserved = false }, { id = "main", reserved = false } },
+        assert.same({ { id = "release" }, { id = "main" } },
             persist.pins_for_save(pins, defaults))
     end)
 
-    it("pins_for_save keeps a reserved default and everything after it", function()
+    it("pins_for_save writes entries as { id } — a legacy `reserved` flag is dropped, not kept", function()
+        -- The dedicated-column flag is gone (§10.6, §18): a flagged default no longer
+        -- pins itself in place, and the flag is never written back.
         local pins = {
             { id = "master", reserved = true },
-            { id = "dev", reserved = false },
+            { id = "rel", reserved = true },
         }
-        assert.same({ { id = "master", reserved = true }, { id = "dev", reserved = false } },
-            persist.pins_for_save(pins, { "master", "dev" }))
+        assert.same({ { id = "rel" } }, persist.pins_for_save(pins, { "master", "dev" }))
     end)
 
     it("pins_for_save keeps defaults the user reordered out of default order", function()
-        local pins = { { id = "dev", reserved = false }, { id = "master", reserved = false } }
+        local pins = { { id = "dev" }, { id = "master" } }
         -- `dev` alone still resolves back to the top; `master` below it does not.
-        assert.same({ { id = "master", reserved = false } },
+        assert.same({ { id = "master" } },
             persist.pins_for_save(pins, { "master", "dev" }))
     end)
 
     it("set_repo / repo_state round-trip per root; an empty state removes the entry", function()
         local data = {}
-        persist.set_repo(data, "C:/a", { { id = "rel", reserved = true } }, { dev = true, main = true })
-        persist.set_repo(data, "C:/b", { { id = "x", reserved = false } }, {})
+        persist.set_repo(data, "C:/a", { { id = "rel" } }, { dev = true, main = true })
+        persist.set_repo(data, "C:/b", { { id = "x" } }, {})
         data = vim.json.decode(vim.json.encode(data), { luanil = { object = true, array = true } })
         local pins, unpinned = persist.repo_state(data, "C:/a")
-        assert.same({ { id = "rel", reserved = true } }, pins)
+        assert.same({ { id = "rel" } }, pins)
         assert.same({ dev = true, main = true }, unpinned)
-        assert.same({ { id = "x", reserved = false } }, (persist.repo_state(data, "C:/b")))
+        assert.same({ { id = "x" } }, (persist.repo_state(data, "C:/b")))
         persist.set_repo(data, "C:/b", {}, {})
         assert.is_nil(data.repos["C:/b"])
         local p2, u2 = persist.repo_state(data, "C:/none")
@@ -151,8 +152,9 @@ describe("persist pin state (§18.2)", function()
 
     it("repo_state sanitises junk entries", function()
         local data = { repos = { r = { pins = { { id = 3 }, "x", { id = "ok", reserved = "y" } }, unpinned = { 1, "d" } } } }
+        -- (`reserved` — the dropped dedicated-column flag — is ignored, §18.)
         local pins, unpinned = persist.repo_state(data, "r")
-        assert.same({ { id = "ok", reserved = false } }, pins)
+        assert.same({ { id = "ok" } }, pins)
         assert.same({ d = true }, unpinned)
     end)
 end)
@@ -168,12 +170,29 @@ describe("persist file I/O (§18.4)", function()
         assert.is_true(ok)
     end)
 
+    it("ignores a persisted `reserved` field on read and never writes it back (§18)", function()
+        local p = tmpfile()
+        -- A file written by an older version, with the dropped dedicated-column flag.
+        local f = assert(io.open(p, "w"))
+        f:write(vim.json.encode({ version = persist.VERSION,
+            repos = { ["C:/old"] = { pins = { { id = "rel", reserved = true } }, unpinned = {} } } }))
+        f:close()
+        persist.set_path(p)
+        local pins = persist.restore_pins({}, "C:/old")
+        assert.same({ { id = "rel" } }, pins)
+        -- Saving it back (any pin change) writes `{ id }` only.
+        persist.save_pins({}, "C:/old", pins, {}, {})
+        local saved = read_json(p).repos["C:/old"].pins
+        assert.same({ { id = "rel" } }, saved)
+        assert.is_nil(saved[1].reserved)
+    end)
+
     it("round-trips a preference and a pin list through the file", function()
         local p = tmpfile()
         local opts = { mirror = false }
         local config = persist.config_values({})
         persist.save_pref(opts, config, "mirror")
-        persist.save_pins({}, "C:/repo", { { id = "rel", reserved = true } }, { dev = true }, {})
+        persist.save_pins({}, "C:/repo", { { id = "rel" } }, { dev = true }, {})
         assert.equals(persist.VERSION, read_json(p).version)
         -- A fresh session (cache dropped) restores both.
         persist.set_path(p)
@@ -181,7 +200,7 @@ describe("persist file I/O (§18.4)", function()
         persist.restore_opts(fresh, {})
         assert.equals(false, fresh.mirror)
         local pins, unpinned = persist.restore_pins({}, "C:/repo")
-        assert.same({ { id = "rel", reserved = true } }, pins)
+        assert.same({ { id = "rel" } }, pins)
         assert.same({ dev = true }, unpinned)
     end)
 
@@ -207,11 +226,11 @@ describe("persist file I/O (§18.4)", function()
         -- Instance B (another nvim) writes its own key straight to the file.
         local other = read_json(p)
         other.view.label_mode = { value = "dual", base = "right" }
-        other.repos = { ["C:/b"] = { pins = { { id = "x", reserved = false } }, unpinned = {} } }
+        other.repos = { ["C:/b"] = { pins = { { id = "x" } }, unpinned = {} } }
         write_raw(p, vim.json.encode(other))
         -- A writes another key: B's keys are kept.
         persist.save_pref({ highlight = false }, config, "highlight")
-        persist.save_pins({}, "C:/a", { { id = "y", reserved = true } }, {}, {})
+        persist.save_pins({}, "C:/a", { { id = "y" } }, {}, {})
         local final = read_json(p)
         assert.same({ value = false, base = true }, final.view.mirror)
         assert.same({ value = "dual", base = "right" }, final.view.label_mode)
@@ -250,7 +269,7 @@ describe("persist file I/O (§18.4)", function()
     it("persist = false neither reads nor writes", function()
         local p = tmpfile()
         write_raw(p, vim.json.encode({ view = { mirror = { value = false, base = true } },
-            repos = { ["C:/r"] = { pins = { { id = "z", reserved = true } }, unpinned = {} } } }))
+            repos = { ["C:/r"] = { pins = { { id = "z" } }, unpinned = {} } } }))
         local before = read_json(p)
         local opts = { mirror = true, persist = false }
         persist.restore_opts(opts, { persist = false })
@@ -270,8 +289,8 @@ describe("persist file I/O (§18.4)", function()
         local p = tmpfile()
         local config = persist.config_values({})
         persist.save_pref({ mirror = false }, config, "mirror")
-        persist.save_pins({}, "C:/a", { { id = "a1", reserved = true } }, {}, {})
-        persist.save_pins({}, "C:/b", { { id = "b1", reserved = true } }, { dev = true }, {})
+        persist.save_pins({}, "C:/a", { { id = "a1" } }, {}, {})
+        persist.save_pins({}, "C:/b", { { id = "b1" } }, { dev = true }, {})
         persist.reset({}, "C:/a")
         local final = read_json(p)
         assert.is_nil(final.view)

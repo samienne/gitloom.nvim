@@ -87,12 +87,23 @@ end
 ---@param bottom integer
 ---@return table<Commit, boolean>
 function M.mark_reachable(order, pivot_index, top, bottom)
-    local item_of, visible = {}, {}
+    -- item_of: the row whose Lanes a commit owns; row_of: the drawn row its marker
+    -- sits on. They differ only on a packed marker row (§10.4), which has no
+    -- `commit`: each head keeps its own Lanes on its original `marker_items` row
+    -- but is drawn on the packed row, and counts as in the cone like any commit.
+    local item_of, row_of, visible = {}, {}, {}
     for i = top, bottom do
         local it = order[i]
         if it and it.commit then
             item_of[it.commit] = it
+            row_of[it.commit] = it
             visible[it.commit] = true
+        elseif it and it.type == "markers" then
+            for k, m in ipairs(it.markers or {}) do
+                item_of[m] = (it.marker_items or {})[k] or it
+                row_of[m] = it
+                visible[m] = true
+            end
         end
     end
 
@@ -105,6 +116,10 @@ function M.mark_reachable(order, pivot_index, top, bottom)
         if it then
             for _, l in ipairs(it.parent_lanes or {}) do l.highlighted = false end
             for _, l in ipairs(it.child_lanes or {}) do l.highlighted = false end
+            for _, mi in ipairs(it.marker_items or {}) do
+                for _, l in ipairs(mi.parent_lanes or {}) do l.highlighted = false end
+                for _, l in ipairs(mi.child_lanes or {}) do l.highlighted = false end
+            end
             for _, line in ipairs(M.item_lines(it)) do
                 for _, t in ipairs(line) do
                     for _, s in ipairs(t.lanes or {}) do
@@ -150,7 +165,7 @@ function M.mark_reachable(order, pivot_index, top, bottom)
     end
 
     for c in pairs(cone) do -- light the cone commits' markers
-        for _, line in ipairs(M.item_lines(item_of[c])) do
+        for _, line in ipairs(M.item_lines(row_of[c])) do
             for _, t in ipairs(line) do
                 if t.has_commit and t.commit == c then t.active = true end
             end

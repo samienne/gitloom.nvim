@@ -25,7 +25,7 @@ end
 
 local function pins(...)
     local out = {}
-    for _, id in ipairs({ ... }) do out[#out + 1] = { id = id, reserved = false } end
+    for _, id in ipairs({ ... }) do out[#out + 1] = { id = id } end
     return out
 end
 
@@ -138,7 +138,8 @@ describe("rank order (§5 rank)", function()
         assert.same({ "b", "a", "origin/a" }, got)
         got = order(registry("a", "r:origin/a", "b"), { a = 1, ["origin/a"] = 1, b = 9 },
             { pins = pins("origin/a", "b") })
-        assert.same({ "a", "origin/a", "b" }, got)
+        -- brightness first: the pinned remote (level 2) below both locals (level 1)
+        assert.same({ "a", "b", "origin/a" }, got)
     end)
 
     it("ranks an identity whose local is not visible as remote-only", function()
@@ -200,7 +201,7 @@ describe("rank order (§5 rank)", function()
         -- The current branch's identity includes its remotes.
         local reg2 = registry("b", "r:origin/b", "a")
         assert.same({ "a", "b", "origin/b" }, order(reg2, { a = 3, b = 1, ["origin/b"] = 3 }))
-        assert.same({ "b", "origin/b", "a" },
+        assert.same({ "b", "a", "origin/b" },
             order(reg2, { a = 3, b = 3, ["origin/b"] = 3 }, { current = "b" }))
     end)
 
@@ -233,7 +234,127 @@ describe("rank order (§5 rank)", function()
                 end
             end
         end
-        assert.same({ "main", "b", "fork/b", "a", "origin/a", "origin/x", "origin/c", "fork/c" },
+        -- level 1 (main pinned, then b / a tied on row 2: current first), then level 2:
+        -- fork/b and origin/a tie on row 2 (current first), origin/x stands higher
+        -- (row 1); then the remote-only identity.
+        assert.same({ "main", "b", "a", "fork/b", "origin/a", "origin/x", "origin/c", "fork/c" },
             rank.order(infos, rows))
+    end)
+end)
+
+describe("brightness levels (§5 'Brightness level')", function()
+    local function infos_of(reg, o)
+        o = o or {}
+        local p = rank.pair(reg, { remotes = REMOTES, pins = o.pins })
+        return rank.infos(p, { visible = o.visible, collapsed = o.collapsed, pins = o.pins,
+            current = o.current, remotes = REMOTES })
+    end
+
+    it("levels: expanded local 1, expanded remote 2, collapsed unpinned 3, pinned never 3", function()
+        local reg = registry("a", "r:origin/a", "p", "r:origin/p", "r:origin/z")
+        local all = { a = true, ["origin/a"] = true, p = true, ["origin/p"] = true, ["origin/z"] = true }
+        local i = infos_of(reg, { pins = pins("p") })
+        assert.same({ 1, 2, 1, 2, 2 }, { i.a.level, i["origin/a"].level, i.p.level, i["origin/p"].level,
+            i["origin/z"].level })
+        i = infos_of(reg, { pins = pins("p"), collapsed = all })
+        assert.same({ 3, 3, 1, 2, 3 }, { i.a.level, i["origin/a"].level, i.p.level, i["origin/p"].level,
+            i["origin/z"].level })
+        assert.is_true(i.a.collapsed)
+        assert.equal(4, rank.generated(1).level)
+        assert.equal(1, rank.drawn_level(rank.generated(1)))
+        assert.equal(3, rank.drawn_level(i.a))
+    end)
+
+    it("a pinned identity's remote ranks below every expanded local, pinned or not", function()
+        -- dev pinned, origin/dev ahead of it; feature forked from origin/dev's commits
+        -- stands higher than origin/dev, yet outranks it (§5 "Rank", the dev example).
+        local reg = registry("dev", "r:origin/dev", "feature")
+        local got = rank.order(infos_of(reg, { pins = pins("dev") }),
+            { feature = 1, ["origin/dev"] = 2, dev = 5 })
+        assert.same({ "dev", "feature", "origin/dev" }, got)
+    end)
+
+    it("every expanded or pinned ref outranks every collapsed unpinned one", function()
+        local reg = registry("base", "r:origin/base", "top", "r:origin/z")
+        -- base stands lowest and would own its commits at one level; collapsed, it
+        -- ranks below even the remote-only origin/z.
+        local col = { base = true, ["origin/base"] = true }
+        local got = rank.order(infos_of(reg, { collapsed = col }),
+            { top = 1, ["origin/z"] = 2, base = 9, ["origin/base"] = 9 })
+        assert.same({ "top", "origin/z", "base", "origin/base" }, got)
+        -- pinning lifts the collapsed identity back to levels 1 and 2
+        got = rank.order(infos_of(reg, { collapsed = col, pins = pins("base") }),
+            { top = 1, ["origin/z"] = 2, base = 9, ["origin/base"] = 9 })
+        assert.same({ "base", "top", "origin/base", "origin/z" }, got)
+    end)
+
+    it("at level 3 the local still outranks its own remote", function()
+        local reg = registry("a", "r:origin/a")
+        local col = { a = true, ["origin/a"] = true }
+        assert.same({ "a", "origin/a" },
+            rank.order(infos_of(reg, { collapsed = col }), { a = 1, ["origin/a"] = 7 }))
+        -- a collapsed local below its expanded remote: the remote is brighter
+        assert.same({ "origin/a", "a" },
+            rank.order(infos_of(reg, { collapsed = { a = true } }), { a = 7, ["origin/a"] = 1 }))
+    end)
+
+    it("brightness wins over every pin and row, generated refs last (fuzz)", function()
+        local s = 7
+        local function rnd(n) s = (s * 16807) % 2147483647; return s % n end
+        for _ = 1, 60 do
+            local names, rows, col, pl = {}, {}, {}, {}
+            for k = 1, 3 + rnd(6) do
+                local n = "x" .. rnd(5)
+                if rnd(3) == 0 then n = (rnd(2) == 0 and "origin/" or "fork/") .. n end
+                if not rows[n] then
+                    names[#names + 1] = n:find("/") and ("r:" .. n) or n
+                    rows[n] = rnd(10)
+                    if rnd(3) == 0 then col[n] = true end
+                    if rnd(4) == 0 then pl[#pl + 1] = n end
+                end
+                local _ = k
+            end
+            local infos = infos_of(registry(unpack(names)), { collapsed = col, pins = pins(unpack(pl)),
+                current = rnd(2) == 0 and "x1" or nil })
+            local list = { rank.generated(1) }
+            for _, i in pairs(infos) do list[#list + 1] = i end
+            for _, a in ipairs(list) do
+                for _, b in ipairs(list) do
+                    if a ~= b then
+                        if a.level < b.level then
+                            assert.is_true(rank.better(a, b, rows), a.name .. " over " .. b.name)
+                        end
+                        assert.not_equal(rank.better(a, b, rows), rank.better(b, a, rows))
+                    end
+                end
+            end
+        end
+    end)
+
+    it("packs a slot and a level into one drawn colour", function()
+        for _, k in ipairs({ 1, 7, 30 }) do
+            for level = 1, 3 do
+                local c = rank.drawn(k, level)
+                assert.equal(k, rank.slot_of(c))
+                assert.equal(level, rank.level_of(c))
+            end
+        end
+        assert.equal(5, rank.drawn(5, 1))
+        assert.equal(-5, rank.drawn(5, 2))
+        assert.is_true(rank.drawn(5, 3) < 0)
+    end)
+end)
+
+describe("rank.start_set (§5.5 pending while streaming)", function()
+    local reg = registry("a", "b", "r:origin/a", "t:v1")
+    it("is every ref under --all (the default)", function()
+        assert.is_true(rank.start_set(nil, reg))
+        assert.is_true(rank.start_set({ "main", "--all" }, reg))
+    end)
+    it("names the refs a narrower refspec starts from", function()
+        assert.same({ a = true }, rank.start_set({ "a" }, reg))
+        assert.same({ a = true, b = true }, rank.start_set({ "--branches" }, reg))
+        assert.same({ ["origin/a"] = true, b = true }, rank.start_set({ "--remotes", "refs/heads/b" }, reg))
+        assert.same({}, rank.start_set({ "deadbeef", "HEAD~3" }, reg))
     end)
 end)

@@ -407,14 +407,13 @@ end
 
 -- ── Pinned branches: the ordered pin list (spec §10.6) ──────────────────────
 --
--- The pinned branches are ONE ordered list, and "holds a dedicated graph column"
--- (§10.6.2) is a per-entry FLAG on it — not a second list. Two properties then
--- hold by construction instead of by discipline: `reserved` ⊆ `pinned`, and
--- **unpinning implies unreserving** (the flag leaves with its entry). Order is
--- the anchor priority, and it matters for EVERY entry: an entry's 1-based place is
--- its **rank**, which drives lane identity (§5); among reserved entries it also
--- decides the dedicated columns (§10.6.2). The other members of a pinned identity
--- (§10.6) are not entries — they are anchors through it (`pin_anchors`).
+-- The pinned branches are ONE ordered list of ref-owner ids. Order is the anchor
+-- priority, and it matters for EVERY entry: an entry's 1-based place is its
+-- **rank**, which drives ref priority and colour (§5). The other members of a
+-- pinned identity (§10.6) are not entries — they are anchors through it
+-- (`pin_anchors`). (The former per-entry `reserved` flag for a dedicated column
+-- was dropped; an entry is `{ id }` alone, and a stray `reserved` field is
+-- ignored — `pin_copy` / `pin_resolve` never carry it.)
 --
 -- All of these are pure: they copy in and copy out, never mutating the input
 -- (like `bump_recent`), so the window glue assigns the result back.
@@ -422,14 +421,13 @@ end
 --- One entry of the pin list (spec §10.6).
 ---@class PinEntry
 ---@field id string        -- the ref-owner id (a ref name; §10)
----@field reserved boolean -- holds a dedicated graph column (§10.6.2)
 
 ---@param pins PinEntry[]?
 ---@return PinEntry[]
 local function pin_copy(pins)
     local out = {}
     for i, e in ipairs(pins or {}) do
-        out[i] = { id = e.id, reserved = e.reserved and true or false }
+        out[i] = { id = e.id }
     end
     return out
 end
@@ -450,16 +448,16 @@ function M.pin_resolve(pins, unpinned, defaults, exists)
     unpinned = unpinned or {}
     local out, seen, placed = {}, {}, {}
     for _, e in ipairs(pins or {}) do placed[e.id] = true end
-    local function push(id, reserved)
+    local function push(id)
         if not id or seen[id] or unpinned[id] then return end
         if exists and exists[id] == nil then return end
         seen[id] = true
-        out[#out + 1] = { id = id, reserved = reserved and true or false }
+        out[#out + 1] = { id = id }
     end
     for _, id in ipairs(defaults or {}) do
-        if not placed[id] then push(id, false) end
+        if not placed[id] then push(id) end
     end
-    for _, e in ipairs(pins or {}) do push(e.id, e.reserved) end
+    for _, e in ipairs(pins or {}) do push(e.id) end
     return out
 end
 
@@ -514,18 +512,7 @@ function M.pin_move(pins, index, delta)
     return out, target
 end
 
---- Toggle the entry's dedicated-lane flag (spec §10.6.1, `<Space>`).
----@param pins PinEntry[]?
----@param index integer
----@return PinEntry[]
-function M.pin_toggle_reserved(pins, index)
-    local out = pin_copy(pins)
-    if out[index] then out[index].reserved = not out[index].reserved end
-    return out
-end
-
---- Unpin the entry at `index` (spec §10.6.1, `D`). The reserve flag lives ON the
---- entry, so unpin **implies** unreserve: there is nothing left behind to clear.
+--- Unpin the entry at `index` (spec §10.6.1, `D`): it leaves the list.
 ---@param pins PinEntry[]?
 ---@param index integer
 ---@return PinEntry[]
@@ -536,15 +523,14 @@ function M.pin_remove(pins, index)
 end
 
 --- Append `id` to the pin list if it is not already on it (the "Pin new branch…"
---- entry and the `P` key). A newly pinned branch is **not** reserved (§10.6).
+--- entry and the `P` key), at the bottom (§10.6).
 ---@param pins PinEntry[]?
 ---@param id string
----@param reserved boolean?
 ---@return PinEntry[]
-function M.pin_add(pins, id, reserved)
+function M.pin_add(pins, id)
     local out = pin_copy(pins)
     for _, e in ipairs(out) do if e.id == id then return out end end
-    out[#out + 1] = { id = id, reserved = reserved and true or false }
+    out[#out + 1] = { id = id }
     return out
 end
 
@@ -558,29 +544,11 @@ function M.pin_ids(pins)
     return set
 end
 
---- The **reserved** ids in pin-list order (spec §10.6.2): the branches that get
---- a dedicated column, left to right, skipping the unreserved entries between
---- them. (The order also ranks every entry for lane identity — `pin_rank`.)
----@param pins PinEntry[]?
----@return string[]
-function M.reserved_order(pins)
-    local out = {}
-    for _, e in ipairs(pins or {}) do
-        if e.reserved then out[#out + 1] = e.id end
-    end
-    return out
-end
-
 --- The pinned-branches dialog's buffer lines (spec §10.6.1). Pure so the layout
 --- is testable without a window: the entry rows carry the priority number (every
---- entry's rank, §5), the `◆` marker for a reserved entry (blank otherwise — the
---- subsequence that also claims columns), and the ref name. The members a pin
---- covers through its identity (§10.6) are not entries, so they have no rows. The
---- static key help runs down the right; the last selectable row adds a branch.
----
---- The closing note is deliberate: the reserve flag is recorded before the
---- layout honours it, and a control whose effect is not yet built must say so
---- rather than appear to work.
+--- entry's rank, §5) and the ref name. The members a pin covers through its
+--- identity (§10.6) are not entries, so they have no rows. The static key help
+--- runs down the right; the last selectable row adds a branch.
 ---@param pins PinEntry[]?
 ---@return string[] lines
 ---@return table<integer, integer|string> rows  -- 1-based line → entry index, or "new"
@@ -588,22 +556,19 @@ function M.pin_dialog_lines(pins)
     pins = pins or {}
     local HELP = {
         "<C-j>/<C-k>  move",
-        "<Space>      toggle lane",
         "D            unpin",
         "<CR>         jump to branch",
         "q            close",
     }
     local NEW = "     + Pin new branch…"
     local TITLE = "Pinned branches"
-    local LEGEND = "◆ = dedicated lane"
-    local NOTE = "◆ is recorded but the layout does not hold dedicated lanes yet."
 
     local function width(s) return vim.fn.strdisplaywidth(s) end
 
     -- The left column: one row per entry, then the "pin new" row.
     local left, rows = {}, {}
     for i, e in ipairs(pins) do
-        left[i] = ("  %d  %s  %s"):format(i, e.reserved and "◆" or " ", e.id)
+        left[i] = ("  %d  %s"):format(i, e.id)
     end
     left[#pins + 1] = NEW
 
@@ -616,15 +581,13 @@ function M.pin_dialog_lines(pins)
         return ((l .. pad .. "    " .. (r or "")):gsub("%s+$", ""))
     end
 
-    local lines = { row(TITLE, LEGEND), "" }
+    local lines = { TITLE, "" }
     for i = 1, math.max(#left, #HELP) do
         lines[#lines + 1] = row(left[i], HELP[i])
         if left[i] then
             rows[#lines] = (i <= #pins) and i or "new"
         end
     end
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = NOTE
     return lines, rows
 end
 

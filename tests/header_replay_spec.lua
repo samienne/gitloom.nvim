@@ -21,15 +21,17 @@ local function build(policy, small, cp)
         dev = { name = "dev", kind = "local", commit = byhash[fix.dev] },
     }
     if cp then
-        -- dev's remote origin/dev a few first-parent commits below HEAD's branch tip
-        -- (the LumeScene shape): dev's identity outranks enne there and recolours its lane.
+        -- A pinned local `pick` a few first-parent commits below HEAD's branch tip, pinned
+        -- FIRST: a full-strength (level 1) ref with a better pin rank than `enne`, so it
+        -- outranks enne at that commit and recolours enne's lane from there down (§5
+        -- "Rank", "Carried refs") — the recolour the header's colours must follow.
         local c = byhash[fix.head]
         for _ = 1, 3 do
             local p = c.parents and c.parents[1]
             p = type(p) == "table" and p or byhash[p]
             if p then c = p end
         end
-        refs["origin/dev"] = { name = "origin/dev", kind = "remote", commit = c }
+        refs.pick = { name = "pick", kind = "local", commit = c }
     end
     for _, r in ipairs(fix.refs) do
         if byhash[r.commit] and not refs[r.name] then
@@ -47,7 +49,7 @@ local function build(policy, small, cp)
         return out
     end
     local pinned = { enne = true, dev = true } -- HEAD's branch + dev, like effective_pinned
-    if cp then pinned["origin/dev"] = true end -- a member of dev's identity is an anchor too (§10.6)
+    if cp then pinned.pick = true end -- a pinned anchor (§10.6)
     local proj = view.project(items, view.owners(items, ofr(), pinned, {}, true), nil)
     local display = proj.items
     local opts = h.big_opts()
@@ -61,11 +63,13 @@ local function build(policy, small, cp)
     opts.layout_policy = policy
     -- The ranking input, as `ctx:sync_ref_rank` publishes it: the pinned anchors (the
     -- default order: trunks first, HEAD's anchor last; §10.6), HEAD's branch current,
-    -- visibility from the projection. With `cp`, dev's remote `origin/dev` sits below
-    -- enne's tip and recolours enne's lane there (§5 "Carried refs"). `pin_rank` is
+    -- visibility from the projection. With `cp`, the pinned local `pick` sits below
+    -- enne's tip and is pinned first — same level as enne (1), better pin rank — so it
+    -- takes enne's lane over there (§5 "Rank": brightness, then pin rank). `pin_rank` is
     -- still published for the header's colour de-collision (`pinned_slots`).
-    h.ranked(opts, display, { pins = { "dev", "enne" }, current = "enne" })
-    opts.pin_rank = { dev = 1, enne = 2 }
+    local pins = cp and { "pick", "dev", "enne" } or { "dev", "enne" }
+    h.ranked(opts, display, { pins = pins, current = "enne" })
+    opts.pin_rank = cp and { pick = 1, dev = 2, enne = 3 } or { dev = 1, enne = 2 }
     local main = columns.layout(opts, display)
     local didx, lane_main, node_col, edge = {}, {}, {}, {}
     for i, it in ipairs(display) do
@@ -259,9 +263,26 @@ describe("large real-world header replay — colours follow the main view (§6.2
         { "compact", true, true } }) do
         local policy, small, cp = cfg[1], cfg[2], cfg[3]
         it(("[%s%s%s] no header lane or node off its main-view colour"):format(policy,
-                small and ", 6 colours" or "", cp and ", origin/dev recolour" or ""),
+                small and ", 6 colours" or "", cp and ", pinned pick recolour" or ""),
             function()
-                local segs, nodes, where = colour_mismatches(build(policy, small, cp))
+                local ctx = build(policy, small, cp)
+                if cp then
+                    -- Guard against a vacuous pass: the outranking `pick` must really
+                    -- recolour enne's lane, i.e. the lane id at pick's commit carries
+                    -- more than one colour in the main view (§5 "Carried refs").
+                    local lane = ctx.lane_of(ctx.dnode_of(ctx.refs.pick.commit.hash))
+                    assert(lane, "pick must sit on a main-view lane")
+                    local cols = {}
+                    for _, row in ipairs(ctx.main) do
+                        for _, l in ipairs(row.parent_lanes or {}) do
+                            if l.id == lane.id then cols[l.color] = true end
+                        end
+                    end
+                    local n = 0
+                    for _ in pairs(cols) do n = n + 1 end
+                    assert.is_true(n >= 2, "pick did not recolour enne's lane (one colour on lane " .. tostring(lane.id) .. ")")
+                end
+                local segs, nodes, where = colour_mismatches(ctx)
                 assert.equals(0, segs, table.concat(where, "\n  ", 1, math.min(#where, 12)))
                 -- Under `gutter` a head reached ONLY through a merge's second parent
                 -- draws that edge's lane, while the main view colours its node by its

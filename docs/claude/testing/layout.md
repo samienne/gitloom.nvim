@@ -157,9 +157,17 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   excluded) and the order (`infos` + `better` / `order`): each tier, local before
   its remotes, the standing row, upstream then `git remote` order, the current-
   branch and name tie-breaks, generated refs last, antisymmetry over a mixed set.
+  **Brightness levels**: expanded local 1, expanded remote 2, collapsed unpinned 3,
+  a pinned ref never 3; a pinned identity's remote below every expanded local;
+  every expanded or pinned ref above every collapsed unpinned one; the local still
+  above its remote at level 3; a fuzz that brightness beats every pin and row with
+  generated refs last; the `rank.drawn` / `slot_of` / `level_of` codec. And
+  `rank.start_set` (`--all` → every ref; a narrower refspec → the refs it names).
 - `tests/ref_color_spec.lua` — **carried refs** (§5) and ref colours (§5.5) in the
   layout, with `opts.ref_rank` built by `h.ranked` from the items' refs (visible =
-  on a non-collapsed, non-junction node). A fuzz sweep (raw + focused, refs, remotes
+  on any node; on a collapsed head or kept junction also collapsed; `o.extra_refs`,
+  `o.visible` and `o.coming` for refs off the items, a visibility override and the
+  stream's start set). A fuzz sweep (raw + focused, refs, remotes
   at / ahead of / behind their locals, remote-only branches, tags and pins scattered)
   × every style × policy checks every row (`check_refs`): the selected ref is the
   best arriving / own ref (else generated), the first parent carries it, the
@@ -175,7 +183,10 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   edges (generated, shared by every merge of one ref-less commit; a ref on the
   parent carried), a tag-only tip; pinned slot k unchanged by a pin below and never
   held by another identity, a tag entry owning nothing, a pin past the palette; an
-  identity's colour held while a member is pending below and released after; the
+  identity's colour held while a member is pending below and released after (a
+  member whose tip never loads holds nothing, a `coming` one does); a pinned
+  identity's remote yielding to an expanded local (brightness first); a collapsed
+  ref carrying its track in its own colour, muted unless pinned; the
   `buffer` cooldown (a fixture plus a fuzz check); streaming == one-shot incl. a
   ranking change re-laying the stream; footer seeds carrying their main-view ref and
   colour; working-tree nodes carrying HEAD's branch (attached) or a generated ref
@@ -242,7 +253,9 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
 - `tests/reachability_spec.lua` — `reachable_cone` (spec §12.1: pivot/ancestors/
   descendants, no cousins, viewport clipping); the **lane model** (`build_graph`
   attaches `parent_lanes`/`child_lanes`, sharing one Lane object per edge); and
-  `mark_reachable` (the Lane walk): cone markers light, an edge is highlighted iff
+  `mark_reachable` (the Lane walk): cone markers light (packed marker heads
+  included, §10.4 — a reached head is in the cone and the walk passes through it),
+  an edge is highlighted iff
   it's in the cone, a sibling sharing a fan stays fully dim (exact, no bus
   over-lighting), and the shared descent/ascent at a separate split/merge line
   keeps a non-trunk cone lane connected through the hub

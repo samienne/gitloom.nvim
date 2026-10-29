@@ -32,10 +32,13 @@ local M = {}
 --- parent/child edge, shared by every Segment that draws it.
 ---@class Lane
 ---@field id integer|nil
----@field color integer|nil   palette slot (1-based) of the carried ref's colour (§5.5);
----                            `-k` = slot k's muted variant, for a remote ref
+---@field color integer|nil   the carried ref's DRAWN colour (§5.5): its palette slot
+---                            (1-based) and brightness level packed by `rank.drawn` —
+---                            `k` full, `-k` slightly muted (a pinned / expanded remote),
+---                            `-(k + rank.MUTED)` muted (collapsed, unpinned); decode
+---                            with `rank.slot_of` / `rank.level_of`
 ---@field ref? RankInfo        the carried ref (§5 "Carried refs"): a visible ranked ref
----                            (`ref.remote` drawn muted) or a generated one (`tier == 4`)
+---                            (`ref.level` its brightness) or a generated one (`tier == 4`)
 ---@field begin Commit
 ---@field parent Commit
 ---@field highlighted boolean
@@ -55,7 +58,7 @@ local M = {}
 --- of edges routing through it).
 ---@class Segment
 ---@field id integer|nil
----@field color integer|nil   palette slot of the Lane(s) this wire draws (`-k` muted)
+---@field color integer|nil   drawn colour of the Lane(s) this wire draws (`rank.drawn`)
 ---@field ref? RankInfo       the ref the labelling Lane carries (§5)
 ---@field connectivity Connectivity
 ---@field begin? Commit
@@ -66,7 +69,7 @@ local M = {}
 
 ---@class GraphColumn
 ---@field id integer|nil
----@field color integer|nil   palette slot for the cell's glyph colour (`-k` muted)
+---@field color integer|nil   drawn colour of the cell's glyph (`rank.drawn`: slot + level)
 ---@field ref? RankInfo       the carried ref behind `color` (§5)
 ---@field connectivity Connectivity
 ---@field has_commit boolean
@@ -91,9 +94,18 @@ local M = {}
 ---@field child_lanes? Lane[]   edges in from this commit's children (§5)
 ---@field selected? RankInfo     the commit's selected ref (§5 "Carried refs")
 ---@field selected_color? integer  its identity's colour slot (unsigned; the node glyph
----   draws the muted variant when the selected ref is a remote)
----@field ref_colors? table<string, integer>  this commit's own visible ranked refs →
----   their label colour (the identity colour, §5.5)
+---   draws it at `selected_level`)
+---@field selected_level? integer  the brightness level the selected ref is drawn at (1
+---   full, 2 slightly muted, 3 muted; §5.5) — with `selected_color`, the colour a tag on
+---   this node takes (§6 "Tags take their node's colour")
+---@field ref_colors? table<string, integer>  this commit's own visible ranked refs (a
+---   collapsed head's / kept junction's folded refs included) → their label colour slot
+---   (the identity colour, §5.5). On a packed "markers" row: the union over its markers.
+---@field ref_levels? table<string, integer>  the same refs → the brightness level their
+---   label is drawn at (1 full, 2 slightly muted, 3 muted; §5.5). Union on a markers row.
+---@field marker_items? OrderItem[]  a packed "markers" row's original marker rows, in
+---   order (each with its own `selected_color` / `selected_level` / `ref_colors` /
+---   `ref_levels`), for per-marker node and label colours (§10.4)
 
 --- Tracks the current ref selection (specification.md §2). Held by commit
 --- identity so it survives reflow; `index` is 1-based into the row's selectable
@@ -135,7 +147,9 @@ local function adopt_row(item, r)
     item.child_lanes = r.child_lanes
     item.selected = r.selected
     item.selected_color = r.selected_color
+    item.selected_level = r.selected_level
     item.ref_colors = r.ref_colors
+    item.ref_levels = r.ref_levels
 end
 
 --- Re-run Phase 1 over the whole order and copy the fresh lines/lanes back into
@@ -308,10 +322,15 @@ local function pack_markers(items)
             if #group == 1 then
                 out[#out + 1] = items[i]
             else
-                local markers = {}
-                for _, g in ipairs(group) do markers[#markers + 1] = g.commit end
+                local markers, colors, levels = {}, {}, {}
+                for _, g in ipairs(group) do
+                    markers[#markers + 1] = g.commit
+                    for name, c in pairs(g.ref_colors or {}) do colors[name] = c end
+                    for name, l in pairs(g.ref_levels or {}) do levels[name] = l end
+                end
                 ---@type OrderItem
-                out[#out + 1] = { type = "markers", markers = markers, columns = merged }
+                out[#out + 1] = { type = "markers", markers = markers, columns = merged,
+                    ref_colors = colors, ref_levels = levels, marker_items = group }
             end
             i = j
         else
@@ -415,11 +434,9 @@ M._internal = {
     checkout_spec = selectm.checkout_spec,
     pin_resolve = selectm.pin_resolve,
     pin_move = selectm.pin_move,
-    pin_toggle_reserved = selectm.pin_toggle_reserved,
     pin_remove = selectm.pin_remove,
     pin_add = selectm.pin_add,
     pin_ids = selectm.pin_ids,
-    reserved_order = selectm.reserved_order,
     pin_dialog_lines = selectm.pin_dialog_lines,
     smartcase_match = selectm.smartcase_match,
     filter_keep = selectm.filter_keep,

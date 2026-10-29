@@ -38,7 +38,7 @@ local function stub(rows, refs, pinned, modes, remotes)
     -- pin_marks resolves the pin set itself, from the ordered entries.
     function ctx:effective_pins()
         local out = {}
-        for id in pairs(pinned) do out[#out + 1] = { id = id, reserved = false } end
+        for id in pairs(pinned) do out[#out + 1] = { id = id } end
         return out
     end
     function ctx:set_branch(b, mode, follow)

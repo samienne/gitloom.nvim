@@ -126,7 +126,8 @@ function M.set_pref(data, key, value, config)
 end
 
 --- A repository's stored pin state, sanitised: an ordered `PinEntry[]` and the
---- unpinned id set.
+--- unpinned id set. A `reserved` field on a stored entry — written by an older
+--- version (the dropped dedicated-column flag, §18) — is ignored.
 ---@param data table
 ---@param root string
 ---@return PinEntry[] pins, table<string, boolean> unpinned
@@ -137,7 +138,7 @@ function M.repo_state(data, root)
     if type(r.pins) == "table" then
         for _, e in ipairs(r.pins) do
             if type(e) == "table" and type(e.id) == "string" then
-                pins[#pins + 1] = { id = e.id, reserved = e.reserved == true }
+                pins[#pins + 1] = { id = e.id }
             end
         end
     end
@@ -150,10 +151,10 @@ function M.repo_state(data, root)
 end
 
 --- The pin list as saved (§18.2): drop what the open-time resolution re-derives —
---- the **leading run** of unreserved default anchors that still sit in their
---- default order, above every explicitly placed entry, where `pin_resolve` puts
---- them back. A default the user moved below an explicit entry (or out of default
---- order) is kept with its place, as is every reserved entry. The members a pin
+--- the **leading run** of default anchors that still sit in their default order,
+--- above every explicitly placed entry, where `pin_resolve` puts them back. A
+--- default the user moved below an explicit entry (or out of default order) is
+--- kept with its place. Entries are written as `{ id }` alone. The members a pin
 --- covers through its identity (§10.6) are never entries, so there is nothing to
 --- drop for them.
 ---@param pins PinEntry[]
@@ -166,13 +167,13 @@ function M.pins_for_save(pins, defaults)
     local skip, last = 0, 0
     for _, e in ipairs(pins) do
         local p = pos[e.id]
-        if e.reserved or not p or p < last then break end
+        if not p or p < last then break end
         skip, last = skip + 1, p
     end
     local out = {}
     for i = skip + 1, #pins do
         local e = pins[i]
-        out[#out + 1] = { id = e.id, reserved = e.reserved and true or false }
+        out[#out + 1] = { id = e.id }
     end
     return out
 end

@@ -10,7 +10,8 @@ Scope: the Phase 1/Phase 2 layout engine: the pipeline, the resumable sweep, lay
   (`{id, color, ref, begin, parent, highlighted}`), a persistent object living from
   the child's row to the parent's row; `id` is its stable identity, `ref` the ref
   it carries (spec §5 "Carried refs") and `color` that ref's identity slot from the
-  recycling free list (spec §5.5; `-k` = slot k muted, for a remote ref).
+  recycling free list (spec §5.5), packed with the ref's brightness level by `rank.drawn` (`k` full,
+  `-k` slightly muted, `-(k + rank.MUTED)` muted).
 - **GraphColumn** — one cell of a rendered line: its connectivity plus the
   **Segment**s (per-edge wires) it draws. (Was `Track`; renamed.)
 - **OrderItem** — a rendered row (`commit`, `merge`, or `split` type) holding
@@ -191,9 +192,12 @@ See specification.md §4–§5 for full definitions.
   the direct seam-up grid, never `columns.layout`).
 - **Carried refs and lane identity are independent of placement** (spec §5,
   `spawn_lanes`; ARCHITECTURE.md "Ranked refs" and Phase 1 step 3). Every Lane
-  carries one ref (`lane.ref`, a `rank.lua` `RankInfo`; tier 4 = generated). A
-  commit's selected ref is the best (`rank.better`) of the incoming lanes' refs and
-  its own visible ranked refs; the first parent carries it, other parents the best
+  carries one ref (`lane.ref`, a `rank.lua` `RankInfo`; tier / level 4 = generated).
+  `rank.better` orders by brightness `level` first (1 full, 2 slightly muted, 3
+  muted, 4 generated), then pin rank, tier, standing row. A commit's selected ref is
+  the best of the incoming lanes' refs and its own visible ranked refs (a `◍` head's
+  or kept junction's folded refs included, at level 3 unless pinned); the first
+  parent carries it, other parents the best
   ref ON that parent else its generated ref. The first parent continues one
   incoming lane's id, in tiers: **0** the lane carrying the best ref, **1** a lane
   whose child has this commit as its FIRST parent (a merge's second-parent edge is
@@ -210,15 +214,22 @@ See specification.md §4–§5 for full definitions.
 - **Colour session** (spec §5.5, `M.session`): colour is kept per ref **key** (an
   identity, or a generated ref's info) — `ensure` allocates on first select /
   carry / label (selected ref, then labels, then other parents), `release` frees a
-  key once no live lane carries it (`live`) and no visible member's tip is pending
-  below (`pending`), after the row's allocations, in allocation order. **Pinned
+  key once no live lane carries it (`live`) and no visible member is `pending`,
+  after the row's allocations, in allocation order. Pending = counted and not yet
+  reached: `load_rows` counts the refs on each `extend`'s rows before sweeping them,
+  and while the stream runs `rr.coming` (`rank.start_set`) counts the refspec's
+  start refs up front — a ref neither loaded nor coming holds nothing. **Pinned
   colours**: `rr.slots` (identity key → pin rank) — rank `k <= #palette.tracks` owns
   slot `k`, withheld up front (`held`, `in_use` 1) and never released; the share
   path skips held slots and generated-slot retirement counts only non-held ones. A
-  **remote** ref's lane is drawn **`-k`** (slot k muted): the sign rides every copy
-  of `color` (Segments, header de-collision, footer seeds — which reserve
-  `abs(color)` — and rebuilt pane cells); `render.slot_hl(-k)` = `mute_hl`. Rows
-  record `selected`, `selected_color` (unsigned) and `ref_colors` (label colours).
+  lane's `color` is its ref's slot packed with its drawn level (`rank.drawn`: `k`,
+  `-k`, `-(k + rank.MUTED)`): the level rides every copy of `color` (Segments,
+  header de-collision, footer seeds — which reserve `rank.slot_of(color)` — rebuilt
+  pane cells and packed marker rows); `render.slot_hl` maps level 2 to `mute_hl`
+  (`remote_mute`) and level 3 to a `GitloomCMute_*` blend (`collapsed_mute`). Rows
+  record `selected`, `selected_color` (unsigned), `selected_level`, `ref_colors` and
+  `ref_levels` (label slots and levels); a packed `markers` row unions the latter
+  two and keeps the per-marker rows in `marker_items`.
   Nothing here reads a column, which buys the cross-policy guarantee: **all five
   policies produce identical lane ids, refs and colours**, differing only in
   position, so `C` moves the graph and never recolours it (asserted in

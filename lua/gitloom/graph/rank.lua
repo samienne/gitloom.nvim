@@ -7,11 +7,17 @@
 ---    identity.
 --- 2. `infos(pairing, opts)` takes the view's side — which refs are visible, the
 ---    resolved pin list, the current branch — and precomputes one static `RankInfo`
----    per ranked ref. `compare(a, b, rows)` then orders two infos given the tip rows
----    known so far: the only row-dependent rule is the standing row, read at
+---    per ranked ref, its **brightness level** (spec §5: 1 full, 2 slightly muted,
+---    3 muted) included. `better(a, b, rows)` then orders two infos given the tip
+---    rows known so far: the only row-dependent rule is the standing row, read at
 ---    compare time, so the layout can compare top to bottom as rows arrive (a
 ---    comparison happens at or below both tips, spec §5). `generated(seq)` is the
 ---    info of the `seq`-th generated ref.
+---
+--- The **drawn colour** codec (`drawn` / `slot_of` / `level_of`) packs a palette
+--- slot and its brightness level into the one integer every Lane, Segment and
+--- GraphColumn carries as `color`, so the level survives every copy of a colour
+--- (the panes' seeds and rebuilt cells, packed marker rows) for free.
 ---
 --- All pure; part of the gitloom graph engine.
 
@@ -24,7 +30,7 @@ local M = {}
 
 ---@class Identity
 ---@field key string           unique: the local's name, or "remote:<short>" for a remote-only one
----@field name string          the tie-break name (§5 rank rule 4): the local's or the shared short name
+---@field name string          the tie-break name (§5 rank rule 6): the local's or the shared short name
 ---@field local_name? string   the identity's local branch (nil = remote-only)
 ---@field upstream? string     the local's configured upstream, when it is a member
 ---@field members string[]     ref names: the local first, then remotes by name
@@ -36,6 +42,12 @@ local M = {}
 ---@class RankInfo
 ---@field name string          the ref name ("" for a generated ref)
 ---@field tier integer         1 pinned, 2 unpinned with a visible local, 3 remote-only, 4 generated
+---@field level integer        rank level (spec §5 "Brightness level"): 1 full (a pinned or
+---                            expanded local), 2 slightly muted (a pinned or expanded
+---                            remote), 3 muted (collapsed and unpinned), 4 generated
+---                            (ranked last, yet drawn at full strength: `drawn_level`)
+---@field collapsed? boolean   its tip's row is drawn collapsed (◍ head, packed marker,
+---                            ref-bearing kept junction)
 ---@field pin? integer         tier 1: the identity's pin rank
 ---@field ident? string        the identity's key (nil for a generated ref)
 ---@field ident_name? string   the identity's tie-break name
@@ -157,16 +169,20 @@ end
 
 --- Precompute the static rank info of every **ranked** ref (spec §5): the visible
 --- local and remote-tracking branches of `pairing`. The caller excludes refs that
---- are filtered out, hidden or folded into a collapsed owner by leaving them out of
---- `visible` (nil = every paired ref is visible). An identity's pin rank is the
+--- are filtered out or hidden by leaving them out of `visible` (nil = every paired
+--- ref is visible); a ref folded into a collapsed region IS visible, and listed in
+--- `collapsed` (its tip's row is drawn collapsed). An identity's pin rank is the
 --- best index among the `pins` entries naming any of its refs (visible or not); an
---- identity whose local is not visible ranks as remote-only.
+--- identity whose local is not visible ranks as remote-only. Each info's brightness
+--- `level` (spec §5): a pinned identity's refs are never collapsed-muted — 1 for its
+--- local, 2 for a remote; otherwise a collapsed ref is 3, else 1 local / 2 remote.
 ---@param pairing IdentityPairing
----@param opts? { visible?: table<string, boolean>, pins?: PinEntry[], current?: string, remotes?: string[] }
+---@param opts? { visible?: table<string, boolean>, collapsed?: table<string, boolean>, pins?: PinEntry[], current?: string, remotes?: string[] }
 ---@return table<string, RankInfo>   ref name → info (only visible ranked refs)
 function M.infos(pairing, opts)
     opts = opts or {}
     local visible = opts.visible
+    local collapsed = opts.collapsed or {}
     local function vis(name) return visible == nil or visible[name] == true end
     local remotes = opts.remotes or {}
     local remote_pos = {}
@@ -185,9 +201,12 @@ function M.infos(pairing, opts)
         for _, name in ipairs(id.members) do
             if vis(name) then
                 local is_local = name == id.local_name
+                local folded = collapsed[name] == true
+                local level = (folded and not pin[id.key]) and 3 or (is_local and 1 or 2)
                 local info = {
-                    name = name, tier = tier, pin = pin[id.key], ident = id.key,
-                    ident_name = id.name, current = current_id == id, is_local = is_local,
+                    name = name, tier = tier, level = level, collapsed = folded or nil,
+                    pin = pin[id.key], ident = id.key, ident_name = id.name,
+                    current = current_id == id, is_local = is_local,
                 }
                 if not is_local then
                     local remote = split_remote(name, remotes)
@@ -209,14 +228,24 @@ end
 ---                                      only, visible or not (§5.5 pinned colours; the
 ---                                      layout applies the curated-palette cap)
 ---@field head? string                   the current branch (a §4.2 working-tree node's ref)
+---@field remote_only table<string, boolean>  the members of every remote-only identity
+---                                      (no local branch anywhere; read from the
+---                                      repository's pairing, not the view): the refs
+---                                      whose label carries `icons.remote` (§6)
+---@field coming? true|table<string, boolean>  while the commit stream runs (§3.1, §5.5):
+---                                      the refs the running load is known to deliver
+---                                      (true = every ref, the default `--all`); they
+---                                      count as pending before their rows load
 ---@field key string                     the whole input as a comparable string, for the
 ---                                      layout fingerprint (§3.1 / §10.5)
 
 --- The layout's ranking input (spec §5 "The ranks are a layout input"): the pairing
---- of `refs`, the rank infos of the visible ranked refs, the pinned identities' slots
---- and the current branch, plus a fingerprint `key` of all of it.
+--- of `refs`, the rank infos of the visible ranked refs (their collapsed state and
+--- levels included), the pinned identities' slots, the current branch and — while
+--- the stream runs — the refs it is known to deliver (`coming`, see `start_set`),
+--- plus a fingerprint `key` of all of it.
 ---@param refs RankRef[]|table<string, RankRef>
----@param opts? { remotes?: string[], pins?: PinEntry[], visible?: table<string, boolean>, current?: string }
+---@param opts? { remotes?: string[], pins?: PinEntry[], visible?: table<string, boolean>, collapsed?: table<string, boolean>, current?: string, coming?: true|table<string, boolean> }
 ---@return RefRankInput
 function M.input(refs, opts)
     opts = opts or {}
@@ -233,14 +262,56 @@ function M.input(refs, opts)
     table.sort(names)
     for _, name in ipairs(names) do
         local i = infos[name]
-        parts[#parts + 1] = table.concat({ name, i.tier, tostring(i.pin), i.ident, tostring(i.current),
+        parts[#parts + 1] = table.concat({ name, i.tier, i.level, tostring(i.pin), i.ident, tostring(i.current),
             tostring(i.local_name), tostring(i.upstream), tostring(i.remote_idx) }, ",")
     end
     local keys = {}
     for k, v in pairs(slots) do keys[#keys + 1] = k .. "=" .. v end
     table.sort(keys)
     parts[#parts + 1] = table.concat(keys, ",")
-    return { infos = infos, slots = slots, head = opts.current, key = table.concat(parts, ";") }
+    local coming = opts.coming
+    if coming == true then
+        parts[#parts + 1] = "coming=*"
+    elseif type(coming) == "table" then
+        local cs = {}
+        for name in pairs(coming) do cs[#cs + 1] = name end
+        table.sort(cs)
+        parts[#parts + 1] = "coming=" .. table.concat(cs, ",")
+    else
+        coming = nil
+    end
+    local remote_only = {}
+    for _, id in ipairs(pairing.identities) do
+        if not id.local_name then
+            for _, name in ipairs(id.members) do remote_only[name] = true end
+        end
+    end
+    return { infos = infos, slots = slots, head = opts.current, coming = coming,
+        remote_only = remote_only, key = table.concat(parts, ";") }
+end
+
+--- The refs a load of `branches` (the refspec, `opts.branches`, default `--all`) is
+--- known to deliver (spec §5.5 "pending"): true for every ref (`--all`), else the
+--- set of ref names it starts from — `--branches` every local branch, `--remotes`
+--- every remote-tracking branch, and a ref named outright (or as `refs/heads/<x>` /
+--- `refs/remotes/<x>`). Other refspec words (revisions, ranges, options) start from
+--- no ranked ref.
+---@param branches string[]?
+---@param refs RankRef[]|table<string, RankRef>
+---@return true|table<string, boolean>
+function M.start_set(branches, refs)
+    local out = {}
+    local list = ref_list(refs)
+    for _, b in ipairs(branches or { "--all" }) do
+        if b == "--all" then return true end
+        for _, r in ipairs(list) do
+            if (b == "--branches" and r.kind == "local") or (b == "--remotes" and r.kind == "remote")
+                or b == r.name or b == "refs/heads/" .. r.name or b == "refs/remotes/" .. r.name then
+                out[r.name] = true
+            end
+        end
+    end
+    return out
 end
 
 --- The rank info of the `seq`-th generated ref (spec §5): below every ranked ref,
@@ -248,10 +319,56 @@ end
 ---@param seq integer
 ---@return RankInfo
 function M.generated(seq)
-    return { name = "", tier = 4, seq = seq }
+    return { name = "", tier = 4, level = 4, seq = seq }
 end
 
---- A ref's **standing row** (spec §5 rank rule 2): its tip's row, except that a
+--- The brightness level `info` is DRAWN at (spec §5.5 "Muting"): its rank level,
+--- except that a generated ref (ranked last) is drawn at full strength.
+---@param info RankInfo?
+---@return integer
+function M.drawn_level(info)
+    local l = info and info.level or 1
+    return l >= 4 and 1 or l
+end
+
+-- The drawn-colour codec. Level 1 is the slot `k` itself, level 2 (slightly muted)
+-- is `-k` — the former "muted remote" sign, unchanged — and level 3 (muted) is
+-- `-(k + MUTED)`: negative too, so every consumer that reads "negative" as "a
+-- muted variant, never recoloured" (the header's de-collision) keeps doing so,
+-- and one integer still carries the whole drawn colour through every copy. Slots
+-- never approach MUTED (curated + generated slots number in the tens).
+local MUTED = 1048576
+M.MUTED = MUTED
+
+--- The drawn colour of slot `slot` at brightness `level` (1 full, 2 slightly
+--- muted, 3 muted).
+---@param slot integer
+---@param level integer?
+---@return integer
+function M.drawn(slot, level)
+    if level == 2 then return -slot end
+    if level == 3 then return -(slot + MUTED) end
+    return slot
+end
+
+--- The palette slot behind a drawn colour.
+---@param c integer
+---@return integer
+function M.slot_of(c)
+    if c >= 0 then return c end
+    c = -c
+    return c > MUTED and c - MUTED or c
+end
+
+--- The brightness level of a drawn colour (1 full, 2 slightly muted, 3 muted).
+---@param c integer
+---@return integer
+function M.level_of(c)
+    if c >= 0 then return 1 end
+    return -c > MUTED and 3 or 2
+end
+
+--- A ref's **standing row** (spec §5 rank rule 4): its tip's row, except that a
 --- remote whose visible local's tip is at or above its own stands at the local's
 --- row. `rows` maps ref name → tip row (rows grow downward); an unknown row reads
 --- as -1 (above everything), though the layout only compares placed tips.
@@ -267,7 +384,7 @@ function M.standing_row(info, rows)
     return own
 end
 
---- Order two members of one identity (spec §5 rank rule 3): the local first, then
+--- Order two members of one identity (spec §5 rank rule 5): the local first, then
 --- remotes by standing row (lower wins), the configured upstream, `git remote`
 --- order, name.
 ---@return boolean
@@ -280,24 +397,27 @@ local function member_better(a, b, rows)
     return a.name < b.name
 end
 
---- Whether `a` ranks strictly better than `b` (spec §5 "Rank"): identity tier
---- (pinned by pin rank, unpinned with a visible local, remote-only, generated);
---- within the unpinned tiers the lower standing row; within one identity the local
---- first, then its remotes (`member_better`); between identities on one row the
---- current branch's identity, then name; generated refs by creation order. A total
---- order (false for `a == b`), usable as a `table.sort` comparator.
+--- Whether `a` ranks strictly better than `b` (spec §5 "Rank"), lexicographically:
+--- brightness level (1, 2, 3, generated last); within a level pinned identities
+--- first by pin rank, then the identity tier (a visible local before remote-only);
+--- between unpinned identities the lower standing row; within one identity the
+--- local first, then its remotes (`member_better`); remaining ties between
+--- identities to the current branch's, then by name; generated refs by creation
+--- order. A total order (false for `a == b`), usable as a `table.sort` comparator.
 ---@param a RankInfo
 ---@param b RankInfo
 ---@param rows table<string, integer>   ref name → tip row
 ---@return boolean
 function M.better(a, b, rows)
     if a == b then return false end
-    if a.tier ~= b.tier then return a.tier < b.tier end
-    if a.tier == 4 then return (a.seq or 0) < (b.seq or 0) end
+    local la, lb = a.level or (a.tier == 4 and 4 or 1), b.level or (b.tier == 4 and 4 or 1)
+    if la ~= lb then return la < lb end
+    if la == 4 then return (a.seq or 0) < (b.seq or 0) end
     if a.ident == b.ident then return member_better(a, b, rows) end
-    if a.tier == 1 then
-        if a.pin ~= b.pin then return a.pin < b.pin end
-    else
+    local pa, pb = a.pin or math.huge, b.pin or math.huge
+    if pa ~= pb then return pa < pb end
+    if a.tier ~= b.tier then return a.tier < b.tier end
+    if a.tier ~= 1 then
         local sa, sb = M.standing_row(a, rows), M.standing_row(b, rows)
         if sa ~= sb then return sa > sb end
         if (a.current or false) ~= (b.current or false) then return a.current == true end

@@ -1492,9 +1492,12 @@ end
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
 ---@field track? { ahead?: string, behind?: string, gone?: string, upstream?: string, mismatch?: string }  upstream tracking tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
----@field remote_mute? number  lighter blend factor toward bg for a remote ref's muted colour (§5.5); default 0.25
----@field remote_mute_out? number  a remote's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
+---@field remote_mute? number  brightness level 2: blend factor (0–1) toward bg for a pinned / expanded remote ref (§5.5 "Muting"); default 0.25, 0 = off
+---@field collapsed_mute? number  brightness level 3: blend factor (0–1) for a collapsed, unpinned ref, replacing remote_mute (§5.5 "Muting"); default 0.45, 0 = off
+---@field remote_mute_out? number  a level-2 remote's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
 ---@field counterpart_dim? number  former name of `remote_mute` (alias, §8)
+---@field collapsed_mute_out? number  a level-3 ref's blend OUT of the cone (§12.2); default 0.45
+---@field highlight_mute? number  levels 2 and 3 IN the cone while the reachability highlight is active (§12.2); default 0.1, 0 = full
 ---@field counterpart_dim_out? number  former name of `remote_mute_out` (alias, §8)
 ---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
 ---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
@@ -1512,6 +1515,7 @@ end
 ---@field pin? string   the pinned-anchor label icon (default "⚲"; "" off); §6/§10.6
 ---@field expanded? string  the expanded-ref label icon, after the pin icon (default "▾"; "" off); §6
 ---@field upstream? string  the glyph before a non-matching upstream (default "→"; "" leaves the bare name); §6.3
+---@field remote? string  a remote-only identity's branch-group icon, after the pin and expanded icons (default "⇣"; "" off); §6
 
 ---@class GraphOptions
 ---@field win GraphWinOptions
@@ -1533,7 +1537,7 @@ end
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field dual_bracket? string[]  the dual-mode pair bracket glyphs { label row, message row } (default { "┬", "└" }); §6.1
----@field lane_label_colors? boolean  ranked refs' labels in their own ref's colour, remotes muted (default true); false = per-kind; §6
+---@field lane_label_colors? boolean  ranked refs' labels in their own ref's colour at its brightness level, tags in their node's (default true); false = per-kind; §6
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean|"dirty"  the working-tree row above HEAD: true = always (a clean node on a clean tree), "dirty" = only with changes, false = never; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
@@ -1625,7 +1629,7 @@ end
 -- The default anchors (§10.6), in order: `master` / `main` / `dev` and the seeded
 -- marks (§11.7.6), then HEAD's anchor LAST (its branch when attached, the `HEAD`
 -- ref when detached) — each only when the ref exists. Shared by effective_pins and
--- the §18 pin save, which leaves the leading run of unreserved defaults out of the
+-- the §18 pin save, which leaves the leading run of defaults out of the
 -- stored list.
 ---@return string[]
 GRAPH_HELPERS.pin_defaults = function(ctx)
@@ -1715,7 +1719,7 @@ GRAPH_HELPERS.reset_view_now = function(ctx)
     end)
 end
 
--- The effective **pin list** (§10.6): an ORDERED list of `{ id, reserved }` —
+-- The effective **pin list** (§10.6): an ORDERED list of `{ id }` entries —
 -- exactly the dialog's rows. The default anchors (master/main/dev, the seeded
 -- marks, then HEAD's) the user has not explicitly placed come first, then the
 -- user's ordered entries (`view_state.pins`); a newly pinned ref is appended to
@@ -1765,12 +1769,17 @@ end
 
 -- Publish the layout's ranking input (`opts.ref_rank`, spec §5 "Ranked refs and
 -- identities"): the identity pairing of the repository's branches, the pin list, the
--- current branch and which refs are VISIBLE — `visible` (ref name → true) when the
--- caller knows the projection, else every ref (the streamed identity projection).
--- Pins, upstream configuration and visibility all change the fingerprint (§3.1).
-GRAPH_HELPERS.sync_ref_rank = function(ctx, visible)
-    local rr = require("gitloom.graph.rank").input(ctx.repo.refs, { remotes = ctx.remotes,
-        pins = ctx:effective_pins(), current = ctx.repo.head, visible = visible })
+-- current branch, which refs are VISIBLE — `visible` (ref name → true) when the
+-- caller knows the projection, else every ref (the streamed identity projection) —
+-- and which of those are drawn COLLAPSED (`collapsed`, §5 brightness level 3). While
+-- the commit stream runs (`ctx.streaming`), the refs the refspec starts from count
+-- as pending before their rows load (§5.5, `rank.start_set`). Pins, upstream
+-- configuration, visibility and collapse all change the fingerprint (§3.1).
+GRAPH_HELPERS.sync_ref_rank = function(ctx, visible, collapsed)
+    local rankm = require("gitloom.graph.rank")
+    local coming = ctx.streaming and rankm.start_set(ctx.opts.branches, ctx.repo.refs) or nil
+    local rr = rankm.input(ctx.repo.refs, { remotes = ctx.remotes, pins = ctx:effective_pins(),
+        current = ctx.repo.head, visible = visible, collapsed = collapsed, coming = coming })
     ctx.opts.ref_rank = rr
     if ctx.pane_opts then ctx.pane_opts.ref_rank = rr end
 end
@@ -1786,8 +1795,10 @@ end
 GRAPH_HELPERS.effective_pinned = effective_pinned
 
 -- The label marks the label renderers are handed (§6/§10.6): the effective anchors
--- (every member of a pinned identity included) + `icons.pin`, and the expanded refs (§6
--- "Expanded marker") + `icons.expanded`. The pin set is resolved fresh on every
+-- (every member of a pinned identity included) + `icons.pin`, the expanded refs (§6
+-- "Expanded marker") + `icons.expanded`, and the remote-only identities' refs (§6
+-- "Remote-only marker", from the published ranking input's repository pairing) +
+-- `icons.remote`. The pin set is resolved fresh on every
 -- call (it is a handful of entries), so a label can never show a stale pin after
 -- `P`, the dialog, or a resync; the expanded set is resolved per reflow
 -- (`reflow_owners`), the only time a mode changes.
@@ -1796,7 +1807,9 @@ GRAPH_HELPERS.pin_marks = function(ctx)
     local icons = ctx.opts.icons
     return { set = effective_pinned(ctx), icon = icons and icons.pin,
         expanded = ctx.view_state.expanded, expanded_icon = icons and icons.expanded,
-        upstream_icon = icons and icons.upstream }
+        upstream_icon = icons and icons.upstream,
+        remote_only = ctx.opts.ref_rank and ctx.opts.ref_rank.remote_only,
+        remote_icon = icons and icons.remote }
 end
 
 -- node hash → repo.display index, and packed-head marker locations (§13.4).
@@ -3862,9 +3875,8 @@ local function h_pin(ctx)
         if repo.refs[oid] then targets[#targets + 1] = oid end
     end
     if #targets == 0 then return end
-    -- Pinning appends to the end of the ordered list (§10.6), unreserved; unpinning
-    -- drops the entry — which drops its reserve flag with it — and records the id
-    -- so a defaulted anchor does not come straight back.
+    -- Pinning appends to the end of the ordered list (§10.6); unpinning drops the
+    -- entry and records the id so a defaulted anchor does not come straight back.
     local want = not ctx:effective_pinned()[targets[1]]
     local pins = ctx:effective_pins()
     for _, oid in ipairs(targets) do
@@ -3887,8 +3899,8 @@ local function h_pin(ctx)
 end
 
 -- L: the pinned-branches dialog (§10.6.1) — a modal float listing the resolved pin
--- list in priority order, where it is reordered (`<C-j>`/`<C-k>`), given a dedicated
--- lane (`<Space>`, §10.6.2), unpinned (`D`), added to ("Pin new branch…", which
+-- list in priority order, where it is reordered (`<C-j>`/`<C-k>`), unpinned (`D`),
+-- added to ("Pin new branch…", which
 -- reuses the §2 ref picker) or jumped from (`<CR>`). Its keys are buffer-local, so
 -- they never collide with the graph's own. Every edit reflows the projection and
 -- restores the graph cursor to the commit it was on, exactly as `P` does.
@@ -3916,13 +3928,6 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
                 { end_col = endcol, hl_group = group })
         end
         hl(0, 0, #lines[1], "Title")
-        hl(#lines - 1, 0, #lines[#lines], "Comment") -- the not-yet-honoured note
-        -- Mark the per-entry diamonds so the reserved subsequence stands out. The
-        -- title row's legend and the closing note keep their own colour.
-        for i = 2, #lines - 1 do
-            local s = lines[i]:find("◆", 1, true)
-            if s then hl(i - 1, s - 1, s - 1 + #"◆", "Special") end
-        end
         -- Fit the float to the content, centered over the graph window.
         local w = 0
         for _, l in ipairs(lines) do w = math.max(w, vim.fn.strdisplaywidth(l)) end
@@ -3991,12 +3996,6 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
         commit(moved, at)
     end
 
-    local function h_toggle()
-        local i = under_cursor()
-        if type(i) ~= "number" then return end
-        commit(selectm.pin_toggle_reserved(ctx:effective_pins(), i), i)
-    end
-
     local function h_unpin()
         local list = ctx:effective_pins()
         local i = under_cursor()
@@ -4061,7 +4060,6 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
     local map = { buffer = dbuf, nowait = true }
     vim.keymap.set("n", "<C-j>", function() h_move(1) end, map)
     vim.keymap.set("n", "<C-k>", function() h_move(-1) end, map)
-    vim.keymap.set("n", "<Space>", h_toggle, map)
     vim.keymap.set("n", "D", h_unpin, map)
     vim.keymap.set("n", "<CR>", h_enter, map)
     vim.keymap.set("n", "q", close, map)
@@ -4139,7 +4137,7 @@ local GRAPH_KEYS = {
         desc = "Collapse / expand branch",
         help = "Collapse / expand the row's own branch(es) under the cursor (selecting: fold / unfold the head)" },
     { key = "L", run = function(ctx) ctx:pin_dialog() end, group = "refs", desc = "Pinned branches…",
-        help = "Pinned branches: reorder (C-j/C-k) · dedicated lane (Space) · unpin (D) · add · CR jump" },
+        help = "Pinned branches: reorder (C-j/C-k) · unpin (D) · add · CR jump" },
     { key = "/", run = h_filter, group = "refs", desc = "Filter the graph…",
         help = "Filter the graph to matching commits (live; C-j/C-k step · CR jump · C-s stamp · Esc cancel)" },
     { key = "<leader>gl", run = h_commit_search, group = "refs", desc = "Search commits…",
@@ -4529,12 +4527,20 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- Reachability dimming (§12): blend factor toward the bg for the
             -- out-of-cone rows/lanes. Higher = more muted.
             dim = 0.45,
-            -- A remote ref's muted variant (§5.5): its tracks, node and label blend
-            -- this far toward the bg (default 0.25), and `remote_mute_out` out of the
+            -- Brightness levels (§5.5 "Muting"), each a 0–1 blend toward the bg (0 =
+            -- off). Level 2, a pinned or expanded remote ref — its tracks, node and
+            -- label: `remote_mute` (default 0.25), and `remote_mute_out` out of the
             -- cone (default 0.75 * dim). Left unset here so the former names
             -- `counterpart_dim` / `counterpart_dim_out` still work as aliases.
             -- remote_mute = 0.25,
             -- remote_mute_out = nil,
+            -- Level 3, any collapsed, unpinned ref (local or remote): replaces
+            -- remote_mute; out of the cone it blends by collapsed_mute_out (§12.2).
+            collapsed_mute = 0.45,
+            -- collapsed_mute_out = 0.45,
+            -- Levels 2 and 3 IN the cone while the reachability highlight is
+            -- active (§12.2): almost full brightness.
+            -- highlight_mute = 0.1,
             -- Commit-view diff colors (§11.3): per-role highlight groups.
             diff = {
                 add = "DiffAdd",
@@ -4621,7 +4627,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- The dual-mode pair bracket (§6.1): the glyph opening the label row and
         -- the one closing the message row, drawn as-is (`{ "┬ ", "└ " }` for a gap).
         dual_bracket = { "┬", "└" },
-        lane_label_colors = true, -- each ranked ref's label in its own ref's colour, remotes muted (§6)
+        lane_label_colors = true, -- each ranked ref's label in its own ref's colour at its level, tags in their node's (§6)
         -- External diff provider (§11.5): open is called with a DiffRange; the
         -- default opens diffview. Override open/label to use another diff plugin,
         -- or set open = nil to disable (no action label, D is a no-op).
@@ -4654,6 +4660,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             pin = "⚲", -- the pinned-anchor label icon (§6/§10.6); "" turns it off
             expanded = "▾", -- the expanded-ref label icon (§6); "" turns it off
             upstream = "→", -- before a non-matching upstream (§6.3); "" leaves the bare name
+            remote = "⇣", -- a remote-only identity's branch-group icon (§6); "" turns it off
         },
     }
     -- The default footer is computed before opts.mirror is resolved; unless the
@@ -4736,6 +4743,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field colstream? table       the streaming Phase-1 sweep held open across
     ---                              batches (graph.extend_columns; §3.1). Cleared by
     ---                              any reflow — the projection is a different list.
+    ---@field streaming? boolean     the open-time commit stream is running: the
+    ---                              refspec's starting refs count as pending (§5.5)
     ---@field worktree_commits table
     ---@field worktree_head? string
     ---@field last_line? integer
@@ -4878,7 +4887,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     -- `modes` is explicit per-owner overrides; `effective` is the resolved mode
     -- per owner id after the first-parent default (§10.7), kept for the footer
     -- and the `<CR>` cycle. Both filled by reflow.
-    -- `pins` is the user's explicitly ordered pin list (§10.6) — `{ id, reserved }`
+    -- `pins` is the user's explicitly ordered pin list (§10.6) — `{ id }`
     -- entries, priority order — and `unpinned` the ids they removed, which suppress
     -- the HEAD / master / main / dev defaults. `ctx:effective_pins()` resolves the
     -- two into the live list and `ctx:effective_pinned()` reduces it to the anchor
@@ -5196,6 +5205,9 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 util.open_trace("refs", { n = nrefs, ms = util.open_ms(ctx.open_t0) })
                 ctx.open_op:report("0 commits")
                 ctx.open_tstream = util.open_now()
+                -- While the stream runs, the refspec's starting refs count as pending
+                -- (§5.5): `sync_ref_rank` reads `ctx.streaming`.
+                ctx.streaming = true
                 ctx:sync_pin_rank() -- the streamed sweep lays out under the pin ranks (§5)
                 return fetch_commits({
                     branch = opts.branches or { "--all" },
@@ -5239,6 +5251,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     end,
                 })
             end).next(function()
+                ctx.streaming = nil -- every row is loaded: pending reads loaded rows alone (§5.5)
                 util.open_trace("stream", { rows = #repo.order, batches = ctx.open_nbatch or 0,
                     ms = util.open_ms(ctx.open_tstream or ctx.open_t0 or 0) })
                 ctx.open_op:report("sorting")
@@ -5750,17 +5763,23 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local c = row.commit
                 local lit = node_lit(c)
                 -- Ref labels coloured as in the main view (§6 "Label colour", §6.2):
-                -- each ranked ref in its own colour from the main view's row of this
-                -- commit (`ref_colors`), a remote muted; a ref not visible there (a
-                -- collapsed head's) per-kind; HEAD's marker in the HEAD colour;
-                -- dimmed toward the background on an out-of-cone row.
+                -- each ranked ref in its own colour at its brightness level from the
+                -- main view's row of this commit (`ref_colors` / `ref_levels` — a
+                -- collapsed head's or packed marker's row included), a tag in that
+                -- row's node colour as drawn; a ref with no colour there per-kind;
+                -- HEAD's marker in the HEAD colour; dimmed toward the background on
+                -- an out-of-cone row.
                 local mi = c and ctx.display_index and ctx.display_index[c.hash]
-                local mitem = mi and repo.display[mi]
-                local colors = mitem and mitem.commit and not mitem.commit.collapsed and not c.collapsed
-                    and mitem.ref_colors or nil
+                local loc = c and not mi and ctx.node_loc and ctx.node_loc[c.hash]
+                local mitem = (mi and repo.display[mi]) or (loc and loc.item) or nil
+                local colors = mitem and mitem.ref_colors or nil
+                local levels = mitem and mitem.ref_levels or nil
+                local tag_hl = render.tag_label_hl(opts, render.node_drawn(mitem, c), label_hl.tag)
                 local function mark(s0, e0, g)
                     if g and e0 > s0 then
-                        marks[#marks + 1] = { li, s0, e0, lit and g or render.dim_hl(opts, g) }
+                        -- In the cone with the highlight on, muted levels brighten (§12.2).
+                        marks[#marks + 1] = { li, s0, e0,
+                            (not lit and render.dim_hl(opts, g)) or (emphasis and render.lit_hl(opts, g)) or g }
                     end
                 end
                 for _, seg in ipairs(c and pane_labels(c, repo.head, pins) or {}) do
@@ -5770,15 +5789,16 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     -- A pointer mark (§11.7.6) carries its own colour; a detached
                     -- `HEAD` the HEAD colour; else its ref's colour (or by kind).
                     local g = seg.hl or ((seg.kind == "head" and not seg.arrow) and pal.head)
-                        or render.ref_label_hl(opts, colors, seg.ref, seg.remote, label_hl[seg.kind])
+                        or (seg.kind == "tag" and tag_hl)
+                        or render.ref_label_hl(opts, colors, seg.ref, seg.remote, label_hl[seg.kind], levels)
                     -- Sub-spans in their own colour, in text order: the `HEAD → ` prefix
                     -- (unless the whole label is HEAD-coloured), each `↑remote` in its
-                    -- own muted colour and the spelled-out upstream (§6.3,
+                    -- own colour at its level and the spelled-out upstream (§6.3,
                     -- palette.track); the rest takes `g`.
                     local spans = {}
                     if seg.arrow and g ~= pal.head then spans[#spans + 1] = { seg.arrow, pal.head } end
                     for _, rs in ipairs(seg.rspans or {}) do
-                        spans[#spans + 1] = { rs.span, render.ref_label_hl(opts, colors, rs.ref, true, pal.remote) }
+                        spans[#spans + 1] = { rs.span, render.ref_label_hl(opts, colors, rs.ref, true, pal.remote, levels) }
                     end
                     if seg.up then spans[#spans + 1] = { seg.up, (pal.track or {})[seg.up_kind] } end
                     local at = s
@@ -6839,16 +6859,23 @@ GRAPH_HELPERS.reflow_build = function(ctx, yield, on_signatures)
     local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig,
         ctx.filter and ctx.filter.keep, yield)
     util.open_trace("project", { rows = #proj.items, ms = util.open_ms(t) })
-    -- The visible ranked refs (§5): those on a node of the projection, not folded
-    -- into a collapsed head or a kept junction (§10.3).
-    local visible = {}
+    -- The visible ranked refs (§5): those on a node of the projection — a ref folded
+    -- into a collapsed head or a ref-bearing kept junction (§10.3) included, and
+    -- marked COLLAPSED (its row is drawn collapsed: §5 brightness level 3). Under the
+    -- filter (§16.3) a folded ref sits on a non-matching commit: filtered out.
+    local visible, collapsed = {}, {}
+    local filtered = ctx.filter and ctx.filter.keep
     for _, it in ipairs(proj.items) do
         local c = it.commit
-        if c and not c.collapsed and not c.junction then
-            for _, r in ipairs(c.refs or {}) do visible[r.name] = true end
+        local folded = c and (c.collapsed or c.junction)
+        if c and not (folded and filtered) then
+            for _, r in ipairs(c.refs or {}) do
+                visible[r.name] = true
+                if folded then collapsed[r.name] = true end
+            end
         end
     end
-    GRAPH_HELPERS.sync_ref_rank(ctx, visible)
+    GRAPH_HELPERS.sync_ref_rank(ctx, visible, collapsed)
     t = util.open_now()
     refresh_columns(ctx.opts, proj.items, yield)
     util.open_trace("layout", { ms = util.open_ms(t) })

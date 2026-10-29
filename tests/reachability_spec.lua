@@ -420,4 +420,63 @@ describe("mark_reachable", function()
         assert.is_true(lane_hl(rows, "a", "base"))
         assert.is_nil(cone[c.b])
     end)
+
+    -- A packed marker row (§10.4) carries no `commit` of its own: its collapsed
+    -- heads are its `markers`. A head the cone reaches is in the cone like any
+    -- other row's commit (§12.2: packed markers included) — its node cell lights,
+    -- its label reads the cone, and the walk continues through it.
+    it("puts a packed marker head the cone reaches in the cone and lights its node", function()
+        -- m merges a and b; a and b are collapsed heads on adjacent rows (packed).
+        local order, c = make_order({
+            { "m", { "a", "b" } },
+            { "a", { "base" } },
+            { "b", { "base" } },
+            { "base", {} },
+        })
+        local rows = build_graph(helpers.big_opts(), order)
+        c.a.collapsed = true; c.b.collapsed = true
+        local display = require("gitloom.graph").pack_markers(rows)
+        local packed
+        for _, it in ipairs(display) do
+            if it.type == "markers" then packed = it end
+        end
+        assert.is_not_nil(packed, "fixture must pack a and b into one markers row")
+        local pivot
+        for i, it in ipairs(display) do if it.commit == c.m then pivot = i end end
+        local cone = mark_reachable(display, pivot, 1, #display)
+        assert.is_true(cone[c.a] == true)
+        assert.is_true(cone[c.b] == true)
+        assert.is_true(cone[c.base] == true) -- the walk passes through the heads
+        for _, t in ipairs(packed.columns) do
+            if t.has_commit then assert.is_true(t.active == true) end
+        end
+    end)
+
+    it("leaves a packed marker head outside the cone dim", function()
+        -- Two unrelated chains whose collapsed heads a and b pack onto one row;
+        -- pivot t1 reaches a only, so b's node cell on the packed row stays dim.
+        local order, c = make_order({
+            { "t1", { "a" } },
+            { "t2", { "b" } },
+            { "a", { "r1" } },
+            { "b", { "r2" } },
+            { "r1", {} },
+            { "r2", {} },
+        })
+        local rows = build_graph(helpers.big_opts(), order)
+        c.a.collapsed = true; c.b.collapsed = true
+        local display = require("gitloom.graph").pack_markers(rows)
+        local packed
+        for _, it in ipairs(display) do
+            if it.type == "markers" then packed = it end
+        end
+        assert.is_not_nil(packed, "fixture must pack a and b into one markers row")
+        local cone = mark_reachable(display, 1, 1, #display) -- pivot t1
+        assert.is_true(cone[c.a] == true)
+        assert.is_nil(cone[c.b])
+        assert.is_true(cone[c.r1] == true)
+        for _, t in ipairs(packed.columns) do
+            if t.has_commit then assert.equals(t.commit == c.a, t.active == true) end
+        end
+    end)
 end)

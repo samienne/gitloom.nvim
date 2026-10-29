@@ -1,16 +1,20 @@
---- Ref labels and their colours (spec §6 "Label colour", §5.5 "Muted remotes",
---- §12.2): every ranked ref's label takes ITS OWN ref's colour (`row.ref_colors`),
---- a remote's muted (`-k`, blended by `palette.remote_mute`); a branch group splits
---- by member (name = the local, each `↑remote` muted); refs that are not visible
---- ranked refs (a collapsed `◍` head's, a packed marker's) and tags / worktrees are
---- per-kind. HEAD's marker keeps `palette.head`, the h/l-selected label
---- `palette.selected`, and `lane_label_colors = false` restores the per-kind groups
---- everywhere. Out of the cone labels dim with their row; a remote's colour then
---- blends by `remote_mute_out` (brighter than every other dim). Driven through the
---- real `display_item` on hand-built rows and on a real `columns.layout` (the
+--- Ref labels and their colours (spec §6 "Label colour", §5.5 "Muting", §12.2):
+--- every ranked ref's label takes ITS OWN ref's colour (`row.ref_colors`) at its
+--- brightness level (`row.ref_levels`: 1 full, 2 slightly muted — `remote_mute` —
+--- 3 muted — `collapsed_mute`); a branch group splits by member (name = the local,
+--- each `↑remote` at its own level); a collapsed `◍` head's and a packed marker's
+--- labels are coloured the same way; a tag takes its node's colour as drawn;
+--- worktree labels are per-kind. HEAD's marker keeps `palette.head`, the
+--- h/l-selected label `palette.selected`, and `lane_label_colors = false` restores
+--- the per-kind groups everywhere (tags included). Out of the cone labels dim with
+--- their row; a level-2 colour then blends by `remote_mute_out` (brighter than every
+--- other dim), a level-3 one blends by `collapsed_mute_out`. The remote-only
+--- marker (`icons.remote`, §6) is covered at the end. Driven through the real
+--- `display_item` on hand-built rows and on a real `columns.layout` (the
 --- lumeeditor shape), plus the pane pieces (`pane_labels`, `ref_label_hl`).
 
 local render = require("gitloom.graph.render")
+local rank = require("gitloom.graph.rank")
 local helpers = require("tests.graph_helpers")
 
 local function opts(extra)
@@ -46,8 +50,11 @@ local function node_cell(c, slot, extra)
     return cell
 end
 
-local function row(c, cells, colors)
-    return { type = "commit", commit = c, columns = cells, ref_colors = colors }
+-- `extra`: more row fields (`ref_levels`, `selected_color`, `selected_level`).
+local function row(c, cells, colors, extra)
+    local r = { type = "commit", commit = c, columns = cells, ref_colors = colors }
+    for k, v in pairs(extra or {}) do r[k] = v end
+    return r
 end
 
 -- `display_item` with no ref selection (and an optional cone).
@@ -88,15 +95,30 @@ local DEV = { kind = "local", name = "dev" }
 local OVAL = { kind = "remote", name = "origin/leppanen/validation" }
 
 describe("ref labels take their own ref's colour (§6 'Label colour')", function()
-    it("a branch group: name in the local's colour, `↑remote` muted; the tag is per-kind", function()
+    it("a branch group: name in the local's colour, `↑remote` slightly muted; the tag in its node's", function()
         local o = opts()
         local c = commit({ refs = { LOCAL, REMOTE, TAG } })
-        local el = draw(o, row(c, { node_cell(c, 3) }, { feat = 3, ["origin/feat"] = 3 }))
+        local el = draw(o, row(c, { node_cell(c, 3) }, { feat = 3, ["origin/feat"] = 3 },
+            { ref_levels = { feat = 1, ["origin/feat"] = 2 }, selected_color = 3, selected_level = 1 }))
         assert.equals(2, #el.line_right)
         assert.same({
             { "(", "C2" }, { "feat", "C2" }, { " ↑origin", render.slot_hl(o, -3) }, { ")", "C2" },
         }, runs(el.line_right[1]))
-        assert.same({ "TagHl" }, groups(el.line_right[2]))
+        assert.same({ "C2" }, groups(el.line_right[2]))
+    end)
+
+    it("a tag takes its node's colour AS DRAWN: at the selected ref's level", function()
+        local o = opts()
+        local c = commit({ refs = { TAG } })
+        -- the node's selected ref is a slightly muted remote (slot 4, level 2)
+        local el = draw(o, row(c, { node_cell(c, -4) }, {}, { selected_color = 4, selected_level = 2 }))
+        assert.same({ render.slot_hl(o, -4) }, groups(el.line_right[1]))
+        -- … and a collapsed, unpinned one (level 3)
+        el = draw(o, row(c, { node_cell(c, 4) }, {}, { selected_color = 4, selected_level = 3 }))
+        assert.same({ render.slot_hl(o, rank.drawn(4, 3)) }, groups(el.line_right[1]))
+        -- no node colour known: per-kind
+        el = draw(o, row(c, { node_cell(c, 4) }, {}))
+        assert.same({ "TagHl" }, groups(el.line_right[1]))
     end)
 
     it("a label keeps its own colour on another ref's track (no lane owner)", function()
@@ -125,22 +147,41 @@ describe("ref labels take their own ref's colour (§6 'Label colour')", function
             runs(el.line_right[1]))
     end)
 
-    it("a collapsed ◍ head's labels are per-kind", function()
+    it("a collapsed ◍ head's labels take their identity colour at their level", function()
         local o = opts()
-        local c = commit({ refs = { LOCAL }, collapsed = true, count = 4 })
-        local el = draw(o, row(c, { node_cell(c, 9) }, { feat = 9 }))
+        local c = commit({ refs = { LOCAL, REMOTE, TAG }, collapsed = true, count = 4 })
+        local muted = render.slot_hl(o, rank.drawn(9, 3))
+        local el = draw(o, row(c, { node_cell(c, rank.drawn(9, 3)) }, { feat = 9, ["origin/feat"] = 9 },
+            { ref_levels = { feat = 3, ["origin/feat"] = 3 }, selected_color = 9, selected_level = 3 }))
         local r = runs(el.line[4])
-        assert.same({ { "(", "BranchHl" }, { "feat", "BranchHl" }, { ")", "BranchHl" } }, { r[1], r[2], r[3] })
+        -- level 3 replaces remote_mute: the local and its remote are drawn alike
+        assert.same({ { "(", muted }, { "feat", muted }, { " ↑origin", muted }, { ")", muted } },
+            { r[1], r[2], r[3], r[4] })
+        assert.same({ "[v1]", muted }, r[5]) -- the tag in its node's colour
+        assert.is_true(muted ~= "BranchHl") -- not per-kind (distinct from C8 under truecolor, below)
+        -- a PINNED collapsed ref stays at level 1
+        el = draw(o, row(c, { node_cell(c, 9) }, { feat = 9 }, { ref_levels = { feat = 1 } }))
+        assert.same({ "(", "C8" }, runs(el.line[4])[1])
     end)
 
-    it("a packed marker row: labels per-kind, a count-only unit in its node's colour", function()
+    it("a packed marker row: labels in identity colour, a tag in its marker's node colour", function()
         local o = opts()
         local m1 = commit({ refs = { { kind = "local", name = "a" }, TAG }, collapsed = true, count = 1 })
         local m2 = commit({ refs = {}, collapsed = true, count = 2 })
-        local item = { type = "markers", markers = { m1, m2 }, columns = { node_cell(m1, 2), node_cell(m2, 4) } }
+        local item = { type = "markers", markers = { m1, m2 }, columns = { node_cell(m1, 2), node_cell(m2, 4) },
+            ref_colors = { a = 2 }, ref_levels = { a = 3 },
+            marker_items = {
+                { type = "commit", commit = m1, selected_color = 5, selected_level = 1 },
+                { type = "commit", commit = m2, selected_color = 4, selected_level = 3 },
+            } }
         local el = draw(o, item)
-        assert.same({ "BranchHl", "TagHl" }, groups(el.line_right[1]))
+        local a = render.slot_hl(o, rank.drawn(2, 3))
+        assert.same({ { "(", a }, { "a", a }, { ")", a }, { "[v1]", "C4" } }, runs(el.line_right[1]))
+        assert.equals("(a) [v1]", el.line_right[1].text)
         assert.same({ "C3" }, groups(el.line_right[2]))
+        -- lane_label_colors off: per-kind again
+        local plain = draw(opts({ lane_label_colors = false }), item)
+        assert.same({ "BranchHl", "TagHl" }, groups(plain.line_right[1]))
     end)
 
     -- The reported lumeeditor shape, through a REAL layout: `dev` pinned at X, its
@@ -222,9 +263,9 @@ describe("ref labels take their own ref's colour (§6 'Label colour')", function
         local o = opts({ lane_label_colors = false })
         local c = commit({ refs = { { kind = "head", name = "HEAD", branch = "feat" }, LOCAL, REMOTE, TAG } })
         local cells = { node_cell(c, 3) }
-        local el = draw(o, row(c, cells, { feat = 3, ["origin/feat"] = 3 }))
+        local el = draw(o, row(c, cells, { feat = 3, ["origin/feat"] = 3 }, { selected_color = 3, selected_level = 1 }))
         assert.same({ "HeadHl", "RemoteHl" }, groups(el.line_right[1]))
-        assert.same({ "TagHl" }, groups(el.line_right[2]))
+        assert.same({ "TagHl" }, groups(el.line_right[2])) -- a tag too: not its node's colour
         local plain = commit({ refs = { LOCAL } })
         assert.equals("C2", node_glyph_hl(o, { node_cell(plain, 3) }))
         assert.equals("BranchHl", render.ref_label_hl(o, { feat = 3 }, "feat", false, "BranchHl"))
@@ -323,7 +364,7 @@ describe("muted remotes (§5.5, §12.2)", function()
         local r1, g1 = ch(fg(d))
         local r2, g2 = ch(pd)
         assert.is_true(r1 > r2 and g1 > g2, "brighter than the dimmed local")
-        assert.is_true(r1 < 150 and g1 < 75, "still dimmer than the in-cone muted colour")
+        assert.is_true(r1 < 160 and g1 < 80, "still dimmer than the in-cone muted colour")
         -- the out-of-cone factor follows `dim`, is configurable, and has its alias
         assert.equals(140 * 65536 + 70 * 256, fg(render.dim_hl(o({ remote_mute_out = 0.3 }), mg)))
         assert.equals(140 * 65536 + 70 * 256, fg(render.dim_hl(o({ counterpart_dim_out = 0.3 }), mg)))
@@ -359,5 +400,263 @@ describe("muted remotes (§5.5, §12.2)", function()
         local item = row(c, { node_cell(c, 1) }, { feat = 1 })
         assert.same({ "C0" }, groups(draw(x, item, nil, { [c] = true }).line_right[1]))
         assert.same({ "C0" }, groups(draw(x, item, nil, nil).line_right[1]))
+    end)
+end)
+
+describe("three brightness levels (§5.5 'Muting', §12.2)", function()
+    local saved
+    before_each(function()
+        saved = vim.o.termguicolors
+        vim.o.termguicolors = true
+        vim.api.nvim_set_hl(0, "Normal", { fg = 0xffffff, bg = 0x000000 })
+        vim.api.nvim_set_hl(0, "C0", { fg = 0xc86400 })
+        render.reset_dim_cache()
+    end)
+    after_each(function()
+        vim.o.termguicolors = saved
+        render.reset_dim_cache()
+    end)
+
+    local function o(pal)
+        local x = opts()
+        for k, v in pairs(pal or {}) do x.palette[k] = v end
+        return x
+    end
+    local function fg(group)
+        return vim.api.nvim_get_hl(0, { name = group, link = false }).fg
+    end
+    local function rg(c) return math.floor(c / 65536) % 256, math.floor(c / 256) % 256 end
+
+    it("levels 1, 2 and 3 draw distinct groups: full, remote_mute 0.25, collapsed_mute 0.45", function()
+        local x = o()
+        local l1 = render.slot_hl(x, rank.drawn(1, 1))
+        local l2 = render.slot_hl(x, rank.drawn(1, 2))
+        local l3 = render.slot_hl(x, rank.drawn(1, 3))
+        assert.equals("C0", l1)
+        assert.is_true(l1 ~= l2 and l2 ~= l3 and l1 ~= l3)
+        assert.equals(200 * 65536 + 100 * 256, fg(l1))
+        assert.equals(150 * 65536 + 75 * 256, fg(l2)) -- 0.25
+        assert.equals(110 * 65536 + 55 * 256, fg(l3)) -- 0.45
+        -- a generated ref (rank level 4) is drawn at full strength
+        assert.equals(l1, render.slot_hl(x, rank.drawn(1, rank.drawn_level(rank.generated(1)))))
+    end)
+
+    it("collapsed_mute replaces remote_mute, is configurable, 0 turns it off, junk falls back", function()
+        assert.equals(150 * 65536 + 75 * 256, fg(render.slot_hl(o({ collapsed_mute = 0.25 }), rank.drawn(1, 3))))
+        -- remote_mute never composes into level 3
+        assert.equals(110 * 65536 + 55 * 256, fg(render.slot_hl(o({ remote_mute = 0.9 }), rank.drawn(1, 3))))
+        -- 0: the level's muting is off (drawn at full strength)
+        assert.equals(200 * 65536 + 100 * 256, fg(render.slot_hl(o({ collapsed_mute = 0 }), rank.drawn(1, 3))))
+        assert.equals(200 * 65536 + 100 * 256, fg(render.slot_hl(o({ remote_mute = 0 }), rank.drawn(1, 2))))
+        -- invalid values (out of 0..1, not a number) read as unset: the default
+        assert.equals(110 * 65536 + 55 * 256, fg(render.slot_hl(o({ collapsed_mute = 2 }), rank.drawn(1, 3))))
+        assert.equals(110 * 65536 + 55 * 256, fg(render.slot_hl(o({ collapsed_mute = "x" }), rank.drawn(1, 3))))
+        assert.equals(150 * 65536 + 75 * 256, fg(render.slot_hl(o({ remote_mute = -1 }), rank.drawn(1, 2))))
+        -- without truecolor every level is the plain colour
+        vim.o.termguicolors = false
+        assert.equals("C0", render.slot_hl(o(), rank.drawn(1, 3)))
+        assert.equals("C0", render.slot_hl(o(), rank.drawn(1, 2)))
+    end)
+
+    it("out of the cone level 3 blends by collapsed_mute_out (default 0.45), without stacking", function()
+
+        local x = o()
+
+        local l3 = render.slot_hl(x, rank.drawn(1, 3))
+
+        -- default 0.45: 200 * 0.55 = 110, 100 * 0.55 = 55, the level-1 dim at the default dim
+
+        local r3, g3 = rg(fg(render.dim_hl(x, l3)))
+
+        assert.is_true(math.abs(r3 - 110) <= 1 and math.abs(g3 - 55) <= 1)
+
+        -- the same level as a level-1 colour out of the cone (master's dim)
+
+        assert.equals(fg(render.dim_hl(x, render.slot_hl(x, rank.drawn(1, 1)))), fg(render.dim_hl(x, l3)))
+
+        -- it does not follow dim
+
+        local x3 = o({ dim = 0.7 })
+
+        local r, g = rg(fg(render.dim_hl(x3, render.slot_hl(x3, rank.drawn(1, 3)))))
+
+        assert.is_true(math.abs(r - 110) <= 1 and math.abs(g - 55) <= 1)
+
+    end)
+
+
+
+    it("collapsed_mute_out is configurable", function()
+
+        local x = o({ collapsed_mute_out = 0.8 })
+
+        local r, g = rg(fg(render.dim_hl(x, render.slot_hl(x, rank.drawn(1, 3)))))
+
+        assert.is_true(math.abs(r - 40) <= 1 and math.abs(g - 20) <= 1)
+
+    end)
+
+
+
+    it("an invalid collapsed_mute_out falls back to the default", function()
+
+        for _, bad in ipairs({ 2, -1, "x" }) do
+
+            local x = o({ collapsed_mute_out = bad })
+
+            local r, g = rg(fg(render.dim_hl(x, render.slot_hl(x, rank.drawn(1, 3)))))
+
+            assert.is_true(math.abs(r - 110) <= 1 and math.abs(g - 55) <= 1)
+
+        end
+
+    end)
+
+
+
+    it("a collapsed ◍ head's label dims with its row by the composed blend", function()
+        local x = o()
+        local c = commit({ refs = { LOCAL }, collapsed = true, count = 2 })
+        local item = row(c, { node_cell(c, rank.drawn(1, 3)) }, { feat = 1 }, { ref_levels = { feat = 3 } })
+        local l3 = render.slot_hl(x, rank.drawn(1, 3))
+        assert.same({ "(", l3 }, runs(draw(x, item, nil, nil).line[4])[1])
+        assert.same({ "(", render.dim_hl(x, l3) }, runs(draw(x, item, nil, {}).line[4])[1])
+    end)
+
+    -- §12.2: while the reachability highlight is active, levels 2 and 3 IN the cone
+    -- blend by `highlight_mute` (default 0.1: 200 * 0.9 = 180, 100 * 0.9 = 90).
+    it("in the cone with the highlight on, levels 2 and 3 use the highlight_mute 0.1 blend", function()
+        local x = o()
+        for _, level in ipairs({ 2, 3 }) do
+            local lit = render.lit_hl(x, render.slot_hl(x, rank.drawn(1, level)))
+            assert.equals(180 * 65536 + 90 * 256, fg(lit))
+        end
+        -- level 1 and plain groups pass through unchanged
+        assert.equals("C0", render.lit_hl(x, render.slot_hl(x, rank.drawn(1, 1))))
+        assert.equals("Comment", render.lit_hl(x, "Comment"))
+        -- out of the cone is unchanged: the dim of a lit group's source still applies
+        local l3 = render.slot_hl(x, rank.drawn(1, 3))
+        local r, g = rg(fg(render.dim_hl(x, l3)))
+        assert.is_true(math.abs(r - 110) <= 1 and math.abs(g - 55) <= 1)
+    end)
+
+    it("a ◍ head's node and label: highlight_mute in the cone, 0.45 with the highlight off, dim out", function()
+        local x = o()
+        local c = commit({ refs = { LOCAL }, collapsed = true, count = 2 })
+        local item = row(c, { node_cell(c, rank.drawn(1, 3)) }, { feat = 1 }, { ref_levels = { feat = 3 } })
+        local l3 = render.slot_hl(x, rank.drawn(1, 3))
+        local hm = render.lit_hl(x, l3)
+        assert.is_true(hm ~= l3)
+        -- highlight on, in the cone
+        local inc = draw(x, item, nil, { [c] = true })
+        assert.same({ "(", hm }, runs(inc.line[4])[1])
+        assert.equals(hm, runs(inc.line[3])[1][2])
+        -- highlight off (no pivot, or the toggle off): the plain 0.45 level
+        assert.same({ "(", l3 }, runs(draw(x, item, nil, nil).line[4])[1])
+        local off = o({}); off.highlight = false
+        local offd = draw(off, item, nil, { [c] = true })
+        assert.same({ "(", l3 }, runs(offd.line[4])[1])
+        assert.equals(l3, runs(offd.line[3])[1][2])
+        assert.equals(110 * 65536 + 55 * 256, fg(l3))
+        -- out of the cone: unchanged
+        -- (the node glyph follows track.active, which mark_reachable sets)
+        local oitem = row(c, { node_cell(c, rank.drawn(1, 3), { active = false }) }, { feat = 1 },
+            { ref_levels = { feat = 3 } })
+        local out = draw(x, oitem, nil, {})
+        assert.same({ "(", render.dim_hl(x, l3) }, runs(out.line[4])[1])
+        assert.equals(render.dim_hl(x, l3), runs(out.line[3])[1][2])
+    end)
+
+    it("a level-2 remote with the highlight off keeps remote_mute 0.25", function()
+        local x = o()
+        local l2 = render.slot_hl(x, rank.drawn(1, 2))
+        assert.equals(150 * 65536 + 75 * 256, fg(l2))
+        assert.equals(180 * 65536 + 90 * 256, fg(render.lit_hl(x, l2)))
+    end)
+
+    it("highlight_mute is configurable (0 = full) and invalid values fall back to 0.1", function()
+        local x = o({ highlight_mute = 0.5 })
+        assert.equals(100 * 65536 + 50 * 256, fg(render.lit_hl(x, render.slot_hl(x, rank.drawn(1, 2)))))
+        local z = o({ highlight_mute = 0 })
+        assert.equals(200 * 65536 + 100 * 256, fg(render.lit_hl(z, render.slot_hl(z, rank.drawn(1, 3)))))
+        for _, bad in ipairs({ 2, -1, "x" }) do
+            local b = o({ highlight_mute = bad })
+            assert.equals(180 * 65536 + 90 * 256, fg(render.lit_hl(b, render.slot_hl(b, rank.drawn(1, 3)))))
+        end
+    end)
+end)
+
+describe("remote-only marker (§6 icons.remote)", function()
+    local REFS = {
+        { name = "dev", kind = "local" },
+        { name = "origin/dev", kind = "remote" },
+        { name = "origin/foo", kind = "remote" },
+        { name = "fork/foo", kind = "remote" },
+        { name = "feat", kind = "local", upstream = { short = "origin/renamed" } },
+        { name = "origin/renamed", kind = "remote" },
+    }
+    local function remote_only()
+        return rank.input(REFS, { remotes = { "origin", "fork" } }).remote_only
+    end
+    local function marks(extra)
+        local m = { set = {}, expanded = {}, remote_only = remote_only() }
+        for k, v in pairs(extra or {}) do m[k] = v end
+        return m
+    end
+    local FOO = { { kind = "remote", name = "origin/foo" }, { kind = "remote", name = "fork/foo" } }
+
+    it("the ranking input lists exactly the members of remote-only identities", function()
+        assert.same({ ["origin/foo"] = true, ["fork/foo"] = true }, remote_only())
+    end)
+
+    it("a remote-only group carries ⇣ before its name; a paired remote or a local group never", function()
+        local m = marks()
+        assert.equals("(⇣foo ↑origin,fork)", render.decoration_texts(commit({ refs = FOO }), nil, m)[1])
+        -- origin/dev ahead of dev: its identity has a local — no marker
+        assert.equals("(dev ↑origin)",
+            render.decoration_texts(commit({ refs = { { kind = "remote", name = "origin/dev" } } }), nil, m)[1])
+        -- a remote claimed only through upstream configuration is not remote-only
+        assert.equals("(renamed ↑origin)",
+            render.decoration_texts(commit({ refs = { { kind = "remote", name = "origin/renamed" } } }), nil, m)[1])
+        -- a group with its local branch
+        assert.equals("(dev ↑origin)", render.decoration_texts(commit({ refs = { DEV, ODEV } }), nil, m)[1])
+    end)
+
+    it("orders pin, expanded, remote, then the name; \"\" turns it off", function()
+        local m = marks({ set = { ["origin/foo"] = true }, expanded = { ["origin/foo"] = true } })
+        assert.equals("(⚲▾⇣foo ↑origin,fork)", render.decoration_texts(commit({ refs = FOO }), nil, m)[1])
+        m.remote_icon = ""
+        assert.equals("(⚲▾foo ↑origin,fork)", render.decoration_texts(commit({ refs = FOO }), nil, m)[1])
+        m.remote_icon = "R"
+        assert.equals("(⚲▾Rfoo ↑origin,fork)", render.decoration_texts(commit({ refs = FOO }), nil, m)[1])
+    end)
+
+    it("is drawn in the label's own colour in the graph", function()
+        local o = opts()
+        local c = commit({ refs = FOO })
+        local item = row(c, { node_cell(c, 4) }, { ["origin/foo"] = 4, ["fork/foo"] = 4 },
+            { ref_levels = { ["origin/foo"] = 2, ["fork/foo"] = 2 } })
+        local el = render.display_item(o, item, {}, nil, nil, nil, nil, marks())
+        local m = render.slot_hl(o, -4)
+        assert.same({ { "(", m }, { "⇣foo", m }, { " ↑origin", m }, { ",fork", m }, { ")", m } },
+            runs(el.line_right[1]))
+    end)
+
+    it("appears in a pane label, after the pin and expanded icons, with the ↑remote spans shifted", function()
+        local m = marks({ set = { ["origin/foo"] = true }, expanded = { ["origin/foo"] = true } })
+        local segs = render.pane_labels(commit({ refs = FOO }), nil, m)
+        assert.equals("(⚲▾⇣foo ↑origin,fork)", segs[1].text)
+        local rs = assert(segs[1].rspans)
+        assert.equals(" ↑origin", segs[1].text:sub(rs[1].span[1], rs[1].span[2]))
+        assert.equals(",fork", segs[1].text:sub(rs[2].span[1], rs[2].span[2]))
+        -- a paired remote in a pane: no marker
+        local d = render.pane_labels(commit({ refs = { { kind = "remote", name = "origin/dev" } } }), nil, m)
+        assert.equals("(dev ↑origin)", d[1].text)
+    end)
+
+    it("appears on packed marker units", function()
+        local m1 = commit({ refs = FOO, collapsed = true, count = 1 })
+        local units = render.marker_units({ type = "markers", markers = { m1 }, columns = {} }, marks())
+        assert.equals("(⇣foo ↑origin,fork)", units[1].text)
     end)
 end)
