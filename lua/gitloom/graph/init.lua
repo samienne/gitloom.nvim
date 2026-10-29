@@ -32,39 +32,31 @@ local M = {}
 --- parent/child edge, shared by every Segment that draws it.
 ---@class Lane
 ---@field id integer|nil
----@field color integer|nil   palette slot (1-based) from the free list; drives colour.
----   Negative `-k` = slot `k` in its counterpart variant (a remote counterpart's lane, §5.5)
+---@field color integer|nil   palette slot (1-based) of the carried ref's colour (§5.5);
+---                            `-k` = slot k's muted variant, for a remote ref
+---@field ref? RankInfo        the carried ref (§5 "Carried refs"): a visible ranked ref
+---                            (`ref.remote` drawn muted) or a generated one (`tier == 4`)
 ---@field begin Commit
 ---@field parent Commit
 ---@field highlighted boolean
----@field rank? integer  pin rank (§5 tier 0): the best pinned ref's rank where the lane
----                      was born; nil = unranked, worse than any rank
 
---- The layout's pin-priority input (spec §5 "Lane identity", §10.6). Declared here,
---- beside the engine that reads it, as a partial of the `GraphOptions` class
+--- The layout's ranking input (spec §5 "Ranked refs and identities", §10.6). Declared
+--- here, beside the engine that reads it, as a partial of the `GraphOptions` class
 --- (window.lua holds the rest).
 ---@class GraphOptions
----@field pin_rank? table<string, integer>  ref id → pin rank, 1 = highest priority.
----   A ref id is its key in `repo.refs` (`git.add_ref`): the ref's `name`
----   (`main`, `origin/main`, `v1.0`, `wt:<dir>`), except the `head` ref, keyed
----   `HEAD`. Keyed by exactly the ids of the resolved pin list's ENTRIES — implicit
----   remote counterparts are not ranked (§10.6). A commit's rank is the best over
----   its refs (`columns.commit_rank`). Rank `k <= #palette.tracks` also owns curated
----   slot `k` as its pinned colour (§5.5, `columns.pinned_slots`). nil or empty ⇒
----   every lane unranked ⇒ the layout is exactly the unpinned one. Part of the
----   layout fingerprint (§3.1).
----@field pin_counterpart? table<string, integer>  implicit remote counterpart's ref
----   id → its local's rank (§5.5 "Counterpart colours", `select.pin_counterpart_rank`;
----   empty with `pin_upstream` off). Colour only: a lane born unranked at such a ref
----   shares the local's held slot `k`, as colour `-k` (the counterpart variant). nil
----   or empty ⇒ byte-identical to the layout without it. Part of the fingerprint.
+---@field ref_rank? RefRankInput  `rank.input`: the visible ranked refs' infos, the
+---   pinned identities' slots (§5.5) and the current branch. nil ⇒ no ranked refs:
+---   every track carries a generated ref. Part of the layout fingerprint (§3.1).
+---@field pin_rank? table<string, integer>  ref id → pin-list rank (1 best); not a
+---   layout input — only the header's colour de-collision reads it (its pinned slots).
 
 --- A **Segment** is one wire within a `GraphColumn`: its connectivity plus the
 --- Lane(s) it draws (a list — usually one, but a shared fan bus carries the set
 --- of edges routing through it).
 ---@class Segment
 ---@field id integer|nil
----@field color integer|nil   palette slot of the Lane(s) this wire draws
+---@field color integer|nil   palette slot of the Lane(s) this wire draws (`-k` muted)
+---@field ref? RankInfo       the ref the labelling Lane carries (§5)
 ---@field connectivity Connectivity
 ---@field begin? Commit
 ---@field parent? Commit
@@ -74,7 +66,8 @@ local M = {}
 
 ---@class GraphColumn
 ---@field id integer|nil
----@field color integer|nil   palette slot for the cell's glyph colour
+---@field color integer|nil   palette slot for the cell's glyph colour (`-k` muted)
+---@field ref? RankInfo       the carried ref behind `color` (§5)
 ---@field connectivity Connectivity
 ---@field has_commit boolean
 ---@field commit? Commit
@@ -96,6 +89,11 @@ local M = {}
 ---@field merge? GraphColumn[]
 ---@field parent_lanes? Lane[]  edges out to this commit's parents (§5)
 ---@field child_lanes? Lane[]   edges in from this commit's children (§5)
+---@field selected? RankInfo     the commit's selected ref (§5 "Carried refs")
+---@field selected_color? integer  its identity's colour slot (unsigned; the node glyph
+---   draws the muted variant when the selected ref is a remote)
+---@field ref_colors? table<string, integer>  this commit's own visible ranked refs →
+---   their label colour (the identity colour, §5.5)
 
 --- Tracks the current ref selection (specification.md §2). Held by commit
 --- identity so it survives reflow; `index` is 1-based into the row's selectable
@@ -126,11 +124,6 @@ local function build_graph(opts, items, yield)
 end
 M.build_graph = build_graph
 
---- A commit's pin rank under `opts.pin_rank` (spec §5): the best rank among its refs,
---- nil when none is pinned. The layout's own reading, re-exported so a caller can
---- check its map against what the layout will see.
-M.commit_rank = columns.commit_rank
-
 --- Copy one freshly-swept row's lines/lanes onto the OrderItem the view holds.
 ---@param item OrderItem
 ---@param r OrderItem
@@ -140,6 +133,9 @@ local function adopt_row(item, r)
     item.merge = r.merge
     item.parent_lanes = r.parent_lanes
     item.child_lanes = r.child_lanes
+    item.selected = r.selected
+    item.selected_color = r.selected_color
+    item.ref_colors = r.ref_colors
 end
 
 --- Re-run Phase 1 over the whole order and copy the fresh lines/lanes back into
@@ -155,21 +151,10 @@ local function refresh_columns(opts, order, yield)
 end
 M.refresh_columns = refresh_columns
 
---- `opts.pin_rank` as a comparable string: sorted `id=rank` pairs, so the result
---- does not depend on `pairs` order; nil and an empty map both give "".
----@param pin_rank table<string, integer>?
----@return string
-local function pin_rank_key(pin_rank)
-    local ranks = {}
-    for id, r in pairs(pin_rank or {}) do ranks[#ranks + 1] = id .. "=" .. tostring(r) end
-    table.sort(ranks)
-    return table.concat(ranks, "\n")
-end
-
 --- The layout-relevant part of `opts`, as a comparable string. A streaming
 --- session may only be continued while these hold still; anything that changes
---- them (`m`, `C`, a palette change, a pin change — the
---- ranks decide lane identity, §5) goes through a reflow anyway, so this is a
+--- them (`m`, `C`, a palette change, a pin, visibility or upstream change — the
+--- ranks decide carried refs and colours, §5) goes through a reflow anyway, so this is a
 --- safety net rather than a hot path.
 ---@param opts GraphOptions
 ---@return string
@@ -181,7 +166,7 @@ local function layout_fingerprint(opts)
         tostring(ms.allow_merge_on_split), tostring(ms.merge_on_separate_line),
         tostring(ms.split_on_separate_line),
         tostring(p.tracks and #p.tracks or 0), tostring(p.generate), tostring(p.buffer),
-        pin_rank_key(opts.pin_rank), pin_rank_key(opts.pin_counterpart),
+        opts.ref_rank and opts.ref_rank.key or "",
     }, "")
 end
 

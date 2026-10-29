@@ -1492,8 +1492,10 @@ end
 ---@field submodule? { new?: string, old?: string, base?: string }  submodule change-view lanes: added/removed/ancestor (§11.7)
 ---@field track? { ahead?: string, behind?: string, gone?: string, upstream?: string, mismatch?: string }  upstream tracking tokens (§6.3)
 ---@field dim? number  blend factor toward bg for out-of-cone rows/lanes (§12)
----@field counterpart_dim? number  lighter blend factor toward bg for a remote counterpart's lane colour (§5.5)
----@field counterpart_dim_out? number  a counterpart lane's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
+---@field remote_mute? number  lighter blend factor toward bg for a remote ref's muted colour (§5.5); default 0.25
+---@field remote_mute_out? number  a remote's blend OUT of the cone (§12.2); default 0.75 * dim, lighter than the cone dim
+---@field counterpart_dim? number  former name of `remote_mute` (alias, §8)
+---@field counterpart_dim_out? number  former name of `remote_mute_out` (alias, §8)
 ---@field tracks? string[]  curated lane colours, the free-list seed (§5.5)
 ---@field buffer? integer  min free-list length: colours drawn before one repeats (§5.5)
 ---@field generate? boolean  generate overflow OKLCH colours when truecolor (§5.5)
@@ -1531,11 +1533,10 @@ end
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field dual_bracket? string[]  the dual-mode pair bracket glyphs { label row, message row } (default { "┬", "└" }); §6.1
----@field lane_label_colors? boolean  ref labels in their node's lane colour (default true); §6
+---@field lane_label_colors? boolean  ranked refs' labels in their own ref's colour, remotes muted (default true); false = per-kind; §6
 ---@field diff? { open?: fun(range: DiffRange), label?: string }  external diff provider; §11.5
 ---@field working_tree? boolean|"dirty"  the working-tree row above HEAD: true = always (a clean node on a clean tree), "dirty" = only with changes, false = never; §3.3/§4.2
 ---@field scrolloff? integer  'scrolloff' for the graph + commit-view windows (default 10); §8
----@field pin_upstream? boolean  a pinned local branch also pins its remote counterparts implicitly (default true); §10.6
 ---@field search? { snippet?: integer, layout?: "vertical" }  commit-search preview (snippet rows, layout); §15
 ---@field show_lane_ids? boolean  per-window lane-id debug overlay (toggled by `i`); window-owned, read by the renderer
 ---@field zindex? integer  the host window's zindex (default 41); overlays at +1, gitloom's transient floats at +2; §8/§14
@@ -1722,7 +1723,7 @@ end
 -- branch it is that branch's owner; detached it is the `HEAD` ref itself (an owner
 -- only then — owners_from_refs), so a `HEAD` entry is dropped while HEAD is on a
 -- branch; `view_state.unpinned` suppresses a default. `pin_resolve` is the pure
--- core. Implicit remote counterparts are NOT entries (see `pin_rank`).
+-- core. The other members of a pinned identity are NOT entries (`effective_pinned`).
 --- (A GRAPH_HELPERS field rather than a module local — window.lua sits near
 --- LuaJIT's 200-local chunk limit, which is what these tables exist to dodge.)
 ---@return PinEntry[]
@@ -1742,54 +1743,50 @@ GRAPH_HELPERS.effective_pins = function(ctx)
 end
 
 -- The **pin rank** of every pin-list ENTRY (§5/§10.6): ref id → its place in the
--- resolved list, 1 = highest priority. This is the layout input `opts.pin_rank` —
--- lane identity and the pinned colours (§5.5). Implicit remote counterparts are NOT
--- in it: they take no rank and no pinned colour; they are anchors only (see
--- `effective_pinned`).
+-- resolved list, 1 = highest priority. Published as `opts.pin_rank` for the header's
+-- colour de-collision (its pinned slots); the layout ranks by `opts.ref_rank`.
 ---@return table<string, integer>
 GRAPH_HELPERS.pin_rank = function(ctx)
-    return selectm.pin_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
-        ctx.view_state.unpinned, false)
+    return selectm.pin_rank(ctx:effective_pins())
 end
 
 -- Publish the current pin ranks on the layout options (`opts.pin_rank`, §5) — the
--- main view's `ctx.opts` and the panes' frozen copy `ctx.pane_opts` — so the next
--- layout reads them. Run at the top of every reflow (which every pin change, the
--- reset, a resync and a HEAD move go through) and before the open-time stream.
+-- main view's `ctx.opts` and the panes' frozen copy `ctx.pane_opts` — and the
+-- ranking input (`sync_ref_rank`), so the next layout reads them. Run at the top of
+-- every reflow (which every pin change, the reset, a resync and a HEAD move go
+-- through) and before the open-time stream.
 GRAPH_HELPERS.sync_pin_rank = function(ctx)
     local rank = GRAPH_HELPERS.pin_rank(ctx)
-    local cp = GRAPH_HELPERS.pin_counterpart(ctx)
-    ctx.opts.pin_rank, ctx.opts.pin_counterpart = rank, cp
-    if ctx.pane_opts then ctx.pane_opts.pin_rank, ctx.pane_opts.pin_counterpart = rank, cp end
+    ctx.opts.pin_rank = rank
+    if ctx.pane_opts then ctx.pane_opts.pin_rank = rank end
+    GRAPH_HELPERS.sync_ref_rank(ctx)
     return rank
 end
 
--- The **counterpart colours** input (§5.5, `opts.pin_counterpart`): every implicit
--- remote counterpart's ref id → its local's rank, so a lane born at one shares the
--- local's pinned colour, lightly dimmed. Empty with `pin_upstream` off.
----@return table<string, integer>
-GRAPH_HELPERS.pin_counterpart = function(ctx)
-    if ctx.opts.pin_upstream == false then return {} end
-    return selectm.pin_counterpart_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
-        ctx.view_state.unpinned)
+-- Publish the layout's ranking input (`opts.ref_rank`, spec §5 "Ranked refs and
+-- identities"): the identity pairing of the repository's branches, the pin list, the
+-- current branch and which refs are VISIBLE — `visible` (ref name → true) when the
+-- caller knows the projection, else every ref (the streamed identity projection).
+-- Pins, upstream configuration and visibility all change the fingerprint (§3.1).
+GRAPH_HELPERS.sync_ref_rank = function(ctx, visible)
+    local rr = require("gitloom.graph.rank").input(ctx.repo.refs, { remotes = ctx.remotes,
+        pins = ctx:effective_pins(), current = ctx.repo.head, visible = visible })
+    ctx.opts.ref_rank = rr
+    if ctx.pane_opts then ctx.pane_opts.ref_rank = rr end
 end
 
--- The effective anchor **set** — the pinned entries plus their implicit remote
--- counterparts (§10.6, `pin_upstream`, unless explicitly unpinned). This is what
--- `view.owners` / `select.toggle_target` and the pin icon consume. A superset of
--- `pin_rank`'s keys: the counterparts are anchors, but never ranked (§5).
+-- The effective anchor **set** — the pinned entries plus every member of their
+-- identities (§10.6 "A pin covers the identity", unless explicitly unpinned). This
+-- is what `view.owners` / `select.toggle_target` and the pin icon consume.
 local function effective_pinned(ctx)
-    local set = {}
-    for id in pairs(selectm.pin_rank(ctx:effective_pins(), ctx.repo.refs, ctx.remotes,
-        ctx.view_state.unpinned, ctx.opts.pin_upstream ~= false)) do
-        set[id] = true
-    end
-    return set
+    local pins = ctx:effective_pins()
+    local pairing = require("gitloom.graph.rank").pair(ctx.repo.refs, { remotes = ctx.remotes, pins = pins })
+    return selectm.pin_anchors(pins, pairing, ctx.view_state.unpinned)
 end
 GRAPH_HELPERS.effective_pinned = effective_pinned
 
 -- The label marks the label renderers are handed (§6/§10.6): the effective anchors
--- (implicit counterparts included) + `icons.pin`, and the expanded refs (§6
+-- (every member of a pinned identity included) + `icons.pin`, and the expanded refs (§6
 -- "Expanded marker") + `icons.expanded`. The pin set is resolved fresh on every
 -- call (it is a handful of entries), so a label can never show a stale pin after
 -- `P`, the dialog, or a resync; the expanded set is resolved per reflow
@@ -4532,7 +4529,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- Reachability dimming (§12): blend factor toward the bg for the
             -- out-of-cone rows/lanes. Higher = more muted.
             dim = 0.45,
-            counterpart_dim = 0.25,
+            -- A remote ref's muted variant (§5.5): its tracks, node and label blend
+            -- this far toward the bg (default 0.25), and `remote_mute_out` out of the
+            -- cone (default 0.75 * dim). Left unset here so the former names
+            -- `counterpart_dim` / `counterpart_dim_out` still work as aliases.
+            -- remote_mute = 0.25,
+            -- remote_mute_out = nil,
             -- Commit-view diff colors (§11.3): per-role highlight groups.
             diff = {
                 add = "DiffAdd",
@@ -4619,7 +4621,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- The dual-mode pair bracket (§6.1): the glyph opening the label row and
         -- the one closing the message row, drawn as-is (`{ "┬ ", "└ " }` for a gap).
         dual_bracket = { "┬", "└" },
-        lane_label_colors = true, -- ref labels take their node's lane colour (§6)
+        lane_label_colors = true, -- each ranked ref's label in its own ref's colour, remotes muted (§6)
         -- External diff provider (§11.5): open is called with a DiffRange; the
         -- default opens diffview. Override open/label to use another diff plugin,
         -- or set open = nil to disable (no action label, D is a no-op).
@@ -4636,9 +4638,6 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- the global value, which interacts badly with the context-pane overlays
         -- (§6.2) — set 0 if the panes' scrolling misbehaves, or toggle panes with F.
         scrolloff = 10,
-        -- Pin the pair (§6.3/§10.6): pinning a local branch also pins its tracked
-        -- upstream remote ref, so both lanes stay in full and a divergence is drawn.
-        pin_upstream = true,
         -- Progress reporting (§19): fidget.nvim when it loads, else vim.notify;
         -- an operation is shown only once it has run for `delay` ms.
         progress = { provider = "auto", delay = 300 },
@@ -4765,9 +4764,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field open_nbatch? integer   streamed batches seen so far
     --- == extracted helpers (Phase B1; attached from GRAPH_HELPERS) ==
     ---@field effective_pinned fun(self:GraphCtx):table<string,boolean>
-    ---@field pin_rank fun(self:GraphCtx):table<string,integer>  ref id → pin rank of each pin-list entry; no counterparts (§5/§10.6)
-    ---@field sync_pin_rank fun(self:GraphCtx):table<string,integer>  publish `pin_rank` + `pin_counterpart` on opts + pane_opts
-    ---@field pin_counterpart fun(self:GraphCtx):table<string,integer>  counterpart ref id → its local's rank (§5.5); {} with pin_upstream off
+    ---@field pin_rank fun(self:GraphCtx):table<string,integer>  ref id → pin rank of each pin-list entry (§5/§10.6)
+    ---@field sync_pin_rank fun(self:GraphCtx):table<string,integer>  publish `pin_rank` + `ref_rank` on opts + pane_opts
     ---@field pin_marks fun(self:GraphCtx):PinMarks
     ---@field build_display_index fun(self:GraphCtx)
     ---@field order_at fun(self:GraphCtx, line:integer):table?,integer,integer
@@ -5751,12 +5749,15 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                 local text = glyph_line(row.columns)
                 local c = row.commit
                 local lit = node_lit(c)
-                -- Ref labels coloured as in the main view: the pane row's node lane
-                -- colour on the label OWNING the lane, the rest per-kind (§6 "Label
-                -- colour"), HEAD's marker in the HEAD colour; dimmed toward the
-                -- background on an out-of-cone row (§6.2).
-                local lane, owner
-                if c then lane, owner = render.node_label_colour(opts, row.columns, emphasis, c, repo.head, true) end
+                -- Ref labels coloured as in the main view (§6 "Label colour", §6.2):
+                -- each ranked ref in its own colour from the main view's row of this
+                -- commit (`ref_colors`), a remote muted; a ref not visible there (a
+                -- collapsed head's) per-kind; HEAD's marker in the HEAD colour;
+                -- dimmed toward the background on an out-of-cone row.
+                local mi = c and ctx.display_index and ctx.display_index[c.hash]
+                local mitem = mi and repo.display[mi]
+                local colors = mitem and mitem.commit and not mitem.commit.collapsed and not c.collapsed
+                    and mitem.ref_colors or nil
                 local function mark(s0, e0, g)
                     if g and e0 > s0 then
                         marks[#marks + 1] = { li, s0, e0, lit and g or render.dim_hl(opts, g) }
@@ -5767,14 +5768,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                     local s = #text
                     text = text .. seg.text
                     -- A pointer mark (§11.7.6) carries its own colour; a detached
-                    -- `HEAD` the HEAD colour; else the lane colour (or by kind).
+                    -- `HEAD` the HEAD colour; else its ref's colour (or by kind).
                     local g = seg.hl or ((seg.kind == "head" and not seg.arrow) and pal.head)
-                        or render.label_hl(opts, seg.key == owner and lane or nil, label_hl[seg.kind])
+                        or render.ref_label_hl(opts, colors, seg.ref, seg.remote, label_hl[seg.kind])
                     -- Sub-spans in their own colour, in text order: the `HEAD → ` prefix
-                    -- (unless the whole label is HEAD-coloured) and the spelled-out
-                    -- upstream (§6.3, palette.track); the rest takes `g`.
+                    -- (unless the whole label is HEAD-coloured), each `↑remote` in its
+                    -- own muted colour and the spelled-out upstream (§6.3,
+                    -- palette.track); the rest takes `g`.
                     local spans = {}
                     if seg.arrow and g ~= pal.head then spans[#spans + 1] = { seg.arrow, pal.head } end
+                    for _, rs in ipairs(seg.rspans or {}) do
+                        spans[#spans + 1] = { rs.span, render.ref_label_hl(opts, colors, rs.ref, true, pal.remote) }
+                    end
                     if seg.up then spans[#spans + 1] = { seg.up, (pal.track or {})[seg.up_kind] } end
                     local at = s
                     for _, sp in ipairs(spans) do
@@ -6021,12 +6026,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             for _, it in ipairs(repo.display) do
                 py()
                 local pl = it.parent_lanes
-                local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color }
+                local main = pl and pl[1] and { id = pl[1].id, color = pl[1].color, ref = pl[1].ref }
                 for _, l in ipairs(pl or {}) do
                     local b, pa = l.begin, l.parent
                     if b and pa then
                         lane_edge[((b.tip and b.tip.hash) or b.hash) .. ">" .. ((pa.tip and pa.tip.hash) or pa.hash)] =
-                            { id = l.id, color = l.color }
+                            { id = l.id, color = l.color, ref = l.ref }
                     end
                 end
                 local lset
@@ -6834,6 +6839,16 @@ GRAPH_HELPERS.reflow_build = function(ctx, yield, on_signatures)
     local proj = viewbuilder.project(ctx.repo.order, owners, ctx.sig_cache.sig,
         ctx.filter and ctx.filter.keep, yield)
     util.open_trace("project", { rows = #proj.items, ms = util.open_ms(t) })
+    -- The visible ranked refs (§5): those on a node of the projection, not folded
+    -- into a collapsed head or a kept junction (§10.3).
+    local visible = {}
+    for _, it in ipairs(proj.items) do
+        local c = it.commit
+        if c and not c.collapsed and not c.junction then
+            for _, r in ipairs(c.refs or {}) do visible[r.name] = true end
+        end
+    end
+    GRAPH_HELPERS.sync_ref_rank(ctx, visible)
     t = util.open_now()
     refresh_columns(ctx.opts, proj.items, yield)
     util.open_trace("layout", { ms = util.open_ms(t) })
@@ -7469,7 +7484,6 @@ M._internal = {
     effective_pinned = effective_pinned,
     pin_rank = GRAPH_HELPERS.pin_rank,
     sync_pin_rank = GRAPH_HELPERS.sync_pin_rank,
-    pin_counterpart = GRAPH_HELPERS.pin_counterpart,
     pin_dialog = GRAPH_HELPERS.pin_dialog, -- §10.6.1; windowed smoke test seam
     reconcile_refs = reconcile_refs,
     prune_to_reachable = prune_to_reachable,

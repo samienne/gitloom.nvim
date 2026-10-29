@@ -37,10 +37,13 @@ Scope: per-spec coverage of the header / footer panes, their seams and the scree
   header matches the graph and forks are distinct — the pivot continuation keeps the
   pivot's colour, only an extra fork child takes a new one). Plus a **colours follow
   the main view** block (§6.2 Colour): two heads never alive together keep their
-  shared main-view colour (only lanes on one drawn row are de-collided), a fork child
+  shared main-view colour (only lanes on one drawn row are de-collided), a lane
+  recoloured at an outranking ref (§5 "Carried refs") is drawn above that node in the
+  colour the main view gives that stretch, a fork child
   reached through a merge's SECOND parent is drawn in that edge's lane colour, and
   without generated colours (`ncolors`) a replacement stays in the palette and off the
-  pinned slots. Asserted vertically
+  pinned slots; a muted `-k` (a remote's colour) is kept and slot k never handed to
+  another lane. Asserted vertically
   id-continuous, **distinct-coloured** (concurrent lanes never share a colour),
   through the wires-connect checker, with `assert_seam_match` (every crossing lane
   present at the seam) and a **minimal-subgraph oracle** (`confluences_of` +
@@ -95,10 +98,13 @@ Scope: per-spec coverage of the header / footer panes, their seams and the scree
   exactly 0 mismatches (nodes not asserted under `gutter`: a head reached only through
   a merge's second parent draws that edge, the main view colours its node by its
   first-parent lane — 3 nodes there). Fails on the pre-fix header (si=42 seg id=22).
-  Three more configurations add `origin/dev` (pinned, `pin_counterpart` → rank 1) three
-  first-parent commits below HEAD's tip — a **counterpart birth** (§5/§5.5) the header
-  must not carry the lower `-1` lane up through (`compact` 64 / 6 colours fail without
-  the birth guard; the `gutter` one passes either way). `tests/pane_spec.lua`'s "colours follow the main view"
+  The ranking is built with `h.ranked` (pins `dev`, `enne`; `enne` current), as
+  `ctx:sync_ref_rank` publishes it; one lane id may show several main-view colours
+  (each on its own stretch) and a header segment must be in one of them. Three more
+  configurations add `origin/dev` (a member of pinned `dev`'s identity) three
+  first-parent commits below HEAD's tip — dev's identity outranks `enne` there and
+  **recolours** its lane (`-1`, muted) rather than starting a new one; the header must
+  draw the stretch above in the main view's colour for it. `tests/pane_spec.lua`'s "colours follow the main view"
   block pins the same LumeScene shape on a minimal DAG under every policy
 - `tests/footer_replay_spec.lua` (+ `tests/large_topo.lua`) — the **footer** counterpart:
   the same real-world topology through the **full projection**, then the footer built at

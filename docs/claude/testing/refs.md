@@ -35,30 +35,26 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   node keeps `◌`; a collapsed head holding HEAD keeps `◍` in the HEAD colour; an
   out-of-cone HEAD node dims; `icons.head` honoured and `""` turns it off; and a
   laid-out graph marks exactly HEAD's row, mirrored or not
-- `tests/label_color_spec.lua` — the label OWNING a node's lane takes its lane
-  colour, every other label its per-kind group (§6 "Label colour", §12.2), through
-  the real `display_item`: a plain row's first label (branch group incl. `↑remote`)
-  equals the node glyph's `get_column_chars` colour while its tag is per-kind;
-  ownership (`label_owner`): a counterpart lane `-k` born here belongs to the
-  counterpart's group even when another remote branch is listed first, a pinned
-  lane to its pinned ref's group, a pinned colour whose ref is elsewhere / a pin
-  past the palette fall back to the first label, a lane born for a pinned
-  detached HEAD going to the first OTHER label (branch group, else tag; the bare
-  `HEAD` stays `palette.head` and never owns — with no other label none does; the
-  pane path's `label_owner` likewise), a packed marker's
-  labels each coloured on their own, a collapsed head's owner; `origin/HEAD` is
-  no label (`classify_ref`); the **lumeeditor shape** through a real
-  `columns.layout` (`compact` + `gutter`: pinned `dev` at X, `origin/dev` +
-  `origin/leppanen/validation` on its child Y, an unlabelled Z above — Y's node is
-  `-1` and only `(dev ↑origin)` takes it); `pane_labels`' `key`s; a `gutter` `own_lane_up` node colours them from the up wire (unflagged:
-  the down wire); a collapsed `◍` head; each marker of a packed row its OWN node
-  colour; the attached label's `HEAD → ` prefix and a detached `HEAD` keep
-  `palette.head`, the h/l-selected label `palette.selected`, a pointer mark its
-  `hl`; out of cone the label is `dim_hl` of the lane colour (a packed marker per
-  marker), in cone / no pivot undimmed; `lane_label_colors = false` restores the
-  per-kind groups everywhere. Panes: `pane_labels`'s `arrow` span and `node_lane_hl` on a
-  header-style (segment-level `highlighted`) row matching the glyph. The pane
-  window glue (`render_pane`) is untested
+- `tests/label_color_spec.lua` — every ranked ref's label takes **its own ref's
+  colour** (§6 "Label colour"), through the real `display_item` with the row's
+  `ref_colors`: a branch group's bracket and name in the local's colour, each
+  `↑remote` in its own muted colour, a tag per-kind; a label keeps its own colour on
+  another ref's track (no lane owner); a remotes-only group in its first remote's
+  muted colour; a ref without a colour on its row, a collapsed `◍` head's labels and
+  a packed marker's labels per-kind (a count-only unit in its node's colour); the
+  **lumeeditor shape** through a real `columns.layout` (every policy: `origin/dev`
+  and its node muted dev, the remote-only label keeping its own colour); the
+  attached label's `HEAD → ` prefix and a detached `HEAD` in `palette.head`, the
+  h/l-selected label `palette.selected`, a pointer mark its `hl`;
+  `lane_label_colors = false` → per-kind everywhere with tracks still coloured;
+  panes: `pane_labels`' `arrow` span and each group's colouring members and
+  `↑remote` spans. Plus **muted remotes** (§5.5, §12.2): `slot_hl(-k)` the
+  `remote_mute` blend of slot k (default 0.25, cached, flat without truecolor),
+  `counterpart_dim` as its alias (the new name winning), out of the cone the
+  `remote_mute_out` blend (default `0.75 * dim`) brighter than every dimmed colour,
+  a remote's label and node muted in the cone / brighter-dimmed out of it, a local's
+  label out of the cone the plain dim. The pane window glue (`render_pane`) is
+  untested
 - `tests/ref_picker_spec.lua` — the ref-picker pure pieces (spec §2, `<leader>b`):
   `bump_recent` (the session MRU list — newest first, deduped, input not mutated),
   `ref_picker_items` (name → Ref registry → ordered picker entries: session-
@@ -149,19 +145,17 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   "not honoured yet" note). Plus a **windowed smoke** block driving the real
   dialog in a real float over a stub ctx (open/`<Space>`/`<C-j>`/`D`/`q`) — the
   keymaps, re-render and focus handoff, which the pure tests cannot reach.
-  Plus the **implicit remote counterparts** (§10.6): `pin_counterparts` (same
-  short name in `git remote` order, unlisted remotes by name, then a differently
-  named upstream; none for a remote / tag) and `pin_rank` (with counterparts on
-  — the anchor set: rank = place, a counterpart sharing its local's, an explicitly
-  unpinned counterpart excluded, an explicitly pinned remote keeping its own; with
-  them off — the layout's `opts.pin_rank`, entries only) and dialog lines without
-  counterpart rows.
+  Plus **a pin covers the identity** (§10.6): `pin_rank` (entries only, by place)
+  and `pin_anchors` (pinning a local anchors its paired remotes and a differently
+  named upstream; pinning a paired remote anchors the whole identity, local
+  included; a remote-only branch every remote of its short name; an explicit unpin
+  drops one member, never an entry; a tag entry anchors itself only) and dialog
+  lines without identity-member rows.
   `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`/
   `pin_rank`/`sync_pin_rank` (default order with HEAD's anchor last, nothing
-  reserved by default, counterparts implicit anchors but NOT in the layout's rank
-  map (§5.5: no rank, no pinned colour) and never rows,
-  dropped with their local or by an explicit unpin, the ranks published on
-  `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
+  reserved by default, a pinned identity's remotes anchors but not entries and never
+  rows, dropped with the identity's last entry or by an explicit unpin, the removed
+  `pin_upstream` ignored, the ranks published on `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
   unpinnable / dropped once attached), and `reconcile_refs` stamping
   the head ref's `branch` (nil when detached); plus the **default selection**
   (§2/§5.4) over a stub ctx in a scratch window: `on_cursor_moved` pre-selects

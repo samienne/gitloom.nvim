@@ -88,24 +88,24 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         local ctx = new_ctx(repo_with_branches(),
             { view_state = vs({ { id = "dev", reserved = true }, { id = "feature", reserved = false } }) })
         local list = internal.effective_pins(ctx)
-        -- No auto entry: implicit counterparts are not rows (§10.6.1).
+        -- No auto entry: identity members are not rows (§10.6.1).
         assert.same({ "master", "main", "dev", "feature" }, ids(list))
         assert.is_true(list[3].reserved)
     end)
 
-    it("pins the remote counterparts implicitly, as anchors only — no rank (§10.6)", function()
+    it("a pin covers the identity: its remotes are anchors, not entries (§10.6)", function()
         local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
         assert.is_true(p.feature)
-        assert.is_true(p["origin/feature"]) -- implicit counterpart: in the anchor set
+        assert.is_true(p["origin/feature"]) -- a member of feature's identity: in the anchor set
         local rank = internal.pin_rank(ctx)
-        assert.is_nil(rank["origin/feature"]) -- ...but not in the layout's rank map (§5/§5.5)
+        assert.is_nil(rank["origin/feature"]) -- ...but not an entry of the pin list
         assert.equal(4, rank.feature) -- below the three defaults
         for id in pairs(rank) do assert.is_true(p[id]) end -- ranks ⊆ anchors
         for _, e in ipairs(internal.effective_pins(ctx)) do assert.not_equal("origin/feature", e.id) end
     end)
 
-    it("unpinning the local drops its counterparts with it", function()
+    it("unpinning the identity's last entry drops its members with it", function()
         local ctx = new_ctx(repo_with_branches(), { view_state = vs({ { id = "feature" } }) })
         assert.is_true(internal.effective_pinned(ctx)["origin/feature"])
         ctx.view_state.pins = {}
@@ -113,7 +113,7 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.is_nil(internal.effective_pinned(ctx)["origin/feature"])
     end)
 
-    it("an explicit unpin of a counterpart removes just that ref", function()
+    it("an explicit unpin of a member removes just that ref's anchor", function()
         local ctx = new_ctx(repo_with_branches(),
             { view_state = vs({ { id = "feature" } }, { ["origin/feature"] = true }) })
         local p = internal.effective_pinned(ctx)
@@ -135,12 +135,12 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.is_nil(internal.effective_pinned(ctx).main)
     end)
 
-    it("pins no counterpart when pin_upstream is off", function()
+    it("ignores the removed pin_upstream option: the identity is pinned regardless (§8)", function()
         local ctx = new_ctx(repo_with_branches(),
             { opts = { pin_upstream = false }, view_state = vs({ { id = "feature" } }) })
         local p = internal.effective_pinned(ctx)
         assert.is_true(p.feature)
-        assert.is_nil(p["origin/feature"])
+        assert.is_true(p["origin/feature"])
     end)
 
     it("pins a seeded pointer mark when its ref exists", function()

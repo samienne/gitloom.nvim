@@ -384,7 +384,17 @@ local function assert_head_id_matches_graph(rows, lane_of, boundary, ctx)
             if cell.has_commit and cell.commit and not boundary_ids[cell.id] then
                 local l = lane_of(cell.commit)
                 local mv = l and l.id
-                if mv ~= nil and cell.id ~= mv then
+                -- A main-view id of one of the head's OTHER edges (a merge's extra-parent
+                -- lane) is still the graph's own lane, not a synthetic one: under carried
+                -- refs (§5) a head's first-parent lane may END at a fork below it, where a
+                -- better-ranked sibling continues, and the header then draws the head on
+                -- the merge edge it does keep.
+                local edge_ids = {}
+                for _, p in ipairs(cell.commit.parents or {}) do
+                    local e = lane_of(cell.commit, p)
+                    if e and e.id ~= nil then edge_ids[e.id] = true end
+                end
+                if mv ~= nil and cell.id ~= mv and not edge_ids[cell.id] then
                     -- allowed only when the graph id is taken by another header lane
                     assert.is_true(used[mv] == true,
                         (ctx or "") .. (" a branch head switched id: header %s vs graph %s"):format(
@@ -807,13 +817,13 @@ describe("pane.header — focused rebuild, laid out seam-up (§6.2)", function()
         end
     end)
 
-    it("keeps a counterpart lane's colour (-k) and never hands slot k to another lane (§5.5/§6.2)", function()
-        -- b3 is a remote counterpart's lane in the main view (colour -1: slot 1, light
-        -- dim); b1 / b2 arrive sharing colour 1 (b1 is the crossing trunk, which keeps
-        -- its boundary colour) and b2 must be de-collided — never onto the pinned slot
-        -- 1 — while b3 keeps its counterpart colour as is. b1 is pinned (rank 1), as the
-        -- local a counterpart belongs to is: so its lane is the one `ca` continues (§5
-        -- tier 0) and it draws slot 1 in the main view.
+    it("keeps a muted colour (-k) and never hands slot k to another lane (§5.5/§6.2)", function()
+        -- b3 stands for a track carrying a remote of b1's identity in the main view
+        -- (colour -1: slot 1, muted); b1 / b2 arrive sharing colour 1 (b1 is the
+        -- crossing trunk, which keeps its boundary colour) and b2 must be de-collided —
+        -- never onto the pinned slot 1 — while b3 keeps its muted colour as is. b1 is
+        -- pinned (rank 1): its lane is the one `ca` continues and it draws slot 1 in
+        -- the main view.
         local items = h.dag({
             { "b1", { "ca" } }, { "b2", { "ca" } }, { "b3", { "ca" } },
             { "ca", { "base" } }, { "base", {} },
@@ -2398,13 +2408,15 @@ describe("pane.header — colours follow the main view (§6.2 Colour)", function
         assert.equals(30, by.a2.color, "a2 recoloured although never alive beside a1")
     end)
 
-    it("does not carry a lane up through a counterpart birth (§5/§5.5)", function()
-        -- The LumeScene shape: `dev` pinned rank 1 at X, its counterpart `origin/dev` on
-        -- X's child Y, and HEAD's branch `enne` (rank 2) three commits above Y. In the
-        -- main view enne's lane (slot 2) ENDS at Y and a counterpart lane (-1) is born
-        -- there, going down. The header, cut below Y, gets the -1 lane at the seam; the
-        -- stretch from Y up to enne's tip must be drawn as the main view draws it — enne's
-        -- lane, slot 2 — not the -1 lane carried on up through Y.
+    it("draws a lane recoloured at an outranking ref in its colour above it (§5/§5.5)", function()
+        -- The LumeScene shape: `dev` pinned rank 1 at X, its remote `origin/dev` on X's
+        -- child Y, and HEAD's branch `enne` (rank 2) three commits above Y. In the main
+        -- view enne's lane (slot 2) runs down to Y, where `origin/dev` (dev's identity,
+        -- pinned 1) outranks enne and the SAME lane continues recoloured in dev's slot 1
+        -- (§5 "Carried refs") — muted, as it carries a remote (§5.5). The
+        -- header, cut below Y, gets that lane at the seam; the stretch from Y up to
+        -- enne's tip must be drawn as the main view draws it — enne's slot 2 — not the
+        -- seam lane's colour carried on up through Y.
         local function ref(items, hash, name, kind)
             for _, it in ipairs(items) do
                 if it.commit.hash == hash then
@@ -2423,21 +2435,20 @@ describe("pane.header — colours follow the main view (§6.2 Colour)", function
             ref(items, "X", "dev")
             local opts = h.big_opts()
             opts.layout_policy = pol
-            opts.pin_rank = { dev = 1, enne = 2 }
-            opts.pin_counterpart = { ["origin/dev"] = 1 }
-            -- the counterpart is an anchor too, as `effective_pinned` makes it (§10.6)
+            h.ranked(opts, items, { pins = { "dev", "enne" }, current = "enne" })
             local res, boundary, _, _, lane_of =
                 header_of(items, opts, 5, { dev = true, enne = true, ["origin/dev"] = true })
             local enne = lane_of({ hash = "H" })
             local cp = lane_of({ hash = "Y" })
             if not (enne and cp) then error("fixture: no main-view lanes") end
             assert.equals(2, enne.color, pol .. ": fixture: enne's lane is slot 2")
-            assert.equals(-1, cp.color, pol .. ": fixture: a counterpart lane is born at Y")
+            assert.equals(-1, cp.color, pol .. ": fixture: the lane is recoloured dev's (muted: origin/dev) at Y")
+            assert.equals(enne.id, cp.id, pol .. ": fixture: one lane, recoloured, not a birth")
             local by = node_colors(res)
             assert.is_not_nil(by.H, pol .. ": enne shown")
-            assert.equals(2, by.H.color, pol .. ": enne's head took the counterpart lane's colour")
+            assert.equals(2, by.H.color, pol .. ": enne's head took the recoloured lane's colour")
             assert.is_not_nil(by.Y, pol .. ": origin/dev shown")
-            assert.equals(-1, by.Y.color, pol .. ": origin/dev's node is the counterpart lane's")
+            assert.equals(-1, by.Y.color, pol .. ": origin/dev's node is in dev's colour, muted (§5.5)")
             -- every segment above origin/dev's row (the last header row) is enne's
             for i = 1, #res.rows - 1 do
                 for _, cell in ipairs(res.rows[i].columns) do

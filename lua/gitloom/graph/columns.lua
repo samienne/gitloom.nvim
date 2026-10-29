@@ -17,8 +17,9 @@
 --- Output shape matches the legacy build_graph so Phase 2 (get_column_chars) and
 --- the invariant tests consume it unchanged: rows of { columns, parent_lanes,
 --- child_lanes }, each track { connectivity, lanes (Segment[]), has_commit,
---- commit, id, color, begin, parent }. `id` is the lane's stable identity;
---- `color` is its palette slot, allocated from a recycling free list (below).
+--- commit, id, color, ref, begin, parent }. `id` is the lane's stable identity;
+--- `ref` is the ref the edge carries (a `RankInfo`, spec §5 "Carried refs") and
+--- `color` that ref's palette slot, allocated from a recycling free list (below).
 ---
 --- **Staged layout.** `M.layout` lays out each item with shell setup steps
 --- (classify / spawn_lanes / decide_style) then a **layout strategy** — a plain
@@ -46,6 +47,8 @@
 --- A row renders as `[above…] columns [merge]`: `above` is a LIST of virtual lines
 --- (the split fan, plus `gutter`'s handover rows), topmost first (§5 Line).
 local M = {}
+
+local rankm = require("gitloom.graph.rank")
 
 --- **For tests only** — not configuration and not part of the API.
 --- `handover_column = false` disables §5.6's handover column, so a test can compare
@@ -82,42 +85,6 @@ local function owns_subject(C, opts)
     return true
 end
 
---- A ref's id: its key in `repo.refs` (`git.add_ref`) — the ref name, except the
---- `head` ref, which is keyed `HEAD`. `opts.pin_rank` is keyed by exactly these.
----@param ref Ref
----@return string
-local function ref_id(ref)
-    return ref.kind == "head" and "HEAD" or ref.name
-end
-
---- A commit's **pin rank** (spec §5 "Lane identity"): the best (smallest) rank in
---- `pin_rank` among the refs pointing at it, or nil when none of them is pinned.
---- Works on a Commit and on a projected DisplayNode alike — a node reads its
---- commit's `refs` through its metatable, and a collapsed head (§10.3) carries every
---- member's refs, so a head is ranked by the best pinned ref anywhere in its region.
---- An attached `HEAD` ref is keyed `HEAD`, which the pin list never holds while HEAD
---- is attached (§10.6), so it ranks nothing; a detached one does when pinned.
---- A §4.2 working-tree node (`virtual`, no refs) is ranked as the first real commit
---- down its first parents — the HEAD commit the stack stands on — so the ◌ lane
---- continues into HEAD in HEAD's branch colour.
----@param commit table               a Commit or DisplayNode
----@param pin_rank table<string, integer>?  ref id → rank (1 = highest priority)
----@return integer?
-function M.commit_rank(commit, pin_rank)
-    if not pin_rank or not commit then return nil end
-    -- A §4.2 working-tree node ranks as the HEAD commit it stands on (spec §4.2
-    -- "Layout identity follows HEAD"): its lane continues into HEAD instead of
-    -- ending there at a pinned-tip birth.
-    while commit and commit.virtual do commit = (commit.parents or {})[1] end
-    if not commit then return nil end
-    local best
-    for _, ref in ipairs(commit.refs or {}) do
-        local r = pin_rank[ref_id(ref)]
-        if r and (not best or r < best) then best = r end
-    end
-    return best
-end
-
 --- The **pinned colours** (spec §5.5): slot → rank for every rank in `pin_rank` that
 --- owns a curated slot. Rank `k` owns slot `k` of `palette.tracks` — the list every
 --- lane draws from — so the map is the identity on its keys; it is a set with the
@@ -137,27 +104,6 @@ function M.pinned_slots(pin_rank, ntracks)
     end
     return out
 end
-
---- Is rank `a` strictly better than rank `b`? Smaller is better; nil (unranked) is
---- worse than every rank, so two unranked lanes tie.
----@param a integer?
----@param b integer?
----@return boolean
-local function rank_better(a, b)
-    return a ~= nil and (b == nil or a < b)
-end
-
---- A lane's **counterpart rank** (§5 tier 0, §5.5 "Counterpart colours"): `k` for a
---- counterpart lane, whose colour is slot `k`'s counterpart variant `-k`; nil for any
---- other lane. Read off the colour, which every continuation (and a footer seed,
---- §6.2) carries unchanged, so it needs no field of its own.
----@param lane table
----@return integer?
-local function cp_rank(lane)
-    local c = lane.color
-    return (c and c < 0) and -c or nil
-end
-M.cp_rank = cp_rank
 
 --- Does this incoming Lane arrive as its child's FIRST-parent edge (§5 tier 1)?
 ---@param lane table
@@ -215,12 +161,6 @@ end
 ---@return integer? index  -- the outgoing entry that may continue in the gutter
 local function merge_swap_index(state)
     if not state.subject then return nil end
-    -- CLAUSE 0: not where a pinned lane is BORN (§5). There the first parent is the
-    -- newborn pinned lane, and the node must read in its colour; a swap would put a
-    -- non-first parent below the node and an ending lane above it — the commit's own
-    -- lane on neither side. Declining also leaves the split swap free to keep a
-    -- converging child in the gutter, so the birth pays no handover Line at all.
-    if state.pin_birth then return nil end
     local outgoing, pre = state.outgoing, state.pre
     if not pre or #outgoing < 2 then return nil end
     local p1 = outgoing[1].lane.parent
@@ -434,10 +374,10 @@ end
 ---
 --- `seed` (optional) pre-populates the sweep's `active` map with lanes crossing
 --- in **from above** — the boundary lanes of a context pane (spec §6.2). Each
---- seeded lane keeps its column and its colour (so the pane's seam matches the
---- main view's edge), and its colour slot is reserved so the layout's own newly
---- born lanes never reuse a live seam colour. A seeded lane is an ordinary Lane
---- `{id, color, parent, begin?}`; it draws straight down until its `parent`
+--- seeded lane keeps its column, its carried ref and its colour (so the pane's
+--- seam matches the main view's edge), and its colour slot is reserved so the
+--- layout's own refs never reuse a live seam colour. A seeded lane is an ordinary
+--- Lane `{id, color, ref?, parent, begin?}`; it draws straight down until its `parent`
 --- commit appears in `items` (or off the bottom edge if it never does). Seeding
 --- only constrains the sweep **start**, so it pins a footer's top seam exactly;
 --- a header's bottom seam needs a different mechanism (see ARCHITECTURE.md).
@@ -445,26 +385,24 @@ end
 ---@param seed table<integer, table>?  -- col -> Lane crossing in from above
 ---@return LayoutSession
 function M.session(opts, seed)
-    -- The pin ranks (§5 tier 0 / birth at a pinned tip). An empty map ranks
-    -- nothing, so it is normalised to nil: the "no pins" path is one nil test.
-    local pin_rank = opts.pin_rank
-    if pin_rank and next(pin_rank) == nil then pin_rank = nil end
-    -- The counterpart map (§5.5): implicit remote counterpart's ref id → its local's
-    -- rank. Colour only — never read by identity. Normalised to nil like `pin_rank`.
-    local pin_cp = opts.pin_counterpart
-    if pin_cp and next(pin_cp) == nil then pin_cp = nil end
+    -- The ranking input (spec §5 "Ranked refs and identities", `rank.input`): the
+    -- visible ranked refs' infos, the pinned identities' slots and the current
+    -- branch. nil ranks nothing: every track then carries a generated ref.
+    local rr = opts.ref_rank
+    local infos = (rr and rr.infos) or {}
     local next_id = 0
     local function new_id()
         next_id = next_id + 1
         return next_id
     end
 
-    -- Lane colour is a **palette slot** from a recycling FIFO **free list** seeded
-    -- with the curated `palette.tracks` colours (slots 1..ntracks). A born lane
-    -- takes the front; an ended lane returns its slot to the back, recycled with a
-    -- cooldown so it is not reused immediately. New lanes allocate *before* ended
-    -- lanes return their slots, so concurrent lanes never share a colour while
-    -- slots last (specification.md §5.5). Phase 2 maps a slot to a colour: <=
+    -- Colour is a **palette slot** from a recycling FIFO **free list** seeded with
+    -- the curated `palette.tracks` colours (slots 1..ntracks), and it belongs to a
+    -- REF (an identity, spec §5.5), not to a lane: a ref takes the front the first
+    -- time it is selected, carried or labelled, and returns its slot to the back
+    -- once it is released (below), recycled with a cooldown so it is not reused
+    -- immediately. A row allocates *before* it releases, so refs alive together
+    -- never share a colour while slots last. Phase 2 maps a slot to a colour: <=
     -- ntracks indexes `palette.tracks`, beyond that is a generated OKLCH colour.
     --
     -- Two modes (gated by `palette.generate`, which graph.lua turns off without
@@ -474,8 +412,7 @@ function M.session(opts, seed)
     --    generated slot is RETIRED (dropped) once the list is comfortably full
     --    again, so a calmed graph drifts back to curated colours.
     --  * no generate: on exhaustion SHARE a curated slot, reference-counted so a
-    --    slot returns only when its last holder ends (never handing a live colour
-    --    to a new lane).
+    --    slot returns only when its last holder releases it.
     local ntracks = (opts.palette and opts.palette.tracks and #opts.palette.tracks) or 8
     local generate = (opts.palette and opts.palette.generate) and true or false
     local buffer = generate and (tonumber(opts.palette.buffer) or 3) or 0
@@ -488,28 +425,23 @@ function M.session(opts, seed)
     for i = 1, ntracks do in_use[i] = 0; free[i] = { slot = i, ready = 0 } end
     local function fcount() return qtail - qhead + 1 end
 
-    -- PINNED COLOURS (§5.5). Rank `k` (k <= ntracks) owns curated slot `k`. From the
-    -- start of the layout the slot is WITHHELD: out of the FIFO, `in_use` 1 (the
-    -- reservation is its holder), never handed out by `alloc_color` and never shared.
-    -- The pinned lane born at its tip TAKES the reservation over (`take_pin`); the slot
-    -- returns to the free list through the ordinary `free_color` when that lane ends,
-    -- or through `release_pin` at the tip when no lane of its own is born there.
-    --   `pin_wait[k]` — slot k withheld and not yet claimed by a lane;
-    --   `held[k]`     — slot k withheld OR held by its pinned lane (cleared when the
-    --                   slot finally returns), which is what the share path skips.
-    local pin_wait, held, nheld = {}, {}, 0
-    if pin_rank then
-        for k in pairs(M.pinned_slots(pin_rank, ntracks)) do
-            pin_wait[k], held[k], nheld = true, true, nheld + 1
+    -- PINNED COLOURS (§5.5). A pinned identity of rank `k` (k <= ntracks) owns
+    -- curated slot `k`, WITHHELD for the whole layout: out of the FIFO, `in_use` 1,
+    -- never handed out by `alloc_color`, never shared and never released. A function
+    -- of the ranks alone, so it is fixed before the first row.
+    local pin_slot, held, nheld = {}, {}, 0 -- identity key → slot; slot → true
+    for key, k in pairs((rr and rr.slots) or {}) do
+        if type(k) == "number" and k >= 1 and k <= ntracks and k == math.floor(k) and not held[k] then
+            pin_slot[key], held[k], nheld = k, true, nheld + 1
         end
-        if nheld > 0 then
-            local kept = {}
-            for i = qhead, qtail do
-                if not held[free[i].slot] then kept[#kept + 1] = free[i] end
-            end
-            free, qhead, qtail = kept, 1, #kept
-            for k in pairs(held) do in_use[k] = 1 end
+    end
+    if nheld > 0 then
+        local kept = {}
+        for i = qhead, qtail do
+            if not held[free[i].slot] then kept[#kept + 1] = free[i] end
         end
+        free, qhead, qtail = kept, 1, #kept
+        for k in pairs(held) do in_use[k] = 1 end
     end
 
     local function alloc_color()
@@ -546,62 +478,60 @@ function M.session(opts, seed)
 
     local function free_color(c)
         if not c then return end
-        -- A counterpart lane's colour `-k` is slot `k` (§5.5): one more holder of it.
-        if c < 0 then c = -c end
         in_use[c] = (in_use[c] or 0) - 1
         if in_use[c] > 0 then return end -- still held (a shared slot's other holder)
-        -- A pinned colour's last holder ended: the slot is an ordinary one again.
-        if held[c] then held[c], nheld = nil, nheld - 1 end
         -- Retire a surplus generated slot rather than recycling it, so quiet
         -- stretches drift back to the curated palette. "Comfortably full" counts
         -- only the slots not withheld as pinned colours (§5.5).
         if c > ntracks and fcount() >= ntracks - nheld then return end
-        qtail = qtail + 1; free[qtail] = { slot = c, ready = clock + buffer }
+        -- Held out of the next `buffer` allocations (§5.5): reusable from the one after.
+        qtail = qtail + 1; free[qtail] = { slot = c, ready = clock + buffer + 1 }
     end
 
-    -- The colour of a lane born where rank `r` is pinned: its pinned colour while that
-    -- is still withheld (the lane takes the reservation over — `in_use` stays 1), else
-    -- (unranked, past the palette, or already claimed) an ordinary free-list colour.
-    local function take_pin(r)
-        if r and pin_wait[r] then
-            pin_wait[r] = nil
-            return r
+    -- CARRIED REFS (spec §5 "Carried refs", §5.5). Every Lane carries one ref (a
+    -- `RankInfo`); colour state is kept per REF KEY — the identity key of a ranked
+    -- ref (members share one hue), the info table itself for a generated ref.
+    --   `tip_row[name]`  — the row a ranked ref's tip was swept at (rank's standing rows)
+    --   `pending[key]`   — visible members of the identity whose tip is still below
+    --   `live[key]`      — live tracks (active edges) carrying a member
+    --   `color_of[key]`  — the slot the key holds while it holds one
+    --   `ref_colors`     — ref name → its label colour, the identity colour at its tip
+    -- A key's colour is released once no live track carries it AND no member is still
+    -- pending (spec §5.5) — never a pinned slot. The releases due on one row go in
+    -- the order their colours were allocated (`alloc_seq`), after its allocations.
+    local tip_row, reached, pending, live = {}, {}, {}, {}
+    local color_of, alloc_seq, nalloc = {}, {}, 0
+    local ref_colors = {}
+    local ngen = 0
+    local gen_on = {} -- commit → the generated ref sitting on it (§5 "Other parents")
+    for _, info in pairs(infos) do pending[info.ident] = (pending[info.ident] or 0) + 1 end
+    local function key_of(info) return info.ident or info end
+    local function gen()
+        ngen = ngen + 1
+        return rankm.generated(ngen)
+    end
+    local function better(a, b) return rankm.better(a, b, tip_row) end
+    local function ensure(info)
+        local k = key_of(info)
+        local c = color_of[k]
+        if c then return c end
+        c = (info.ident and pin_slot[info.ident]) or alloc_color()
+        nalloc = nalloc + 1
+        color_of[k], alloc_seq[k] = c, nalloc
+        return c
+    end
+    local function release(keys)
+        local list = {}
+        for k in pairs(keys) do
+            if color_of[k] and (live[k] or 0) == 0 and (pending[k] or 0) == 0
+                and not (type(k) == "string" and pin_slot[k]) then
+                list[#list + 1] = k
+            end
         end
-        return alloc_color()
-    end
-
-    -- COUNTERPART COLOURS (§5.5). A lane born unranked at an implicit remote
-    -- counterpart's tip shares its local's slot `k` while that slot is still HELD
-    -- (withheld, or held by the pinned lane or another counterpart lane): it is one
-    -- more holder (`in_use[k] + 1`, so `free_color` returns the slot only when the
-    -- last holder ends) and its colour is `-k` — slot k in its counterpart variant,
-    -- the mark every copy of the colour carries. Nothing else may take a held slot.
-    -- The best (smallest) such rank at the commit wins (`counterpart_at`; nil when
-    -- none applies, and the caller then takes an ordinary free-list colour). That
-    -- rank is also what decides a COUNTERPART BIRTH (§5, in `spawn_lanes`): a held
-    -- slot is exactly when the birth has a colour to give, so no birth churns lanes
-    -- for an ordinary colour.
-    local function counterpart_at(C)
-        if not pin_cp then return nil end
-        local best
-        for _, ref in ipairs(C.refs or {}) do
-            local k = pin_cp[ref_id(ref)]
-            if k and held[k] and (not best or k < best) then best = k end
-        end
-        return best
-    end
-    local function take_counterpart(k)
-        if not k then return nil end
-        in_use[k] = in_use[k] + 1
-        return -k
-    end
-
-    -- Release a still-withheld pinned colour whose branch start was found without a
-    -- lane of its own (§5.5): back to the free list like any returned colour.
-    local function release_pin(k)
-        if pin_wait[k] then
-            pin_wait[k] = nil
-            free_color(k)
+        table.sort(list, function(a, b) return alloc_seq[a] < alloc_seq[b] end)
+        for _, k in ipairs(list) do
+            free_color(color_of[k])
+            color_of[k], alloc_seq[k] = nil, nil
         end
     end
 
@@ -609,17 +539,35 @@ function M.session(opts, seed)
     local active = {} -- col -> Lane flowing down into the current row
 
     -- Seed the boundary lanes of a context pane (spec §6.2): they flow in from
-    -- above in their given columns, keeping their colours. Reserve each seed
-    -- colour slot — drop it from the curated free FIFO and bump its in_use — so
-    -- the pane's own newly born lanes never reuse a colour live at the seam.
+    -- above in their given columns, keeping their colours and carried refs. Each
+    -- seeded ref keeps its seed colour, reserved — dropped from the curated free
+    -- FIFO and counted in use — so the pane's own refs never reuse a colour live at
+    -- the seam. A seed carrying a pinned identity's slot is that reservation already
+    -- (counted once). A seed without a ref carries a generated one, ranked before
+    -- every ref the pane generates (seeded refs were created first).
     if seed then
-        local reserved, cp = {}, {}
-        for col, lane in pairs(seed) do
+        local reserved = {}
+        local cols = {}
+        for col in pairs(seed) do cols[#cols + 1] = col end
+        table.sort(cols)
+        for _, col in ipairs(cols) do
+            local lane = seed[col]
             active[col] = lane
-            -- A counterpart seed (`-k`, §5.5) holds slot k as one more holder.
-            local slot = lane.color < 0 and -lane.color or lane.color
-            reserved[slot] = (reserved[slot] or 0) + 1
-            if lane.color < 0 then cp[slot] = (cp[slot] or 0) + 1 end
+            local info = lane.ref
+            if info and info.tier == 4 and (info.seq or 0) > ngen then ngen = info.seq end
+            if not info then
+                info = rankm.generated(col - 1000000)
+                lane.ref = info
+            end
+            local k = key_of(info)
+            live[k] = (live[k] or 0) + 1
+            -- A seed's colour is its drawn colour: `-k` (slot k muted) for a remote.
+            local slot = lane.color and math.abs(lane.color)
+            if not color_of[k] and slot then
+                nalloc = nalloc + 1
+                color_of[k], alloc_seq[k] = slot, nalloc
+                if not held[slot] then reserved[slot] = (reserved[slot] or 0) + 1 end
+            end
         end
         local kept = {}
         for i = qhead, qtail do
@@ -627,11 +575,6 @@ function M.session(opts, seed)
         end
         free, qhead, qtail = kept, 1, #kept
         for slot, n in pairs(reserved) do
-            -- A seed carrying a still-withheld pinned colour IS that pinned branch's
-            -- lane continuing across the seam (§5.5): it takes the reservation over,
-            -- so the slot is counted once and released when the seed ends.
-            -- A counterpart seed never does: it is a holder in addition to the pin.
-            if pin_wait[slot] and n > (cp[slot] or 0) then pin_wait[slot] = nil; n = n - 1 end
             in_use[slot] = (in_use[slot] or 0) + n
             if slot > nextgen then nextgen = slot end
         end
@@ -653,14 +596,16 @@ function M.session(opts, seed)
         -- descent into a merge / ascent out of a split): it lights if *any* of its
         -- edges is in the cone, which is what keeps a non-trunk cone lane connected
         -- through the hub.
-        local function add_seg(j, c, edges, id, color)
+        -- `src` is the Lane whose id, colour and carried ref label the wire.
+        local function add_seg(j, c, edges, src)
             cells[j] = cells[j] or {}
             cells[j][#cells[j] + 1] = {
-                id = id, color = color, begin = edges[1] and edges[1].begin, parent = edges[1] and edges[1].parent,
+                id = src.id, color = src.color, ref = src.ref,
+                begin = edges[1] and edges[1].begin, parent = edges[1] and edges[1].parent,
                 connectivity = conn(c), edges = edges,
             }
         end
-        local function add(j, lane, c) add_seg(j, c, { lane }, lane.id, lane.color) end
+        local function add(j, lane, c) add_seg(j, c, { lane }, lane) end
         local function draw(lane, lo, hi, up_col, down_col)
             for m = lo, hi do
                 local c = { left = m > lo or nil, right = m < hi or nil }
@@ -687,6 +632,7 @@ function M.session(opts, seed)
                 commit = (commit_col ~= nil and j == commit_col) and C or nil,
                 id = segs[1] and segs[1].id or nil,
                 color = segs[1] and segs[1].color or nil,
+                ref = segs[1] and segs[1].ref or nil,
                 begin = segs[1] and segs[1].begin or nil,
                 parent = segs[1] and segs[1].parent or nil,
             }
@@ -717,146 +663,148 @@ function M.session(opts, seed)
         state.incoming_lanes, state.survivor_lanes = iset, sset
     end
 
-    -- SPAWN_LANES (shell step): mint one outgoing Lane per parent, then return the
-    -- ended incoming children's colours. Pure lane lifecycle, driven by the DAG, the
-    -- row order and the pin ranks, NEVER by placement; must run before any later
-    -- colour alloc so a slot freed here cannot be reused by a lane born on the same
-    -- line.
+    -- SPAWN_LANES (shell step): mint one outgoing Lane per parent, carrying its ref
+    -- and that ref's colour, then end every incoming edge and release the colours
+    -- nothing holds any more. Pure lane lifecycle, driven by the DAG, the row order
+    -- and the ranks, NEVER by placement; it runs before any stage, so allocation and
+    -- release order are row order alone (§5.5).
     --
-    -- IDENTITY (spec §5). A lane is `{ id, color, rank }`; the first parent continues
-    -- the identity of one incoming lane, chosen in tiers, each deciding only between
-    -- the lanes the previous one left tied — all read off the DAG, the row order and
-    -- `opts.pin_rank`, never off a column:
+    -- CARRIED REFS (spec §5). This commit's **selected ref** is the best-ranked
+    -- (`rank.better`) of the refs carried by the arriving tracks and its own visible
+    -- ranked refs (a §4.2 working-tree node: HEAD's branch). The first parent's track
+    -- carries the selected ref; each other parent's carries the best ranked ref ON
+    -- that parent commit, else the parent's generated ref (created at the first such
+    -- edge, shared by every later one). No arriving track and no own ref: a generated
+    -- ref created here.
     --
-    --  0. PIN RANK — the best-ranked lane (1 is best; an unranked lane, `rank == nil`,
-    --     is worse than every rank). A lane's rank is fixed where it is born (the best
-    --     pinned ref at that commit, `M.commit_rank`) and carried by its continuations.
+    -- IDENTITY (spec §5 "Lane identity"). The first parent continues one incoming
+    -- lane's `id`, chosen in tiers, each deciding only between the lanes the previous
+    -- one left tied — all read off the DAG, the row order and the ranks, never a
+    -- column:
+    --
+    --  0. CARRIED REF — the lane carrying the best-ranked ref. When the commit's own
+    --     ref outranks every arriving one, this lane still continues, RECOLOURED: no
+    --     lane is born at a ranked tip. Several lanes may carry one ref, so:
     --  1. FIRST PARENT — a lane whose child has THIS COMMIT as its FIRST parent: that
     --     child's mainline runs into here, so it is a continuation outright. A merge's
-    --     second-parent edge is still a candidate — it is the merged-in BRANCH, and
-    --     minting a fresh lane for it would recolour every merged-in branch tip (the
-    --     `m -> {a, b}` diamond is the smallest case that proves it).
+    --     second-parent edge is still a candidate — it is the merged-in BRANCH.
     --  2. NEWEST — the largest id. Ids are minted in row order and carried along a
-    --     whole first-parent chain, so the largest is the chain that started LOWEST,
-    --     nearest this commit: the branch just followed down into the junction carries
-    --     on and the older chain ends. A trunk keeps its colour through such a
-    --     junction by being pinned (tier 0), not by having started first.
-    --
-    -- BIRTH AT A PINNED TIP overrules the tiers where this commit's best rank STRICTLY
-    -- beats every incoming lane's: every incoming lane ends — a merge's extra-parent
-    -- edge included, since a lane's colour is fixed for life — and the pinned
-    -- branch's lane is born (fresh id, its PINNED COLOUR, §5.5). An equal rank births
-    -- nothing. With no `pin_rank` every rank is nil, tier 0 always ties and no commit
-    -- is pinned, so this is exactly the old two-tier choice.
-    --
-    -- Tier 0 continues below the ranks: among UNRANKED lanes a COUNTERPART lane
-    -- (colour `-k`, `cp_rank`) beats a plain one, the smaller `k` first. And BIRTH AT
-    -- A COUNTERPART TIP is the same overrule one step down: at a commit with no ranked
-    -- ref, carrying an implicit remote counterpart of rank `k` whose slot is still
-    -- held, when `k` strictly beats every incoming lane (none ranked <= k, none a
-    -- counterpart lane of rank <= k — compared by RANK, so a lane of a pin ranked
-    -- worse than `k`, e.g. HEAD's branch below the trunks, is beaten and ends here),
-    -- every incoming lane ends and a counterpart lane is born (fresh id, unranked,
-    -- colour `-k`). Both births set `state.pin_birth`, so
-    -- the gutter treats them alike (no claim row, no parent swap).
-    --
-    -- PINNED COLOURS: a lane born with rank `r` takes slot `r` while it is withheld
-    -- (`take_pin`). After the ended lanes return, every rank at this commit whose slot
-    -- is STILL withheld is released (`release_pin`, slot order): the branch's start is
-    -- here, and it got no lane of its own — a better-ranked lane continued, a better
-    -- ref on the same commit named the lane, or the commit is a root.
+    --     whole first-parent chain, so the largest is the chain that started LOWEST.
     --
     -- This used to be "the leftmost incoming lane" — a positional proxy for "the
     -- trunk", true only while the trunk happened to sit leftmost. Choosing
     -- semantically is also what makes identity **invariant across layout policies**
-    -- (§5.6): no column may reach an id, a colour or a rank.
+    -- (§5.6): no column may reach an id, a ref or a colour.
+    local state_index = 0 -- the row being swept (`spawn_lanes` sets it)
+    local function own_refs(C)
+        local own = {}
+        if C.virtual then
+            -- §4.2: a working-tree node carries HEAD's current branch for layout. Its
+            -- tip is the HEAD commit below, so nothing is reached here.
+            local info = rr and rr.head and infos[rr.head]
+            if info then own[1] = info end
+            return own
+        end
+        for _, ref in ipairs(C.refs or {}) do
+            local info = (ref.kind == "local" or ref.kind == "remote") and infos[ref.name] or nil
+            if info and not reached[ref.name] then
+                reached[ref.name] = true
+                tip_row[ref.name] = state_index
+                pending[info.ident] = (pending[info.ident] or 1) - 1
+                -- A collapsed head / kept junction folds its refs (§5): not ranked here.
+                if not C.collapsed and not C.junction then own[#own + 1] = info end
+            end
+        end
+        return own
+    end
+
+    -- The ref the track to non-first parent `p` carries (§5 "Other parents"): the best
+    -- ranked ref on `p` itself, compared as standing at `p`'s (not yet swept) row;
+    -- else `p`'s generated ref.
+    local below = setmetatable({}, { __index = tip_row })
+    local function parent_ref(p)
+        local best
+        if not p.collapsed and not p.junction then
+            local cands = {}
+            for _, ref in ipairs(p.refs or {}) do
+                local info = (ref.kind == "local" or ref.kind == "remote") and infos[ref.name] or nil
+                if info and not reached[ref.name] then
+                    cands[#cands + 1] = info
+                    below[ref.name] = math.huge
+                end
+            end
+            for _, info in ipairs(cands) do
+                if not best or rankm.better(info, best, below) then best = info end
+            end
+            for _, info in ipairs(cands) do below[info.name] = nil end
+        end
+        if best then return best end
+        local g = gen_on[p]
+        if not g then
+            g = gen()
+            gen_on[p] = g
+        end
+        return g
+    end
+
     local function spawn_lanes(state)
         local C = state.commit
         local incoming = state.incoming
+        state_index = state.index
+        local own = own_refs(C)
         local trunk
         for _, e in ipairs(incoming) do
             local l = e.lane
             if not trunk then
                 trunk = l
-            elseif rank_better(l.rank, trunk.rank) then
+            elseif better(l.ref, trunk.ref) then
                 trunk = l
-            elseif rank_better(trunk.rank, l.rank) then
-                -- `trunk` outranks `l`: keep it.
-            elseif rank_better(cp_rank(l), cp_rank(trunk)) then
-                -- Tied ranks (both unranked): the better COUNTERPART lane wins (§5 tier 0).
-                trunk = l
-            elseif not rank_better(cp_rank(trunk), cp_rank(l)) then
+            elseif not better(trunk.ref, l.ref) then
+                -- One ref on both (a total order): tiers 1 and 2.
                 local lf, tf = continues_into(l, C), continues_into(trunk, C)
                 if (lf and not tf) or (lf == tf and l.id > trunk.id) then trunk = l end
             end
         end
-        local crank = pin_rank and M.commit_rank(C, pin_rank)
-        local rank = trunk and trunk.rank or crank
-        state.pin_birth = nil
-        if crank and trunk and rank_better(crank, trunk.rank) then
-            -- `trunk` holds the best incoming rank, so beating it beats them all: no
-            -- incoming lane continues, and the node is where the pinned lane is born.
-            trunk, rank = nil, crank
-            state.pin_birth = true
+        local sel = trunk and trunk.ref
+        for _, info in ipairs(own) do
+            if not sel or better(info, sel) then sel = info end
         end
-        -- BIRTH AT A COUNTERPART TIP (§5): no ranked ref here, its slot `k` still held,
-        -- and `k` strictly beats every incoming lane — none ranked <= k, none a
-        -- counterpart lane of rank <= k. A lane of a pin ranked WORSE than `k` is beaten
-        -- like an unranked one. Every incoming lane is checked, not just `trunk`: tier 0
-        -- prefers any ranked lane to a counterpart lane, so a counterpart lane of rank
-        -- <= k may arrive beside a worse-ranked `trunk`, and it still blocks the birth.
-        -- The ranked rule wins wherever a ranked ref points (`crank`).
-        local ck = (not crank) and counterpart_at(C) or nil
-        if ck and trunk then
-            local beaten = true
-            for _, e in ipairs(incoming) do
-                local l = e.lane
-                if not rank_better(ck, l.rank or cp_rank(l)) then beaten = false; break end
-            end
-            if beaten then
-                trunk, rank = nil, nil
-                state.pin_birth = true
-            end
+        sel = sel or gen()
+        -- Allocation order (§5.5): the selected ref, the labels' refs in label order,
+        -- then the other parents' refs in parent order.
+        local touched = {}
+        local sel_color = ensure(sel)
+        touched[key_of(sel)] = true
+        local labels = {}
+        for _, info in ipairs(own) do
+            local c = ensure(info)
+            labels[info.name] = c
+            ref_colors[info.name] = c
+            touched[key_of(info)] = true
         end
+        -- A track's drawn colour: its ref's identity slot, `-k` (the muted variant)
+        -- for a remote ref (§5.5 "Muted remotes") — so every copy of the colour, the
+        -- panes' included (§6.2), draws a remote muted without consulting its ref.
         local outgoing = {}
         for i, p in ipairs(C.parents or {}) do
-            local id, color, r
-            if i == 1 and trunk then
-                id, color, r = trunk.id, trunk.color, rank
-            elseif i == 1 then
-                -- An unranked birth at a remote counterpart's tip shares its local's
-                -- slot (§5.5, colour only); otherwise the pinned / free-list colour.
-                id, r = new_id(), rank
-                color = (rank == nil and take_counterpart(ck)) or take_pin(rank)
-            else
-                -- A merge's extra-parent edge: born unranked.
-                id, color = new_id(), alloc_color()
-            end
-            outgoing[#outgoing + 1] = { lane = { id = id, color = color, rank = r,
+            local info = (i == 1) and sel or parent_ref(p)
+            local id = (i == 1 and trunk) and trunk.id or new_id()
+            local k = key_of(info)
+            live[k] = (live[k] or 0) + 1
+            local c = ensure(info)
+            outgoing[#outgoing + 1] = { lane = { id = id, color = info.remote and -c or c, ref = info,
                 begin = C, parent = p, highlighted = false } }
         end
-        -- Return the colour of every incoming lane that did not continue (all of
-        -- them when nothing leaves). Ordered by lane id — row order — because
-        -- `free_color` appends to a FIFO, so the ORDER of these returns decides which
-        -- colour a later lane receives; taking it from columns would let placement
-        -- reach colour through the back door and two policies would diverge (§5.5).
-        local ended = {}
+        -- Every incoming edge ends here; then the releases, after every allocation.
         for _, e in ipairs(incoming) do
-            if e.lane ~= trunk or #outgoing == 0 then ended[#ended + 1] = e.lane end
+            local k = key_of(e.lane.ref)
+            live[k] = (live[k] or 1) - 1
+            touched[k] = true
         end
-        table.sort(ended, function(a, b) return a.id < b.id end)
-        for _, lane in ipairs(ended) do free_color(lane.color) end
-        if crank and pin_rank then
-            local ks = {}
-            for _, ref in ipairs(C.refs or {}) do
-                local k = pin_rank[ref_id(ref)]
-                if k and pin_wait[k] then ks[#ks + 1] = k end
-            end
-            table.sort(ks)
-            for _, k in ipairs(ks) do release_pin(k) end
-        end
+        release(touched)
         state.outgoing = outgoing
         state.trunk_in = trunk
+        state.selected, state.selected_color, state.ref_colors = sel, sel_color, labels
         -- The incoming ENTRY carrying that lane, so a placement stage can ask "which
         -- column is this commit's own lane in?" without re-deriving identity. The
         -- entry table is what the gutter's handover rows mutate (`e.col`), so holding
@@ -1065,14 +1013,6 @@ function M.session(opts, seed)
         if not state.subject or blocked[GUTTER] or state.split_swap then return end
         local incoming = state.incoming
         if #incoming == 0 then return end
-        -- A pinned lane BORN here (§5) continues no incoming lane, so there is nothing
-        -- that must turn in: every incoming lane ends at the node, converging as an arm
-        -- of the fan-in. Claiming one would pay a handover Line only to end it on the
-        -- node — UNLESS the fan-in shares the commit Line with a fan-out: arms running
-        -- in towards the gutter and extra parents running out of it over the same cells
-        -- is the §5.1 mixed-direction share the claim row exists to prevent. So skip it
-        -- only when either fan has a Line of its own or nothing fans out.
-        if state.pin_birth and (state.sep_split or state.sep_merge or #state.outgoing <= 1) then return end
         local claimer
         for _, inc in ipairs(incoming) do
             if inc.lane == state.trunk_in then claimer = inc end
@@ -1293,7 +1233,7 @@ function M.session(opts, seed)
             if hub_col == cc0 then
                 -- The node sits on the hub lane's own column (every policy but a
                 -- `gutter` pane seam row): it enters the hub as a bare up-stub.
-                add_seg(cc0, { up = true }, { hub }, hub.id, hub.color)
+                add_seg(cc0, { up = true }, { hub }, hub)
             else
                 -- The node column is elsewhere, and the hub lane reaches it as a fan arm
                 -- like the rest. Two `gutter` rows land here (§5.6): a pane SEAM row
@@ -1312,7 +1252,7 @@ function M.session(opts, seed)
             -- this same wire as `commit_incoming`'s up-stub, so the two must carry
             -- one id. It is not an identity choice — identity changes at the node,
             -- below this wire — so it is the arriving lane the node sits on.
-            add_seg(cc0, { down = true }, descent, hub.id, hub.color)
+            add_seg(cc0, { down = true }, descent, hub)
             for _, inc in ipairs(incoming) do
                 if inc.lane ~= hub then
                     draw(inc.lane, math.min(inc.col, cc0), math.max(inc.col, cc0), inc.col, nil)
@@ -1469,8 +1409,8 @@ function M.session(opts, seed)
             if lead then
                 local ascent = {}
                 for _, o in ipairs(outgoing) do ascent[#ascent + 1] = o.lane end
-                madd(cc, { up = true }, ascent, lead.lane.id, lead.lane.color)
-                madd(cc, { down = true }, { lead.lane }, lead.lane.id, lead.lane.color)
+                madd(cc, { up = true }, ascent, lead.lane)
+                madd(cc, { down = true }, { lead.lane }, lead.lane)
             end
             for i = 1, #outgoing do
                 if i ~= cont then
@@ -1517,6 +1457,11 @@ function M.session(opts, seed)
             above = state.above,
             columns = main,
             merge = state.below[1],
+            -- Carried refs (§5): the commit's selected ref and its colour (the node's),
+            -- and its own ranked refs' label colours (ref name → slot, §5.5).
+            selected = state.selected,
+            selected_color = state.selected_color,
+            ref_colors = state.ref_colors,
         }
         for _, o in ipairs(state.outgoing) do row.parent_lanes[#row.parent_lanes + 1] = o.lane end
         for _, inc in ipairs(state.incoming) do row.child_lanes[#row.child_lanes + 1] = inc.lane end
@@ -1744,8 +1689,11 @@ function M.session(opts, seed)
     ---@field rows table[]      every row swept so far, in order
     ---@field lookahead boolean the policy reads rows below the current one, so it
     ---                         cannot be resumed — the caller must rebuild in full
+    ---@field ref_colors table<string, integer>  ref name → its label colour (§5.5): the
+    ---                         identity's colour at the ref's tip row, for every visible
+    ---                         ranked ref swept so far — carried or not
     ---@field extend fun(items: table[], from: integer?, yield: (fun())?): table[]
-    local session = { n = 0, rows = rows, lookahead = policy.prepass ~= nil }
+    local session = { n = 0, rows = rows, lookahead = policy.prepass ~= nil, ref_colors = ref_colors }
 
     --- Sweep `items[from..]` onto the end of the session and return **just the rows
     --- it appended** (`session.rows` holds the whole sweep). `from` defaults to 1;

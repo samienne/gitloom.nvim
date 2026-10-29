@@ -389,8 +389,9 @@ describe("pinned-branches dialog (§10.6.1) — windowed smoke", function()
     end)
 end)
 
-describe("pin_counterparts / pin_rank (§10.6 implicit remote counterparts)", function()
+describe("pin_rank / pin_anchors (§10.6 a pin covers the identity)", function()
     local selectm = require("gitloom.graph.select")
+    local rankm = require("gitloom.graph.rank")
     -- dev tracks `up/dev-renamed`; origin, fork and a remote missing from the
     -- `git remote` list (zz) all carry a `dev`.
     local function refs()
@@ -404,72 +405,51 @@ describe("pin_counterparts / pin_rank (§10.6 implicit remote counterparts)", fu
             ["up/dev-renamed"] = { name = "up/dev-renamed", kind = "remote" },
             ["origin/topic"] = { name = "origin/topic", kind = "remote" },
             ["origin/master"] = { name = "origin/master", kind = "remote" },
+            ["origin/solo"] = { name = "origin/solo", kind = "remote" },
+            ["fork/solo"] = { name = "fork/solo", kind = "remote" },
             v1 = { name = "v1", kind = "tag" },
         }
         return r
     end
-
-    it("lists same-short-name remotes in `git remote` order, the rest by name, then the upstream", function()
-        assert.same({ "fork/dev", "origin/dev", "zz/dev", "up/dev-renamed" },
-            selectm.pin_counterparts(refs(), { "fork", "origin" }, "dev"))
-        -- Before the remote list loads: every remote by name.
-        assert.same({ "fork/dev", "origin/dev", "zz/dev", "up/dev-renamed" },
-            selectm.pin_counterparts(refs(), nil, "dev"))
-    end)
-
-    it("does not repeat an upstream that already shares the short name", function()
+    local function anchors(list, unpinned)
         local r = refs()
-        r.topic.upstream = { short = "origin/topic" }
-        assert.same({ "origin/topic" }, selectm.pin_counterparts(r, { "origin" }, "topic"))
+        return selectm.pin_anchors(list, rankm.pair(r, { remotes = { "fork", "origin" }, pins = list }), unpinned)
+    end
+
+    it("pin_rank ranks the entries only, by place", function()
+        assert.same({ master = 1, ["origin/dev"] = 2, dev = 3 }, selectm.pin_rank(pins("master", "origin/dev", "dev")))
     end)
 
-    it("has none for a remote, a tag or an unknown ref", function()
-        assert.same({}, selectm.pin_counterparts(refs(), { "origin" }, "origin/dev"))
-        assert.same({}, selectm.pin_counterparts(refs(), { "origin" }, "v1"))
-        assert.same({}, selectm.pin_counterparts(refs(), { "origin" }, "nope"))
+    it("pinning a local anchors every paired remote and its differently named upstream", function()
+        assert.same({ dev = true, ["origin/dev"] = true, ["fork/dev"] = true, ["zz/dev"] = true,
+            ["up/dev-renamed"] = true }, anchors(pins("dev")))
     end)
 
-    it("ranks entries by place, a counterpart sharing its local's rank", function()
-        local rank = selectm.pin_rank(pins("master", "dev"), refs(), { "origin" }, {})
-        assert.same({
-            master = 1, ["origin/master"] = 1,
-            dev = 2, ["origin/dev"] = 2, ["fork/dev"] = 2, ["zz/dev"] = 2, ["up/dev-renamed"] = 2,
-        }, rank)
+    it("pinning a paired remote anchors its whole identity, the local included", function()
+        local a = anchors(pins("origin/dev"))
+        assert.is_true(a.dev)
+        assert.is_true(a["fork/dev"])
+        assert.is_nil(a.master)
     end)
 
-    it("excludes an explicitly unpinned counterpart, keeping the others", function()
-        local rank = selectm.pin_rank(pins("dev"), refs(), { "origin" }, { ["origin/dev"] = true })
-        assert.is_nil(rank["origin/dev"])
-        assert.equal(1, rank["fork/dev"])
-        assert.equal(1, rank.dev)
+    it("pinning a remote-only branch anchors every remote of its short name", function()
+        assert.same({ ["origin/solo"] = true, ["fork/solo"] = true }, anchors(pins("origin/solo")))
     end)
 
-    it("an explicitly pinned remote keeps its own rank", function()
-        local rank = selectm.pin_rank(pins("origin/dev", "master", "dev"), refs(), { "origin" }, {})
-        assert.equal(1, rank["origin/dev"])
-        assert.equal(3, rank.dev)
-        assert.equal(3, rank["fork/dev"])
-        -- …and below its local, it still has its own (worse) rank.
-        rank = selectm.pin_rank(pins("dev", "master", "origin/dev"), refs(), { "origin" }, {})
-        assert.equal(3, rank["origin/dev"])
-        assert.equal(1, rank["fork/dev"])
+    it("an explicit unpin drops one member's anchor, keeping the others; an entry is never dropped", function()
+        local a = anchors(pins("dev"), { ["origin/dev"] = true })
+        assert.is_nil(a["origin/dev"])
+        assert.is_true(a["fork/dev"])
+        assert.is_true(a.dev)
+        -- an entry is its own anchor even with a stale override (pin_resolve already filters)
+        assert.is_true(anchors(pins("origin/dev"), { ["origin/dev"] = true })["origin/dev"])
     end)
 
-    it("pins no counterpart with counterparts off (pin_upstream = false)", function()
-        assert.same({ dev = 1 }, selectm.pin_rank(pins("dev"), refs(), { "origin" }, {}, false))
+    it("a tag entry anchors itself only", function()
+        assert.same({ v1 = true }, anchors(pins("v1")))
     end)
 
-    it("counterparts off is the layout's map: entries only, an explicit remote kept (§5.5)", function()
-        -- The anchor set (counterparts on) is a superset; the layout ranks entries only,
-        -- so no counterpart can be born with, or claim, a pinned colour.
-        local layout = selectm.pin_rank(pins("master", "origin/dev", "dev"), refs(), { "origin" }, {}, false)
-        assert.same({ master = 1, ["origin/dev"] = 2, dev = 3 }, layout)
-        local anchors = selectm.pin_rank(pins("master", "origin/dev", "dev"), refs(), { "origin" }, {})
-        for id, k in pairs(layout) do assert.equal(k, anchors[id]) end
-        assert.equal(1, anchors["origin/master"])
-    end)
-
-    it("the dialog lists the entries only — counterparts have no rows", function()
+    it("the dialog lists the entries only — identity members have no rows", function()
         local list = pin_resolve(pins("dev"), {}, { "master" }, refs())
         local lines, rows = pin_dialog_lines(list)
         local n = 0

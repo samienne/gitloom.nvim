@@ -248,19 +248,22 @@ so it is never folded into a `◍`) plus the common trunks `master` / `main` /
 pinned branches stay shown in full under focus, so you can keep `master`, `dev`,
 a release branch and a few of your own in view at once while everything else
 collapses. The footer notes the anchor count when more than one is pinned
-(§10.6). Pinning a local branch also pins its **remote counterparts**
-implicitly — every remote branch of the same name, plus its tracked upstream —
-so their lanes stay in full and a divergence is drawn rather than a remote
-collapsing. Each pinned branch also keeps a **fixed colour**: the pin at
-position `k` in the list draws in the `k`-th palette colour, which no other
-branch takes until the pinned branch's lane ends (pins past the palette size
-draw an ordinary colour). A remote counterpart that is ahead of or diverged
-from its local draws in the local's colour, lightly dimmed
-(`palette.counterpart_dim`), from its own tip — even when another branch is built
-on top of it — brightening to full where it reaches the local. Out of the
-reachability focus it stays a shade brighter than the other dimmed lanes
-(`palette.counterpart_dim_out`, default `0.75 × dim`). They are not separate dialog rows; `P` on one
-unpins just that ref, and `pin_upstream = false` turns them off. Every pinned
+(§10.6). A pin covers the branch's whole **identity** — a local branch, its
+upstream and every remote branch of the same name — so their lanes stay in full
+and a divergence is drawn rather than a remote collapsing. They are not separate
+dialog rows; `P` on one remote unpins just that ref. Each pinned branch also keeps
+a **fixed colour**: the pin at position `k` in the list draws in the `k`-th palette
+colour, which no other branch ever takes (pins past the palette size draw an
+ordinary colour).
+
+**Colours follow branches.** A colour belongs to a branch, not to a lane: every
+lane carries the best-ranked branch that reaches it (pinned first, then by tip
+height), and a branch's label is drawn in that branch's colour. A local branch and
+its remotes share one hue, the remotes always **muted** (`palette.remote_mute`;
+out of the reachability focus `palette.remote_mute_out`, default `0.75 × dim`, so
+they stay a shade brighter than other dimmed lanes). An unpinned branch's colour is
+freed once it is outranked and no member is still to come below, so colours are
+reused down a long graph (specification.md §5, §5.5). Every pinned
 branch's label carries a pin icon — `(⚲dev)`, `(⚲release/2.1 ↑origin)` — except
 HEAD's own label (`icons.pin`; `""` turns it off).
 
@@ -580,8 +583,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
         pair = "NonText",        -- the dual-mode pair bracket (§6.1); false = blank
         action = "Special",      -- the commit-view diff action label (§11.5)
         dim = 0.45,              -- blend toward bg for out-of-cone rows/lanes (§12)
-        counterpart_dim = 0.25,  -- lighter blend for a remote counterpart's lane (§5.5)
-        -- counterpart_dim_out = nil, -- its blend out of focus (§12.2); nil = 0.75 * dim
+        remote_mute = 0.25,      -- lighter blend of a remote ref's muted colour (§5.5)
+        -- remote_mute_out = nil, -- its blend out of focus (§12.2); nil = 0.75 * dim
+        -- (the former names counterpart_dim / counterpart_dim_out still work as aliases)
         -- commit-view diff colors (§11.3)
         diff = { add = "DiffAdd", delete = "DiffDelete", hunk = "Title", header = "Comment" },
         -- submodule change view (§11.7): added / removed / common-ancestor marker
@@ -622,10 +626,9 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     dual_bracket = { "┬", "└" }, -- dual mode's pair bracket: label row, message row
-    lane_label_colors = true, -- the lane's owning label in the lane colour (false: per-kind groups)
+    lane_label_colors = true, -- each branch label in its own ref's colour, remotes muted (false: per-kind groups)
     working_tree = true,     -- the ◌ working-tree row above HEAD: true | "dirty" | false (§3.3/§4.2)
     scrolloff = 10,          -- context rows kept around the cursor (graph + commit view)
-    pin_upstream = true,     -- a pinned local branch also pins its remote counterparts implicitly (§10.6)
     persist = true,          -- remember the view toggles + pin lists across sessions (§18)
     progress = {             -- long-running operations (§19); progress = false for none
         provider = "auto",   -- "auto" (fidget if installed, else vim.notify) / "fidget" / "notify" / false / { start = fn }
@@ -650,11 +653,14 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 
 - **`win`** — floating window geometry (forwarded to snacks.win). Fractional
   `width`/`height` are a share of the editor.
-- **`palette`** — highlight groups per field. `tracks` is a list cycled by
-  lane id to color each lane. `dim` is a blend factor (`0`–`1`) toward the
+- **`palette`** — highlight groups per field. `tracks` is the curated colour
+  list the branches draw from (§5.5; generated colours extend it on truecolor
+  terminals). `dim` is a blend factor (`0`–`1`) toward the
   window background applied to everything outside the cursor row's reachability
   cone (§12); each field keeps its own colour, just muted (a higher factor is
   more muted). Falls back to a flat `NonText` on non-truecolor terminals.
+  `remote_mute` / `remote_mute_out` are a remote branch's lighter blend in and out
+  of the cone (formerly `counterpart_dim` / `counterpart_dim_out`, still accepted).
 - **`merge_style`** — controls whether merges/splits get their own virtual
   line above/below the commit, or are folded onto the commit line.
 - **`layout_policy`** — the lane **layout policy** (default `"compact"`): which
@@ -720,15 +726,16 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
   `{ "┬", "└" }`), drawn exactly as given — add a trailing space
   (`{ "┬ ", "└ " }`) for a gap before the text. Its colour is `palette.pair`
   (default `NonText`; `false` leaves the prefix blank at the same width).
-- **`lane_label_colors`** — draw the label of the ref that **owns** a node's lane
-  in that lane's colour (default `true`), dimmed with the lane out of the cursor's
-  reachability cone: the ref the lane was born for (a pinned branch at its tip, a
-  remote counterpart at its own tip), else the node's first label. Every other
-  label on the node keeps its per-kind colour, so a remote branch that merely
-  shares a commit with `origin/dev` does not read as `dev`'s. The `HEAD` marker keeps `palette.head`, the
-  `h`/`l`-selected label `palette.selected`. `false` restores the per-kind groups
-  (`palette.branch` / `remote` / `tags` / `worktree`). See
+- **`lane_label_colors`** — draw every branch label in **its own ref's colour**
+  (default `true`) — the colour of that branch's identity, a remote's muted — dimmed
+  out of the cursor's reachability cone. Tags, worktree labels and a collapsed
+  head's labels keep their per-kind colour; the `HEAD` marker keeps `palette.head`,
+  the `h`/`l`-selected label `palette.selected`. `false` restores the per-kind
+  groups (`palette.branch` / `remote` / `tags` / `worktree`) for every label; lanes
+  and nodes are coloured by ref either way. See
   [specification.md](specification.md) §6 "Label colour".
+- **`pin_upstream`** — removed: a pin always covers the branch's identity
+  (local + remotes); a set value is ignored (§10.6).
 - **`diff`** — the external diff provider (`D` and the commit view's action
   label). `open` is called with a `DiffRange` (`{ rev, from, to, root }` — `rev`
   is a git rev-range like `<hash>^!`; an endpoint may also be the tree state

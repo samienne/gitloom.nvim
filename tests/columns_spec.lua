@@ -262,11 +262,11 @@ describe("columns.layout lane identity (spec §5)", function()
     --- MERGED with a `master` ref on m1, pinned at rank 1.
     local function pinned_merged(policy)
         local opts = policy_opts(nil, policy)
-        opts.pin_rank = { master = 1 }
         local ord = ordered(MERGED)
         for _, it in ipairs(ord) do
             if it.commit.hash == "m1" then it.commit.refs = { { kind = "local", name = "master" } } end
         end
+        h.ranked(opts, ord, { pins = { "master" } })
         return columns.layout(opts, ord)
     end
 
@@ -314,16 +314,18 @@ describe("columns.layout lane identity (spec §5)", function()
         end
     end)
 
-    it("the tiebreak is the NEWEST lane, not arrival order", function()
-        -- Both `m2` and `t2` have `m3` as their first parent and nothing is pinned:
-        -- the newest chain (the larger id — the topic's, minted below master's tip)
-        -- must win under every policy, which is what makes identity independent of
-        -- where the lanes were placed.
+    it("the carried ref decides before the tiers: the FIRST generated ref continues", function()
+        -- Both `m2` and `t2` have `m3` as their first parent and no ref is ranked:
+        -- each chain carries a generated ref, and among generated refs the one
+        -- created first wins (§5 rank rule 5) — master's, created at its tip above
+        -- the topic's merge edge — under every policy, so identity stays independent
+        -- of where the lanes were placed. (Tier 2, the NEWEST lane, only breaks ties
+        -- between lanes carrying ONE ref — see the merged-in-tip case above.)
         for _, policy in ipairs(POLICIES) do
             local sp = spine(columns.layout(policy_opts(nil, policy), ordered(MERGED)))
-            assert.equals(sp.t1.id, sp.m3.id,
-                policy .. ": the newest lane must be the one that continues")
-            assert.is_true(sp.m1.id < sp.m3.id, policy .. ": master's lane ends at m3")
+            assert.equals(sp.m1.id, sp.m3.id,
+                policy .. ": the first-created generated ref's lane must continue")
+            assert.is_true(sp.t1.id ~= sp.m3.id, policy .. ": the topic's lane ends at m3")
         end
     end)
 end)
@@ -449,13 +451,13 @@ describe("columns.layout compact column reuse (spec §5.1)", function()
             -- instead of leaving an empty-column gap. The gap made the width oscillate
             -- (2 vs 3) and bounced a right-aligned mirror graph. Width must stay STABLE.
             --
-            -- `gutter` (§5.6) used to be one wider here (3): the gutter may be entered
-            -- ONLY by the lane owning the next subject row, so a fan-out may not reclaim
-            -- it even when a terminating child just freed it. Since §5 tier 2 picks the
-            -- NEWEST lane, `m(k+1)` continues `fK`'s lane — the one already in the
-            -- gutter — and the trunk lane from `mK` ends there, so the gutter needs no
-            -- extra column and every policy is width 2, stable per merge.
-            local expect = 2
+            -- `gutter` (§5.6) is one wider here (3): the gutter may be entered ONLY by
+            -- the lane owning the next subject row, so a fan-out may not reclaim it even
+            -- when a terminating child just freed it. Under carried refs (§5) the trunk's
+            -- generated ref, created first, continues at `m(k+1)`, so the gutter is
+            -- handed back each merge and costs one extra column — still STABLE per
+            -- merge. (While the NEWEST lane decided, `fK`'s lane continued and it was 2.)
+            local expect = policy == "gutter" and 3 or 2
             local opts = policy_opts({ split_on_separate_line = false, merge_on_separate_line = true }, policy)
             assert.equals(expect, max_width(columns.layout(opts, h.dag(staircase(3)))))
             assert.equals(expect, max_width(columns.layout(opts, h.dag(staircase(12)))))
@@ -739,8 +741,10 @@ describe("columns.layout free-list colouring", function()
         return lines
     end
 
-    -- A lane keeps one colour for its whole life: every Segment edge carrying a
-    -- given lane id resolves to a single, non-nil colour slot.
+    -- With no ranked refs nothing ever outranks a lane's carried (generated) ref,
+    -- so a lane keeps one colour for its whole life: every Segment edge carrying a
+    -- given lane id resolves to a single, non-nil colour slot. (A ranked ref may
+    -- recolour a lane at its tip, §5 — see ref_color_spec.)
     it("assigns each lane a single stable colour", function()
         for style, ms in pairs(STYLES) do
             local opts = h.big_opts(ms)
@@ -779,10 +783,14 @@ describe("columns.layout free-list colouring", function()
                         for _, s in ipairs(t.lanes or {}) do
                             local c = s.connectivity
                             if c.up and c.down and #(s.edges or {}) == 1 then
-                                assert.is_nil(seen[s.color],
+                                -- Colour belongs to the carried ref (§5.5): two lanes
+                                -- carrying ONE ref (two merge edges into one ref-less
+                                -- commit) share it; distinct refs alive together never do.
+                                local k = s.ref and (s.ref.ident or s.ref)
+                                assert.is_true(seen[s.color] == nil or seen[s.color] == k,
                                     ("%s seed %d line %d col %d: colour %s reused by a concurrent vertical")
                                         :format(style, seed, li, ci, tostring(s.color)))
-                                seen[s.color] = true
+                                seen[s.color] = k
                             end
                         end
                     end

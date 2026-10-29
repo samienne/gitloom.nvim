@@ -1,0 +1,239 @@
+--- Tests for ranked refs and identities (spec §5 "Ranked refs and identities"):
+--- the pure identity pairing (`rank.pair`) and the total rank order
+--- (`rank.infos` + `rank.better` / `rank.order`, `rank.generated`).
+
+local rank = require("gitloom.graph.rank")
+
+--- A ref registry from shorthand: "name" = local, "r:origin/x" = remote,
+--- "t:v1" = tag, "name>origin/up" = local tracking `origin/up`.
+local function registry(...)
+    local out = {}
+    for _, s in ipairs({ ... }) do
+        local kind, rest = s:match("^(%a):(.+)$")
+        if kind == "r" then
+            out[rest] = { name = rest, kind = "remote" }
+        elseif kind == "t" then
+            out[rest] = { name = rest, kind = "tag" }
+        else
+            local name, up = s:match("^(.-)>(.+)$")
+            name = name or s
+            out[name] = { name = name, kind = "local", upstream = up and { short = up } or nil }
+        end
+    end
+    return out
+end
+
+local function pins(...)
+    local out = {}
+    for _, id in ipairs({ ... }) do out[#out + 1] = { id = id, reserved = false } end
+    return out
+end
+
+local REMOTES = { "origin", "fork" }
+
+local function members(p, name) return p.of[name] and p.of[name].members end
+
+describe("rank.pair (§5 identities)", function()
+    it("pairs a local with same-named remotes on every remote", function()
+        local p = rank.pair(registry("foo", "r:origin/foo", "r:fork/foo"), { remotes = REMOTES })
+        assert.same({ "foo", "fork/foo", "origin/foo" }, members(p, "foo"))
+        assert.equal(p.of["foo"], p.of["origin/foo"])
+        assert.equal(p.of["foo"], p.of["fork/foo"])
+        assert.is_nil(p.of["foo"].upstream)
+    end)
+
+    it("pairs a configured upstream with a different name", function()
+        local p = rank.pair(registry("feat>origin/dev", "r:origin/dev", "r:origin/feat"),
+            { remotes = REMOTES })
+        assert.same({ "feat", "origin/dev", "origin/feat" }, members(p, "feat"))
+        assert.equal("origin/dev", p.of["feat"].upstream)
+    end)
+
+    it("ignores a local upstream (not a remote-tracking branch)", function()
+        local p = rank.pair(registry("a>b", "b"), { remotes = REMOTES })
+        assert.same({ "a" }, members(p, "a"))
+        assert.same({ "b" }, members(p, "b"))
+    end)
+
+    it("gives a remote claimed by several locals to the same-named local", function()
+        local p = rank.pair(registry("main", "feat>origin/main", "r:origin/main"), { remotes = REMOTES })
+        assert.same({ "main", "origin/main" }, members(p, "main"))
+        assert.same({ "feat" }, members(p, "feat"))
+        assert.is_nil(p.of["feat"].upstream)
+    end)
+
+    it("otherwise to the first claimer in pin order, then by name", function()
+        local reg = registry("a>origin/x", "b>origin/x", "r:origin/x")
+        assert.same({ "a", "origin/x" }, members(rank.pair(reg, { remotes = REMOTES }), "a"))
+        local p = rank.pair(reg, { remotes = REMOTES, pins = pins("b", "a") })
+        assert.same({ "b", "origin/x" }, members(p, "b"))
+        assert.same({ "a" }, members(p, "a"))
+        assert.equal("origin/x", p.of["b"].upstream)
+    end)
+
+    it("groups same-named remote-only branches into one identity", function()
+        local p = rank.pair(registry("r:origin/foo", "r:fork/foo", "r:origin/bar"), { remotes = REMOTES })
+        local id = p.of["origin/foo"]
+        assert.equal(id, p.of["fork/foo"])
+        assert.is_nil(id.local_name)
+        assert.equal("foo", id.name)
+        assert.not_equal(id, p.of["origin/bar"])
+    end)
+
+    it("keeps a claimed remote out of the remote-only identity of its short name", function()
+        local p = rank.pair(registry("x>origin/foo", "r:origin/foo", "r:fork/foo"), { remotes = REMOTES })
+        assert.same({ "x", "origin/foo" }, members(p, "x"))
+        assert.same({ "fork/foo" }, members(p, "fork/foo"))
+    end)
+
+    it("leaves tags, HEAD, worktrees and <remote>/HEAD unranked", function()
+        local reg = registry("main", "t:v1", "r:origin/HEAD", "r:origin/main")
+        reg.HEAD = { name = "HEAD", kind = "head" }
+        reg["wt:x"] = { name = "wt:x", kind = "worktree" }
+        local p = rank.pair(reg, { remotes = REMOTES })
+        assert.is_nil(p.of["v1"])
+        assert.is_nil(p.of["HEAD"])
+        assert.is_nil(p.of["wt:x"])
+        assert.is_nil(p.of["origin/HEAD"])
+        assert.same({ "main", "origin/main" }, members(p, "main"))
+    end)
+
+    it("splits remote names on the longest known remote", function()
+        local p = rank.pair(registry("x", "r:my/fork/x"), { remotes = { "my/fork" } })
+        assert.same({ "x", "my/fork/x" }, members(p, "x"))
+    end)
+
+    it("accepts an array of refs", function()
+        local p = rank.pair({ { name = "foo", kind = "local" }, { name = "origin/foo", kind = "remote" } })
+        assert.same({ "foo", "origin/foo" }, members(p, "foo"))
+    end)
+end)
+
+describe("rank order (§5 rank)", function()
+    --- The order of the visible ranked refs.
+    local function order(reg, rows, o)
+        o = o or {}
+        local p = rank.pair(reg, { remotes = REMOTES, pins = o.pins })
+        local infos = rank.infos(p, {
+            visible = o.visible, pins = o.pins, current = o.current, remotes = REMOTES,
+        })
+        return rank.order(infos, rows), infos
+    end
+
+    it("ranks pinned > unpinned with a local > remote-only", function()
+        local reg = registry("a", "p", "r:origin/z")
+        -- rows would favour z, then a; the tiers win.
+        local got = order(reg, { a = 5, p = 1, ["origin/z"] = 9 }, { pins = pins("p") })
+        assert.same({ "p", "a", "origin/z" }, got)
+    end)
+
+    it("orders pinned identities by pin rank, regardless of rows", function()
+        local got = order(registry("a", "b"), { a = 9, b = 1 }, { pins = pins("b", "a") })
+        assert.same({ "b", "a" }, got)
+    end)
+
+    it("takes an identity's pin rank from any member's entry", function()
+        local got = order(registry("a", "r:origin/a", "b"), { a = 1, ["origin/a"] = 1, b = 9 },
+            { pins = pins("b", "origin/a") })
+        assert.same({ "b", "a", "origin/a" }, got)
+        got = order(registry("a", "r:origin/a", "b"), { a = 1, ["origin/a"] = 1, b = 9 },
+            { pins = pins("origin/a", "b") })
+        assert.same({ "a", "origin/a", "b" }, got)
+    end)
+
+    it("ranks an identity whose local is not visible as remote-only", function()
+        local reg = registry("a", "r:origin/a", "b")
+        local got = order(reg, { ["origin/a"] = 9, b = 1 }, { visible = { ["origin/a"] = true, b = true } })
+        assert.same({ "b", "origin/a" }, got)
+    end)
+
+    it("excludes refs the caller leaves out of visible", function()
+        local _, infos = order(registry("a", "b", "t:v1"), { a = 1, b = 2 }, { visible = { a = true } })
+        assert.is_not_nil(infos.a)
+        assert.is_nil(infos.b)
+        assert.is_nil(infos.v1)
+    end)
+
+    it("within an unpinned tier, the lower standing row wins", function()
+        assert.same({ "base", "topic" }, order(registry("topic", "base"), { topic = 1, base = 4 }))
+        assert.same({ "origin/y", "origin/x" },
+            order(registry("r:origin/x", "r:origin/y"), { ["origin/x"] = 2, ["origin/y"] = 3 }))
+    end)
+
+    it("a remote whose local is at or above it stands at the local's row", function()
+        -- origin/a (row 8) stands at a's row 2, so b (row 5) beats it.
+        local got = order(registry("a", "r:origin/a", "b"), { a = 2, ["origin/a"] = 8, b = 5 })
+        assert.same({ "b", "a", "origin/a" }, got)
+        -- A remote above its local stands at its own row.
+        got = order(registry("a", "r:origin/a", "b"), { a = 8, ["origin/a"] = 2, b = 5 })
+        assert.same({ "a", "b", "origin/a" }, got)
+    end)
+
+    it("the local outranks its remotes in every tier", function()
+        local reg = registry("a", "r:origin/a")
+        local rows = { a = 3, ["origin/a"] = 3 }
+        assert.same({ "a", "origin/a" }, order(reg, rows))
+        assert.same({ "a", "origin/a" }, order(reg, { a = 1, ["origin/a"] = 7 }, { pins = pins("a") }))
+    end)
+
+    it("orders remotes by standing row, then upstream, then git remote order", function()
+        local reg = registry("a>fork/a", "r:origin/a", "r:fork/a", "r:zz/a")
+        -- All at or below the local: all stand at its row; upstream first, then
+        -- `git remote` order, unknown remotes last.
+        local got = order(reg, { a = 1, ["origin/a"] = 2, ["fork/a"] = 3, ["zz/a"] = 2 })
+        assert.same({ "a", "fork/a", "origin/a", "zz/a" }, got)
+        -- Above the local, the lower one wins first.
+        got = order(reg, { a = 9, ["origin/a"] = 5, ["fork/a"] = 2, ["zz/a"] = 9 })
+        assert.same({ "a", "zz/a", "origin/a", "fork/a" }, got)
+    end)
+
+    it("orders a remote-only identity by row, then git remote order", function()
+        local reg = registry("r:origin/f", "r:fork/f")
+        assert.same({ "origin/f", "fork/f" }, order(reg, { ["origin/f"] = 4, ["fork/f"] = 4 }))
+        assert.same({ "fork/f", "origin/f" }, order(reg, { ["origin/f"] = 4, ["fork/f"] = 6 }))
+    end)
+
+    it("breaks a tie between identities by current branch, then name", function()
+        local reg = registry("b", "a")
+        assert.same({ "a", "b" }, order(reg, { a = 3, b = 3 }))
+        assert.same({ "b", "a" }, order(reg, { a = 3, b = 3 }, { current = "b" }))
+        -- The current branch's identity includes its remotes.
+        local reg2 = registry("b", "r:origin/b", "a")
+        assert.same({ "a", "b", "origin/b" }, order(reg2, { a = 3, b = 1, ["origin/b"] = 3 }))
+        assert.same({ "b", "origin/b", "a" },
+            order(reg2, { a = 3, b = 3, ["origin/b"] = 3 }, { current = "b" }))
+    end)
+
+    it("ranks generated refs last, the first created winning", function()
+        local p = rank.pair(registry("a", "r:origin/z"))
+        local infos = rank.infos(p)
+        local rows = { a = 1, ["origin/z"] = 1 }
+        local g1, g2 = rank.generated(1), rank.generated(2)
+        assert.is_true(rank.better(infos["origin/z"], g1, rows))
+        assert.is_false(rank.better(g1, infos["a"], rows))
+        assert.is_true(rank.better(g1, g2, rows))
+        assert.is_false(rank.better(g2, g1, rows))
+        assert.is_false(rank.better(g1, g1, rows))
+    end)
+
+    it("is a strict total order (antisymmetric) over a mixed set", function()
+        local reg = registry("a>origin/x", "b", "r:origin/a", "r:origin/x", "r:fork/b",
+            "r:origin/c", "r:fork/c", "main")
+        local p = rank.pair(reg, { remotes = REMOTES, pins = pins("main") })
+        local infos = rank.infos(p, { pins = pins("main"), current = "b", remotes = REMOTES })
+        local rows = { a = 2, b = 2, ["origin/a"] = 4, ["origin/x"] = 1, ["fork/b"] = 2,
+            ["origin/c"] = 3, ["fork/c"] = 3, main = 6 }
+        local list = {}
+        for _, i in pairs(infos) do list[#list + 1] = i end
+        list[#list + 1] = rank.generated(1)
+        for _, x in ipairs(list) do
+            for _, y in ipairs(list) do
+                if x ~= y then
+                    assert.not_equal(rank.better(x, y, rows), rank.better(y, x, rows))
+                end
+            end
+        end
+        assert.same({ "main", "b", "fork/b", "a", "origin/a", "origin/x", "origin/c", "fork/c" },
+            rank.order(infos, rows))
+    end)
+end)

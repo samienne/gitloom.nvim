@@ -15,7 +15,7 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   `vim.system` I/O — its only Neovim coupling), behind a `git/init.lua` aggregator.
   **gitloom.graph** (`graph/`): `view` (the pre-Phase-1 projection §10),
   `sigset` (the interned persistent owner sets the §10.2 signatures are computed
-  in), `columns` (Phase 1 lane layout), `render` (Phase 2 glyphs/colour/dimming +
+  in), `rank` (§5 identity pairing + rank order), `columns` (Phase 1 lane layout), `render` (Phase 2 glyphs/colour/dimming +
   `display_item`), `reach` (§12 reachability), `select` (selection/branch-mode
   helpers §2/§10/§13), `pane` (context-pane core), `color`; `graph/init.lua` is
   the engine entry (data-model types + the layout glue `build_graph`/
@@ -82,8 +82,10 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   continues and keeps its colour, an extra fork child takes its own) and unpinned heads
   packed onto as few rows as possible (`pack_heads`/`overlay_rows` — pinned anchors and
   junctions keep their own line) BEFORE the de-collision, which recolours only lanes
-  sharing a drawn row, never onto a pinned slot, and within the palette without
-  truecolor (`ncolors`); `cap`; §6.2). **Both panes are wired** via
+  sharing a drawn row (the unit is a lane id IN one main-view colour, since a lane is
+  recoloured at an outranking ref; two units of one identity sharing its colour are
+  no clash; a muted `-k` is never moved), never onto a pinned slot, and within the
+  palette without truecolor (`ncolors`); `cap`; §6.2). **Both panes are wired** via
   graph.lua `update_panes` (gated by `opts.panes`, toggled by `F`): borderless
   overlays (footer at the bottom, header at the top). Both seams are computed by
   **pure, virtual-line-aware** seam functions that round to **whole commit blocks** so

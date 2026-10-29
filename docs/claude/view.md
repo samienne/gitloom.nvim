@@ -98,32 +98,23 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   defaults; HEAD is its branch when attached, the `HEAD` ref itself when detached).
   `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`: unplaced
   defaults — trunks, seeds, HEAD's anchor last — then the stored entries) into
-  exactly the dialog's rows. **Implicit remote counterparts** (`pin_upstream`) are
-  NOT entries, and take no rank and no pinned colour (§5.5/§10.6): `ctx:pin_rank()`
-  is `select.pin_rank` with counterparts OFF — the entries' ranks (1 = highest), the
-  layout map; `ctx:effective_pinned()` is the key set of `select.pin_rank` with
-  counterparts ON (a local's `select.pin_counterparts`, unless explicitly unpinned)
-  and is still what `view.owners`/`select.toggle_target`/the pin icon consume. The header
-  pane gets `columns.pinned_slots(pane_opts.pin_rank, #tracks)` as `pane.header`'s
-  `avoid`, so its colour de-collision never hands out a pinned slot.
-  **Counterpart colours** (§5.5): `ctx:pin_counterpart()` (`select.pin_counterpart_rank`
-  — counterpart id → its local's rank, `{}` with `pin_upstream` off) is published
-  beside the ranks as `opts.pin_counterpart` (in the fingerprint). Where no ranked
-  ref points and slot k is `held`, a counterpart tip is a **birth** (§5) when k
-  strictly beats every incoming lane (none ranked ≤ k, none a counterpart lane — read
-  back from the colour, `columns.cp_rank` — of rank ≤ k; a lane of a pin ranked
-  WORSE than k, e.g. HEAD's branch, is beaten and ends there); it sets `state.pin_birth`,
-  so the gutter + `check_spine` rules for a pinned birth cover it. The lane born
-  there takes the local's slot k, as colour
-  **`-k`** (one more `in_use` holder; `free_color` takes `|c|`), so the mark rides
-  every colour copy (Segments, footer seeds, the header, which keeps a negative pref
-  as is); `render.slot_hl(-k)` = `counterpart_hl(tracks[k])`, the cached
-  `palette.counterpart_dim` blend; out of the cone `dim_hl` maps that group back to
-  its slot (`cp_source`) and blends by `counterpart_dim_out` (default `0.75 * dim`),
-  brighter than every other dimmed lane — the dims do not compose.
-  `ctx:sync_pin_rank()` publishes the table as the layout input `opts.pin_rank`
-  (on `ctx.opts` and `ctx.pane_opts`) at the top of every `reflow_build` and
-  before the open stream — every pin change reflows, so that is the refresh.
+  exactly the dialog's rows. **A pin covers the identity** (§10.6): the other
+  members of a pinned entry's identity (`rank.pair` — its local, upstream, same-named
+  remotes) are NOT entries but anchors through it. `ctx:effective_pinned()` is
+  `select.pin_anchors(pins, pairing, unpinned)` — entries plus identity members,
+  minus a member explicitly unpinned — and is what `view.owners` /
+  `select.toggle_target` / the pin icon consume. `ctx:pin_rank()` is
+  `select.pin_rank(pins)` (entries only, 1 = highest), published as `opts.pin_rank`
+  solely for the header: it gets `columns.pinned_slots(pane_opts.pin_rank, #tracks)`
+  as `pane.header`'s `avoid`, so its colour de-collision never hands out a pinned
+  slot. The **layout** ranks by `opts.ref_rank` (`rank.input`: pairing, pin list,
+  current branch, visible refs — spec §5 "The ranks are a layout input"), published
+  by `GRAPH_HELPERS.sync_ref_rank`: `ctx:sync_pin_rank()` calls it at the top of
+  every `reflow_build` and before the open stream (every pin change reflows, so
+  that is the refresh), and `reflow_build` calls it again with the projection's
+  **visible** refs (on a node not folded into a collapsed head or kept junction)
+  before laying out. Pinned identities' colours, carried refs and the muted
+  remotes are layout matters — see layout.md "Colour session".
   Pinning changes only the default *mode* and the ranks, not `fp_only` or the
   owner tips, so it does **not** invalidate the signature cache
   (like a mode toggle). `P` uses `branch_under_cursor`, pins only real refs (drops
@@ -133,10 +124,10 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   "holds a reserved graph column" is a **flag on the pin entry**, not a second
   list — so `reserved ⊆ pinned` and *unpin implies unreserve* are structural, and
   **pinning alone claims no column** (up to four are pinned by default). Every
-  entry's place is its lane-identity rank (§5, `opts.pin_rank`); among reserved
-  entries it also orders the columns (`select.reserved_order`). Implicit remote
-  counterparts have no rows; `P` on one records an explicit unpin of just that
-  ref. `L` opens a `float_zindex` float rendered
+  entry's place is its identity's rank (§5, `rank.input`'s pin tier); among reserved
+  entries it also orders the columns (`select.reserved_order`). The other members
+  of a pinned identity have no rows; `P` on one records an explicit unpin of just
+  that ref. `L` opens a `float_zindex` float rendered
   by the pure `select.pin_dialog_lines` (lines + a line → entry-index row map);
   its buffer-local keys `<C-j>`/`<C-k>`/`<Space>`/`D`/`<CR>`/`q` each write
   `view_state.pins`, reflow, and restore the graph cursor by hash like `P`.

@@ -693,16 +693,10 @@ function M.boundary_of(line, up)
                 -- pane repaint can read the crossing lane's current cone state
                 -- (`highlighted`, set by the main view's reachability walk) without
                 -- rebuilding the pane (spec §6.2 reachability emphasis).
-                -- The lane's pin rank (§5) rides on its Lane objects, not the Segment:
-                -- take it from the edge carrying the Segment's own id (a fan hub's
-                -- shared wire lists several edges), so a footer seeded from this map
-                -- continues the lane under the rank the main view gave it.
-                local rank
-                for _, e in ipairs(s.edges or {}) do
-                    if e.id == s.id then rank = e.rank break end
-                end
-                out[col] = { id = s.id, color = s.color, parent = s.parent,
-                    begin = s.begin, highlighted = false, edges = s.edges, rank = rank }
+                -- The carried ref (§5) rides on the Segment, so a footer seeded from
+                -- this map continues the lane carrying the ref the main view gave it.
+                out[col] = { id = s.id, color = s.color, ref = s.ref, parent = s.parent,
+                    begin = s.begin, highlighted = false, edges = s.edges }
             end
         end
     end
@@ -736,7 +730,7 @@ function M.boundary_above(rows, i)
     for col, cell in ipairs(line) do
         for _, s in ipairs(cell.lanes or {}) do
             if s.connectivity.up then
-                out[col] = { id = s.id, color = s.color, parent = s.parent,
+                out[col] = { id = s.id, color = s.color, ref = s.ref, parent = s.parent,
                     begin = s.begin, highlighted = false }
             end
         end
@@ -861,7 +855,7 @@ function M.footer(opts, pane_items, boundary, node_of)
     for col, lane in pairs(boundary) do
         local target = lane.parent and node_of[lane.parent.hash]
         if target and present[target] then
-            seed[col] = { id = lane.id, color = lane.color, rank = lane.rank,
+            seed[col] = { id = lane.id, color = lane.color, ref = lane.ref,
                 begin = lane.begin,
                 parent = target, highlighted = false }
         else
@@ -1438,9 +1432,22 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
     -- The main-view lane id/colour for a node's branch, so each branch keeps its OWN
     -- distinct colour (matching the graph). With `parent`, the lane of the edge
     -- node → parent — the one the header draws between them. Falls back to `def`.
+    -- The identity (§5 "Ranked refs and identities") behind each main-view lane id IN
+    -- one colour, where known: two refs of ONE identity share a colour in the graph
+    -- while alive together (a local and its remote), which the de-collision below
+    -- must not mistake for a recycled colour.
+    local unit_ident = {}
+    local function note(l)
+        -- Ranked identities only: lanes sharing a GENERATED ref (two merges of one
+        -- ref-less commit) are still de-collided, as the header always has.
+        if l and l.id ~= nil and l.color ~= nil and l.ref and l.ref.ident then
+            unit_ident[tostring(l.id) .. "/" .. tostring(l.color)] = l.ref.ident
+        end
+    end
+    for _, l in pairs(boundary) do note(l) end
     local function lane(node, def, parent)
         local l = lane_of and lane_of(node, parent)
-        if l then return l.id, l.color end
+        if l then note(l); return l.id, l.color end
         return def and def.id, def and def.color
     end
 
@@ -1478,9 +1485,9 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
         return id
     end
     -- A replacement colour never lands on a pinned colour (§5.5/§6.2): that slot reads
-    -- as its pinned branch, in the pane as in the graph. A counterpart colour (`-k`,
-    -- §5.5) is kept as is: in the graph too it is legitimately shared by every
-    -- counterpart lane of one pin, so the header never swaps it for another colour.
+    -- as its pinned branch, in the pane as in the graph. A muted colour (`-k`, a
+    -- track carrying a remote ref, §5.5) is kept as is: in the graph too it is
+    -- legitimately shared by an identity's remotes, so the header never swaps it.
     -- `used` counts the lanes holding each colour. Without generated colours
     -- (`ncolors`) an exhausted palette SHARES the least-held curated slot — never a
     -- pinned one, never the colour being moved off — rather than minting a slot past
@@ -1606,18 +1613,22 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
                 -- brand-new id (the merge-at-cutoff bug). Only a genuine FAN-OUT (N is not this
                 -- child's first parent and the lanes differ) switches.
                 -- The topological test must NOT outvote the main view where the main view
-                -- itself starts a new lane at N: a pinned or counterpart BIRTH (§5/§5.5)
-                -- ends every arriving lane there, so the lane arriving at N from the child
-                -- (`mv1`) is a different main-view lane from the one N continues downward
-                -- (`lane_of(N)`, its first-parent lane). A spliced run between them is one
-                -- lane: a birth needs a ranked or counterpart ref, i.e. a pinned anchor,
-                -- which `condense` never splices. The recycled-tip case keeps the two equal
-                -- (the main view continues through N; only the header's id drifted), so
-                -- comparing them separates it from a birth.
+                -- itself starts a new lane at N: then the lane arriving at N from the
+                -- child (`mv1`) is a different main-view lane from the one N continues
+                -- downward (`lane_of(N)`, its first-parent lane). (A better-ranked ref at
+                -- N no longer births a lane — it recolours the continuing one, §5
+                -- "Carried refs" — so this is the rare case.) The recycled-tip case keeps
+                -- the two equal (the main view continues through N; only the header's id
+                -- drifted), so comparing them separates it from a new lane.
                 local first_parent = upkids[1].parents and upkids[1].parents[1] == N
                 local down = lane_of and lane_of(N)
                 local born = mv1 ~= nil and down ~= nil and down.id ~= mv1
-                if mv1 == plane.id or (first_parent and upkids[1].collapsed and not born) then
+                if mv1 == plane.id then
+                    -- The same main-view lane continuing — in the colour the main view
+                    -- draws that edge in: a better-ranked ref at N recolours the lane
+                    -- there (§5 "Carried refs"), so above N it may differ from below.
+                    upid[1], upcolor[1] = plane.id, c1col or plane.color
+                elseif first_parent and upkids[1].collapsed and not born then
                     upid[1], upcolor[1] = plane.id, plane.color
                 else
                     upid[1], upcolor[1] = pick_id(mv1), c1col or plane.color
@@ -1775,17 +1786,22 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
     -- of rows; the main view RECYCLES colours, so two ids alive on the same row can
     -- arrive here sharing one. Assign each id a colour distinct from every id it shares
     -- a row with, preferring its own (main-view) colour so the header still matches the
-    -- graph wherever there is no clash. One colour per id keeps a lane's colour
-    -- vertically continuous by construction.
+    -- graph wherever there is no clash. The unit is a lane id IN ONE main-view colour
+    -- (`ukey`): a lane is recoloured where a better-ranked ref takes it over (§5
+    -- "Carried refs"), and each run keeps its own colour, so a lane's colour is still
+    -- continuous by construction between those nodes.
     do
+        local function ukey(sg) return tostring(sg.id) .. "/" .. tostring(sg.color) end
+        local unit_id = {}
         local id_rows, pref, order_ids, seen = {}, {}, {}, {}
         for _, r in ipairs(rows) do
             for _, cell in ipairs(r.columns or {}) do
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.id ~= nil then
-                        id_rows[s.id] = id_rows[s.id] or {}
-                        if pref[s.id] == nil then pref[s.id] = s.color end
-                        if not seen[s.id] then seen[s.id] = true; order_ids[#order_ids + 1] = s.id end
+                        local k = ukey(s)
+                        id_rows[k] = id_rows[k] or {}
+                        if pref[k] == nil then pref[k], unit_id[k] = s.color, s.id end
+                        if not seen[k] then seen[k] = true; order_ids[#order_ids + 1] = k end
                     end
                 end
             end
@@ -1797,10 +1813,11 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
             for _, cell in ipairs(r.columns or {}) do
                 for _, s in ipairs(cell.lanes or {}) do
                     if s.id ~= nil then
-                        id_rows[s.id][ri] = true
+                        local k = ukey(s)
+                        id_rows[k][ri] = true
                         local cc = s.connectivity or {}
                         if cell.has_commit and not cc.up and not cc.left and not cc.right then
-                            head_id[s.id] = true
+                            head_id[k] = true
                             -- No recolouring toward the head: a fork child's lane already
                             -- carries the colour of its main-view EDGE into the fork (its
                             -- branch's colour for a first-parent edge), and a mainline
@@ -1819,6 +1836,7 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
         table.sort(order_ids, function(a, b)
             local ha, hb = head_id[a] and 0 or 1, head_id[b] and 0 or 1
             if ha ~= hb then return ha < hb end
+            if unit_id[a] ~= unit_id[b] then return unit_id[a] < unit_id[b] end
             return a < b
         end)
         local final = {}
@@ -1829,14 +1847,18 @@ function M.header(items, boundary, node_of, lane_of, col_of, avoid, ncolors)
                 for ri in pairs(id_rows[id]) do if id_rows[oid][ri] then overlap = true; break end end
                 -- Only lanes ALIVE TOGETHER — sharing a header row, packed head rows
                 -- included — must differ (§6.2 Colour); a head is not special.
-                if overlap then used[c] = (used[c] or 0) + 1 end
+                -- ... unless both are one identity's own colour (a local and its
+                -- remote alive together share it in the graph too, §5.5).
+                local same = unit_ident[id] ~= nil and unit_ident[id] == unit_ident[oid] and pref[id] == pref[oid]
+                if overlap and not same then used[c] = (used[c] or 0) + 1 end
             end
             final[id] = free_color(used, pref[id])
         end
         for _, r in ipairs(rows) do
             for _, cell in ipairs(r.columns or {}) do
                 for _, s in ipairs(cell.lanes or {}) do
-                    if s.id ~= nil and final[s.id] then s.color = final[s.id] end
+                    local k = s.id ~= nil and ukey(s)
+                    if k and final[k] then s.color = final[k] end
                 end
                 -- Re-pick the cell's primary colour after recolouring: the lane running
                 -- through it vertically, so a turn keeps its own lane's colour.
