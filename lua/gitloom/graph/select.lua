@@ -413,8 +413,8 @@ end
 -- **unpinning implies unreserving** (the flag leaves with its entry). Order is
 -- the anchor priority, and it matters for EVERY entry: an entry's 1-based place is
 -- its **rank**, which drives lane identity (§5); among reserved entries it also
--- decides the dedicated columns (§10.6.2). A pinned local branch's implicit remote
--- counterparts are not entries — they share their local's rank (`pin_rank`).
+-- decides the dedicated columns (§10.6.2). The other members of a pinned identity
+-- (§10.6) are not entries — they are anchors through it (`pin_anchors`).
 --
 -- All of these are pure: they copy in and copy out, never mutating the input
 -- (like `bump_recent`), so the window glue assigns the result back.
@@ -463,89 +463,40 @@ function M.pin_resolve(pins, unpinned, defaults, exists)
     return out
 end
 
---- A pinned local branch's **implicit remote counterparts** (spec §10.6): every
---- remote branch with the same short name — the remotes in `git remote` order
---- (`remotes`), then any other remote's `*/<id>` the registry holds, by name (the
---- `%` cycle's members and order, §2) — then the branch's tracked upstream when
---- its short name differs. Only refs that exist; none for a non-local ref. Pure.
----@param refs table<string, Ref>?  the repo's name → Ref registry
----@param remotes string[]?         remote names in `git remote` order
----@param id string                 the pinned ref id
----@return string[]
-function M.pin_counterparts(refs, remotes, id)
-    local out = {}
-    if not refs then return out end
-    local reg = refs ---@type table<string, Ref>
-    local r = reg[id]
-    if not r or r.kind ~= "local" then return out end
-    local seen = { [id] = true }
-    local function add(name, kind)
-        local x = reg[name]
-        if seen[name] or not x or (kind and x.kind ~= kind) then return end
-        seen[name] = true
-        out[#out + 1] = name
-    end
-    for _, remote in ipairs(remotes or {}) do add(remote .. "/" .. id, "remote") end
-    local rest = {}
-    for name, x in pairs(reg) do
-        if x.kind == "remote" and not seen[name] and name:match("^[^/]+/(.+)$") == id then
-            rest[#rest + 1] = name
-        end
-    end
-    table.sort(rest)
-    for _, name in ipairs(rest) do add(name, "remote") end
-    if r.upstream and r.upstream.short then add(r.upstream.short) end
-    return out
-end
-
---- The **pin rank** of every effectively pinned ref (spec §5/§10.6): ref id →
---- its 1-based place in the resolved list `pins` (1 = highest priority). With
---- `counterparts` on (`pin_upstream`), a local entry's implicit remote
---- counterparts (`pin_counterparts`) take its rank, unless explicitly `unpinned`
---- or already ranked — an explicitly pinned remote keeps its own place, and a
---- counterpart shared by two locals takes the better one. With `counterparts` on,
---- the keys are exactly the effective anchor set (the focus default and the pin
---- icon). With it `false` the table holds the list's entries only — that is the
---- layout's `opts.pin_rank` (§5 identity, §5.5 pinned colours), since counterparts
---- take no rank and no pinned colour (§10.6). Pure.
----@param pins PinEntry[]?                  the resolved pin list (`pin_resolve`)
----@param refs table<string, Ref>?
----@param remotes string[]?
----@param unpinned table<string, boolean>?
----@param counterparts boolean?             false = no implicit counterparts
+--- The **pin rank** of every pin-list entry (spec §5/§10.6): ref id → its 1-based
+--- place in the resolved list `pins` (1 = highest priority). Entries only — the
+--- members a pin covers through its identity are anchors (`pin_anchors`) whose rank
+--- and colour follow the identity (§5 `rank.input`), not entries. Pure.
+---@param pins PinEntry[]?  the resolved pin list (`pin_resolve`)
 ---@return table<string, integer>
-function M.pin_rank(pins, refs, remotes, unpinned, counterparts)
-    unpinned = unpinned or {}
+function M.pin_rank(pins)
     local rank = {}
     for i, e in ipairs(pins or {}) do
         if rank[e.id] == nil then rank[e.id] = i end
     end
-    if counterparts == false then return rank end
-    for i, e in ipairs(pins or {}) do
-        for _, cid in ipairs(M.pin_counterparts(refs, remotes, e.id)) do
-            if rank[cid] == nil and not unpinned[cid] then rank[cid] = i end
-        end
-    end
     return rank
 end
 
---- The **counterpart colours** layout input (spec §5.5, `opts.pin_counterpart`):
---- every implicit remote counterpart's ref id → its local's rank — exactly the keys
---- `pin_rank` adds with counterparts on, at the rank it gives them. A ref that is
---- itself an entry (an explicitly pinned remote) is not a counterpart; an explicitly
---- unpinned one is dropped. Pure.
----@param pins PinEntry[]?
----@param refs table<string, Ref>?
----@param remotes string[]?
----@param unpinned table<string, boolean>?
----@return table<string, integer>
-function M.pin_counterpart_rank(pins, refs, remotes, unpinned)
-    local entries = M.pin_rank(pins, refs, remotes, unpinned, false)
-    local out = {}
-    for id, r in pairs(M.pin_rank(pins, refs, remotes, unpinned, true)) do
-        if entries[id] == nil then out[id] = r end
+--- The effective anchor **set** (spec §10.6 "A pin covers the identity"): every
+--- pin-list entry plus every member of each entry's identity (`pairing`, from
+--- `rank.pair`: a local branch and its paired remotes) — except a member pinned only
+--- through its identity that is explicitly `unpinned`, which loses the anchor (its
+--- rank and colour still follow the identity). Pure.
+---@param pins PinEntry[]?                  the resolved pin list (`pin_resolve`)
+---@param pairing IdentityPairing?          `rank.pair` of the repository's refs
+---@param unpinned table<string, boolean>?  explicit per-ref unpin overrides
+---@return table<string, boolean>
+function M.pin_anchors(pins, pairing, unpinned)
+    unpinned = unpinned or {}
+    local set = {}
+    for _, e in ipairs(pins or {}) do set[e.id] = true end
+    for _, e in ipairs(pins or {}) do
+        local ident = pairing and pairing.of[e.id]
+        for _, name in ipairs(ident and ident.members or {}) do
+            if not set[name] and not unpinned[name] then set[name] = true end
+        end
     end
-    return out
+    return set
 end
 
 --- Move the entry at `index` by `delta` places (spec §10.6.1, `<C-j>`/`<C-k>`),
@@ -623,8 +574,8 @@ end
 --- The pinned-branches dialog's buffer lines (spec §10.6.1). Pure so the layout
 --- is testable without a window: the entry rows carry the priority number (every
 --- entry's rank, §5), the `◆` marker for a reserved entry (blank otherwise — the
---- subsequence that also claims columns), and the ref name. Implicit remote
---- counterparts are not entries, so they have no rows. The
+--- subsequence that also claims columns), and the ref name. The members a pin
+--- covers through its identity (§10.6) are not entries, so they have no rows. The
 --- static key help runs down the right; the last selectable row adds a branch.
 ---
 --- The closing note is deliberate: the reserve flag is recorded before the

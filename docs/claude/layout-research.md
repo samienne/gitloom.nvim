@@ -80,6 +80,13 @@ Numbers below are from those runs; re-measure before relying on them for a new d
 
 ## Gutter policy: crossings
 
+> **Predates the ref-colour model.** These gutter measurements (and any spine-break /
+> births figures here) were taken under the former lane-owned colours, with pinned
+> and counterpart lane births. Carried refs (spec §5) recolour the continuing lane
+> instead of birthing one, so `gutter` numbers are to be re-measured over the fuzz
+> corpus and `large_topo` before relying on them (spec §5 "The `gutter` exception").
+> The closed axes below are about placement, not colour, and stand.
+
 Closed axes, do not re-propose:
 
 - **Fan arm order is inert.** 3+-parent merges occur 0 times in real topologies, and a

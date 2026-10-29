@@ -98,6 +98,37 @@ function M.big_opts(merge_style)
     return o
 end
 
+--- Set `opts.ref_rank` (spec §5 "Ranked refs and identities") from the refs on
+--- `items`: every local / remote branch on a visible node (not a collapsed head or a
+--- kept junction) is a visible ranked ref, paired into identities as the window
+--- does. `o.pins` is a list of ref names (pin-list order, 1 best), `o.current` the
+--- current branch, `o.remotes` the `git remote` order (default `{ "origin" }`), and
+--- `o.upstream` a map local name → configured upstream (short name).
+---@param opts table
+---@param items table[]
+---@param o? { pins?: string[], current?: string, remotes?: string[], upstream?: table<string, string> }
+---@return table opts
+function M.ranked(opts, items, o)
+    o = o or {}
+    local refs, visible = {}, {}
+    for _, it in ipairs(items) do
+        local c = it.commit
+        for _, r in ipairs((c and c.refs) or {}) do
+            if r.kind == "local" or r.kind == "remote" then
+                local up = o.upstream and o.upstream[r.name]
+                refs[r.name] = { name = r.name, kind = r.kind, upstream = up and { short = up } or nil }
+                if not c.collapsed and not c.junction then visible[r.name] = true end
+            end
+        end
+    end
+    local pins = {}
+    for i, id in ipairs(o.pins or {}) do pins[i] = { id = id } end
+    opts.ref_rank = require("gitloom.graph.rank").input(refs, {
+        remotes = o.remotes or { "origin" }, pins = pins, current = o.current, visible = visible,
+    })
+    return opts
+end
+
 ----------------------------------------------------------------------
 -- Rendering to a glyph grid
 ----------------------------------------------------------------------
@@ -687,20 +718,15 @@ end
 -- `gutter` only, as it was before this licence existed. It is not a new exemption: the
 -- four policies were never asserted.
 --
--- A THIRD LICENCE, NOT A SWAP: a PINNED BIRTH (§5 "Birth at a pinned tip"). Where a
--- commit's pin rank strictly beats every arriving lane's, no arriving lane continues and
--- the pinned lane is born at the node, so the spine changes lane by definition — under
--- every policy and in any column. Read off the rows: the wire below is the first parent,
--- it carries a rank, and every arriving Lane has another id and a strictly worse rank.
--- A COUNTERPART BIRTH (§5) is licensed alike: the wire below is a counterpart lane
--- (colour `-k`) and every arriving Lane is ranked worse than `k` (rank > k), or
--- unranked and no counterpart lane of rank <= k.
+-- There is no birth licence: a better-ranked ref at a commit recolours the continuing
+-- lane rather than birthing one (§5 "Carried refs"), so the spine never changes lane
+-- there.
 --
 -- Returns the errors, the number of LICENSED breaks (so a test can prove the gate fires
 -- rather than passing vacuously), and a per-kind breakdown.
 ---@param rows table[]
 ---@param opts table?  -- needed to classify subject rows (§5.6); defaults to markers on
----@return string[] errors, integer licensed, table kinds  -- { merge, split, birth = n }
+---@return string[] errors, integer licensed, table kinds  -- { merge, split = n }
 local function check_spine(rows, opts)
     local errors = {}
     local o = opts or {}
@@ -734,7 +760,7 @@ local function check_spine(rows, opts)
         end
     end
 
-    local licensed, kinds = 0, { merge = 0, split = 0, birth = 0 }
+    local licensed, kinds = 0, { merge = 0, split = 0 }
     for ri, row in ipairs(rows) do
         local e = node[ri]
         if e and e.u and e.d and e.u ~= e.d then
@@ -749,32 +775,7 @@ local function check_spine(rows, opts)
             for _, l in ipairs(cl) do
                 if l.id == e.u and l.id ~= first then foreign = l end
             end
-            -- A PINNED BIRTH (§5 "Birth at a pinned tip"): the wire below is the first
-            -- parent's Lane, it carries a pin rank strictly better than every arriving
-            -- Lane's, and none of them shares its id — so no arriving lane continued and
-            -- the spine changes lane by definition, wherever the node sits.
-            -- A COUNTERPART BIRTH is the same licence one step down: the wire below is a
-            -- counterpart lane (colour `-k`) and every arriving Lane is ranked worse than
-            -- `k` (rank > k — compared by rank, §5), or unranked and no counterpart lane
-            -- of rank <= k.
-            local function cpk(l) return (l.color and l.color < 0) and -l.color or nil end
-            local function beats(a, b)
-                if a.rank ~= nil then return b.rank == nil or a.rank < b.rank end
-                local x = cpk(a)
-                if not x then return false end
-                if b.rank ~= nil then return b.rank > x end
-                local y = cpk(b)
-                return y == nil or x < y
-            end
-            local born = pl[1] and pl[1].id == e.d and (pl[1].rank ~= nil or cpk(pl[1]) ~= nil)
-            if born then
-                for _, l in ipairs(cl) do
-                    if l.id == pl[1].id or not beats(pl[1], l) then born = false end
-                end
-            end
-            if born then
-                kind = "birth"
-            elseif e.col ~= 1 then
+            if e.col ~= 1 then
                 why = "not in the gutter column"
             elseif swapped then
                 kind = "merge"

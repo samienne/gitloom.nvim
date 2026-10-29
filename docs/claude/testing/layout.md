@@ -125,7 +125,7 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   a fan-in and a fan-out sharing a run is flagged MIXED-DIRECTION, two arms of the
   same fan are not. It proves **`check_spine`** has teeth too, on hand-built rows that
   isolate each licence clause of BOTH swap licences (a third, the §5 **pinned
-  birth**, is exercised in `pin_rank_spec`). Merge: the licensed swap passes, while
+  birth**, no longer exists under carried refs). Merge: the licensed swap passes, while
   a break outside the
   gutter column, a break whose wire below is not a parent lane, a next subject row
   whose node is not in the gutter, a next subject row entered by a DIFFERENT lane
@@ -150,56 +150,36 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   policies need no separate sweep, but `gutter` emits cell shapes the others never
   do (a node cell whose only wire is a horizontal; a `┤` where one lane both
   arrives and leaves) and mirrored is the orientation it exists for.
-- `tests/pin_rank_spec.lua` — pin priority in lane identity (§5): `commit_rank`
-  (best rank, `HEAD` keying), nil / empty / past-the-palette non-matching
-  `pin_rank` byte-identical (fuzz + `large_topo`, every style × policy), the birth
-  at a pinned tip (the `feature1`-off-`dev` case; a merged pinned tip ending the
-  merge edge and starting its own pinned-colour lane; a counterpart ahead of its
-  local reaching the tip unranked; equal rank one lane; a worse rank no birth),
-  tier 0 beating the newest-lane tiebreak, ids /
-  colours / ranks identical across policies, 0 glyph changes under the four
-  lane-column policies and every invariant + `check_spine` (births licensed, seen
-  > 0) under `gutter`, streaming == one-shot incl. a pin change forcing a re-lay
-  (the fingerprint), and footer seeds carrying their main-view rank. Plus the
-  **pinned colours** (§5.5): rank k's lane born with slot k and unchanged by a pin
-  added below it; over a fuzz corpus with a 6-slot palette (generate on and off) no
-  other lane holds slot k before rank k's branch start is found, and the slot IS
-  recycled after; a diverged counterpart drawing an ordinary colour without a
-  `pin_counterpart` map (with one, see `counterpart_color_spec`); pins past the
-  palette falling back (generated, or shared without truecolor); a non-matching
-  in-palette rank withholding its slot and moving nothing else; and the footer seed
-  taking a withheld slot's reservation over (released once, reused as in the main
-  view). `tests/pane_spec.lua` checks the header never de-collides a lane onto a
-  pinned slot (`pane.header`'s `avoid`), and keeps a counterpart lane's `-k`
-- `tests/counterpart_color_spec.lua` — **counterpart colours** (§5.5,
-  `opts.pin_counterpart`): a counterpart ahead of its local draws `-k` above the
-  local's tip (still unranked) and full `k` from it, the **birth at a counterpart
-  tip** (an arriving unranked lane ends; a lane of a pin ranked as well or better
-  continues; the **lumeeditor HEAD shape** — a lane of a pin ranked WORSE than k,
-  HEAD's branch above `origin/dev`, ends there, its own commits keeping its colour,
-  every style × policy, `check_spine` under `gutter`, and only `(dev ↑origin)` takes
-  `-1` at Y), a diverged one shares slot k
-  with the concurrent pinned lane while an unrelated lane never gets it, the slot
-  returns only after the pinned lane AND every counterpart lane ended (a 2-slot
-  fixture with teeth: without the map, x's end releases it), a fuzz sweep that no
-  ordinary lane holds slot k while a holder does; the **birth at a counterpart
-  tip** (§5) on the reported real-repo shape (pinned `x`, `origin/x` one ahead
-  carrying two more remote refs AND a child branch on top: the child's lane ends,
-  `-1` is born, every style × policy, a licensed `check_spine` birth with no claim
-  Line under gutter), a ranked incoming lane continuing through, a ranked ref on the
-  tip winning (pinned birth), a same-pin counterpart lane continuing vs a worse
-  pin's ending, and no birth once the slot is released; 0 glyph changes vs no map
-  under the four lane-column policies over fuzz + `large_topo` × 4 styles, gutter
-  holding every `h.check` invariant + `check_spine` with births seen (measured
-  rows changed with `GITLOOM_CP_MEASURE=1`; empty map byte-identical),
-  streaming == one-shot incl. a map change re-laying, a footer seed carrying `-k`
-  as one more holder, `select.pin_counterpart_rank` + `pin_upstream = false` →
-  `{}` (`window._internal.pin_counterpart`), and rendering: `slot_hl(-k)` = the
-  `counterpart_dim` blend (0.25; configurable; plain without truecolor), out of the
-  cone `dim_hl` giving the slot colour's `counterpart_dim_out` blend (default
-  `0.75 * dim`, configurable, following `dim`) — brighter than the dimmed pinned
-  lane, dimmer than in-cone — and a counterpart's label in the light-dim colour
-  in the cone and the same brighter dim out of it
+- `tests/ref_rank_spec.lua` — ranked refs and identities (§5), the pure
+  `graph/rank.lua`: `pair` (same-named remotes, a differently named upstream, a
+  remote claimed by several locals — same-named local, then pin order, then name —
+  one shared remote-only identity, tags / `HEAD` / worktrees / `<remote>/HEAD`
+  excluded) and the order (`infos` + `better` / `order`): each tier, local before
+  its remotes, the standing row, upstream then `git remote` order, the current-
+  branch and name tie-breaks, generated refs last, antisymmetry over a mixed set.
+- `tests/ref_color_spec.lua` — **carried refs** (§5) and ref colours (§5.5) in the
+  layout, with `opts.ref_rank` built by `h.ranked` from the items' refs (visible =
+  on a non-collapsed, non-junction node). A fuzz sweep (raw + focused, refs, remotes
+  at / ahead of / behind their locals, remote-only branches, tags and pins scattered)
+  × every style × policy checks every row (`check_refs`): the selected ref is the
+  best arriving / own ref (else generated), the first parent carries it, the
+  continuing lane carries the best arriving ref, a lane changes ref or colour only
+  at a commit carrying an outranking ref of its own, never loses rank, a merge edge
+  carries the best ranked ref on that parent (looked up there alone) else that
+  parent's one generated ref, colour is a function of the identity and distinct refs
+  alive together differ, labels take their identity colour. Plus: every `h.check`
+  invariant (+ `check_spine` under `gutter`) and 0 glyph changes vs no ranking under
+  the lane-column policies; ids / refs / colours identical across policies; fixtures
+  for recolouring at a pinned tip (no birth), a remote ahead of / behind its local
+  (one hue, `ref.remote`), the lower standing row owning the base branch, merge
+  edges (generated, shared by every merge of one ref-less commit; a ref on the
+  parent carried), a tag-only tip; pinned slot k unchanged by a pin below and never
+  held by another identity, a tag entry owning nothing, a pin past the palette; an
+  identity's colour held while a member is pending below and released after; the
+  `buffer` cooldown (a fixture plus a fuzz check); streaming == one-shot incl. a
+  ranking change re-laying the stream; footer seeds carrying their main-view ref and
+  colour; working-tree nodes carrying HEAD's branch (attached) or a generated ref
+  that yields at HEAD's commit (detached).
 - `tests/stream_layout_spec.lua` — the **streaming** Phase-1 sweep (§3.1,
   `graph.extend_columns`): the streamed layout is byte-identical to the one-shot
   one (every rendered Line's connectivity, lane id, colour, node flag,

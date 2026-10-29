@@ -21,8 +21,8 @@ local function build(policy, small, cp)
         dev = { name = "dev", kind = "local", commit = byhash[fix.dev] },
     }
     if cp then
-        -- dev's remote counterpart a few first-parent commits below HEAD's branch tip
-        -- (the LumeScene shape): a counterpart birth (§5/§5.5) ends enne's lane there.
+        -- dev's remote origin/dev a few first-parent commits below HEAD's branch tip
+        -- (the LumeScene shape): dev's identity outranks enne there and recolours its lane.
         local c = byhash[fix.head]
         for _ = 1, 3 do
             local p = c.parents and c.parents[1]
@@ -47,7 +47,7 @@ local function build(policy, small, cp)
         return out
     end
     local pinned = { enne = true, dev = true } -- HEAD's branch + dev, like effective_pinned
-    if cp then pinned["origin/dev"] = true end -- a counterpart is an anchor too (§10.6)
+    if cp then pinned["origin/dev"] = true end -- a member of dev's identity is an anchor too (§10.6)
     local proj = view.project(items, view.owners(items, ofr(), pinned, {}, true), nil)
     local display = proj.items
     local opts = h.big_opts()
@@ -59,20 +59,20 @@ local function build(policy, small, cp)
         opts.palette.buffer = 3
     end
     opts.layout_policy = policy
-    -- The pinned anchors' lane ranks, as `ctx:sync_pin_rank` publishes them (the
-    -- default order: trunks first, HEAD's anchor last; §10.6). Without them §5 tier 2
-    -- (the NEWEST lane) may end an anchor's lane at a junction below its tip, and the
-    -- lane crossing a cutoff there is legitimately another one — the production
-    -- graph never lays an anchor out unranked.
+    -- The ranking input, as `ctx:sync_ref_rank` publishes it: the pinned anchors (the
+    -- default order: trunks first, HEAD's anchor last; §10.6), HEAD's branch current,
+    -- visibility from the projection. With `cp`, dev's remote `origin/dev` sits below
+    -- enne's tip and recolours enne's lane there (§5 "Carried refs"). `pin_rank` is
+    -- still published for the header's colour de-collision (`pinned_slots`).
+    h.ranked(opts, display, { pins = { "dev", "enne" }, current = "enne" })
     opts.pin_rank = { dev = 1, enne = 2 }
-    if cp then opts.pin_counterpart = { ["origin/dev"] = 1 } end
     local main = columns.layout(opts, display)
     local didx, lane_main, node_col, edge = {}, {}, {}, {}
     for i, it in ipairs(display) do
         local c = it.commit
         local pl = main[i].parent_lanes
-        for _, l in ipairs(pl or {}) do edge[l.begin.hash .. ">" .. l.parent.hash] = { id = l.id, color = l.color } end
-        local function reg(x) didx[x] = i; if pl and pl[1] then lane_main[x] = { id = pl[1].id, color = pl[1].color } end end
+        for _, l in ipairs(pl or {}) do edge[l.begin.hash .. ">" .. l.parent.hash] = { id = l.id, color = l.color, ref = l.ref } end
+        local function reg(x) didx[x] = i; if pl and pl[1] then lane_main[x] = { id = pl[1].id, color = pl[1].color, ref = pl[1].ref } end end
         if c then
             reg((c.tip and c.tip.hash) or c.hash)
             if c.tip then reg(c.tip.hash) end
@@ -203,9 +203,15 @@ end
 -- second parent coloured by its first-parent lane, and that wrong colour then moved.
 local render = require("gitloom.graph.render")
 local function colour_mismatches(ctx)
+    -- A lane id's main-view colours: a lane is recoloured where a better-ranked ref
+    -- takes it over (§5 "Carried refs"), so one id may show more than one colour —
+    -- each on its own stretch. A header segment must be in one of them.
     local idcol = {}
     for _, row in ipairs(ctx.main) do
-        for _, l in ipairs(row.parent_lanes or {}) do idcol[l.id] = l.color end
+        for _, l in ipairs(row.parent_lanes or {}) do
+            idcol[l.id] = idcol[l.id] or {}
+            idcol[l.id][l.color] = true
+        end
     end
     local segs, nodes, where = 0, 0, {}
     for si = 2, #ctx.display do
@@ -224,15 +230,20 @@ local function colour_mismatches(ctx)
             for _, r in ipairs(res.rows) do
                 for _, cell in ipairs(r.columns or {}) do
                     for _, sg in ipairs(cell.lanes or {}) do
-                        if idcol[sg.id] ~= nil and idcol[sg.id] ~= sg.color then
-                            segs = segs + 1; where[#where + 1] = ("si=%d seg id=%s"):format(si, tostring(sg.id))
+                        if idcol[sg.id] ~= nil and not idcol[sg.id][sg.color] then
+                            local want = {}
+                            for c in pairs(idcol[sg.id]) do want[#want + 1] = tostring(c) end
+                            table.sort(want)
+                            segs = segs + 1; where[#where + 1] = ("si=%d seg id=%s colour %s, main %s"):format(si,
+                                tostring(sg.id), tostring(sg.color), table.concat(want, "/"))
                         end
                     end
                     if cell.has_commit and cell.commit then
                         local i = ctx.didx[(cell.commit.tip and cell.commit.tip.hash) or cell.commit.hash]
                         local ms = i and render.node_lane_slot(ctx.main[i].columns, nil, nil)
                         if ms ~= nil and ms ~= render.node_lane_slot(r.columns, nil, cell.commit) then
-                            nodes = nodes + 1; where[#where + 1] = ("si=%d node %s"):format(si, cell.commit.hash)
+                            nodes = nodes + 1; where[#where + 1] = ("si=%d node %s colour %s, main %s"):format(si,
+                                cell.commit.hash, tostring(render.node_lane_slot(r.columns, nil, cell.commit)), tostring(ms))
                         end
                     end
                 end
@@ -248,7 +259,7 @@ describe("large real-world header replay — colours follow the main view (§6.2
         { "compact", true, true } }) do
         local policy, small, cp = cfg[1], cfg[2], cfg[3]
         it(("[%s%s%s] no header lane or node off its main-view colour"):format(policy,
-                small and ", 6 colours" or "", cp and ", counterpart birth" or ""),
+                small and ", 6 colours" or "", cp and ", origin/dev recolour" or ""),
             function()
                 local segs, nodes, where = colour_mismatches(build(policy, small, cp))
                 assert.equals(0, segs, table.concat(where, "\n  ", 1, math.min(#where, 12)))

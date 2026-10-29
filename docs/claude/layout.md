@@ -7,9 +7,10 @@ Scope: the Phase 1/Phase 2 layout engine: the pipeline, the resumable sweep, lay
 - **Commit** — a node in the DAG (hash, parents, children, refs, metadata).
   Identity-stable across the stream.
 - **Lane** — one drawn edge child→parent
-  (`{id, color, begin, parent, highlighted}`), a persistent object living from
-  the child's row to the parent's row; `id` is its stable identity and `color`
-  (a palette slot from the recycling free list, spec §5.5) drives the colour.
+  (`{id, color, ref, begin, parent, highlighted}`), a persistent object living from
+  the child's row to the parent's row; `id` is its stable identity, `ref` the ref
+  it carries (spec §5 "Carried refs") and `color` that ref's identity slot from the
+  recycling free list (spec §5.5; `-k` = slot k muted, for a remote ref).
 - **GraphColumn** — one cell of a rendered line: its connectivity plus the
   **Segment**s (per-edge wires) it draws. (Was `Track`; renamed.)
 - **OrderItem** — a rendered row (`commit`, `merge`, or `split` type) holding
@@ -188,53 +189,42 @@ See specification.md §4–§5 for full definitions.
   messages, so the gutter column would only add handover rows; the seam still
   matches since `straight` moves no seeded lane); the **header** does not (it is
   the direct seam-up grid, never `columns.layout`).
-- **Lane identity is independent of placement** (spec §5, `spawn_lanes`): a
-  commit's first parent continues the identity of the incoming lane that
-  represents the same line of history, in tiers: **0** the best **pin rank**
-  (`opts.pin_rank`, ref id → rank, 1 best; each Lane carries the `rank` of the
-  pinned ref at its birth; unranked is worst), **1** a lane whose child has this
-  commit as its FIRST parent, else any incoming lane (a merge's second-parent edge
-  is still that branch continuing; minting fresh there would recolour every
-  merged-in branch tip), **2** the **newest**, the largest id (the chain that
-  started nearest the commit; it was the most senior until the user chose this —
-  a trunk keeps its colour through such a junction by being pinned, tier 0; the
-  ended lanes' colours are still freed in id ORDER, which is only the FIFO's
-  determinism, not a continuation choice). Since the four lane-column policies
-  still put the node on the LEFTMOST incoming lane, the newest lane usually
-  arrives from the right, so an unpinned fork shows a colour change at the node
-  under them (`check_spine` errors ~3.5x the senior rule's over fuzz; `gutter` 0).
-  Fixtures that need a trunk to continue through a fork PIN it (`pin_rank`), as
-  production does (the split-swap block, the fork-hub fixture, `header_replay_spec`,
-  two `pane_spec` header cases, the focused spine sweep's `t1`). A commit whose
-  best rank (`columns.commit_rank`) strictly beats every incoming lane's is a
-  **pinned birth**: every incoming lane ends — an arriving merge extra-parent edge
-  included (the old "adopt" case is gone: a lane's colour is fixed for life) — and a
-  fresh ranked lane is born (`state.pin_birth`; under `gutter` it skips the claim
-  row when a fan has its own Line and declines the parent swap). **Pinned colours**
-  (§5.5): rank `k <= #palette.tracks` owns curated slot `k` (`columns.pinned_slots`);
-  `M.session` withholds those slots from the FIFO up front (`pin_wait` / `held`,
-  `in_use` 1), a lane born with rank `r` takes slot `r` (`take_pin`), and the slot
-  returns through the ordinary `free_color` when that lane ends — or through
-  `release_pin` at the tip when no lane of its own is born there (outranked, a
-  better ref on the commit, a root). The no-truecolor share path skips held slots,
-  and generated-slot retirement counts only non-held ones. A footer seed carrying a
-  withheld slot takes the reservation over (counted once). nil/empty `pin_rank` is
-  byte-identical to the unranked layout (0 of 233,025 rows vs the pre-rank code); a
-  non-matching rank inside the palette withholds its slot for the whole layout. The
-  map is in the layout fingerprint, and footer seeds carry `rank` via
-  `pane.boundary_of`.
-  Under the four lane-column policies ranks change colour only (0 glyphs); under
-  `gutter` they move geometry (spec §5's measured exception). The ended lanes' colours are returned in
-  **id order**, because `free_color` appends to a FIFO and the return order decides
-  which colour a later lane gets. Nothing here reads a column, which buys the
-  cross-policy guarantee: **all five policies produce identical lane ids and
-  colours**, differing only in position, so `C` moves the graph and never recolours
-  it (asserted in `graph_layout_spec`). This replaced "reuse the **leftmost**
-  incoming lane" — a positional proxy for "the trunk" that failed wherever a topic
-  lane landed left of it, drawing the merge and the whole spine below as the topic.
-  It was found under `gutter` (which constrains columns, so it hit reliably) but was
-  never gutter-specific: `compact` mis-picked on ~2.8% of commits. The fix changes
-  **colour only — geometry is untouched** (0 glyph changes across every corpus).
+- **Carried refs and lane identity are independent of placement** (spec §5,
+  `spawn_lanes`; ARCHITECTURE.md "Ranked refs" and Phase 1 step 3). Every Lane
+  carries one ref (`lane.ref`, a `rank.lua` `RankInfo`; tier 4 = generated). A
+  commit's selected ref is the best (`rank.better`) of the incoming lanes' refs and
+  its own visible ranked refs; the first parent carries it, other parents the best
+  ref ON that parent else its generated ref. The first parent continues one
+  incoming lane's id, in tiers: **0** the lane carrying the best ref, **1** a lane
+  whose child has this commit as its FIRST parent (a merge's second-parent edge is
+  still that branch continuing), **2** the **newest**, the largest id. No lane is
+  born at a ranked tip: an outranking own ref **recolours** the continuing lane
+  there (the former pinned-tip births and their `gutter` special cases are
+  gone). The ranking input is `opts.ref_rank`
+  (`rank.input`, in the layout fingerprint; nil = everything generated); fixtures
+  build it with `h.ranked(opts, items, o)` in `tests/graph_helpers.lua`. Since the four
+  lane-column policies still put the node on the LEFTMOST incoming lane, the
+  continuing lane may arrive from the right — a colour change at the node
+  (`check_spine`; `gutter` 0). Under those four, ranks change colour only (0
+  glyphs); under `gutter` they move geometry (spec §5's measured exception).
+- **Colour session** (spec §5.5, `M.session`): colour is kept per ref **key** (an
+  identity, or a generated ref's info) — `ensure` allocates on first select /
+  carry / label (selected ref, then labels, then other parents), `release` frees a
+  key once no live lane carries it (`live`) and no visible member's tip is pending
+  below (`pending`), after the row's allocations, in allocation order. **Pinned
+  colours**: `rr.slots` (identity key → pin rank) — rank `k <= #palette.tracks` owns
+  slot `k`, withheld up front (`held`, `in_use` 1) and never released; the share
+  path skips held slots and generated-slot retirement counts only non-held ones. A
+  **remote** ref's lane is drawn **`-k`** (slot k muted): the sign rides every copy
+  of `color` (Segments, header de-collision, footer seeds — which reserve
+  `abs(color)` — and rebuilt pane cells); `render.slot_hl(-k)` = `mute_hl`. Rows
+  record `selected`, `selected_color` (unsigned) and `ref_colors` (label colours).
+  Nothing here reads a column, which buys the cross-policy guarantee: **all five
+  policies produce identical lane ids, refs and colours**, differing only in
+  position, so `C` moves the graph and never recolours it (asserted in
+  `graph_layout_spec`). This replaced "reuse the **leftmost** incoming lane" — a
+  positional proxy for "the trunk" that failed wherever a topic lane landed left of
+  it (`compact` mis-picked on ~2.8% of commits).
 - **Node-less junctions render inline** (spec §10.4): `columns.layout` skips the
   separate split/merge line for a node-less junction with a **single** fan (it
   carries no message), so a join is one row, not a fan line plus an empty lane

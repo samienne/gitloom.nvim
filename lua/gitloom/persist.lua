@@ -153,8 +153,9 @@ end
 --- the **leading run** of unreserved default anchors that still sit in their
 --- default order, above every explicitly placed entry, where `pin_resolve` puts
 --- them back. A default the user moved below an explicit entry (or out of default
---- order) is kept with its place, as is every reserved entry. Implicit remote
---- counterparts are never entries, so there is nothing to drop for them.
+--- order) is kept with its place, as is every reserved entry. The members a pin
+--- covers through its identity (§10.6) are never entries, so there is nothing to
+--- drop for them.
 ---@param pins PinEntry[]
 ---@param defaults string[]?  the default anchor ids at save time, in default order
 ---@return PinEntry[]

@@ -25,9 +25,22 @@ local M = {}
 local DIM_FALLBACK = "NonText"
 M.DIM_FALLBACK = DIM_FALLBACK
 local dim_cache = {}
--- Counterpart-variant group name → the slot group it was blended from (§5.5). Names
+-- Muted-variant group name → the slot group it was blended from (§5.5). Names
 -- are deterministic (group + factor), so this survives a ColorScheme reset intact.
-local cp_source = {}
+local mute_source = {}
+
+--- A palette blend factor by its current name, else its former alias (§8:
+--- `remote_mute` / `counterpart_dim`, `remote_mute_out` / `counterpart_dim_out`).
+---@param opts GraphOptions
+---@param key string
+---@param alias string
+---@return number?
+local function palette_factor(opts, key, alias)
+    local pal = opts.palette or {}
+    if type(pal[key]) == "number" then return pal[key] end
+    if type(pal[alias]) == "number" then return pal[alias] end
+    return nil
+end
 
 ---@param fg integer
 ---@param bg integer
@@ -53,15 +66,14 @@ function M.dim_hl(opts, group)
     if not group then return nil end
     if not vim.o.termguicolors then return DIM_FALLBACK end
     local factor = (opts.palette and type(opts.palette.dim) == "number") and opts.palette.dim or 0.45
-    -- A COUNTERPART lane's colour out of the cone (§12.2): not the cone dim on top of
-    -- its light dim, but ITS SLOT COLOUR blended by the out-of-cone counterpart factor
-    -- — `palette.counterpart_dim_out`, default `0.75 * dim` — so it reads a shade
-    -- BRIGHTER than every other dimmed lane, its own pinned lane's included.
-    local src_group = cp_source[group]
+    -- A REMOTE ref's colour out of the cone (§12.2): not the cone dim on top of its
+    -- light mute, but ITS SLOT COLOUR blended by the out-of-cone remote factor —
+    -- `palette.remote_mute_out`, default `0.75 * dim` — so it reads a shade BRIGHTER
+    -- than every other dimmed colour, its own local's included.
+    local src_group = mute_source[group]
     if src_group then
-        local out = (opts.palette and type(opts.palette.counterpart_dim_out) == "number")
-            and opts.palette.counterpart_dim_out or 0.75 * factor
-        return M.counterpart_hl(opts, src_group, out, "GitloomCpDim_")
+        local out = palette_factor(opts, "remote_mute_out", "counterpart_dim_out") or (0.75 * factor)
+        return M.mute_hl(opts, src_group, out, "GitloomMuteDim_")
     end
     local key = group .. "\x1f" .. tostring(factor)
     if dim_cache[key] then return dim_cache[key] end
@@ -81,13 +93,14 @@ function M.dim_hl(opts, group)
     return name
 end
 
---- The **counterpart variant** of lane colour `group` (spec §5.5 "Counterpart
---- colours"): the same hue blended lightly toward the Normal background by
---- `palette.counterpart_dim` (default 0.25 — much lighter than the §12 cone dim).
---- Cached in the dim cache (so the ColorScheme reset clears it too). Without
---- truecolor it is `group` itself. Out of the cone `dim_hl` of this group does NOT
---- compose: it blends the slot colour by `counterpart_dim_out` (default
---- `0.75 * dim`), lighter than the cone dim every other lane gets (§12.2).
+--- The **muted variant** of colour `group` (spec §5.5 "Muted remotes"): the same
+--- hue blended lightly toward the Normal background by `palette.remote_mute`
+--- (alias `counterpart_dim`; default 0.25 — much lighter than the §12 cone dim),
+--- the colour of every remote ref's tracks, node and label. Cached in the dim cache
+--- (so the ColorScheme reset clears it too). Without truecolor it is `group`
+--- itself. Out of the cone `dim_hl` of this group does NOT compose: it blends the
+--- slot colour by `remote_mute_out` (default `0.75 * dim`), lighter than the cone
+--- dim every other colour gets (§12.2).
 ---
 --- `factor` / `prefix` override the blend and the group-name prefix: `dim_hl` uses
 --- them for the same lane OUT of the cone (§12.2), which is not a composition.
@@ -96,12 +109,11 @@ end
 ---@param factor? number
 ---@param prefix? string
 ---@return string|nil
-function M.counterpart_hl(opts, group, factor, prefix)
+function M.mute_hl(opts, group, factor, prefix)
     if not group or not vim.o.termguicolors then return group end
-    factor = factor or ((opts.palette and type(opts.palette.counterpart_dim) == "number")
-        and opts.palette.counterpart_dim or 0.25)
-    prefix = prefix or "GitloomCp_"
-    local key = "cp:" .. prefix .. group .. ":" .. tostring(factor)
+    factor = factor or palette_factor(opts, "remote_mute", "counterpart_dim") or 0.25
+    prefix = prefix or "GitloomMute_"
+    local key = "mute:" .. prefix .. group .. ":" .. tostring(factor)
     if dim_cache[key] then return dim_cache[key] end
     local ok_src, src = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
     local ok_norm, normal = pcall(vim.api.nvim_get_hl, 0, { name = "Normal", link = false })
@@ -112,7 +124,7 @@ function M.counterpart_hl(opts, group, factor, prefix)
     local name = prefix .. group:gsub("%W", "_") .. "_" .. tostring(math.floor(factor * 100))
     pcall(vim.api.nvim_set_hl, 0, name, { fg = blend_color(fg, bg, factor) })
     dim_cache[key] = name
-    if prefix == "GitloomCp_" then cp_source[name] = group end
+    if prefix == "GitloomMute_" then mute_source[name] = group end
     return name
 end
 
@@ -188,8 +200,8 @@ end
 -- ── Ref decorations (specification.md §6) ───────────────────────────────────
 
 --- The label marks a label render is given (§6/§10.6): the **effective** pinned
---- ref ids (ref names, as `repo.refs` keys them — so the default anchors and an
---- implicit remote counterparts of a pinned local branch are in it) and the icon to
+--- ref ids (ref names, as `repo.refs` keys them — so the default anchors and every
+--- member of a pinned identity, §10.6, are in it) and the icon to
 --- prefix a pinned label with, plus the **expanded** ref ids (§6 "Expanded marker":
 --- effective normal while the §10.7 default is collapsed) and their icon, drawn
 --- after the pin icon. Passed in by the caller so the renderer stays pure; nil = no
@@ -288,15 +300,17 @@ end
 --- first: the **current branch** as `(HEAD → name)` with kind "head" (the HEAD colour),
 --- or, on a **detached HEAD** (a head marker with no current branch), a bare `HEAD`.
 --- The head ref's `branch` identifies the current branch; `head_branch` (= repo.head)
---- is the fallback for a ref list that does not carry it. `key` is the label's
---- `label_owner` key, so the pane can give its row's lane colour to the owner only.
+--- is the fallback for a ref list that does not carry it. A branch group carries its
+--- colouring members (§6 "Label colour", `group_members`): `ref` / `remote` the ref
+--- whose colour the bracket, icons and name take, and `rspans` each `↑remote`
+--- token's byte span (1-based, inclusive) with its full ref name.
 ---@param commit { refs: Ref[] }?
 ---@param head_branch string?  -- the current branch (coloured as HEAD); nil when detached
 ---@param pins? PinMarks  the pin set + icon (§6/§10.6); nil = no pin icons
 --- A tracked branch's spelled-out non-matching upstream (§6.3) is part of its
 --- label text; `up` is that token's byte span (1-based, inclusive) and `up_kind`
 --- its `palette.track` key ("upstream"|"mismatch"), so the pane colours it apart.
----@return { text: string, kind: string, key: string, hl: string?, arrow: integer[]?, up: integer[]?, up_kind: string? }[]
+---@return { text: string, kind: string, ref: string?, remote: boolean?, rspans: { span: integer[], ref: string }[]?, hl: string?, arrow: integer[]?, up: integer[]?, up_kind: string? }[]
 function M.pane_labels(commit, head_branch, pins)
     local g = git.group_refs(commit and commit.refs or {}, head_branch)
     -- Per-ref colour override (§11.7.6): a tag with `hl` (a pointer mark) keeps
@@ -307,10 +321,16 @@ function M.pane_labels(commit, head_branch, pins)
     end
     local out = {}
     -- Detached HEAD: no branch to colour, so show the bare HEAD marker.
-    if g.head and not g.current then out[#out + 1] = { text = "HEAD", kind = "head", key = "HEAD" } end
+    if g.head and not g.current then out[#out + 1] = { text = "HEAD", kind = "head" } end
     for _, b in ipairs(g.branches) do
         local t = "(" .. (b.current and git.HEAD_ARROW or "") .. M.group_pin(pins, b) .. b.name
-        if #b.remotes > 0 then t = t .. " ↑" .. table.concat(b.remotes, ",") end
+        local nref, nremote, rnames = M.group_members(b)
+        local rspans = {}
+        for i, r in ipairs(b.remotes) do
+            local tok = (i == 1 and " ↑" or ",") .. r
+            rspans[i] = { span = { #t + 1, #t + #tok }, ref = rnames[i] }
+            t = t .. tok
+        end
         -- Only the spelled-out upstream (§6.3) — the panes carry no divergence.
         local up = git.track_segments(b.track, pins and pins.upstream_icon)[1]
         local up_span = nil
@@ -320,19 +340,19 @@ function M.pane_labels(commit, head_branch, pins)
         else
             up = nil
         end
-        -- The current branch takes the HEAD colour; others their own kind. `arrow`
-        -- is the `HEAD → ` prefix's byte span (1-based, inclusive): it keeps the
-        -- HEAD colour when the rest takes the lane colour (§6 "Label colour").
+        -- The current branch's per-kind colour is HEAD's; others their own kind.
+        -- `arrow` is the `HEAD → ` prefix's byte span (1-based, inclusive): it keeps
+        -- the HEAD colour when the rest takes its ref's colour (§6 "Label colour").
         out[#out + 1] = { text = t .. ")", kind = b.current and "head" or (b.has_local and "branch" or "remote"),
-            key = "b:" .. b.name, arrow = b.current and { 2, 1 + #git.HEAD_ARROW } or nil,
+            ref = nref, remote = nremote, rspans = rspans,
+            arrow = b.current and { 2, 1 + #git.HEAD_ARROW } or nil,
             up = up_span, up_kind = up and up.kind or nil }
     end
     for _, tag in ipairs(g.tags) do
-        out[#out + 1] = { text = "[" .. M.name_pin(pins, tag) .. tag .. "]", kind = "tag", key = "t:" .. tag,
-            hl = hl_by_name[tag] }
+        out[#out + 1] = { text = "[" .. M.name_pin(pins, tag) .. tag .. "]", kind = "tag", hl = hl_by_name[tag] }
     end
     for _, wt in ipairs(g.worktrees) do
-        out[#out + 1] = { text = "{" .. M.name_pin(pins, wt) .. wt .. "}", kind = "worktree", key = "w:" .. wt }
+        out[#out + 1] = { text = "{" .. M.name_pin(pins, wt) .. wt .. "}", kind = "worktree" }
     end
     return out
 end
@@ -340,17 +360,18 @@ end
 --- The selectable units of a packed marker-group row (spec §10.4): one per
 --- marker, its text being the marker's ref decoration(s) or a "(N)" count when
 --- it carries no ref. Used for rendering, `h`/`l` selection, and `<CR>` expand.
---- `decos` / `keys` are the separate labels (empty for a count-only unit) and their
---- `label_owner` keys, so each label can be coloured on its own (§6 "Label colour").
+--- `decos` / `kinds` are the separate labels (empty for a count-only unit) and their
+--- per-kind label kinds (`decoration_kinds`): a packed marker's refs are not visible
+--- ranked refs, so each label takes its per-kind colour (§6 "Label colour").
 ---@param item OrderItem  -- a type == "markers" item
 ---@param pins? PinMarks  the pin set + icon (§6/§10.6); nil = no pin icons
----@return { marker: table, text: string, decos: string[], keys: string[] }[]
+---@return { marker: table, text: string, decos: string[], kinds: string[] }[]
 function M.marker_units(item, pins)
     local units = {}
     for _, m in ipairs(item.markers or {}) do
         local decos = M.decoration_texts(m, nil, pins)
         local text = (#decos > 0) and table.concat(decos, " ") or ("(" .. (m.count or 0) .. ")")
-        units[#units + 1] = { marker = m, text = text, decos = decos, keys = M.decoration_keys(m) }
+        units[#units + 1] = { marker = m, text = text, decos = decos, kinds = M.decoration_kinds(m) }
     end
     return units
 end
@@ -457,24 +478,24 @@ M.top_lane = top_lane
 
 --- Resolve a palette slot (1-based, from Phase 1's free list) to its highlight
 --- group: a curated slot indexes `palette.tracks`; a slot beyond the curated set
---- is a generated OKLCH colour (§5.5). A negative slot `-k` is slot `k`'s
---- counterpart variant (a remote counterpart's lane, §5.5): `counterpart_hl`.
+--- is a generated OKLCH colour (§5.5). A negative slot `-k` is slot `k`'s muted
+--- variant (a track or node carrying a remote ref, §5.5): `mute_hl`.
 ---@param opts GraphOptions
 ---@param slot integer|nil
 ---@return string?
 function M.slot_hl(opts, slot)
     if not slot then return nil end
-    if slot < 0 then return M.counterpart_hl(opts, M.slot_hl(opts, -slot)) end
+    if slot < 0 then return M.mute_hl(opts, M.slot_hl(opts, -slot)) end
     local n = #opts.palette.tracks
     if slot <= n then return opts.palette.tracks[slot] end
     return generated_hl(opts, slot - n)
 end
 
---- The lane colour a row's node is drawn in (§6 "Label colour"): the highlight
---- group `get_column_chars` gives the node glyph — the node cell's `top_lane`
---- (honouring `own_lane_up`, §5.6) through `seg_color` — WITHOUT the HEAD-node
---- override (§5.3), since a label's HEAD marker is coloured on its own. Undimmed;
---- the caller dims it with the row. `commit` picks the node on a packed marker row
+--- The colour a row's node is drawn in: the highlight group `get_column_chars`
+--- gives the node glyph — the node cell's `top_lane` (honouring `own_lane_up`,
+--- §5.6) through `seg_color` — WITHOUT the HEAD-node override (§5.3). Undimmed;
+--- the caller dims it with the row. A packed marker's count-only unit (§10.4) takes
+--- it. `commit` picks the node on a packed marker row
 --- (§10.4); nil = the row's (first) node cell. nil when the row has no node cell.
 ---@param opts GraphOptions
 ---@param columns GraphColumn[]?
@@ -485,8 +506,8 @@ function M.node_lane_hl(opts, columns, emphasis, commit)
     return M.slot_hl(opts, M.node_lane_slot(columns, emphasis, commit))
 end
 
---- The palette slot behind `node_lane_hl` (negative `-k` for a counterpart lane,
---- §5.5) — what `label_owner` matches against the refs. nil without a node cell.
+--- The palette slot behind `node_lane_hl` (negative `-k` for a track carrying a
+--- remote ref, drawn muted, §5.5). nil without a node cell.
 ---@param columns GraphColumn[]?
 ---@param emphasis boolean|nil
 ---@param commit table?
@@ -501,111 +522,49 @@ function M.node_lane_slot(columns, emphasis, commit)
     return nil
 end
 
---- A ref's **label key** (§6 "Label colour"): which drawn label it belongs to —
---- `b:<short>` for a branch group (a local and its `↑remote,…` list are ONE label,
---- keyed by the short name exactly as `git.group_refs` groups them), `t:<name>` a
---- tag, `w:<name>` a worktree label, `HEAD` a detached HEAD's bare marker (an
---- attached head ref belongs to its branch's group).
----@param ref Ref
----@return string?
-local function ref_label_key(ref)
-    if ref.kind == "head" then return ref.branch and ("b:" .. ref.branch) or "HEAD" end
-    if ref.kind == "local" then return "b:" .. ref.name end
-    if ref.kind == "remote" then
-        local short = ref.name:match("^[^/]+/(.+)$")
-        return "b:" .. (short or ref.name)
-    end
-    if ref.kind == "tag" then return "t:" .. ref.name end
-    if ref.kind == "worktree" then return "w:" .. ref.name end
-    return nil
-end
-
---- The label that **owns** a node's lane (§6 "Label colour"), as a label key
---- (`ref_label_key`): the only label on the node drawn in the lane colour.
----
----  1. The ref the lane was BORN FOR: a ref on this node whose own colour the lane
----     carries — rank `k`'s pinned colour, slot `k` (`opts.pin_rank`, only while
----     `k` is a curated slot, §5.5), or counterpart rank `k`'s colour `-k`
----     (`opts.pin_counterpart`). A pinned slot is withheld until its ref's tip and
----     only a counterpart lane carries `-k`, so matching the colour is exactly "born
----     here for it" — and needs no layout data, so the panes (which carry the main
----     view's colours) agree.
----  2. Otherwise the first label in logical order: the current branch's group, the
----     other branch groups, tags, worktrees. A detached HEAD's bare marker is never
----     an owner (it is always `palette.head`) — not even when the lane was born for
----     a pinned detached `HEAD` in step 1: that lane falls through to here, so a
----     branch on a detached HEAD reads in its lane's colour.
----
---- nil when the node has no label at all. A remote's `origin/HEAD` symref is no ref
---- (`git.classify_ref` drops it), so it can never own.
----@param opts GraphOptions
----@param commit { refs: Ref[]? }?
----@param slot integer?            the node's lane slot (`node_lane_slot`)
----@param head_branch string?      the current branch when the head ref does not name it
----@return string?
-function M.label_owner(opts, commit, slot, head_branch)
-    local refs = commit and commit.refs or {}
-    if slot then
-        local ntracks = #((opts.palette or {}).tracks or {})
-        local rank, cp = opts.pin_rank, opts.pin_counterpart
-        for _, ref in ipairs(refs) do
-            local id = ref.kind == "head" and "HEAD" or ref.name
-            if (slot > 0 and slot <= ntracks and rank and rank[id] == slot)
-                or (slot < 0 and cp and cp[id] == -slot) then
-                -- a detached HEAD's bare marker is always `palette.head`, so a lane
-                -- born for it passes to the first other label (step 2)
-                local key = ref_label_key(ref)
-                if key ~= "HEAD" then return key end
-            end
-        end
-    end
-    local g = git.group_refs(refs, head_branch)
-    if g.branches[1] then return "b:" .. g.branches[1].name end
-    if g.tags[1] then return "t:" .. g.tags[1] end
-    if g.worktrees[1] then return "w:" .. g.worktrees[1] end
-    return nil
-end
-
---- The label keys of `decoration_texts`, in the same order (§6 "Label colour").
+--- The per-kind label kinds of `decoration_texts`, in the same order (§6 "Label
+--- colour"): "branch" for a branch group with its local branch, "remote" for one of
+--- remotes only, "tag", "worktree".
 ---@param commit { refs: Ref[]? }?
 ---@param head_branch string?
 ---@return string[]
-function M.decoration_keys(commit, head_branch)
+function M.decoration_kinds(commit, head_branch)
     local g = git.group_refs(commit and commit.refs or {}, head_branch)
     local out = {}
-    for _, b in ipairs(g.branches) do out[#out + 1] = "b:" .. b.name end
-    for _, t in ipairs(g.tags) do out[#out + 1] = "t:" .. t end
-    for _, w in ipairs(g.worktrees) do out[#out + 1] = "w:" .. w end
+    for _, b in ipairs(g.branches) do out[#out + 1] = b.has_local and "branch" or "remote" end
+    for _ in ipairs(g.tags) do out[#out + 1] = "tag" end
+    for _ in ipairs(g.worktrees) do out[#out + 1] = "worktree" end
     return out
 end
 
---- A node's lane colour and the label that owns it (§6 "Label colour"): the
---- `node_lane_hl` group plus `label_owner`'s key. Callers pass the lane colour to
---- `label_hl` for the owning label only.
+--- The highlight of one ranked ref's label (§6 "Label colour"): the ref's OWN
+--- colour — `colors[name]`, its identity's slot at its tip (`row.ref_colors`, §5.5)
+--- — in the muted variant for a remote; or the per-kind group `kind_group` when
+--- `lane_label_colors` is off or the ref has no colour here (not a visible ranked
+--- ref: a collapsed `◍` head's or a packed marker's label, §10.4).
 ---@param opts GraphOptions
----@param columns GraphColumn[]?
----@param emphasis boolean|nil
----@param commit table?        the node's commit (also picks the node on a packed row)
----@param head_branch string?
----@param pick boolean?        match the node cell by `commit` (a packed marker row)
----@return string? lane, string? owner
-function M.node_label_colour(opts, columns, emphasis, commit, head_branch, pick)
-    local slot = M.node_lane_slot(columns, emphasis, pick and commit or nil)
-    return M.slot_hl(opts, slot), M.label_owner(opts, commit, slot, head_branch)
-end
-
---- The highlight a ref label is drawn in (§6 "Label colour"): its node's lane
---- colour `lane` — which the caller passes for the label owning the lane only
---- (`label_owner`), nil for every other label — unless `lane_label_colors` is off
---- or the row has no node colour, then the label's per-kind palette group
---- `kind_group`.
----@param opts GraphOptions
----@param lane string?
+---@param colors table<string, integer>?  ref name → slot (the row's `ref_colors`)
+---@param name string?                    the ref's full name
+---@param remote boolean?                 a remote-tracking branch (drawn muted)
 ---@param kind_group string?
 ---@return string?
-function M.label_hl(opts, lane, kind_group)
-    if opts.lane_label_colors ~= false and lane then return lane end
-    return kind_group
+function M.ref_label_hl(opts, colors, name, remote, kind_group)
+    local slot = opts.lane_label_colors ~= false and colors and name and colors[name]
+    if not slot then return kind_group end
+    return M.slot_hl(opts, remote and -slot or slot)
+end
+
+--- A branch group's members for its colouring (§6 "Label colour"): the ref whose
+--- colour the bracket, icons and name take — the local branch, else the group's
+--- first listed remote — whether that ref is a remote, and each `↑remote`'s full
+--- ref name in listed order.
+---@param b RefGroup
+---@return string? name_ref, boolean name_remote, string[] remotes
+function M.group_members(b)
+    local remotes = {}
+    for i, r in ipairs(b.remotes or {}) do remotes[i] = r .. "/" .. b.name end
+    if b.has_local then return b.name, false, remotes end
+    return remotes[1], true, remotes
 end
 
 --- Whether `commit` is the one HEAD points at (§5.3): it carries the `head` ref
@@ -1101,10 +1060,10 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
     -- The `selected`-th decoration (branches then tags) is drawn with
     -- palette.selected (§2). The listview packs these against the right edge
     -- with a width budget and a "+N" overflow marker.
-    -- Only the label OWNING the node's lane (`owner`, a `label_owner` key) takes
-    -- the lane colour `lane`; every other label its per-kind group (§6 "Label colour").
-    local get_ref_items = function(commit, lane, owner)
-        local function lane_for(key) return key == owner and lane or nil end
+    -- Every ranked ref's label takes ITS OWN ref's colour (`colors`, the row's
+    -- `ref_colors`: ref name → slot), a remote's muted (§6 "Label colour"); a ref
+    -- with no colour there (`colors` nil: a collapsed head's) its per-kind group.
+    local get_ref_items = function(commit, colors)
         local g = git.group_refs(commit.refs, head_branch)
         local texts = M.decoration_texts(commit, head_branch, pins) -- same order + text; shared with the cursor target
         local items = {}
@@ -1124,16 +1083,18 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             if di == selected then
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
-                -- The owning label takes its node's lane colour (§6 "Label colour");
-                -- the current branch's `HEAD → ` prefix keeps the HEAD colour.
-                local blane = lane_for("b:" .. b.name)
-                local name_hl = M.label_hl(opts, blane,
+                -- The bracket, icons and name in the local's colour (else the first
+                -- remote's), each `↑remote` in its own muted colour (§6 "Label
+                -- colour"); the current branch's `HEAD → ` prefix keeps the HEAD colour.
+                local nref, nremote, rnames = M.group_members(b)
+                local name_hl = M.ref_label_hl(opts, colors, nref, nremote,
                     b.current and palette.head or (b.has_local and palette.branch or palette.remote))
                 local segs = { rh("(", name_hl) }
                 if b.current then segs[#segs + 1] = rh(git.HEAD_ARROW, palette.head) end
                 segs[#segs + 1] = rh(M.group_pin(pins, b) .. b.name, name_hl)
-                if #b.remotes > 0 then
-                    segs[#segs + 1] = rh(" ↑" .. table.concat(b.remotes, ","), M.label_hl(opts, blane, palette.remote))
+                for i, r in ipairs(b.remotes) do
+                    segs[#segs + 1] = rh((i == 1 and " ↑" or ",") .. r,
+                        M.ref_label_hl(opts, colors, rnames[i], true, palette.remote))
                 end
                 -- Upstream tracking (§6.3): the spelled-out non-matching upstream
                 -- and each ⇡/⇣/gone token, coloured by kind via palette.track (never
@@ -1153,7 +1114,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
                 items[#items + 1] = rh("[" .. M.name_pin(pins, t) .. t .. "]",
-                    hl_by_name[t] or M.label_hl(opts, lane_for("t:" .. t), palette.tags))
+                    hl_by_name[t] or palette.tags)
             end
         end
         -- Linked-worktree labels (§3.2) come last: they are the least branch-like
@@ -1165,7 +1126,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 items[#items + 1] = highlight_text(texts[di], palette.selected)
             else
                 items[#items + 1] = rh("{" .. M.name_pin(pins, w) .. w .. "}",
-                    M.label_hl(opts, lane_for("w:" .. w), palette.worktree or palette.tags))
+                    palette.worktree or palette.tags)
             end
         end
         return items
@@ -1223,13 +1184,19 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
             -- branch renders in its normal colour and the others — out of its cone
             -- — dim, exactly like selecting a normal head. (`sel` still windows the
             -- selected label into view via line_right_sel.)
-            -- Each marker is its own node: the label owning THAT marker's lane takes
-            -- its node colour, the others `palette.branch` (§6 "Label colour"). A
-            -- count-only unit has no label to own, so it shows the lane colour.
-            local lane, owner = M.node_label_colour(opts, item.columns, emphasis, u.marker, nil, true)
+            -- A packed marker's refs are not visible ranked refs: each label takes
+            -- its per-kind colour (§6 "Label colour"). A count-only unit has no
+            -- label, so it shows its node's colour (`palette.branch` with
+            -- `lane_label_colors` off).
             local dim = emphasis and not (cone and cone[u.marker])
-            local function hl_of(key)
-                local g = M.label_hl(opts, (key == nil or key == owner) and lane or nil, palette.branch)
+            local kind_hl = { branch = palette.branch, remote = palette.remote, tag = palette.tags,
+                worktree = palette.worktree or palette.tags }
+            local function hl_of(kind)
+                local g = kind_hl[kind]
+                if kind == nil then
+                    g = opts.lane_label_colors ~= false
+                        and M.node_lane_hl(opts, item.columns, emphasis, u.marker) or palette.branch
+                end
                 return dim and M.dim_hl(opts, g) or g
             end
             if u.marker == sel_cursor then
@@ -1240,7 +1207,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
                 local segs = {}
                 for i, d in ipairs(u.decos) do
                     if i > 1 then segs[#segs + 1] = " " end
-                    segs[#segs + 1] = highlight_text(d, hl_of(u.keys[i]))
+                    segs[#segs + 1] = highlight_text(d, hl_of(u.kinds[i]))
                 end
                 labels[#labels + 1] = compose(segs)
             end
@@ -1265,7 +1232,8 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         -- only to show the region's existence and how it connects to the trunk —
         -- uncollapse for detail.
         local parts = {}
-        for _, it in ipairs(get_ref_items(head, M.node_label_colour(opts, item.columns, emphasis, head, head_branch))) do
+        -- A collapsed head's refs are not visible ranked refs: per-kind (§6).
+        for _, it in ipairs(get_ref_items(head, nil)) do
             parts[#parts + 1] = it
             parts[#parts + 1] = " "
         end
@@ -1282,8 +1250,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         local graph_item = M.get_column_chars(opts, item.columns, emphasis)
         local above, below = fan_lines()
         local parts = {}
-        for _, it in ipairs(get_ref_items(item.commit,
-            M.node_label_colour(opts, item.columns, emphasis, item.commit, head_branch))) do
+        for _, it in ipairs(get_ref_items(item.commit, item.ref_colors)) do
             parts[#parts + 1] = it
             parts[#parts + 1] = " "
         end
@@ -1337,8 +1304,7 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         else
             message = rh(msg_text, palette.message) or ""
         end
-        local ref_items = get_ref_items(item.commit,
-            M.node_label_colour(opts, item.columns, emphasis, item.commit, head_branch))
+        local ref_items = get_ref_items(item.commit, item.ref_colors)
 
         local date_item = rh(git.format_date(item.commit.date, opts) .. " ", palette.date)
         local author_item = rh((item.commit.author or "") .. " ", palette.author)

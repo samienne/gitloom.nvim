@@ -406,11 +406,10 @@ describe("compaction never crosses a lane (§5)", function()
             { "r",     {} },
         })
         -- The trunk is pinned (as the window pins `master`/`main`/`dev`, §10.6): §5 tier
-        -- 0 is what continues it through `f`; unpinned, tier 2 would continue the NEWEST
-        -- lane (`t2`'s, already in the gutter) and there would be no trunk to keep.
+        -- 0 (the carried ref) is what continues it through `f`.
         items[1].commit.refs = { { kind = "local", name = "trunk" } }
         local opts = policy_opts({ split_on_separate_line = true, merge_on_separate_line = false }, "gutter")
-        opts.pin_rank = { trunk = 1 }
+        h.ranked(opts, items, { pins = { "trunk" } })
         local rows = build_graph(opts, items)
         assert.equals(0, #h.check_spine(rows, opts), "the fork's spine changes lane at the node")
 
@@ -423,9 +422,9 @@ describe("compaction never crosses a lane (§5)", function()
         assert.truthy(frow)
         assert.equals(3, #frow.child_lanes) -- main's, t1's and t2's edges converge here
         local trunk = frow.parent_lanes[1].id
-        -- the trunk's own edge into f is the RANKED incoming lane (§5 identity, tier 0)
+        -- the trunk's own edge into f is the lane carrying `trunk` (§5 identity, tier 0)
         local ranked
-        for _, l in ipairs(frow.child_lanes) do if l.rank == 1 then ranked = l.id end end
+        for _, l in ipairs(frow.child_lanes) do if l.ref and l.ref.name == "trunk" then ranked = l.id end end
         assert.equals(ranked, trunk, "f must continue the pinned (trunk) lane")
 
         local fan = frow.above[#frow.above] -- fan_in appends the split Line last
@@ -918,17 +917,16 @@ describe("a freed fan-out column is never the node's own (§5.1/§5.6)", functio
     local build_graph = require("gitloom.graph")._internal.build_graph
 
     -- The shape, as a named fixture: a junction `f` that is both a fork and a merge,
-    -- reached by TWO lanes — a merge's second-parent edge (from `x`, whose mainline
-    -- goes elsewhere) and `f`'s own line of history (`y`, whose FIRST parent is `f`).
-    -- Row order puts `x` above `y`, so `f`'s own lane is the RIGHTMOST of the two and
-    -- the node lands off the leftmost incoming column. Not contrived: §3.1 emits a
-    -- merged-in lineage right after its merge, so a junction reached by a foreign
-    -- second-parent edge above its own is ordinary.
+    -- reached by TWO lanes — the second-parent edges of `x` and `y`, whose mainlines
+    -- go elsewhere. Both carry `f`'s one generated ref (§5 "Other parents"), so tier 2
+    -- continues the NEWER, `y`'s, which arrives RIGHT of `x`'s, and the node lands off
+    -- the leftmost incoming column. (The former fixture reached `f` by `y`'s FIRST
+    -- parent; under carried refs the earlier-created generated ref on `x`'s edge
+    -- continues there, leftmost, so it no longer had the shape.)
     local FIXTURE = {
-        { "x", { "p", "f" } }, -- a merge; `f` is its SECOND parent
-        { "y", { "f" } },      -- `f`'s own line of history
-        { "p", { "g" } },
-        { "f", { "g", "r" } }, -- merges (x, y) AND forks (g, r) => a kept junction
+        { "x", { "y", "f" } }, -- a merge; `f` is its SECOND parent
+        { "y", { "g", "f" } }, -- `f` again as a SECOND parent
+        { "f", { "r", "g" } }, -- merges (x, y) AND forks (r, g) => a kept junction
         { "g", { "r" } },
         { "r", {} },
     }
@@ -1170,16 +1168,16 @@ describe("graph layout [inline+mergesplit] characterization", function()
     -- under allow_merge_on_split an incoming lane terminates and a new parent
     -- lane reuses the same column (the sanctioned two-turn cell), so the vertical
     -- colour changes mid-column. Repro: random_dag(7, 108). (The glyphs are
-    -- unchanged by §5 tier 2 picking the NEWEST lane; only the last two rows' lane
-    -- ids moved, 1 -> 5: the newer lane now continues at the merge.)
+    -- unchanged by colour moving to carried refs, §5; only the colours did: both
+    -- merge edges into one ref-less commit carry its one generated ref, `2`.)
     local EXPECTED = [[
 ◉─╮  122
 ○ │  1.2
-│ │ ◉─╮  1.2.344
-│ │ │ │ ◉  1.2.3.4.5
-○─│─│─╯ │  1464344.5
-○─│─┴───╯  536335555
-◎─╯  566]]
+│ │ ◉─╮  1.2.322
+│ │ │ │ ◉  1.2.3.2.4
+○─│─│─╯ │  1252322.4
+○─│─┴───╯  135334444
+◎─╯  155]]
 
     it("renders the known merge-handoff repro unchanged", function()
         local opts = h.opts({
