@@ -1072,8 +1072,9 @@ into a collapsed region is visible, and listed in `collapsed`): `name`, `ident`,
 `remote`, `tier` (1 pinned, 2 unpinned with a visible local, 3 remote-only, 4
 generated), the **brightness `level`** (spec §5: 1 a pinned or expanded local, 2 a
 pinned or expanded remote, 3 collapsed and unpinned, 4 generated) and the tie-break
-fields. `rank.better(a, b, rows)` is the total order, lexicographic with the level
-first, then pin rank, tier, standing row, member order, current branch, name; its
+fields. `rank.better(a, b, rows)` is the total order, lexicographic with the pin
+rank first (pinned refs above all, whatever their level), then the level (generated
+last), tier, standing row, member order, current branch, name; its
 one row-dependent rule, the **standing row** (`rank.standing_row`), is read at
 compare time from the tip rows known so far, which is what lets the layout compare
 top-down while rows stream in. `rank.generated(seq)` is the `seq`-th generated ref
@@ -1173,8 +1174,8 @@ the current row. For each commit `C`:
    parent) and every extra parent of a merge.
    **Ranking input.** `opts.ref_rank` (`rank.input`, published by window.lua's
    `GRAPH_HELPERS.sync_ref_rank`): the visible ranked refs' infos (each with its
-   **brightness level**, 1 full / 2 slightly muted / 3 muted — the rank's first axis,
-   spec §5 — from whether it is a remote, pinned, and drawn collapsed), the pinned
+   **brightness level**, 1 full / 2 slightly muted / 3 muted — the rank's first axis
+   among unpinned refs, after the pin rank, spec §5 — from whether it is a remote, pinned, and drawn collapsed), the pinned
    identities' slots, the current branch and, while the open-time stream runs, the
    refspec's start set (`coming`, `rank.start_set`), plus a fingerprint `key` that is
    part of the layout fingerprint `graph.extend_columns` checks. The only

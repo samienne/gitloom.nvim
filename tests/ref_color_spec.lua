@@ -152,12 +152,18 @@ local function check_refs(o, rows)
                 if l.ref and better(l.ref, out[1].ref) then err(where .. ": the first parent lost rank") end
             end
         end
-        -- brightness wins (§5.1): the selected ref is never drawn dimmer than a ranked
-        -- ref competing for this commit (arriving or own) — a track never steps DOWN in
-        -- brightness, and a dim colour never runs over a bright ref's history
+        -- pins first, then brightness wins (§5.1): no ranked ref competing for this
+        -- commit (arriving or own) has a better pin rank than the selected ref, and
+        -- among unpinned refs the selected one is never drawn dimmer — a track never
+        -- steps DOWN in brightness between unpinned refs
         if r.selected and r.selected.level <= 3 then
+            local sp = r.selected.pin or math.huge
             local function check(info, what)
-                if info and info.level <= 3 and info.level < r.selected.level then
+                if not info or info.level > 3 then return end
+                local ip = info.pin or math.huge
+                if ip < sp then
+                    err(where .. ": a worse-pinned ref (" .. r.selected.name .. ") beat a better-pinned " .. what)
+                elseif ip == math.huge and sp == math.huge and info.level < r.selected.level then
                     err(where .. ": a dimmer ref (" .. r.selected.name .. ") beat a brighter " .. what)
                 end
             end
@@ -347,9 +353,10 @@ describe("carried refs (§5)", function()
         end
     end)
 
-    it("a pinned identity's remote yields to an expanded local: brightness first (§5 Rank)", function()
+    it("a pinned identity's remote outranks an expanded local: pins first (§5 Rank)", function()
         -- dev pinned, origin/dev ahead of it; feature forked from origin/dev's new
-        -- commit keeps its colour where the tracks meet, down to dev's tip.
+        -- commit: where the tracks meet the slightly muted origin/dev carries on, then
+        -- dev from its tip.
         for _, pol in ipairs(POLICIES) do
             local items = h.dag({
                 { "f", { "o1" } }, { "o2", { "o1" } }, { "o1", { "d" } }, { "d", { "r" } }, { "r", {} },
@@ -359,8 +366,10 @@ describe("carried refs (§5)", function()
             ref(items, "d", "dev")
             local o = h.ranked(opts(STYLES[1].s, pol), items, { pins = { "dev" } })
             local rows = columns.layout(o, items)
-            assert.equals("feature", row_of(rows, "o1").selected.name, pol)
+            assert.equals("origin/dev", row_of(rows, "o1").selected.name, pol)
+            assert.equals(2, row_of(rows, "o1").selected_level, pol .. ": drawn slightly muted")
             assert.equals(2, rank.level_of(row_of(rows, "o2").parent_lanes[1].color), pol .. ": origin/dev slightly muted")
+            assert.equals(-1, row_of(rows, "o1").parent_lanes[1].color, pol .. ": dev's slot, muted")
             assert.equals("dev", row_of(rows, "d").selected.name, pol)
             assert.equals(1, row_of(rows, "d").parent_lanes[1].color, pol .. ": dev's pinned slot, full")
         end

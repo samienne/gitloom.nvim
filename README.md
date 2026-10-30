@@ -257,8 +257,8 @@ colour, which no other branch ever takes (pins past the palette size draw an
 ordinary colour).
 
 **Colours follow branches.** A colour belongs to a branch, not to a lane: every
-lane carries the best-ranked branch that reaches it (brighter first, then pinned,
-then by tip height), and a branch's label is drawn in that branch's colour. A local
+lane carries the best-ranked branch that reaches it (pinned first, by pin
+order, then brighter, then by tip height), and a branch's label is drawn in that branch's colour. A local
 branch and its remotes share one hue, drawn at one of **three brightness levels**:
 
 | level | branches | drawn |
@@ -267,7 +267,9 @@ branch and its remotes share one hue, drawn at one of **three brightness levels*
 | slightly muted | remote branches that are pinned or expanded | `palette.remote_mute` (default `0.25`) |
 | muted | any collapsed, unpinned branch, local or remote | `palette.collapsed_mute` (default `0.45`, replacing `remote_mute`) |
 
-A brighter branch always outranks a dimmer one where lanes meet. Out of the
+A pinned branch outranks every unpinned one where lanes meet, even a pinned remote
+over a full-strength local; among unpinned branches a brighter one always outranks a
+dimmer one. Out of the
 reachability focus the dim is applied on top: a pinned or expanded remote takes
 `palette.remote_mute_out` (default `0.75 × dim`, so it stays a shade brighter than
 other dimmed lanes), and a collapsed one takes `palette.collapsed_mute_out` (default `0.45`, the same level as a dimmed local branch). Inside the

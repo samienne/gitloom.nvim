@@ -127,7 +127,7 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
 - **The pinned-branches dialog** (spec §10.6.1, `L`): **pinning claims no
   column** (up to four are pinned by default; the former dedicated-lane flag was
   dropped). Every entry's place is its identity's pin rank (§5, `rank.better`'s
-  second key, after the brightness level). The other members
+  first key, before the brightness level). The other members
   of a pinned identity have no rows; `P` on one records an explicit unpin of just
   that ref. `L` opens a `float_zindex` float rendered
   by the pure `select.pin_dialog_lines` (lines + a line → entry-index row map);

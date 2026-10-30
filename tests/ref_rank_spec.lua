@@ -138,8 +138,8 @@ describe("rank order (§5 rank)", function()
         assert.same({ "b", "a", "origin/a" }, got)
         got = order(registry("a", "r:origin/a", "b"), { a = 1, ["origin/a"] = 1, b = 9 },
             { pins = pins("origin/a", "b") })
-        -- brightness first: the pinned remote (level 2) below both locals (level 1)
-        assert.same({ "a", "b", "origin/a" }, got)
+        -- pins first: identity a (pinned via origin/a) above b, its local before its remote
+        assert.same({ "a", "origin/a", "b" }, got)
     end)
 
     it("ranks an identity whose local is not visible as remote-only", function()
@@ -265,13 +265,33 @@ describe("brightness levels (§5 'Brightness level')", function()
         assert.equal(3, rank.drawn_level(i.a))
     end)
 
-    it("a pinned identity's remote ranks below every expanded local, pinned or not", function()
-        -- dev pinned, origin/dev ahead of it; feature forked from origin/dev's commits
-        -- stands higher than origin/dev, yet outranks it (§5 "Rank", the dev example).
+    it("a pinned identity's remote ranks above every unpinned expanded local", function()
+        -- dev pinned, origin/dev ahead of it; feature forked from origin/dev's commits:
+        -- pinning comes before brightness, so origin/dev (level 2) outranks feature
+        -- (level 1) (§5 "Rank", the dev example).
         local reg = registry("dev", "r:origin/dev", "feature")
         local got = rank.order(infos_of(reg, { pins = pins("dev") }),
             { feature = 1, ["origin/dev"] = 2, dev = 5 })
-        assert.same({ "dev", "feature", "origin/dev" }, got)
+        assert.same({ "dev", "origin/dev", "feature" }, got)
+    end)
+
+    it("a pinned remote-only ref outranks a worse-pinned local and every unpinned one", function()
+        -- the owner's case: origin/release (remote-only, level 2) pinned above dev
+        local reg = registry("dev", "r:origin/release", "feature")
+        local infos = infos_of(reg, { pins = pins("origin/release", "dev") })
+        assert.equal(2, infos["origin/release"].level)
+        assert.equal(1, infos.dev.level)
+        assert.equal(1, infos.feature.level)
+        for _, rows in ipairs({
+            { ["origin/release"] = 1, dev = 5, feature = 9 },
+            { ["origin/release"] = 9, dev = 5, feature = 1 },
+        }) do
+            assert.same({ "origin/release", "dev", "feature" }, rank.order(infos, rows))
+        end
+        -- unpinned dev: origin/release still outranks the expanded local
+        infos = infos_of(reg, { pins = pins("origin/release") })
+        assert.is_true(rank.better(infos["origin/release"], infos.dev, { ["origin/release"] = 1, dev = 9 }))
+        assert.is_true(rank.better(infos["origin/release"], infos.feature, { ["origin/release"] = 1, feature = 9 }))
     end)
 
     it("every expanded or pinned ref outranks every collapsed unpinned one", function()
@@ -285,7 +305,7 @@ describe("brightness levels (§5 'Brightness level')", function()
         -- pinning lifts the collapsed identity back to levels 1 and 2
         got = rank.order(infos_of(reg, { collapsed = col, pins = pins("base") }),
             { top = 1, ["origin/z"] = 2, base = 9, ["origin/base"] = 9 })
-        assert.same({ "base", "top", "origin/base", "origin/z" }, got)
+        assert.same({ "base", "origin/base", "top", "origin/z" }, got)
     end)
 
     it("at level 3 the local still outranks its own remote", function()
@@ -298,7 +318,7 @@ describe("brightness levels (§5 'Brightness level')", function()
             rank.order(infos_of(reg, { collapsed = { a = true } }), { a = 7, ["origin/a"] = 1 }))
     end)
 
-    it("brightness wins over every pin and row, generated refs last (fuzz)", function()
+    it("pinned refs first by pin rank, brightness wins among unpinned, generated last (fuzz)", function()
         local s = 7
         local function rnd(n) s = (s * 16807) % 2147483647; return s % n end
         for _ = 1, 60 do
@@ -321,7 +341,14 @@ describe("brightness levels (§5 'Brightness level')", function()
             for _, a in ipairs(list) do
                 for _, b in ipairs(list) do
                     if a ~= b then
-                        if a.level < b.level then
+                        local pa, pb = a.pin or math.huge, b.pin or math.huge
+                        local expect
+                        if b.level == 4 and a.level ~= 4 then expect = true
+                        elseif a.level == 4 then expect = nil
+                        elseif pa < pb then expect = true
+                        elseif pa == math.huge and pb == math.huge and a.level < b.level then expect = true
+                        end
+                        if expect then
                             assert.is_true(rank.better(a, b, rows), a.name .. " over " .. b.name)
                         end
                         assert.not_equal(rank.better(a, b, rows), rank.better(b, a, rows))

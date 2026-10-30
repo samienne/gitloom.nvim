@@ -398,12 +398,13 @@ local function member_better(a, b, rows)
 end
 
 --- Whether `a` ranks strictly better than `b` (spec §5 "Rank"), lexicographically:
---- brightness level (1, 2, 3, generated last); within a level pinned identities
---- first by pin rank, then the identity tier (a visible local before remote-only);
---- between unpinned identities the lower standing row; within one identity the
---- local first, then its remotes (`member_better`); remaining ties between
---- identities to the current branch's, then by name; generated refs by creation
---- order. A total order (false for `a == b`), usable as a `table.sort` comparator.
+--- pinned identities first, by pin rank, whatever their brightness level; then
+--- unpinned refs by brightness level (1, 2, 3); generated refs last. Then the
+--- identity tier (a visible local before remote-only); between unpinned identities
+--- the lower standing row; within one identity the local first, then its remotes
+--- (`member_better`); remaining ties between identities to the current branch's,
+--- then by name; generated refs by creation order. A total order (false for
+--- `a == b`), usable as a `table.sort` comparator.
 ---@param a RankInfo
 ---@param b RankInfo
 ---@param rows table<string, integer>   ref name → tip row
@@ -411,11 +412,18 @@ end
 function M.better(a, b, rows)
     if a == b then return false end
     local la, lb = a.level or (a.tier == 4 and 4 or 1), b.level or (b.tier == 4 and 4 or 1)
-    if la ~= lb then return la < lb end
-    if la == 4 then return (a.seq or 0) < (b.seq or 0) end
-    if a.ident == b.ident then return member_better(a, b, rows) end
+    if la == 4 or lb == 4 then
+        if la ~= lb then return lb == 4 end
+        return (a.seq or 0) < (b.seq or 0)
+    end
+    -- Pinning first: a better pin rank wins whatever the brightness level (a pinned
+    -- remote over an expanded local); one pin rank is one identity, ordered below.
     local pa, pb = a.pin or math.huge, b.pin or math.huge
     if pa ~= pb then return pa < pb end
+    -- Brightness wins among unpinned refs (and, within a pinned identity, agrees
+    -- with `member_better`: its local is level 1, its remotes level 2).
+    if la ~= lb then return la < lb end
+    if a.ident == b.ident then return member_better(a, b, rows) end
     if a.tier ~= b.tier then return a.tier < b.tier end
     if a.tier ~= 1 then
         local sa, sb = M.standing_row(a, rows), M.standing_row(b, rows)
