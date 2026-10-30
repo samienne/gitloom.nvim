@@ -257,17 +257,19 @@ colour, which no other branch ever takes (pins past the palette size draw an
 ordinary colour).
 
 **Colours follow branches.** A colour belongs to a branch, not to a lane: every
-lane carries the best-ranked branch that reaches it (brighter first, then pinned,
-then by tip height), and a branch's label is drawn in that branch's colour. A local
+lane carries the best-ranked branch that reaches it (pinned branches first, by pin
+order; among the rest, brighter beats dimmer; then by tip height), and a branch's label is drawn in that branch's colour. A local
 branch and its remotes share one hue, drawn at one of **three brightness levels**:
 
 | level | branches | drawn |
 |---|---|---|
-| full | local branches that are pinned or expanded | full strength |
-| slightly muted | remote branches that are pinned or expanded | `palette.remote_mute` (default `0.25`) |
+| full | local branches that are pinned or expanded; a pinned remote branch with no local branch | full strength |
+| slightly muted | other remote branches that are pinned or expanded (a pinned local's remotes included) | `palette.remote_mute` (default `0.25`) |
 | muted | any collapsed, unpinned branch, local or remote | `palette.collapsed_mute` (default `0.45`, replacing `remote_mute`) |
 
-A brighter branch always outranks a dimmer one where lanes meet. Out of the
+A pinned branch outranks every unpinned one where lanes meet, even a pinned remote
+over a full-strength local; among unpinned branches a brighter one always outranks a
+dimmer one. Out of the
 reachability focus the dim is applied on top: a pinned or expanded remote takes
 `palette.remote_mute_out` (default `0.75 × dim`, so it stays a shade brighter than
 other dimmed lanes), and a collapsed one takes `palette.collapsed_mute_out` (default `0.45`, the same level as a dimmed local branch). Inside the
@@ -301,7 +303,12 @@ Pinned branches
 ```
 
 `<C-j>`/`<C-k>` reorder, `D` unpins, the last row adds a branch through the
-ref picker, and `<CR>` jumps the graph to a branch. Pinning never claims a graph
+ref picker, and `<CR>` jumps the graph to a branch. A pin covers the whole
+branch: pinning `dev` also anchors `origin/dev` (kept expanded, shown in the
+panes, drawn slightly muted, with no row of its own). Pinning a remote that has
+a local branch — `origin/dev` while `dev` exists — pins `dev`, so the branch has
+one row. A remote with no local branch (`origin/release` above) keeps its own
+row and is drawn at full strength, its `⇣` icon still marking it remote. Pinning never claims a graph
 column: a pinned branch is placed like any other (§10.6.1).
 
 **Upstream tracking.** A local branch that tracks a remote shows a terse

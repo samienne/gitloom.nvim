@@ -22,7 +22,7 @@ local function build(policy, small, cp)
     }
     if cp then
         -- A pinned local `pick` a few first-parent commits below HEAD's branch tip, pinned
-        -- FIRST: a full-strength (level 1) ref with a better pin rank than `enne`, so it
+        -- FIRST: a ref with a better pin rank than `enne` (pin rank comes first), so it
         -- outranks enne at that commit and recolours enne's lane from there down (§5
         -- "Rank", "Carried refs") — the recolour the header's colours must follow.
         local c = byhash[fix.head]
@@ -65,7 +65,7 @@ local function build(policy, small, cp)
     -- default order: trunks first, HEAD's anchor last; §10.6), HEAD's branch current,
     -- visibility from the projection. With `cp`, the pinned local `pick` sits below
     -- enne's tip and is pinned first — same level as enne (1), better pin rank — so it
-    -- takes enne's lane over there (§5 "Rank": brightness, then pin rank). `pin_rank` is
+    -- takes enne's lane over there (§5 "Rank": pin rank first). `pin_rank` is
     -- still published for the header's colour de-collision (`pinned_slots`).
     local pins = cp and { "pick", "dev", "enne" } or { "dev", "enne" }
     h.ranked(opts, display, { pins = pins, current = "enne" })

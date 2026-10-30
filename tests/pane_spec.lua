@@ -2409,9 +2409,9 @@ describe("pane.header — colours follow the main view (§6.2 Colour)", function
     end)
 
     it("draws a lane recoloured at an outranking ref in its colour above it (§5/§5.5)", function()
-        -- The LumeScene shape, adapted to brightness-first ranking (§5: a pinned
-        -- identity's REMOTE no longer outranks an expanded local, so the outranking ref
-        -- is `dev` itself): `dev` pinned rank 1 at Y, and HEAD's branch `enne` (rank 2)
+        -- The LumeScene shape on a minimal DAG, the outranking ref being the local
+        -- `dev` itself (a pinned remote with a better pin rank would do too, §5
+        -- "Rank": pins first): `dev` pinned rank 1 at Y, and HEAD's branch `enne` (rank 2)
         -- three commits above Y. In the main view enne's lane (slot 2) runs down to Y,
         -- where `dev` outranks enne and the SAME lane continues recoloured in dev's slot
         -- 1 (§5 "Carried refs"). The header, cut below Y, gets that lane at the seam;

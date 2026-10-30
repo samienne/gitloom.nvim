@@ -1072,8 +1072,9 @@ into a collapsed region is visible, and listed in `collapsed`): `name`, `ident`,
 `remote`, `tier` (1 pinned, 2 unpinned with a visible local, 3 remote-only, 4
 generated), the **brightness `level`** (spec §5: 1 a pinned or expanded local, 2 a
 pinned or expanded remote, 3 collapsed and unpinned, 4 generated) and the tie-break
-fields. `rank.better(a, b, rows)` is the total order, lexicographic with the level
-first, then pin rank, tier, standing row, member order, current branch, name; its
+fields. `rank.better(a, b, rows)` is the total order, lexicographic with the pin
+rank first (pinned refs above all, whatever their level), then the level (generated
+last), tier, standing row, member order, current branch, name; its
 one row-dependent rule, the **standing row** (`rank.standing_row`), is read at
 compare time from the tip rows known so far, which is what lets the layout compare
 top-down while rows stream in. `rank.generated(seq)` is the `seq`-th generated ref
@@ -1173,8 +1174,9 @@ the current row. For each commit `C`:
    parent) and every extra parent of a merge.
    **Ranking input.** `opts.ref_rank` (`rank.input`, published by window.lua's
    `GRAPH_HELPERS.sync_ref_rank`): the visible ranked refs' infos (each with its
-   **brightness level**, 1 full / 2 slightly muted / 3 muted — the rank's first axis,
-   spec §5 — from whether it is a remote, pinned, and drawn collapsed), the pinned
+   **brightness level**, 1 full / 2 slightly muted / 3 muted — the rank's first axis
+   among unpinned refs, after the pin rank, spec §5 — from whether it is a remote, pinned, and drawn collapsed;
+   a pinned remote-only identity's pinned ref is level 1), the pinned
    identities' slots, the current branch and, while the open-time stream runs, the
    refspec's start set (`coming`, `rank.start_set`), plus a fingerprint `key` that is
    part of the layout fingerprint `graph.extend_columns` checks. The only
@@ -1208,7 +1210,7 @@ the current row. For each commit `C`:
    `avoid` so its de-collision never hands one out.
    **Brightness levels — the drawn colour.** A lane's `color` packs the slot and its
    ref's drawn level (`rank.drawn`): `k` full, **`-k`** slightly muted (a pinned or
-   expanded remote), **`-(k + rank.MUTED)`** muted (a collapsed, unpinned ref) — so
+   expanded remote — not a pinned remote-only one, which is full), **`-(k + rank.MUTED)`** muted (a collapsed, unpinned ref) — so
    the level rides every copy of a lane's `color` (Segments, the header's
    `lane_of`/de-collision, which never recolours a negative colour, footer seeds,
    rebuilt pane cells and packed marker rows) with no lookup of the ref;
@@ -2030,7 +2032,14 @@ ranks. (The former per-entry `reserved` flag for a dedicated column is gone:
 `pin_copy` / `pin_resolve` and `persist.repo_state` drop a stray `reserved`
 field, and `pins_for_save` writes `{ id }` alone.)
 
-`ctx:effective_pins()` resolves the live list — exactly the dialog's rows. A pin
+`ctx:effective_pins()` resolves the live list — exactly the dialog's rows — and
+normalises it with `select.pin_normalize` (over `rank.pair`): an entry naming a
+remote whose identity has a local reads as that local (`select.pin_owner`), first
+place kept, so an identity has one entry. That is also how a legacy stored remote
+pin (§18) is read; it is rewritten only by the next save, which stores the
+normalised list. `P` and the dialog's "Pin new branch…" record `pin_owner` of the
+chosen ref (clearing an `unpinned` override on both), and the picker omits every
+anchor (`effective_pinned`), not just the entries. A pin
 **covers its identity** (spec §10.6): the other members of a pinned entry's
 identity (`rank.pair` — a local, its paired remotes) are NOT entries but anchors
 through it. `ctx:effective_pinned()` is `select.pin_anchors(pins, pairing,

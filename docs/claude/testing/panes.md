@@ -102,11 +102,11 @@ Scope: per-spec coverage of the header / footer panes, their seams and the scree
   `ctx:sync_ref_rank` publishes it; one lane id may show several main-view colours
   (each on its own stretch) and a header segment must be in one of them. Three more
   configurations ("pinned pick recolour") add a local `pick` three first-parent commits
-  below HEAD's tip, pinned first (pins `pick`, `dev`, `enne`): same brightness level as
-  `enne` (1) with a better pin rank, so it outranks enne and recolours enne's lane from
+  below HEAD's tip, pinned first (pins `pick`, `dev`, `enne`): a better pin rank than
+  `enne` (pin rank comes first, §5), so it outranks enne and recolours enne's lane from
   there (spec §5 "Rank", "Carried refs"). Each asserts that recolour happens — the lane
   id at pick's commit carries two main-view colours — so the case cannot pass
-  vacuously (a remote such as `origin/dev`, level 2, would not outrank `enne`). `tests/pane_spec.lua`'s "colours follow the main view"
+  vacuously (an unpinned ref, or one pinned below `enne`, would not outrank it). `tests/pane_spec.lua`'s "colours follow the main view"
   block pins the LumeScene shape on a minimal DAG under every policy, adapted so the
   outranking ref is pinned `dev` itself (recolouring enne's lane to slot 1)
 - `tests/footer_replay_spec.lua` (+ `tests/large_topo.lua`) — the **footer** counterpart:

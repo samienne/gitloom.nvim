@@ -1727,13 +1727,16 @@ end
 -- branch it is that branch's owner; detached it is the `HEAD` ref itself (an owner
 -- only then — owners_from_refs), so a `HEAD` entry is dropped while HEAD is on a
 -- branch; `view_state.unpinned` suppresses a default. `pin_resolve` is the pure
--- core. The other members of a pinned identity are NOT entries (`effective_pinned`).
+-- core. The other members of a pinned identity are NOT entries (`effective_pinned`),
+-- and an entry naming a remote that has a local (a legacy stored one, §18) reads as
+-- that local (`pin_normalize`), so an identity has one entry.
 --- (A GRAPH_HELPERS field rather than a module local — window.lua sits near
 --- LuaJIT's 200-local chunk limit, which is what these tables exist to dodge.)
 ---@return PinEntry[]
 GRAPH_HELPERS.effective_pins = function(ctx)
     local repo, view_state = ctx.repo, ctx.view_state
     local pins = selectm.pin_resolve(view_state.pins, view_state.unpinned, GRAPH_HELPERS.pin_defaults(ctx), repo.refs)
+    pins = selectm.pin_normalize(pins, require("gitloom.graph.rank").pair(repo.refs, { remotes = ctx.remotes, pins = pins }))
     if repo.head then
         -- Attached: the `HEAD` ref is not an owner (its branch is), so an entry the
         -- user pinned while detached would be an inert row in the dialog.
@@ -3879,10 +3882,13 @@ local function h_pin(ctx)
     -- entry and records the id so a defaulted anchor does not come straight back.
     local want = not ctx:effective_pinned()[targets[1]]
     local pins = ctx:effective_pins()
+    local pairing = want and require("gitloom.graph.rank").pair(repo.refs, { remotes = ctx.remotes, pins = pins })
     for _, oid in ipairs(targets) do
         if want then
-            view_state.unpinned[oid] = nil
-            pins = selectm.pin_add(pins, oid)
+            -- A remote with a local pins its identity as the local (§10.6).
+            local owner = selectm.pin_owner(oid, pairing or nil)
+            view_state.unpinned[oid], view_state.unpinned[owner] = nil, nil
+            pins = selectm.pin_add(pins, owner)
         else
             view_state.unpinned[oid] = true
             for i, e in ipairs(pins) do
@@ -4014,7 +4020,9 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
             vim.notify("gitloom: snacks.picker not available", vim.log.levels.WARN)
             return
         end
-        local on = selectm.pin_ids(ctx:effective_pins())
+        -- `on` is every anchor — an identity member pinned through its entry is not
+        -- offered; one with an explicit unpin override is, and picking it re-anchors it.
+        local on = GRAPH_HELPERS.effective_pinned(ctx)
         local items = {}
         for _, it in ipairs(ref_picker_items(ctx.repo.refs, recent_refs[ctx.repo_key])) do
             if selectm.pin_candidate(it, on, ctx.repo.head) then items[#items + 1] = it end
@@ -4035,9 +4043,15 @@ GRAPH_HELPERS.pin_dialog = function(ctx)
                 vim.schedule(function()
                     if not (dwin and vim.api.nvim_win_is_valid(dwin)) then return end
                     pcall(vim.api.nvim_set_current_win, dwin)
-                    ctx.view_state.unpinned[item.name] = nil
-                    local added = selectm.pin_add(ctx:effective_pins(), item.name)
-                    commit(added, #added)
+                    -- A remote with a local pins its identity as the local (§10.6).
+                    local list = ctx:effective_pins()
+                    local owner = selectm.pin_owner(item.name, require("gitloom.graph.rank").pair(ctx.repo.refs,
+                        { remotes = ctx.remotes, pins = list }))
+                    ctx.view_state.unpinned[item.name], ctx.view_state.unpinned[owner] = nil, nil
+                    local added = selectm.pin_add(ctx:effective_pins(), owner)
+                    local at = #added
+                    for i, e in ipairs(added) do if e.id == owner then at = i; break end end
+                    commit(added, at)
                 end)
             end,
         })

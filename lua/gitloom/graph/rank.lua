@@ -43,8 +43,9 @@ local M = {}
 ---@field name string          the ref name ("" for a generated ref)
 ---@field tier integer         1 pinned, 2 unpinned with a visible local, 3 remote-only, 4 generated
 ---@field level integer        rank level (spec §5 "Brightness level"): 1 full (a pinned or
----                            expanded local), 2 slightly muted (a pinned or expanded
----                            remote), 3 muted (collapsed and unpinned), 4 generated
+---                            expanded local, or a pinned remote-only branch), 2 slightly
+---                            muted (another pinned or expanded remote), 3 muted
+---                            (collapsed and unpinned), 4 generated
 ---                            (ranked last, yet drawn at full strength: `drawn_level`)
 ---@field collapsed? boolean   its tip's row is drawn collapsed (◍ head, packed marker,
 ---                            ref-bearing kept junction)
@@ -175,7 +176,9 @@ end
 --- best index among the `pins` entries naming any of its refs (visible or not); an
 --- identity whose local is not visible ranks as remote-only. Each info's brightness
 --- `level` (spec §5): a pinned identity's refs are never collapsed-muted — 1 for its
---- local, 2 for a remote; otherwise a collapsed ref is 3, else 1 local / 2 remote.
+--- local, 2 for a remote, except that a pinned **remote-only** identity draws its
+--- pinned ref (the remote its best pin entry names) at 1, having no local to carry
+--- the full hue; otherwise a collapsed ref is 3, else 1 local / 2 remote.
 ---@param pairing IdentityPairing
 ---@param opts? { visible?: table<string, boolean>, collapsed?: table<string, boolean>, pins?: PinEntry[], current?: string, remotes?: string[] }
 ---@return table<string, RankInfo>   ref name → info (only visible ranked refs)
@@ -187,10 +190,10 @@ function M.infos(pairing, opts)
     local remotes = opts.remotes or {}
     local remote_pos = {}
     for i, r in ipairs(remotes) do if remote_pos[r] == nil then remote_pos[r] = i end end
-    local pin = {}
+    local pin, pin_ref = {}, {}
     for i, e in ipairs(opts.pins or {}) do
         local id = pairing.of[e.id]
-        if id and pin[id.key] == nil then pin[id.key] = i end
+        if id and pin[id.key] == nil then pin[id.key], pin_ref[id.key] = i, e.id end
     end
     local current_id = opts.current and pairing.of[opts.current]
 
@@ -203,6 +206,9 @@ function M.infos(pairing, opts)
                 local is_local = name == id.local_name
                 local folded = collapsed[name] == true
                 local level = (folded and not pin[id.key]) and 3 or (is_local and 1 or 2)
+                if level == 2 and pin[id.key] and not id.local_name and pin_ref[id.key] == name then
+                    level = 1 -- a pinned remote-only branch is drawn full (§5)
+                end
                 local info = {
                     name = name, tier = tier, level = level, collapsed = folded or nil,
                     pin = pin[id.key], ident = id.key, ident_name = id.name,
@@ -398,12 +404,13 @@ local function member_better(a, b, rows)
 end
 
 --- Whether `a` ranks strictly better than `b` (spec §5 "Rank"), lexicographically:
---- brightness level (1, 2, 3, generated last); within a level pinned identities
---- first by pin rank, then the identity tier (a visible local before remote-only);
---- between unpinned identities the lower standing row; within one identity the
---- local first, then its remotes (`member_better`); remaining ties between
---- identities to the current branch's, then by name; generated refs by creation
---- order. A total order (false for `a == b`), usable as a `table.sort` comparator.
+--- pinned identities first, by pin rank, whatever their brightness level; then
+--- unpinned refs by brightness level (1, 2, 3); generated refs last. Then the
+--- identity tier (a visible local before remote-only); between unpinned identities
+--- the lower standing row; within one identity the local first, then its remotes
+--- (`member_better`); remaining ties between identities to the current branch's,
+--- then by name; generated refs by creation order. A total order (false for
+--- `a == b`), usable as a `table.sort` comparator.
 ---@param a RankInfo
 ---@param b RankInfo
 ---@param rows table<string, integer>   ref name → tip row
@@ -411,11 +418,19 @@ end
 function M.better(a, b, rows)
     if a == b then return false end
     local la, lb = a.level or (a.tier == 4 and 4 or 1), b.level or (b.tier == 4 and 4 or 1)
-    if la ~= lb then return la < lb end
-    if la == 4 then return (a.seq or 0) < (b.seq or 0) end
-    if a.ident == b.ident then return member_better(a, b, rows) end
+    if la == 4 or lb == 4 then
+        if la ~= lb then return lb == 4 end
+        return (a.seq or 0) < (b.seq or 0)
+    end
+    -- Pinning first: a better pin rank wins whatever the brightness level (a pinned
+    -- remote over an expanded local); one pin rank is one identity, ordered below.
     local pa, pb = a.pin or math.huge, b.pin or math.huge
     if pa ~= pb then return pa < pb end
+    -- Among the rest, brighter beats dimmer (and, within a pinned identity, agrees
+    -- with `member_better`: its local is level 1, its remotes level 2; a pinned
+    -- remote-only identity's pinned ref, level 1, leads its other remotes).
+    if la ~= lb then return la < lb end
+    if a.ident == b.ident then return member_better(a, b, rows) end
     if a.tier ~= b.tier then return a.tier < b.tier end
     if a.tier ~= 1 then
         local sa, sb = M.standing_row(a, rows), M.standing_row(b, rows)

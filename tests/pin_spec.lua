@@ -368,6 +368,24 @@ describe("pin_rank / pin_anchors (§10.6 a pin covers the identity)", function()
         assert.is_true(anchors(pins("origin/dev"), { ["origin/dev"] = true })["origin/dev"])
     end)
 
+    it("pin_owner records a remote with a local as that local; anything else as itself", function()
+        local p = rankm.pair(refs(), { remotes = { "fork", "origin" } })
+        assert.equal("dev", selectm.pin_owner("origin/dev", p))
+        assert.equal("dev", selectm.pin_owner("up/dev-renamed", p)) -- the differently named upstream
+        assert.equal("dev", selectm.pin_owner("dev", p))
+        assert.equal("origin/solo", selectm.pin_owner("origin/solo", p)) -- remote-only: its own
+        assert.equal("v1", selectm.pin_owner("v1", p))
+        assert.equal("HEAD", selectm.pin_owner("HEAD", p))
+        assert.equal("origin/dev", selectm.pin_owner("origin/dev", nil))
+    end)
+
+    it("pin_normalize gives an identity one entry, at its first place", function()
+        local p = rankm.pair(refs(), { remotes = { "fork", "origin" } })
+        local input = pins("master", "origin/dev", "origin/solo", "dev", "fork/dev")
+        assert.same({ "master", "dev", "origin/solo" }, ids(selectm.pin_normalize(input, p)))
+        assert.equal("origin/dev", input[2].id) -- pure: the input is not mutated
+    end)
+
     it("a tag entry anchors itself only", function()
         assert.same({ v1 = true }, anchors(pins("v1")))
     end)

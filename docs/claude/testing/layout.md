@@ -158,10 +158,13 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   its remotes, the standing row, upstream then `git remote` order, the current-
   branch and name tie-breaks, generated refs last, antisymmetry over a mixed set.
   **Brightness levels**: expanded local 1, expanded remote 2, collapsed unpinned 3,
-  a pinned ref never 3; a pinned identity's remote below every expanded local;
-  every expanded or pinned ref above every collapsed unpinned one; the local still
-  above its remote at level 3; a fuzz that brightness beats every pin and row with
-  generated refs last; the `rank.drawn` / `slot_of` / `level_of` codec. And
+  a pinned ref never 3; a pinned remote-only ref level 1 (its sibling remotes 2),
+  a pinned local's remotes level 2 sharing its pin rank; a pinned identity's
+  remote above every unpinned local, and
+  a pinned remote-only ref with a better pin rank above a pinned local; every
+  expanded or pinned ref above every collapsed unpinned one; the local still above
+  its remote at level 3; a fuzz that pinned refs come first by pin rank, brightness
+  beats every row among unpinned refs, generated refs last; the `rank.drawn` / `slot_of` / `level_of` codec. And
   `rank.start_set` (`--all` → every ref; a narrower refspec → the refs it names).
 - `tests/ref_color_spec.lua` — **carried refs** (§5) and ref colours (§5.5) in the
   layout, with `opts.ref_rank` built by `h.ranked` from the items' refs (visible =
@@ -185,7 +188,7 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   held by another identity, a tag entry owning nothing, a pin past the palette; an
   identity's colour held while a member is pending below and released after (a
   member whose tip never loads holds nothing, a `coming` one does); a pinned
-  identity's remote yielding to an expanded local (brightness first); a collapsed
+  identity's remote outranking an expanded local (pins first); a collapsed
   ref carrying its track in its own colour, muted unless pinned; the
   `buffer` cooldown (a fixture plus a fuzz check); streaming == one-shot incl. a
   ranking change re-laying the stream; footer seeds carrying their main-view ref and
