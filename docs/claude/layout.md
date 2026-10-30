@@ -195,7 +195,8 @@ See specification.md §4–§5 for full definitions.
   carries one ref (`lane.ref`, a `rank.lua` `RankInfo`; tier / level 4 = generated).
   `rank.better` orders by pin rank first (pinned refs above all, whatever their
   level), then brightness `level` (1 full, 2 slightly muted, 3 muted, 4 generated
-  last), tier, standing row. A commit's selected ref is
+  last), tier, standing row. A pinned remote-only identity's pinned ref is level 1
+  (`rank.infos`); a pinned local's remotes stay level 2. A commit's selected ref is
   the best of the incoming lanes' refs and its own visible ranked refs (a `◍` head's
   or kept junction's folded refs included, at level 3 unless pinned); the first
   parent carries it, other parents the best

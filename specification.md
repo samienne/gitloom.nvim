@@ -642,9 +642,16 @@ collapsed-muted, collapsed or not):
 
 | level | refs | drawn |
 |---|---|---|
-| 1 — full | local branches, pinned or expanded | full strength |
-| 2 — slightly muted | remote branches, pinned or expanded | `remote_mute` |
+| 1 — full | local branches, pinned or expanded; an **explicitly pinned remote-only** branch | full strength |
+| 2 — slightly muted | remote branches, pinned or expanded — the remotes of a pinned local included | `remote_mute` |
 | 3 — muted | **any** collapsed, unpinned branch, local or remote | `collapsed_mute` |
+
+A **pinned remote-only identity** has no local to carry its full hue, so the
+remote its pin-list entry names (§10.6) is drawn at **level 1**, like a pinned
+local; any other remote of that identity stays at level 2. It is still marked as
+remote by its label: the `remote/` prefix and the remote-only icon (`icons.remote`,
+§6). The remotes of a pinned **local** stay at level 2 — pinning never draws two
+full-strength copies of one identity.
 
 At level 3 `collapsed_mute` **replaces** `remote_mute` rather than adding to it, so
 a collapsed local and a collapsed remote of one identity are drawn alike; there
@@ -654,14 +661,15 @@ remote-only icon, §6).
 **Rank.** Ranked and generated refs are **totally ordered**, best first, by a
 lexicographic key:
 
-1. **Pin rank** — refs of **pinned identities** (§10.6) first, by the identity's
-   pin rank: the best rank among the pin-list entries naming one of its refs. **A
-   pinned ref outranks every ref except those with a better pin rank**, whatever
-   its brightness level, local or remote: a pinned remote-only `origin/release`
-   above `dev` in the pin list outranks pinned `dev` and every unpinned expanded
-   local. One pin rank is one identity, whose members rule 5 orders.
-2. **Brightness level** — then the unpinned refs by level 1, 2, 3: **among unpinned
-   refs a brighter-drawn ref always outranks a dimmer one** (§5.1). **Generated
+1. **Pin rank** — **pinned identities first, by pin rank** (§10.6): the best rank
+   among the pin-list entries naming one of its refs. **A pinned ref outranks every
+   ref except those with a better pin rank**, whatever its brightness level, local
+   or remote: a pinned remote-only `origin/release` above `dev` in the pin list
+   outranks pinned `dev` and every unpinned expanded local. One pin rank is one
+   identity, whose members rule 5 orders.
+2. **Brightness level** — **among the rest, brighter beats dimmer**: the unpinned
+   refs by level 1, 2, 3, a brighter-drawn ref always outranking a dimmer one
+   (§5.1). **Generated
    refs** come **last**, below level 3, although they are drawn at full strength —
    otherwise every anonymous merged state would outrank the real branches around
    it.
@@ -676,7 +684,8 @@ lexicographic key:
    branch's tip is **at or above** its own stands at its local's row — so a remote
    compares against other identities as its local would.
 5. **Within one identity** the local branch outranks its remotes. Across levels 1
-   and 2 the level already says so; it decides at level 3, where the two look the
+   and 2 the level already says so (in a pinned remote-only identity it puts the
+   pinned remote, level 1, before the others); it decides at level 3, where the two look the
    same but the local still owns the history. Its remotes rank among themselves by
    standing row (lower wins), then the configured upstream first, then the `%`
    cycle order (`git remote` order). The members of a remote-only identity rank the
@@ -923,11 +932,11 @@ The single genuine claim that compaction *happens* is policy-specific and lives 
   carried by one Lane on one of its Segments (§5.5); a node's is its commit's
   selected ref's. Colour is a property of the carried refs (§5 "Carried refs"),
   decided from the DAG, the row order and the ranks, which no policy varies.
-- **Pins first, then brightness wins.** Wherever two refs compete — for a
-  commit's selected ref, at a junction, for a merge edge — a **pinned** ref
-  outranks every unpinned one, and of two pinned refs the better pin rank wins,
-  whatever their brightness levels (§5 rank rule 1). **Among unpinned refs** a ref
-  drawn **brighter** (its §5 brightness level: full, slightly muted, muted) always
+- **Pinned identities first by pin rank; among the rest, brighter beats dimmer.**
+  Wherever two refs compete — for a commit's selected ref, at a junction, for a
+  merge edge — a **pinned** ref outranks every unpinned one, and of two pinned refs
+  the better pin rank wins, whatever their brightness levels (§5 rank rule 1).
+  **Among unpinned refs** a ref drawn **brighter** (its §5 brightness level: full, slightly muted, muted) always
   outranks one drawn dimmer, whatever their standing rows; so between unpinned refs
   a track never steps *down* in brightness except to a ref of the same level, and a
   dim unpinned colour never runs over a bright unpinned ref's history. A pinned
@@ -1248,8 +1257,10 @@ laid out (the resumable sweep of §3.1 keeps its prefix property), and a pin add
 level** (§5 "Ranked refs and identities") — the same colour blended toward the
 window background by one factor:
 
-- **level 1 — full**: a local branch that is pinned or expanded, at full strength;
-- **level 2 — slightly muted**: a remote branch that is pinned or expanded, blended
+- **level 1 — full**: a local branch that is pinned or expanded, and an explicitly
+  pinned remote-only branch (§5 "Brightness level"), at full strength;
+- **level 2 — slightly muted**: any other remote branch that is pinned or expanded
+  — a pinned local's remotes included — blended
   by `palette.remote_mute` (§8, **default `0.25`**) — a deliberately small step, so a
   local branch and where each remote thinks it is read as one branch, yet the point
   where a track switches from `origin/dev` to `dev` stays visible;
@@ -1882,8 +1893,9 @@ carries it (HEAD is never on a remote-tracking branch).
 
 **Label colour.** Colour belongs to refs (§5 "Ranked refs and identities"), so
 every **ranked ref's** label is drawn in **its own ref's colour** (§5.5) at its
-**brightness level**: a pinned or expanded local branch at full strength, a pinned
-or expanded remote slightly muted, and a collapsed, unpinned branch — on a `◍`
+**brightness level**: a pinned or expanded local branch at full strength — and an
+explicitly pinned remote-only branch, whose `⇣` still says it is remote — a pinned
+or expanded remote slightly muted otherwise, and a collapsed, unpinned branch — on a `◍`
 head, a packed marker or a ref-bearing kept junction (§10.4) — muted. Collapsed
 labels are coloured like any other: their identity is allocated and recycled by
 §5.5, never left uncoloured. A
@@ -3134,7 +3146,7 @@ on and drawn, and a pinned identity of rank `k` is drawn in its **pinned colour*
 slot `k` of the curated palette (§5.5). Pinning also lifts an identity's collapsed
 refs out of the muted level: a pinned identity is never collapsed-muted, so its
 refs rank and draw as if expanded even while folded into a `◍` head. Pinning
-comes before brightness (§5): a pinned identity's **remote** ranks above every
+comes before brightness (§5): a pinned local's **remote** ranks above every
 unpinned local branch, though it is still drawn slightly muted. So moving any entry can change which refs are carried where and how
 the graph is coloured.
 
@@ -3164,8 +3176,12 @@ diverged the fork between them is drawn instead of a remote collapsing to a `◍
 head. Every member of a pinned identity:
 
 - is pinned for the **focus default** (§10.7) and carries the **pin icon** (§6);
-- ranks with the identity (§5): the local branch first, its remotes after it, all
-  in the identity's colour — the remotes muted (§5.5). A remote **ahead** of its
+- is **expanded** by default under focus (§10.7) — never collapsed to a `◍` head
+  unless the user collapses it — and shows in the **context panes** (§6) as an
+  anchor;
+- ranks with the identity (§5) — it **shares the identity's pin rank**: the local
+  branch first, its remotes after it, all in the identity's colour — the remotes
+  of a local drawn slightly muted (level 2, §5.5). A remote **ahead** of its
   local carries its muted colour down to the local's tip, where it turns full; one
   at or behind the local sits on the local's track, at full strength;
 - is **not listed** in the pinned-branches dialog (§10.6.1) unless it is itself an
@@ -3177,10 +3193,15 @@ removed, §8). An explicit choice on one member still wins for **anchoring**: `P
 a member that is pinned only through its identity records an explicit **unpinned**
 override for that one ref — it loses the pin icon and the focus default — while its
 rank and colour still follow its identity, because colour belongs to the identity.
-Pinning a remote branch **explicitly** (`P` on an unpinned one, or "Pin new
-branch…") gives it its own row in the dialog at its own priority: for a remote-only
-identity that row is its rank and pinned colour; for a remote paired with a local
-it pins the identity, whose rank is the best of its entries.
+Pinning a **remote-only** branch explicitly (`P` on an unpinned one, or "Pin new
+branch…") gives it its own row in the dialog at its own priority — its rank and
+pinned colour — and draws it at **full brightness** (level 1, §5), still marked as
+remote by its label. **Pinning a remote that has a local counterpart pins the
+identity as a whole, exactly like pinning the local**: the entry is recorded as
+the local (`P` on `origin/dev` while `dev` exists pins `dev`), so the identity has
+one row, its local is drawn full and the remote slightly muted. A stored entry
+naming such a remote (written by an older version, §18) is read as its local in the
+same way.
 
 Anchors drive three things — the focus default, the panes, and lane identity
 with a **fixed colour** — and, deliberately, nothing more:
@@ -3238,14 +3259,18 @@ Pinned branches
   runs over the whole list — it is every entry's rank, which drives ref priority
   and colour (§5). The other members of a pinned identity (§10.6) — a pinned local
   branch's paired remotes — have **no** rows: they follow their identity's entry
-  and share its rank. An explicitly pinned remote branch has a row of its own.
+  and share its rank. An explicitly pinned **remote-only** branch has a row of its
+  own; pinning a remote that has a local counterpart adds (or keeps) the
+  **local's** row instead (§10.6), so an identity never has two rows.
 - `<C-j>` / `<C-k>` move the entry under the cursor **down / up**, clamped at
   the ends; the cursor follows it so a move is repeatable.
 - `D` unpins the entry — it leaves the list.
 - The last row, **`+ Pin new branch…`**, opens the existing ref picker (§2,
-  `<leader>b`); the chosen ref is appended to the **bottom** of the list. Refs already on the list are omitted from that picker (an
-  identity member pinned only through its identity is not on it, so it is offered
-  — picking it adds a row of its own, §10.6), and so is
+  `<leader>b`); the chosen ref is appended to the **bottom** of the list — a
+  remote with a local counterpart as that local (§10.6). Refs already pinned are
+  omitted from that picker — the entries and the members pinned through their
+  identity; a member with an explicit unpin override is offered, and picking it
+  clears the override (its identity's row stands) — and so is
   `HEAD` while it is on a branch (its branch is the owner); a **detached** `HEAD`
   is offered, so it can be pinned back after an unpin.
 - `<CR>` on an entry closes the dialog and **jumps the graph to that branch**,
@@ -3259,7 +3284,7 @@ dialog's keys are buffer-local, so they do not collide with the graph's own
 bindings. `P` (§10.6) remains the in-graph shortcut for pin/unpin of the branch
 under the cursor; it appends to the bottom of the list (on a member
 pinned only through its identity it unpins that one ref for anchoring instead,
-§10.6).
+§10.6; on an unpinned remote that has a local it pins the local).
 
 ### 10.7 First-parent default
 
@@ -4891,7 +4916,10 @@ an entry that is a **default anchor** at the time of saving
 (`master` / `main` / `dev`, a seeded mark, HEAD's branch) **and still sits in its
 default place** — in the leading run of defaults, above every explicitly placed
 entry, where the resolution (§10.6) puts it back. Members pinned only through
-their identity (§10.6) are never entries, so they are never saved. So pinning a branch while on
+their identity (§10.6) are never entries, so they are never saved. A stored
+entry naming a remote that has a local counterpart (an explicit remote pin written
+by an older version) is read as that local (§10.6); the file is rewritten in that
+form by the next save, not on read. So pinning a branch while on
 `feature/x` does not make `feature/x` an anchor forever after the user checks out
 something else; an unpinned default stays unpinned. A `reserved` field on a saved
 entry, written by an older version (the dropped dedicated-column flag, §10.6), is

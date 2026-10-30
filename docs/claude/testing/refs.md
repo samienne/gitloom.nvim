@@ -160,13 +160,17 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   and `pin_anchors` (pinning a local anchors its paired remotes and a differently
   named upstream; pinning a paired remote anchors the whole identity, local
   included; a remote-only branch every remote of its short name; an explicit unpin
-  drops one member, never an entry; a tag entry anchors itself only) and dialog
-  lines without identity-member rows.
+  drops one member, never an entry; a tag entry anchors itself only), `pin_owner`
+  / `pin_normalize` (a remote with a local recorded as the local, one entry per
+  identity at its first place) and dialog lines without identity-member rows.
   `tests/window_internal_spec.lua` covers `effective_pins`/`effective_pinned`/
   `pin_rank`/`sync_pin_rank` (default order with HEAD's anchor last, entries
   `{ id }` alone, a pinned identity's remotes anchors but not entries and never
   rows, dropped with the identity's last entry or by an explicit unpin, the removed
-  `pin_upstream` ignored, the ranks published on `opts` + `pane_opts`, and a detached HEAD pinning the `HEAD` ref last /
+  `pin_upstream` ignored, the ranks published on `opts` + `pane_opts`, a legacy
+  stored `origin/feature` pin read as `feature`, pinning `origin/dev` with a local
+  `dev` giving one entry with `dev` level 1 / `origin/dev` level 2 and a pinned
+  remote-only branch level 1, and a detached HEAD pinning the `HEAD` ref last /
   unpinnable / dropped once attached), and `reconcile_refs` stamping
   the head ref's `branch` (nil when detached); plus the **default selection**
   (§2/§5.4) over a stub ctx in a scratch window: `on_cursor_moved` pre-selects

@@ -99,7 +99,10 @@ Scope: the view builder (§10) and what feeds it: signatures, owner coverage, pi
   defaults; HEAD is its branch when attached, the `HEAD` ref itself when detached).
   `ctx:effective_pins()` resolves it (pure core `select.pin_resolve`: unplaced
   defaults — trunks, seeds, HEAD's anchor last — then the stored entries) into
-  exactly the dialog's rows. **A pin covers the identity** (§10.6): the other
+  exactly the dialog's rows, normalised by `select.pin_normalize` — a remote with
+  a local reads as that local (`pin_owner`), so an identity has one entry and a
+  legacy stored remote pin resolves on read (rewritten by the next save); `P` and
+  "Pin new branch…" record `pin_owner` too. **A pin covers the identity** (§10.6): the other
   members of a pinned entry's identity (`rank.pair` — its local, upstream, same-named
   remotes) are NOT entries but anchors through it. `ctx:effective_pinned()` is
   `select.pin_anchors(pins, pairing, unpinned)` — entries plus identity members,

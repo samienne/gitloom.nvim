@@ -497,6 +497,38 @@ function M.pin_anchors(pins, pairing, unpinned)
     return set
 end
 
+--- The pin-list id that pinning `id` records (spec §10.6 "A pin covers the
+--- identity"): a remote branch whose identity has a **local** (`pairing`, from
+--- `rank.pair`) pins that identity as a whole, so it is recorded as the local —
+--- pinning `origin/dev` while `dev` exists is pinning `dev`. Every other id (a
+--- local, a remote-only branch, a tag, `HEAD`) is its own. Pure.
+---@param id string
+---@param pairing IdentityPairing?
+---@return string
+function M.pin_owner(id, pairing)
+    local ident = pairing and pairing.of[id]
+    return ident and ident.local_name or id
+end
+
+--- Normalise a pin list (spec §10.6): every entry recorded as its `pin_owner`, the
+--- first occurrence of an id keeping its place and later duplicates dropped — so an
+--- identity has one entry, and a stored entry naming a paired remote (written by an
+--- older version, §18) reads as its local. Pure.
+---@param pins PinEntry[]?
+---@param pairing IdentityPairing?
+---@return PinEntry[]
+function M.pin_normalize(pins, pairing)
+    local out, seen = {}, {}
+    for _, e in ipairs(pins or {}) do
+        local id = M.pin_owner(e.id, pairing)
+        if not seen[id] then
+            seen[id] = true
+            out[#out + 1] = { id = id }
+        end
+    end
+    return out
+end
+
 --- Move the entry at `index` by `delta` places (spec §10.6.1, `<C-j>`/`<C-k>`),
 --- clamped at the ends — an out-of-range move is a no-op, so the key is safely
 --- repeatable. Returns the new list and the entry's new index.

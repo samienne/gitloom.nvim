@@ -276,10 +276,10 @@ describe("brightness levels (§5 'Brightness level')", function()
     end)
 
     it("a pinned remote-only ref outranks a worse-pinned local and every unpinned one", function()
-        -- the owner's case: origin/release (remote-only, level 2) pinned above dev
+        -- the owner's case: origin/release (remote-only, pinned: level 1) above dev
         local reg = registry("dev", "r:origin/release", "feature")
         local infos = infos_of(reg, { pins = pins("origin/release", "dev") })
-        assert.equal(2, infos["origin/release"].level)
+        assert.equal(1, infos["origin/release"].level)
         assert.equal(1, infos.dev.level)
         assert.equal(1, infos.feature.level)
         for _, rows in ipairs({
@@ -292,6 +292,32 @@ describe("brightness levels (§5 'Brightness level')", function()
         infos = infos_of(reg, { pins = pins("origin/release") })
         assert.is_true(rank.better(infos["origin/release"], infos.dev, { ["origin/release"] = 1, dev = 9 }))
         assert.is_true(rank.better(infos["origin/release"], infos.feature, { ["origin/release"] = 1, feature = 9 }))
+    end)
+
+    it("a pinned remote-only branch is drawn full (level 1), its other remotes level 2", function()
+        local reg = registry("r:origin/release", "r:fork/release", "r:origin/z")
+        local i = infos_of(reg, { pins = pins("fork/release") })
+        assert.equal(1, i["fork/release"].level)   -- the pinned ref
+        assert.equal(2, i["origin/release"].level) -- same identity, not the pinned ref
+        assert.equal(2, i["origin/z"].level)       -- unpinned remote-only stays slightly muted
+        assert.equal(1, rank.drawn_level(i["fork/release"]))
+        -- collapsed or not
+        i = infos_of(reg, { pins = pins("fork/release"), collapsed = { ["fork/release"] = true } })
+        assert.equal(1, i["fork/release"].level)
+        -- within the identity the pinned ref (level 1) leads its sibling
+        assert.same({ "fork/release", "origin/release", "origin/z" },
+            rank.order(infos_of(reg, { pins = pins("fork/release") }),
+                { ["origin/release"] = 9, ["fork/release"] = 1, ["origin/z"] = 9 }))
+    end)
+
+    it("a pinned local's remotes share its pin rank and stay slightly muted (level 2)", function()
+        local reg = registry("dev", "r:origin/dev", "r:fork/dev")
+        local i = infos_of(reg, { pins = pins("dev"), collapsed = { ["origin/dev"] = true } })
+        assert.same({ 1, 2, 2 }, { i.dev.level, i["origin/dev"].level, i["fork/dev"].level })
+        assert.same({ 1, 1, 1 }, { i.dev.pin, i["origin/dev"].pin, i["fork/dev"].pin })
+        -- a remote with a local never draws full, even when a (legacy) pin names it
+        i = infos_of(reg, { pins = pins("origin/dev") })
+        assert.same({ 1, 2 }, { i.dev.level, i["origin/dev"].level })
     end)
 
     it("every expanded or pinned ref outranks every collapsed unpinned one", function()

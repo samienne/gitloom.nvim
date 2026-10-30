@@ -158,7 +158,9 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   its remotes, the standing row, upstream then `git remote` order, the current-
   branch and name tie-breaks, generated refs last, antisymmetry over a mixed set.
   **Brightness levels**: expanded local 1, expanded remote 2, collapsed unpinned 3,
-  a pinned ref never 3; a pinned identity's remote above every unpinned local, and
+  a pinned ref never 3; a pinned remote-only ref level 1 (its sibling remotes 2),
+  a pinned local's remotes level 2 sharing its pin rank; a pinned identity's
+  remote above every unpinned local, and
   a pinned remote-only ref with a better pin rank above a pinned local; every
   expanded or pinned ref above every collapsed unpinned one; the local still above
   its remote at level 3; a fuzz that pinned refs come first by pin rank, brightness

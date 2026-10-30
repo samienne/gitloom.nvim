@@ -142,6 +142,34 @@ describe("window._internal.effective_pins / effective_pinned (§10.6)", function
         assert.is_true(p["origin/feature"])
     end)
 
+    it("a legacy entry naming a remote with a local reads as the local: one identity entry (§10.6/§18)", function()
+        -- stored by an older version: origin/feature pinned explicitly (feature's upstream)
+        local ctx = new_ctx(repo_with_branches(),
+            { view_state = vs({ { id = "origin/feature" }, { id = "feature" } }) })
+        assert.same({ "master", "main", "dev", "feature" }, ids(internal.effective_pins(ctx)))
+        local p = internal.effective_pinned(ctx)
+        assert.is_true(p.feature)
+        assert.is_true(p["origin/feature"]) -- still anchored, through the identity
+        -- the stored list is left as is until the next save rewrites it
+        assert.equal("origin/feature", ctx.view_state.pins[1].id)
+    end)
+
+    it("pinning origin/dev with a local dev: one entry, the local full and the remote level 2 (§5/§10.6)", function()
+        local repo = repo_with_branches()
+        git.add_ref(repo, "origin/dev", "remote", "h_odev")
+        git.add_ref(repo, "origin/solo", "remote", "h_solo")
+        local ctx = new_ctx(repo, { view_state = vs({ { id = "origin/dev" }, { id = "origin/solo" } }, { dev = true }) })
+        -- dev was an unpinned default; the remote pin brings its identity back as `dev`
+        assert.same({ "master", "main", "dev", "origin/solo" }, ids(internal.effective_pins(ctx)))
+        internal.sync_pin_rank(ctx)
+        local infos = ctx.opts.ref_rank.infos
+        assert.equal(1, infos.dev.level)
+        assert.equal(2, infos["origin/dev"].level)
+        assert.equal(infos.dev.pin, infos["origin/dev"].pin) -- one pin rank for the identity
+        assert.equal(1, infos["origin/solo"].level) -- a pinned remote-only branch is full
+        assert.is_true(internal.effective_pinned(ctx)["origin/dev"])
+    end)
+
     it("pins a seeded pointer mark when its ref exists", function()
         local repo = repo_with_branches()
         local ctx = new_ctx(repo, { seed_pin_names = { feature = true } })
