@@ -6621,8 +6621,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- against a now-moved viewport is dropped before it renders). `coroutine.resume`
         -- contains any error in the build (returns false), so a broken build never
         -- wedges the main view — the same guarantee the old pcall gave.
+        -- Also abandoned while a sub-frame (a commit view, §14.3) owns the host
+        -- window: the panes are relative="win" on the HOST, so a build landing
+        -- then — a resumed chunk, or any async caller (stream done, reflow, cone
+        -- debounce) — would float the footer over the commit view, where nothing
+        -- closes it again. on_show rebuilds them when the graph is re-entered.
         local function drive_panes(co, gen)
-            if gen ~= pane_gen or not vim.api.nvim_win_is_valid(win) then
+            if gen ~= pane_gen or not vim.api.nvim_win_is_valid(win)
+                or vim.api.nvim_win_get_buf(win) ~= buf then
                 util.pane_trace("abandon", { gen = gen, cur = pane_gen, at = "pre" })
                 if gen == pane_gen then pane_gate:dropped() end -- the window went away
                 return

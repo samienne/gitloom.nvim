@@ -163,3 +163,10 @@ Scope: per-spec coverage of the header / footer panes, their seams and the scree
   **top** down every screen row (columns AND split-above-columns), asserting `header_ts`
   returns the true top (naive `cols[w0]` wrong where a split sits above, `naive_wrong > 0`)
   and the `header_seam` it implies rounds to a whole commit block that is fully visible
+- `tests/footer_commit_view_spec.lua` — the panes vs the **commit view** (§6.2/§14.3),
+  on the REAL graph of this repository (needs snacks in the lazy install dir): with the
+  footer up, `<CR>` swaps the host to a commit view (BufWinLeave closes the panes); a
+  pane rebuild then fired by an async path (`update_panes`/`maybe_update_panes`, as the
+  stream / reflow / cone debounce / a resumed build chunk would) must NOT re-open the
+  footer over it (`drive_panes` abandons while the host shows another buffer), and
+  `<C-o>` back to the graph rebuilds it (on_show)

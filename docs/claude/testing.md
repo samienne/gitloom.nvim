@@ -23,7 +23,7 @@ Shared fixtures: `tests/graph_helpers.lua` (with `graph_layout_spec`, see layout
 | File | Specs |
 |---|---|
 | [layout.md](testing/layout.md) | `columns_spec`, `graph_layout_spec`, `graph_mirror_spec`, `ref_rank_spec`, `ref_color_spec`, `stream_layout_spec`, `view_spec`, `view_sigset_spec`, `reachability_spec` |
-| [panes.md](testing/panes.md) | `pane_spec`, `header_replay_spec`, `footer_replay_spec`, `screen_window_spec`, `footer_bottom_spec`, `footer_window_spec`, `header_window_spec` |
+| [panes.md](testing/panes.md) | `pane_spec`, `header_replay_spec`, `footer_replay_spec`, `screen_window_spec`, `footer_bottom_spec`, `footer_window_spec`, `header_window_spec`, `footer_commit_view_spec` |
 | [refs.md](testing/refs.md) | `refs_spec`, `head_marker_spec`, `label_color_spec`, `ref_picker_spec`, `ref_cycle_spec`, `selection_spec`, `ref_window_spec`, `label_mode_spec`, `listview_spec`, `pin_spec`, `detached_head_spec`, `own_owners_spec`, `space_toggle_spec` |
 | [git-io.md](testing/git-io.md) | `commit_spec`, `stream_complete_spec`, `stream_tick_spec`, `git_debug_spec`, `repo_picker_spec`, `fetch_spec`, `ordering_spec`, `worktree_spec`, `diff_provider_spec` |
 | [actions.md](testing/actions.md) | `palette_spec`, `checkout_spec`, `sync_spec`, `upstream_spec`, `examine_spec` |
