@@ -162,7 +162,7 @@ local function scenario()
 end
 
 function M.run()
-    vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/lazy/snacks.nvim")
+    vim.opt.rtp:prepend(vim.g.gitloom_test_deps .. "/snacks.nvim")
     vim.o.lines, vim.o.columns = 45, 200
     local ok_snacks = pcall(function()
         require("snacks").setup({ picker = { enabled = true }, input = { enabled = true } })

@@ -860,6 +860,12 @@ make test                          # run all specs
 make test-file FILE=tests/refs_spec.lua   # run a single spec
 ```
 
+The specs load plenary (required) and snacks / diffview / fidget (optional,
+their specs are skipped when absent) from `$GITLOOM_DEPS`, else `.deps/` in the
+checkout, else lazy.nvim's install dir. CI (`.github/workflows/ci.yml`) clones
+pinned commits into `.deps/` and runs `make test` and `make lint` on every pull
+request and push to `main`.
+
 ## Diagnostics
 
 Four opt-in dump globals, all off by default and all harmless to leave unset.

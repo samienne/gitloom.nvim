@@ -5,3 +5,6 @@
 
 # Untracked measurement / sample scratch (spike probes, corpus fixtures)
 /spike/
+
+# Test dependencies cloned by CI (see tests/minimal_init.lua)
+/.deps/
