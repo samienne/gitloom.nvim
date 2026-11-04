@@ -39,7 +39,14 @@ ARCHITECTURE.md ("Model ownership and the view pipeline").
 The plugin lives at `C:/src/nvim-plugins/gitloom.nvim`, loaded via the owner's
 Neovim config (`C:/Users/samie/AppData/Local/nvim`, branch `loomworks`) as a
 lazy.nvim dev plugin: `dev.path` uses the local checkout when present, else
-clones the `unstable` branch from `https://gitcode.com/samienne/gitloom.nvim`.
+clones the `unstable` branch from GitHub.
+
+The canonical repository is **GitHub**:
+`https://github.com/samienne/gitloom.nvim` (issues and backlog live in its
+[issue tracker](https://github.com/samienne/gitloom.nvim/issues), not in the
+docs). gitcode (`https://gitcode.com/samienne/gitloom.nvim`) is a **legacy
+mirror**, still updated until the owner's configs migrate off it: `main` on
+GitHub is mirrored to `master` on gitcode, and `unstable` to `unstable`.
 
 ## Relationship to loomworks
 
@@ -71,41 +78,40 @@ refactors without behavior change), skip steps 1–4 and implement directly.
 
 ## Branch Workflow
 
-All changes go through branches — never commit directly to `master` or
-`unstable`. One branch per piece of work.
+Every change goes through a **GitHub pull request** on
+`samienne/gitloom.nvim` — never commit directly to `main` or `unstable`. One
+branch per piece of work.
 
 - **Branch names**: `feature/<short-name>`, `fix/<short-name>`, `docs/…`,
   `refactor/…` etc.
-- Branch from `master`. Multiple commits per branch are fine.
+- **Flow**: branch off `main`, push, open a PR; CI runs the tests; then merge.
+- Do **not** create commits, push or open PRs automatically — only when the
+  user explicitly asks. It is fine to suggest "should we commit this?" at a
+  stopping point.
 - **`unstable` is a test pointer, not an integration branch.** The user's
   Neovim config loads gitloom from `unstable`: on this computer from the main
   worktree (which stays checked out on `unstable`), on other computers by
-  cloning `unstable` from gitcode. To test a branch, point `unstable` at its
-  tip (`git reset --hard <branch>` in the main worktree, when it is clean) —
-  no merge commits on `unstable`. Moving it rewrites its history, so the user
-  force-pushes it.
-- Do **not** create commits automatically — only when the user explicitly
-  asks. It is fine to suggest "should we commit this?" at a stopping point.
-- **When the branch is ready** (the user's call, after testing via
-  `unstable`), merge it to `master`. **Every commit on `master` makes one
-  meaningful change.** How a branch lands:
-  - **One commit** — fast-forward (rebase it onto `master` first if needed).
-  - **Several commits that are not each a meaningful step** (work in progress,
-    fixups, "address review") — squash them into one commit.
-  - **A real merge** (`git merge --no-ff`, with a summary message describing
-    *what* and *why*) — only when the branch's commits are carefully curated,
-    each a self-contained meaningful step. Curate them before merging.
-- **A branch merged to `master` is finished.** Never add commits to it or
-  merge it again. Follow-up work — a cleanup, a fix to it, a review change —
-  goes on a **new** branch from the current `master`. (While a branch is only
-  being tested via `unstable`, keep committing to it and re-point `unstable`.)
-
-`master` is the stable integration branch; `unstable` is what the Neovim
-config loads.
+  cloning `unstable` from GitHub (mirrored to gitcode). To test a branch, point
+  `unstable` at its tip (`git reset --hard <branch>` in the main worktree, when
+  it is clean) — no merge commits on `unstable`. Moving it rewrites its
+  history, so the user force-pushes it.
+- **Merging is the user's call** (after testing via `unstable`). **`main`'s
+  first-parent chain must read as a chain of meaningful changes** — each
+  first-parent commit one meaningful step — and each commit in a PR is itself a
+  meaningful step:
+  - **Single-commit PR** — squash-merge (`gh pr merge --squash`). For a very
+    small change, squashing the branch to one commit is fine.
+  - **Multi-commit PR** — a real merge (`gh pr merge --merge`, with a summary
+    of *what* and *why*). For a bigger change, first squash the branch, then
+    re-split it into meaningful commits before merging.
+- **A merged branch is finished.** Never add commits to it or merge it again.
+  Follow-up work — a cleanup, a fix to it, a review change — goes on a **new**
+  branch from the current `main`. (While a PR is open and being tested via
+  `unstable`, keep committing to it and re-point `unstable`.)
 
 ## Pre-merge checklist (mandatory)
 
-Before merging ANY branch, verify:
+Before merging ANY pull request, verify:
 
 1. **specification.md** — all behavioral changes reflected
 2. **ARCHITECTURE.md** — any structural changes documented
@@ -114,7 +120,7 @@ Before merging ANY branch, verify:
 5. **Type annotations** — LuaCATS `@class`/`@field` annotations affected by
    the change are current (no stale or missing fields)
 6. **Comments** — comments near changed lines are still accurate
-7. **Tests pass** — `make test`
+7. **Tests pass** — `make test` locally, and CI is green on the PR
 8. **Diagnostics clean** — `make lint` reports no problems
 
 **Do not merge if documentation is out of sync.** Fix docs first. If the

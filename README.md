@@ -63,17 +63,8 @@ even though it ships as part of the same suite. See
   collapse), with `<C-j>`/`<C-k>` to step matches, `<CR>` to jump (opening the
   branch), and `<C-s>` to keep it as a persistent view you return from with `<C-o>`
 
-### Planned
-
-- **Collapse a branch** to a single line in the view
-- **Pin branch-heads** so everything they reference stays visible
-- **Toggle branch visibility** (visible / collapsed / hidden) with the graph
-  reflowing to match
-- **Graph-initiated actions** and integrations (e.g. diffview) where they
-  arise naturally from the graph
-- **"Update available" marker** — flag when a tracked branch is behind its
-  remote, queried with `git ls-remote` (no `fetch`, no objects downloaded,
-  nothing written to the repo) so it stays true to the read-only viewer model
+Planned work and known issues are tracked in the
+[GitHub issues](https://github.com/samienne/gitloom.nvim/issues).
 
 ## Requirements
 
@@ -94,7 +85,7 @@ suite. With lazy.nvim:
 
 ```lua
 {
-    url = "https://gitcode.com/samienne/gitloom.nvim",
+    url = "https://github.com/samienne/gitloom.nvim",
     branch = "unstable",
     cmd = "GitloomGraph",
     keys = {
