@@ -27,7 +27,7 @@ lane layout, and glyph rendering) works; the surrounding plugin surface
 
 gitloom is **self-contained** — it does not depend on `loomworks.nvim`
 even though it ships as part of the same suite. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for the rationale.
+[ARCHITECTURE.md](ARCHITECTURE.md) for the overview.
 
 ## Features
 

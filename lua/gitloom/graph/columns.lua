@@ -3,7 +3,7 @@
 --- Places the commit DAG's lanes (edges child -> parent) into columns and emits,
 --- per rendered line, the connectivity of every Segment in every Column. It does
 --- NOT pick glyphs or colours (that is Phase 2, the renderer) — it only owns lane
---- placement and the continuity invariants. The design (see ARCHITECTURE.md):
+--- placement and the continuity invariants. The design (overview: ARCHITECTURE.md):
 ---
 ---   * A **Lane** is one edge child -> parent, a persistent object that lives from
 ---     the child's row down to the parent's row. Reusing the object across rows is
@@ -31,7 +31,7 @@
 --- different chain: `layout_seam` (a context pane's boundary row) drops `slide` and
 --- swaps `compact` for `carry`, so the seam matches the seeded columns without a
 --- jog. There is no generic runner — the sequence is the algorithm. See
---- ARCHITECTURE.md ("Layout as a staged pipeline").
+--- docs/claude/layout.md (the pipeline).
 ---
 --- **Layout policy** (spec §5.6). Which chain lays out an ordinary row is
 --- selectable via `opts.layout_policy`: `compact` (default), `survivors` (no
@@ -380,7 +380,8 @@ end
 --- Lane `{id, color, ref?, parent, begin?}`; it draws straight down until its `parent`
 --- commit appears in `items` (or off the bottom edge if it never does). Seeding
 --- only constrains the sweep **start**, so it pins a footer's top seam exactly;
---- a header's bottom seam needs a different mechanism (see ARCHITECTURE.md).
+--- a header's bottom seam needs a different mechanism (the seam-up grid,
+--- docs/claude/window.md).
 ---@param opts table
 ---@param seed table<integer, table>?  -- col -> Lane crossing in from above
 ---@return LayoutSession

@@ -4410,7 +4410,7 @@ duplicated, §3); only the view state is copied. Closing the filter **discards t
 copy** and returns to the base view exactly as it was — so the base's collapses
 and pins are provably untouched, with no save/restore bookkeeping. (Implementation:
 a single graph buffer whose projection follows the active view state, swapped to
-the copy on entry and back on exit — ARCHITECTURE.md.)
+the copy on entry and back on exit — see `h_filter` in `window.lua`.)
 
 ### 16.2 Matching
 
