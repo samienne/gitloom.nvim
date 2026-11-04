@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NVIM_VERSION: v0.12.6
+  LUALS_VERSION: 3.17.1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # tests/minimal_init.lua loads plenary / snacks / diffview / fidget from here.
+      GITLOOM_DEPS: ${{ github.workspace }}/.deps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Some specs drive the real graph on this repository.
+          fetch-depth: 0
+
+      - name: Install Neovim
+        run: |
+          curl -fsSL -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          mkdir -p "$HOME/nvim"
+          tar -xzf /tmp/nvim.tar.gz -C "$HOME/nvim" --strip-components=1
+          echo "$HOME/nvim/bin" >> "$GITHUB_PATH"
+
+      - name: Clone test dependencies (pinned)
+        run: |
+          clone() { # <dir> <repo> <commit>
+            git init -q "$GITLOOM_DEPS/$1"
+            git -C "$GITLOOM_DEPS/$1" fetch -q --depth 1 "https://github.com/$2" "$3"
+            git -C "$GITLOOM_DEPS/$1" checkout -q FETCH_HEAD
+          }
+          clone plenary.nvim  nvim-lua/plenary.nvim  74b06c6c75e4eeb3108ec01852001636d85a932b
+          clone snacks.nvim   folke/snacks.nvim      882c996cf28183f4d63640de0b4c02ec886d01f2
+          clone diffview.nvim sindrets/diffview.nvim 4516612fe98ff56ae0415a259ff6361a89419b0a
+          clone fidget.nvim   j-hui/fidget.nvim      6f793b2bcd2d35e201c09520f698bb763220908a
+
+      - name: Configure git
+        run: |
+          git config --global user.name "gitloom CI"
+          git config --global user.email "ci@example.invalid"
+          git config --global init.defaultBranch main
+
+      - run: nvim --version
+
+      - name: make test
+        run: make test
+
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Neovim
+        run: |
+          curl -fsSL -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          mkdir -p "$HOME/nvim"
+          tar -xzf /tmp/nvim.tar.gz -C "$HOME/nvim" --strip-components=1
+          echo "$HOME/nvim/bin" >> "$GITHUB_PATH"
+
+      - name: Install lua-language-server
+        run: |
+          curl -fsSL -o /tmp/luals.tar.gz \
+            "https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VERSION}/lua-language-server-${LUALS_VERSION}-linux-x64.tar.gz"
+          mkdir -p "$HOME/luals"
+          tar -xzf /tmp/luals.tar.gz -C "$HOME/luals"
+
+      # `--check` does not reliably fail the step on problems, so assert the
+      # clean summary line explicitly.
+      - name: make lint
+        run: |
+          set -o pipefail
+          make lint LUALS="$HOME/luals/bin/lua-language-server" 2>&1 | tee lint.log
+          grep -q "no problems found" lint.log
