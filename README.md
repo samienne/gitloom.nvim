@@ -94,7 +94,7 @@ suite. With lazy.nvim:
 
 ```lua
 {
-    url = "https://gitcode.com/samienne/gitloom.nvim",
+    url = "https://github.com/samienne/gitloom.nvim",
     branch = "unstable",
     cmd = "GitloomGraph",
     keys = {
