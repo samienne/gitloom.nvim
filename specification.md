@@ -3332,44 +3332,18 @@ trunk branch and nothing pinned) does the graph fall back to all-normal.
 
 ### 10.8 Open / deferred
 
-- **Adaptive layout** — Phase A packs only *consecutive* concurrent markers, so
-  in a first-parent focus view (where each merged head sits between mainline
-  commits, not next to other heads) packing rarely fires. Making it effective
-  needs **reordering**: cluster concurrent markers into a band within their valid
-  topological range (a merged head's range is its merge … its fork), then pack.
-  Beyond that: *packing* junction markers (they already render node-less, §10.4,
-  but don't yet share lines), and letting markers ride on message-bearing lines
-  when they fit, toward a fully adaptive density (greedy row packing). Deferred.
-- **Hidden connectivity** — phantom indicator vs. vanish.
-- **Scale** — unbounded reads in large repositories; the loading strategy
-  (limits, lazy/streamed loading, on-demand reachability) must keep reflow
-  responsive. The open path no longer *blocks* on either half of this (§3.1
-  streaming is incremental, §10.5's opening projection is sliced), but the total
-  work is still linear in the whole history — a repository large enough still
-  spends seconds projecting it, just without freezing. Bounding what is read and
-  laid out at all remains open. The total is also a function of the repository's
-  **shape**, not only its size: the per-commit signature is computed against the
-  whole owner set (§10.2) and an owner is minted per non-first merge parent, so a
-  trunk of merges costs several times what a linear history of the same length
-  does. The phase breakdown of an open — the ref query, each streamed batch, then
-  sort / owners / signatures / projection / layout / packing / apply, with the
-  counts each scales with — is recorded by the armable `gitloom_open_trace`
-  diagnostic (README → Diagnostics), so this is measured rather than estimated.
-- **Auto-refresh** — history refresh (§3.4) is in place via the manual `R`
-  resync; triggering it automatically when the repository changes underneath
-  (watching `.git` refs / `HEAD` via an fs-event or autocmd, debounced) is a
-  follow-up. Today a history change is mirrored only on `R` or reopen.
-- **Toggle UX** — `<Space>` toggles collapse ⇄ expand and the `<C-Space>`
-  palette's row entries set any mode (implemented); a picker for setting many at
-  once is still future.
-- **Context panes** — header/footer windows showing off-screen topology folded
-  onto the pinned anchors (§10.6), with lanes continuous across the viewport
-  boundary. To be specified in §6. Pane recomputation must be **asynchronous /
-  debounced** and must never block or slow the main view's scroll and render.
-- **Stronger-than-collapse fold** — contracting a non-anchor branch onto its
-  boundary commit (the merge, or for squash-merged work the fork point) as a
-  label + count with no head row or lane, a level between collapse and hide.
-  Open refinement.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): adaptive layout —
+reordering concurrent markers into bands before packing (#1), hidden
+connectivity — phantom indicator vs. vanish (#2), scale — bounding what is read
+and laid out (#3), auto-refresh on repository changes (#4), a picker for
+setting many branch modes at once (#5), and a stronger-than-collapse fold onto
+the boundary commit (#6).
+
+For scale, the phase breakdown of an open — the ref query, each streamed batch,
+then sort / owners / signatures / projection / layout / packing / apply, with the
+counts each scales with — is recorded by the armable `gitloom_open_trace`
+diagnostic (README → Diagnostics), so cost is measured rather than estimated.
 
 ## 11. Commit view
 
@@ -3760,17 +3734,11 @@ bumping several submodules gets one change graph per submodule.
 
 #### 11.7.5 Open points
 
-- **Detail level** (§11.7.3): the change graph currently shows both first-parent
-  sides with per-commit subjects; a topology-only or condensed rendering
-  (collapsing the linear stretches between junctions) is a likely configurable
-  refinement, defaulting conservatively.
-- **Full-merge traversal** (§11.7.3): an option to walk *all* parents
-  (`base..tip` instead of `--first-parent`) so merged-in side branches show — at
-  the cost of lanes that dangle where the range boundary cuts a side branch off.
-  Deferred; first-parent is the cleaner default.
-- **Named divergence**: when no ref points at `B`, a stable "B is on `X`, N
-  behind its tip" line (from refs *containing* `B`, when exactly one) could name
-  the new pointer's home — deferred, fragile when several branches contain it.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): change-graph detail
+level (#7), full-merge traversal (#8), and named divergence for an unnamed new
+pointer (#9).
+
 - **Nested submodules** are out of scope for the first cut.
 
 #### 11.7.6 Opening the submodule's repository
@@ -4143,14 +4111,11 @@ possibility rather than a typo the user can see.
 
 ### 13.6 Open / deferred
 
-- **First-parent-restricted range** — the literal `from..to` pulls in a merged-in
-  side when the path crosses a merge; restricting the diff to the followed
-  branch's own commits needs a synthesized range the provider understands (§13.5).
-- **Selection across hidden regions** — a path that would cross a §10 *hidden*
-  region (whose boundary edge is dropped, §10.3) follows the §10.8
-  hidden-connectivity open question.
-- **`<C-d>` / `<C-u>` step count** — the exact "half-viewport of branch commits"
-  count is a tuning point, expected to need iteration.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): a
+first-parent-restricted range diff, §13.5 (#10), selection across §10 hidden
+regions — part of the §10.8 hidden-connectivity question (#2), and tuning the
+`<C-d>` / `<C-u>` step count (#11).
 
 ## 14. Windows, views, and navigation
 
@@ -4346,19 +4311,16 @@ submodule update can never quietly mutate the submodule's saved layout.
 
 ### 14.9 Open / deferred
 
-- **Disk persistence** of the remaining durable view state — collapse / expand
-  overrides — is deferred; the pin list and the view toggles are persisted (§18).
-- **Cold rebuild.** Hiding (`q`) retains buffers, so re-show is instant.
-  Rebuilding a destroyed entry from a serialized descriptor (scope + modifiers +
-  state snapshot) — to survive a full teardown or a Neovim restart — would reuse
-  the same descriptor used for breadcrumb labels (§14.6); not yet specified.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): disk persistence of
+collapse / expand overrides and cold rebuild of destroyed entries (#12), and
+the concrete modifier surface — filters / scopes and their keys (#13); the
+machinery (§14.2–§14.5) is independent of which modifiers exist.
+
 - **Live parent→child propagation.** Fork-on-push (§14.4) is deliberately a
   one-time copy; a model where a parent's later edits flow into already-open
   children (copy-on-write sharing) is materially more complex and is not adopted
   unless a concrete case demands it.
-- **Modifier surface.** The concrete set of filters / scopes (file, path glob,
-  author, …) and the keys that apply / clear them are enumerated as they are
-  built; the machinery (§14.2–§14.5) is independent of which modifiers exist.
 
 ## 15. Commit search
 
@@ -4418,13 +4380,10 @@ the jump.
 
 ### 15.5 Open / deferred
 
-- **Body search** as a separate **live mode** — a toggle within the picker that
-  switches from the resident fuzzy match to a git-side `git log --grep` / `-G`
-  query, re-run per query (no resident corpus; regex, not fuzzy). This keeps body
-  text searchable without caching it or cluttering the default subject/author
-  list; not yet built.
-- **Additional fields / filters** (committer, date range, path) would compose as
-  further picker modes or as view modifiers (§14.2) as needed.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): body search as a live
+`git log --grep` / `-G` mode (#14), and additional fields / filters such as
+committer, date range and path, as picker modes or view modifiers §14.2 (#15).
 
 ## 16. Filter search (in-graph)
 
@@ -4540,10 +4499,10 @@ beyond merely being the only normal commits among the `◍` heads.
 
 ### 16.8 Open / deferred
 
-- **Fuzzy mode** and **field scoping** (subject-only / author-only) as toggles in
-  the filter input (§16.2).
-- Composing the filter with the body **live-grep** mode (§15.5) — filtering by
-  message body via `git log --grep`, async — is a later extension.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): fuzzy mode and field
+scoping (subject-only / author-only) in the filter input, §16.2 (#16), and
+composing the filter with the body live-grep mode, §15.5 (#14).
 
 ## 17. Command palette
 
@@ -5122,11 +5081,11 @@ others; it is not a view toggle and is not persisted (§18).
 
 ### 19.6 Open / deferred
 
-- **A percentage for the open's stream**, estimated from the commit count of the
-  previous open of the same repository (persisted, §18) — useful on very large
-  repositories, wrong after a big fetch; deferred until it is wanted.
+Open items are tracked in the [GitHub
+issues](https://github.com/samienne/gitloom.nvim/issues): a stream percentage
+(#17), and reporting synchronous reflows once they are chunked like the open's
+projection, §10.5 (#18).
+
 - **Cancel from the display** — interrupting a fetch from its fidget entry. It
   needs gitloom to own the job handle end to end and to define what a half-done
   fetch leaves behind; out of scope here.
-- **Synchronous reflows** become reportable only once they are chunked like the
-  open's projection (§10.5).
