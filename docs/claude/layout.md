@@ -27,7 +27,7 @@ See specification.md §4–§5 for full definitions.
 
 ## Implementation notes
 
-- **Two-phase pipeline** (see ARCHITECTURE.md): **Phase 1** `columns.lua`
+- **Two-phase pipeline** (overview in ARCHITECTURE.md): **Phase 1** `columns.lua`
   (`columns.layout`) owns lane placement — it assigns lanes to columns and emits
   one Segment per drawn edge with its own connectivity, validated for
   continuity. **Phase 2** `get_column_chars` (in graph.lua) renders glyphs and
@@ -191,7 +191,7 @@ See specification.md §4–§5 for full definitions.
   matches since `straight` moves no seeded lane); the **header** does not (it is
   the direct seam-up grid, never `columns.layout`).
 - **Carried refs and lane identity are independent of placement** (spec §5,
-  `spawn_lanes`; ARCHITECTURE.md "Ranked refs" and Phase 1 step 3). Every Lane
+  `spawn_lanes`; `rank.lua` and `columns.lua` headers). Every Lane
   carries one ref (`lane.ref`, a `rank.lua` `RankInfo`; tier / level 4 = generated).
   `rank.better` orders by pin rank first (pinned refs above all, whatever their
   level), then brightness `level` (1 full, 2 slightly muted, 3 muted, 4 generated

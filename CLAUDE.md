@@ -5,9 +5,9 @@
 - **[specification.md](specification.md)** — Behavioral contract. *What*
   gitloom does: entry point, data source, data model, graph layout
   invariants, rendering behavior, configuration. Authoritative for behavior.
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** — Implementation architecture.
-  *How* it is built: layers, data flow, the lane-layout algorithm, the
-  listview widget, file layout.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — High-level architecture overview:
+  layers, data flow, async fetching, the lane-layout idea, file map. Details
+  live in the code and `docs/claude/`.
 - **[README.md](README.md)** — User-facing docs. Install, usage,
   configuration, testing.
 
@@ -34,7 +34,7 @@ reflow require owning ordering and layout. The graph algorithm is the most
 developed part; the rest of the surface exists mainly to exercise it. The
 central unsolved problem is
 commit attribution in a shared DAG. See specification.md §1, §10 and
-ARCHITECTURE.md ("Model ownership and the view pipeline").
+ARCHITECTURE.md.
 
 The plugin lives at `C:/src/nvim-plugins/gitloom.nvim`, loaded via the owner's
 Neovim config (`C:/Users/samie/AppData/Local/nvim`, branch `loomworks`) as a

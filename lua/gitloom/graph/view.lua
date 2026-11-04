@@ -3,8 +3,7 @@
 --- **DisplayNodes** plus their re-pointed parent/child edges — that Phase 1
 --- (`columns.layout`) lays out unchanged. A DisplayNode is either a real commit
 --- (visible region) or a synthetic **collapsed head** standing for a whole
---- collapsed region. See ARCHITECTURE.md ("OrderItem graphs as derived
---- projections").
+--- collapsed region. See docs/claude/view.md.
 ---
 --- The model (spec §10.2): each commit's **signature** is the set of owners
 --- (v1: refs) whose tip reaches it; signatures are monotone (a parent's is a
@@ -227,7 +226,7 @@ end
 --- `sig` (the per-commit signatures) may be passed in precomputed: it depends
 --- only on the DAG and the owner *tips*, not on modes, so a caller reflowing
 --- after a mode change can reuse a cached one and skip the O(N·owners) pass
---- (the caching split, ARCHITECTURE.md / spec §10.5). Omit it to compute fresh.
+--- (the caching split, spec §10.5). Omit it to compute fresh.
 ---
 --- `keep` (the filter-search match set, spec §16.3) is an optional set of commit
 --- hashes that must **never** contract into a collapsed head — they stay their

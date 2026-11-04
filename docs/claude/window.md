@@ -254,7 +254,7 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   --ff-only`, which overrides any `pull.rebase` / `pull.ff` config, so it never
   merges or rebases; a failed pull still resyncs (its fetch half may have moved
   remote-tracking refs).
-- **Branch sync** (spec §17.2, ARCHITECTURE "Command palette"): the branch
+- **Branch sync** (spec §17.2, `git/sync.lua`): the branch
   context's fast-forward / reset-to-upstream entries. Visibility is decided from
   the CACHED tracking counts (`SelectedRef.upstream`, carried from
   `group_refs`'s `track`; `Upstream.ref` is the full refname from
@@ -317,8 +317,8 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   projection via the `on_signatures` hook — it needs only the signatures and the
   resolved modes, and a mode never enters a signature — instead of triggering a
   second whole reflow as it used to.
-- **Persisted view state** (§18, `persist.lua`; see ARCHITECTURE "Persisted view
-  state"): one JSON file, `stdpath("state")/gitloom.json`. The toggles
+- **Persisted view state** (§18, `persist.lua`; see its header comment): one JSON
+  file, `stdpath("state")/gitloom.json`. The toggles
   `m C M B d H S c p F i` save `{ value, base }` via `ctx:save_pref(<field>)`
   (`base` = the configuration-resolved value, computed in `open_graph` from the
   caller's options BEFORE the defaults merge, kept as `ctx.persist_config`); a
@@ -327,8 +327,7 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   `:GitloomResetView`) clears the toggles + THIS repository's pins only. All glue
   uses inline `require("gitloom.persist")` — no new window.lua locals. Tests must
   never hit the real file: `persist.set_path` (minimal_init does it).
-- **Progress reporting** (§19, `progress.lua`; see ARCHITECTURE "Progress
-  reporting"): `ctx.progress` is the session's tracker; each reported operation is
+- **Progress reporting** (§19, `progress.lua`; see its header comment): `ctx.progress` is the session's tracker; each reported operation is
   `ctx.progress:start(title, { message?, own_notices? })` → an Op ended on EVERY
   path (`op:finish(outcome)`, idempotent), and the graph buffer's `BufWipeout`
   sweeps the rest `cancelled`. fidget is only ever `pcall(require)`d, per Op; an
