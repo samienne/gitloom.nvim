@@ -366,10 +366,10 @@ describe("notify provider (§19.3)", function()
 end)
 
 describe("the real fidget adapter (§19.3)", function()
-    local dir = vim.fn.stdpath("data") .. "/lazy/fidget.nvim"
+    local dir = vim.g.gitloom_test_deps .. "/fidget.nvim"
     local have = vim.fn.isdirectory(dir) == 1
     if not have then
-        pending("fidget.nvim not in the lazy install dir")
+        pending("fidget.nvim not in the test deps dir")
         return
     end
     vim.opt.rtp:append(dir)

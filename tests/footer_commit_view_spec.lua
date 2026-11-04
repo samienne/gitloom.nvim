@@ -9,7 +9,7 @@
 -- over the commit view, where nothing ever closed it again (the user's "footer
 -- got stuck over the commit view").
 --
--- Drives the REAL graph on this repository (needs snacks in the lazy install dir).
+-- Drives the REAL graph on this repository (needs snacks in the test deps dir).
 
 local function settle(ms) vim.wait(ms or 200, function() return false end) end
 
@@ -31,7 +31,7 @@ describe("context panes vs the commit view (§6.2/§14.3)", function()
     local window, sess, gbuf
 
     before_each(function()
-        vim.opt.rtp:prepend(vim.fn.stdpath("data") .. "/lazy/snacks.nvim")
+        vim.opt.rtp:prepend(vim.g.gitloom_test_deps .. "/snacks.nvim")
         vim.o.lines, vim.o.columns = 30, 160
         require("snacks").setup({})
         window = require("gitloom.window")

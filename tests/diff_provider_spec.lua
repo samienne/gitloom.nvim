@@ -93,7 +93,7 @@ end)
 
 -- ── End to end against the real diffview ─────────────────────────────────────
 
-local dv_path = vim.fn.stdpath("data") .. "/lazy/diffview.nvim"
+local dv_path = vim.g.gitloom_test_deps .. "/diffview.nvim"
 local have_dv = vim.fn.isdirectory(dv_path) == 1
 
 local function sh(dir, ...)

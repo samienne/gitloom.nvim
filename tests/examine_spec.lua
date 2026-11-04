@@ -684,7 +684,7 @@ end)
 
 -- ── Optional: the single-rev open against the real diffview ─────────────────
 
-local dv_path = vim.fn.stdpath("data") .. "/lazy/diffview.nvim"
+local dv_path = vim.g.gitloom_test_deps .. "/diffview.nvim"
 local have_dv = vim.fn.isdirectory(dv_path) == 1
 
 ;(have_dv and describe or pending)("examine's single-rev range in the real diffview (§10.4.2)", function()

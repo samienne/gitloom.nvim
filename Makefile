@@ -16,8 +16,8 @@ test:
 	nvim --headless -u $(INIT_FILE) -c "PlenaryBustedDirectory $(TESTS_DIR)/ {minimal_init = '$(INIT_FILE)', timeout = $(TEST_TIMEOUT)}"
 
 ## Headless window smoke-test (drives the real graph; needs snacks in the
-## lazy install dir). Separate from `test` — it is not a busted spec and needs a
-## real repo + async waits. Exits non-zero on failure.
+## test deps dir, see tests/minimal_init.lua). Separate from `test` — it is
+## not a busted spec and needs a real repo + async waits. Exits non-zero on failure.
 smoke:
 	nvim --headless -u $(INIT_FILE) -c "lua require('tests.smoke.graph_smoke').run()"
 
