@@ -96,7 +96,9 @@ Scope: per-spec coverage of ref classification and labels, HEAD, the ref picker 
   overflow, §6: a contiguous window around the selected ref with separate
   left/right `+N` markers; greedy right-then-left growth; the selected item always
   shown even when it alone overflows; sel clamping; empty), and `refresh_columns`
-  width aggregation from `below` and from every stacked `above`/`below` row (§6.1);
+  width aggregation from `below` and from every stacked `above`/`below` row (§6.1)
+  and its caller-fixed `col_widths` columns (kept across ranges, re-read each
+  refresh; §6);
   plus `label_occurrence` + `ref_byte_col`'s `nth` (repeated marker labels such
   as `(3)`, for cursor parking), and **mirroring keeps the logical label order**
   (§5.4): `display_item`'s labels in logical order under `mirror` in `inline` /

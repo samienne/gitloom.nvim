@@ -120,6 +120,26 @@ function M.compose(list)
     }
 end
 
+--- Fit `text` into `width` display cells: unchanged when it fits, else cut to
+--- `width - 1` cells plus `…` (a wide character that would straddle the cut is
+--- dropped whole). No padding — the caller aligns.
+---@param text string
+---@param width integer
+---@return string
+function M.truncate(text, width)
+    if vim.fn.strdisplaywidth(text) <= width then return text end
+    if width <= 0 then return "" end
+    local out, used = {}, 0
+    for i = 0, vim.fn.strchars(text) - 1 do
+        local ch = vim.fn.strcharpart(text, i, 1)
+        local w = vim.fn.strdisplaywidth(ch)
+        if used + w > width - 1 then break end
+        out[#out + 1] = ch
+        used = used + w
+    end
+    return table.concat(out) .. "…"
+end
+
 --- Trim leading/trailing whitespace (git command output is line-wrapped).
 ---@param s string|nil
 ---@return string

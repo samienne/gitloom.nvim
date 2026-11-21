@@ -59,6 +59,75 @@ function M.format_relative(ts, now)
     return "just now"
 end
 
+-- The largest count the relative vocabulary prints for the top unit (years).
+-- Every other unit's count is bounded by the next larger unit (59 seconds, 23
+-- hours, ...); a year count is not, so it is capped where a longer phrase would
+-- need five digits (§6: "9999 years ago" is as long as "59 seconds ago").
+local REL_MAX_YEARS = 9999
+
+--- Display width (cells) of a string; `vim` is always present at runtime, the
+--- byte length is the fallback for a bare-Lua caller.
+local function cells(s)
+    if vim and vim.fn and vim.fn.strdisplaywidth then return vim.fn.strdisplaywidth(s) end
+    return #s
+end
+
+local relative_cache
+
+--- The widest phrase `format_relative` can produce, in cells (§6): for every unit
+--- the largest count it is printed with — one less than the next larger unit in
+--- this unit (`59 seconds`, `23 hours`, `4 weeks`, `12 months`), the year count
+--- capped at REL_MAX_YEARS — plus "just now". Derived from REL_UNITS, so it
+--- follows the vocabulary.
+---@return integer
+function M.relative_width()
+    if relative_cache then return relative_cache end
+    local w = cells("just now")
+    for i, u in ipairs(REL_UNITS) do
+        local n = (i == 1) and REL_MAX_YEARS or math.floor((REL_UNITS[i - 1][1] - 1) / u[1])
+        w = math.max(w, cells(M.format_relative({ epoch = 0, offset = 0 }, n * u[1])))
+    end
+    relative_cache = w
+    return w
+end
+
+-- Probe dates for absolute_width: one per day of 2001 (from Monday 2001-01-01
+-- 00:00 UTC), so every month, every weekday and every day number (1-31, two-digit
+-- ones included) appear, each at a two-digit morning and a two-digit evening time
+-- (AM and PM, 10:10:10 / 23:59:59).
+local PROBE_BASE = 978307200 -- 2001-01-01 00:00:00 UTC
+local PROBE_TIMES = { 10 * 3600 + 10 * 60 + 10, 23 * 3600 + 59 * 60 + 59 }
+local absolute_cache = {}
+
+--- The widest text the os.date format `fmt` produces over the probe dates, in
+--- cells (§6): a format with names (`%B`, `%a`) gets its longest name in the
+--- current locale. Cached per format.
+---@param fmt string?
+---@return integer
+function M.absolute_width(fmt)
+    fmt = fmt or "%Y-%m-%d %H:%M"
+    local cached = absolute_cache[fmt]
+    if cached then return cached end
+    local w = 0
+    for day = 0, 364 do
+        for _, t in ipairs(PROBE_TIMES) do
+            local ts = { epoch = PROBE_BASE + day * 86400 + t, offset = 0 }
+            w = math.max(w, cells(M.format_absolute(ts, fmt)))
+        end
+    end
+    absolute_cache[fmt] = w
+    return w
+end
+
+--- The date column's text width for `opts.date_mode` (§6): a function of the
+--- mode (and `date_format`) alone, never of the commits shown.
+---@param opts GraphOptions
+---@return integer
+function M.date_width(opts)
+    if opts.date_mode == "relative" then return M.relative_width() end
+    return M.absolute_width(opts.date_format)
+end
+
 --- Render a commit's date for display per opts.date_mode (§6).
 ---@param ts Timestamp?
 ---@param opts GraphOptions

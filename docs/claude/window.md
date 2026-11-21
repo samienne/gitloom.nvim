@@ -299,12 +299,20 @@ Scope: the window controller (`window.lua`): module layout and `GraphCtx`, z-ord
   untracked files, verified on 2.49) Return falls back to a plain apply and WARNs
   that the changes are back unstaged; any other `--index` failure is a failed
   apply. The `--index` apply runs under `LC_ALL=C` so the message is matchable.
-- **Sticky columns** (listview, anti-bounce; spec §6): the shared column widths
-  recompute from the visible range each scroll, so a varying column bounces. A
-  column can *only grow* (never shrink): `col_max` (a per-column cap, implies
-  sticky — the author column at 25) and `col_sticky` (no-cap sticky columns, a
-  list or a function — the graph column when `opts.mirror` is on, whose
-  right-aligned content would otherwise shift as the lane width changes).
+- **Fixed row columns** (spec §6): the date, author and graph columns have widths
+  the window hands the listview through `col_widths` (column index → cells, read
+  on every render); only columns it does not name are measured from the visible
+  rows. Date = `git.date_width(opts)` (the widest `date_format` output over fixed
+  probe dates, or the longest relative phrase) + the gap; author =
+  `render.author_width(opts)` + the gap (the name itself is cut with `…` in
+  `display_item`); graph = `ctx.graph_w` floored by `graph_min_width`.
+  `ctx.graph_w` is the whole view's widest graph (`render.graph_width`, two cells
+  per lane column over every row's node / above / merge lines): `reflow_apply`
+  sets it from the new display (it may shrink), and a streamed batch only widens
+  it — the fast path measures the batch's rows (all rows when the sweep restarted)
+  and refreshes if it grew; a batch's reflow sets `ctx.graph_widen` so
+  `reflow_apply` keeps the max. `model.columns` stays the single source of the
+  widths `col_offset`, the pane offsets and the cursor placement read.
 - **The reflow splits into compute and apply** (§10.5): `reflow_build` produces
   the display and touches no window, `reflow_apply` swaps it in; `reflow` is both,
   `reflow_async` drives the compute half as a coroutine across event-loop turns
