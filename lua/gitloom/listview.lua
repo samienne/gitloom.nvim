@@ -137,7 +137,11 @@ local function item_index_at(model, bl)
     return lo
 end
 
---- 1-based indexing
+--- 1-based indexing. Lays out (via `model.display`) any item in `first..last`
+--- not laid out yet, and settles the shared column widths `model.columns`. A
+--- column the caller gives a **fixed width** (`model.col_widths`) takes it as is
+--- — independent of the rows, so it does not change as rows scroll past; every
+--- other non-flex column is as wide as its widest value in the range.
 ---@param win integer?   the list window (unused here; nil in unit tests)
 ---@param model ListViewModel
 ---@param first integer
@@ -149,10 +153,18 @@ local function refresh_columns(win, model, first, last)
 
     local changed = false
 
+    -- The caller's fixed widths (column index -> width), read fresh each time so
+    -- the caller can change them (e.g. a display-mode toggle) between renders.
+    local fixed = model.col_widths and model.col_widths() or {}
+    for j, w in pairs(fixed) do
+        if model.columns[j] ~= w then changed = true end
+    end
+
     -- The flex column (e.g. the message, or the dual-mode branch line's labels)
-    -- sizes per row, not by alignment, so it never drives the shared max widths.
+    -- sizes per row, not by alignment, so it never drives the shared max widths;
+    -- nor does a fixed-width column.
     local function counts(j)
-        return not (model.flex and j == model.flex)
+        return not (model.flex and j == model.flex) and fixed[j] == nil
     end
 
     -- Compute any newly-visible items and normalise string columns to
@@ -174,8 +186,8 @@ local function refresh_columns(win, model, first, last)
         end
     end
 
-    -- Even without a new item, a row whose column widths no longer match the
-    -- shared maxima forces a recompute (e.g. after a display-mode toggle).
+    -- Even without a new item, a row whose measured column widths no longer
+    -- match the shared maxima forces a recompute (e.g. after a display toggle).
     if not changed then
         for i = first, last do
             local item = model.items[i]
@@ -216,23 +228,7 @@ local function refresh_columns(win, model, first, last)
                 end
             end
         end
-
-        -- **Sticky** columns only grow (never shrink), so a column doesn't bounce
-        -- as different-length values scroll into view. `col_max` (a per-column
-        -- cap) implies sticky and bounds the growth; `col_sticky` (a column list,
-        -- or a function returning one) names no-cap sticky columns — e.g. the
-        -- graph column under mirroring, whose right-aligned content would
-        -- otherwise shift as its width changes.
-        local sticky = {}
-        local cs = model.col_sticky
-        if type(cs) == "function" then cs = cs() end
-        for _, j in ipairs(cs or {}) do sticky[j] = true end
-        for j in pairs(model.col_max or {}) do sticky[j] = true end
-        for j in pairs(sticky) do
-            local cap = model.col_max and model.col_max[j]
-            if cap then new_columns[j] = math.min(new_columns[j] or 0, cap) end
-            new_columns[j] = math.max(new_columns[j] or 0, model.columns[j] or 0)
-        end
+        for j, w in pairs(fixed) do new_columns[j] = w end
 
         model.columns = new_columns
     end
@@ -811,8 +807,7 @@ end
 ---@field flex? integer        index of the flex column in `line` (fills width)
 ---@field message_min? integer min width kept for the flex column
 ---@field overflow_hl? string  highlight for the "+N" overflow marker
----@field col_max? table<integer, integer>  per-column cap; a capped column is sticky (only grows)
----@field col_sticky? integer[]|fun(): integer[]  no-cap sticky columns (only grow)
+---@field col_widths? fun(): table<integer, integer>  fixed column widths (column index -> cells), read on every render; columns not named are measured from the visible rows
 
 ---@class ListViewAttach
 ---@field winid fun(): integer  the live host window id (changes across the host's hide/show)
@@ -828,8 +823,7 @@ end
 ---@field flex? integer
 ---@field message_min? integer
 ---@field overflow_hl? string
----@field col_max? table<integer, integer>
----@field col_sticky? integer[]|fun(): integer[]
+---@field col_widths? fun(): table<integer, integer>
 
 ---@param opts ListViewOptions
 function M.open(opts)
@@ -844,8 +838,7 @@ function M.open(opts)
         flex = opts.flex,
         message_min = opts.message_min,
         overflow_hl = opts.overflow_hl,
-        col_max = opts.col_max,
-        col_sticky = opts.col_sticky,
+        col_widths = opts.col_widths,
     }
 
     opts = opts or {}

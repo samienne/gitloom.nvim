@@ -638,6 +638,8 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
     junction_markers = true, -- draw kept fork/merge junctions node-less (§10.4)
     date_format = "%Y-%m-%d %H:%M",  -- os.date format for absolute dates
     date_mode = "absolute",  -- "absolute" or "relative"; toggle with d
+    author_width = 18,       -- fixed author column width; longer names truncate with …
+    graph_min_width = 0,     -- floor for the graph column (its width is the widest graph in the view)
     message_min = 24,        -- min width kept for the message; refs use the rest
     label_mode = "right",    -- ref placement: "right" / "inline" / "dual"; cycle with B
     dual_bracket = { "┬", "└" }, -- dual mode's pair bracket: label row, message row
@@ -736,7 +738,17 @@ The graph view accepts an options table (`GraphOptions`). Defaults:
 - **`date_format`** / **`date_mode`** — the author date is parsed into a
   structured timestamp and rendered either as an absolute author-local time
   (`date_format`, an `os.date` string) or a relative age (`date_mode =
-  "relative"`). Toggle live with `d`.
+  "relative"`). Toggle live with `d`. The date column has a fixed width for the
+  mode: the widest text `date_format` can produce, or the longest relative
+  phrase, so it does not change while scrolling.
+- **`author_width`** — the author column is exactly this many cells wide
+  (default `18`); longer names are truncated with `…`.
+- **`graph_min_width`** — the graph column is as wide as the widest graph in the
+  whole current view, not just the rows on screen, so it stays put while
+  scrolling (and, mirrored, so does lane 1). It is recomputed, and may shrink,
+  when the view is rebuilt (collapse / expand, pins, visibility, mirror toggle,
+  and so on). This option sets a floor (default `0`). See
+  [specification.md](specification.md) §6.
 - **`message_min`** — in the default `right` label mode the ref labels are pinned
   to the right edge of the row and use the free width; the message keeps at least
   `message_min` columns (truncated with `…`), and refs that don't fit collapse

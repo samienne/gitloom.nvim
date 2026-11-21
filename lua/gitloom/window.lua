@@ -351,10 +351,10 @@ end
 -- (specification.md §6; see listview's build_line). Grouped into one table so the
 -- big open_graph closure captures a single upvalue rather than four (LuaJIT's
 -- 60-upvalue ceiling — see open_graph). `flex` (message) fills the remaining width
--- with refs pinned right; `author` gets a sticky `author_max` cap so it only grows
--- and doesn't bounce as names scroll past; `graph` is sticky under mirroring so the
--- right-aligned graph + message don't shift as the lane width changes.
-local COL = { flex = 4, author = 2, author_max = 25, graph = 3 }
+-- with refs pinned right; date, author and graph have FIXED widths (§6, the
+-- listview's `col_widths`), so neither the aligned columns nor the message edge
+-- move while scrolling.
+local COL = { date = 1, author = 2, graph = 3, flex = 4 }
 
 -- Floating-window z-order (spec §2.1/§14). With the single-window model there is
 -- exactly **one host window** per repo on screen at a time (frames swap its
@@ -1534,6 +1534,8 @@ end
 ---@field junction_markers? boolean  draw kept junctions node-less (default true); §10.4
 ---@field date_format? string  os.date format for absolute dates; §6
 ---@field date_mode? "absolute"|"relative"  initial date rendering; §6
+---@field author_width? integer  fixed author column width in cells (default 18); longer names truncate with …; §6/§8
+---@field graph_min_width? integer  floor for the graph column's width (default 0); §6/§8
 ---@field message_min? integer  min width kept for the message; refs use the rest; §6
 ---@field label_mode? "right"|"inline"|"dual"  ref label placement; §6.1
 ---@field dual_bracket? string[]  the dual-mode pair bracket glyphs { label row, message row } (default { "┬", "└" }); §6.1
@@ -4626,6 +4628,11 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- Toggle live with d.
         date_format = "%Y-%m-%d %H:%M",
         date_mode = "absolute",
+        -- The author column is exactly author_width cells; longer names are cut
+        -- with … (§6). The graph column is as wide as the widest graph in the
+        -- whole view, and at least graph_min_width.
+        author_width = 18,
+        graph_min_width = 0,
         -- Refs are pinned to the right edge and use the free width; the message
         -- keeps at least message_min, and ref overflow becomes a "+N" marker.
         message_min = 24,
@@ -4757,6 +4764,12 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
     ---@field colstream? table       the streaming Phase-1 sweep held open across
     ---                              batches (graph.extend_columns; §3.1). Cleared by
     ---                              any reflow — the projection is a different list.
+    ---@field graph_w? integer       the graph column's width: the widest graph of the
+    ---                              whole current view (§6), set by reflow_apply and
+    ---                              only widened by streamed batches; the listview's
+    ---                              fixed graph width (col_widths) reads it.
+    ---@field graph_widen? boolean   set around a streamed batch's reflow: reflow_apply
+    ---                              may then only widen graph_w (§6).
     ---@field streaming? boolean     the open-time commit stream is running: the
     ---                              refspec's starting refs count as pending (§5.5)
     ---@field worktree_commits table
@@ -5183,11 +5196,18 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         flex = COL.flex,
         message_min = opts.message_min,
         overflow_hl = opts.palette.remote,
-        -- Sticky cap on the author column so it only grows (no scroll bounce).
-        col_max = { [COL.author] = COL.author_max },
-        -- Under mirroring, make the graph column sticky too (only grow) so the
-        -- right-aligned graph + message don't bounce as the lane width changes.
-        col_sticky = function() return opts.mirror and { COL.graph } or {} end,
+        -- The fixed column widths (§6), read on every render. Date: from the date
+        -- mode alone (`d` changes it); author: `author_width`; each + its one-cell
+        -- gap. Graph: the widest graph of the whole current view (`ctx.graph_w`,
+        -- set by reflow_apply and widened by the stream), floored by
+        -- `graph_min_width` — the same in both mirror modes.
+        col_widths = function()
+            return {
+                [COL.date] = git.date_width(opts) + 1,
+                [COL.author] = render.author_width(opts) + 1,
+                [COL.graph] = math.max(ctx.graph_w or 0, render.graph_min_width(opts)),
+            }
+        end,
         -- Real buffer lines per item: a dual-mode labelled commit is two rows
         -- (label row + message row), everything else one. Cheap — reads only the
         -- commit's refs + mode — so the listview's buffer-line map needs no layout.
@@ -5250,13 +5270,25 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
                         -- the stream O(N²/batch) (spec §3.1).
                         -- Once a branch mode makes the display a separate
                         -- projection, a streamed batch needs a full reflow (§10).
+                        -- The graph column's whole-view width (§6) may only WIDEN
+                        -- while the stream runs: the batch's rows (all rows when
+                        -- the sweep restarted and re-laid the rows above too), or,
+                        -- through a reflow, the new projection's (graph_widen).
+                        local graph_w = ctx.graph_w or 0
                         if repo.display == repo.order then
                             local from = #repo.order - #new_items + 1
+                            local prev = ctx.colstream
                             ctx.colstream = graph.extend_columns(opts, repo.order, from, ctx.colstream)
+                            ctx.graph_w = math.max(graph_w, render.graph_width(repo.order,
+                                (prev and ctx.colstream == prev) and from or 1))
                             controller.insert(new_items, from)
+                            -- The rows on screen were drawn at the old width.
+                            if ctx.graph_w > graph_w then controller.refresh() end
                         else
                             ctx.colstream = nil
+                            ctx.graph_widen = true
                             reflow()
+                            ctx.graph_widen = nil
                         end
                         ctx.open_nbatch = (ctx.open_nbatch or 0) + 1
                         util.open_trace("batch", { i = ctx.open_nbatch, n = #new_items,
@@ -5899,13 +5931,14 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
         -- line (spec §6.2): `goff` = the graph's left edge (date+author width),
         -- `foff` = the message edge (the graph's right side, where the mirrored graph
         -- right-aligns). The panes only continue the main view's lanes, so they must
-        -- line up with whatever offset the graph shows *right now* — and the shared
-        -- column widths are sticky (they grow as wider lane regions scroll in, and
-        -- the graph column is sticky under mirror). A value frozen at build time
-        -- therefore drifts: once the columns grow past the build-time width the pane
-        -- sits left of the graph — under mirror, dramatically, slamming the
-        -- right-aligned header to the left edge (the flush-left header bug). So we
-        -- recompute on every render (build and cone repaint), not once at build.
+        -- line up with whatever offset the graph shows *right now*. The column
+        -- widths are fixed while scrolling (§6) but still change: the graph width on
+        -- a relayout or as the stream widens it, the date width on `d`. A value
+        -- frozen at build time therefore drifts: once the columns change past the
+        -- build-time width the pane sits off the graph — under mirror, dramatically,
+        -- slamming the right-aligned header to the left edge (the flush-left header
+        -- bug). So we recompute on every render (build and cone repaint), not once
+        -- at build.
         -- col_offset is in BYTES; convert via the line's own text so multi-byte
         -- author names don't skew the display columns. A degenerate read (the row's
         -- item columns transiently nil mid-relayout → col_offset 0) keeps the last
@@ -5979,7 +6012,7 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             end
             -- Align to the main view's CURRENT graph offset, not the value frozen
             -- when this pane was built (see pane_offsets), so the lanes stay
-            -- continuous as the sticky columns grow.
+            -- continuous when the column widths change (pane_offsets).
             local goff, foff = pane_offsets()
             render_pane(p.buf, p.rows, goff, foff, p.is_header, p.ovf, p.H, p.ovf_names, p.hclipped,
                 emphasis, incone)
@@ -6340,8 +6373,8 @@ local function open_graph(folder, opts, focus_hash, seed_refs, attach)
             -- ===== no-yield tail: all editor-state mutation happens below =====
             -- Seed the pane offsets from the main view's current graph column (see
             -- pane_offsets). These are stored on the pane state for debug only — the
-            -- actual render recomputes them live (paint_pane) so growth in the sticky
-            -- columns can never strand a pane left of the graph.
+            -- actual render recomputes them live (paint_pane) so a column width change
+            -- can never strand a pane off the graph.
             local goff, foff = pane_offsets()
 
             -- FOOTER (off-screen-older topology, below).
@@ -6917,6 +6950,11 @@ GRAPH_HELPERS.reflow_apply = function(ctx, display)
     -- underneath), so that session can no longer be continued.
     ctx.colstream = nil
     ctx.repo.display = display
+    -- The graph column's width is the widest graph of the whole new view (§6): it
+    -- may shrink here — except for a reflow run for a streamed batch, which may
+    -- only widen it (graph_widen). Set before the swap renders.
+    local graph_w = render.graph_width(display)
+    ctx.graph_w = ctx.graph_widen and math.max(ctx.graph_w or 0, graph_w) or graph_w
     -- A reflow recreates the DisplayNodes, so drop any in-flight commit selection.
     ctx.sel.active, ctx.sel.path, ctx.sel.anchor, ctx.sel.cursor = false, nil, nil, nil
     if ctx.lv and ctx.lv.controller and ctx.lv.controller.set_items then
@@ -7554,6 +7592,8 @@ M._internal = {
     keys = GRAPH_HELPERS.key_registry(), -- the key registry GRAPH_KEYS (§17.1); palette_spec
     -- §19.4's "always ended" glue paths, driven over a stub ctx; progress_spec
     reflow_async = GRAPH_HELPERS.reflow_async,
+    -- The reflow's apply half: the graph column's whole-view width (§6); row_columns_spec
+    reflow_apply = GRAPH_HELPERS.reflow_apply,
     resync = GRAPH_HELPERS.resync,
     -- The palette fetch / pull glue + the fetch log (§17.4), over a stub ctx; palette_spec
     run_remote = GRAPH_HELPERS.run_remote,

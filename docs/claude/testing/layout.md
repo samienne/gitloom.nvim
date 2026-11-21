@@ -262,3 +262,11 @@ Scope: per-spec coverage of the lane layout, streaming sweep, pin ranks / colour
   it's in the cone, a sibling sharing a fan stays fully dim (exact, no bus
   over-lighting), and the shared descent/ascent at a separate split/merge line
   keeps a non-trunk cone lane connected through the hub
+- `tests/row_columns_spec.lua` — the row's fixed-width columns (§6, §8): the date
+  width per mode (absolute probes incl. `%B` / `%A` / two-digit hours, the 14-cell
+  relative vocabulary), `author_width` / `graph_min_width` validation and the `…`
+  author cut through `display_item`, `render.graph_width` = the rendered width in
+  both mirror modes and the whole-view max, `reflow_apply` recomputing it (may
+  shrink) vs only widening it for a streamed batch's reflow (`graph_widen`), and
+  end to end on this repository (snacks): the message edge sits at one column
+  across scroll positions in both mirror modes.

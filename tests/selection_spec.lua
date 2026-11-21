@@ -260,37 +260,46 @@ describe("refresh_columns", function()
         assert.equals(#"wide split", model.columns[3]) -- the wider row wins
     end)
 
-    -- A `col_max` column is sticky: it grows up to its cap as wider values scroll
-    -- in, but never shrinks — so it doesn't bounce (the author column, spec §6).
-    it("caps a column and only grows it (sticky)", function()
+    -- A column with a caller-supplied fixed width (`col_widths`, the date /
+    -- author / graph columns, spec §6) takes it as is, whatever the visible rows
+    -- hold — so it does not change as rows scroll past; the others are measured.
+    it("a col_widths column keeps its fixed width across visible ranges", function()
         local model = {
             flex = nil,
             columns = {},
-            col_max = { [1] = 5 },
-            items = { { data = "abc" }, { data = "abcdefghij" }, { data = "ab" } },
-            display = function(d) return { line = { { text = d } } } end,
+            col_widths = function() return { [1] = 5 } end,
+            items = { { data = "abc" }, { data = "abcdefghij" }, { data = "" } },
+            display = function(d) return { line = { { text = d }, { text = d } } } end,
         }
-        refresh_columns(nil, model, 1, 1) -- width 3 → grows to 3
-        assert.equals(3, model.columns[1])
-        refresh_columns(nil, model, 2, 2) -- width 10 → capped at 5
+        refresh_columns(nil, model, 1, 1)
         assert.equals(5, model.columns[1])
-        refresh_columns(nil, model, 3, 3) -- width 2 → sticky, stays 5
+        assert.equals(3, model.columns[2]) -- measured
+        refresh_columns(nil, model, 2, 2)
         assert.equals(5, model.columns[1])
+        assert.equals(10, model.columns[2])
+        -- A range of rows with an empty value keeps the fixed width (it used to
+        -- collapse to 0 on a screen of non-commit rows).
+        refresh_columns(nil, model, 3, 3)
+        assert.equals(5, model.columns[1])
+        assert.equals(0, model.columns[2])
     end)
 
-    -- col_sticky (no cap) just keeps a column from shrinking — for the graph
-    -- column under mirroring (spec §5.4). A function form is supported too.
-    it("a col_sticky column only grows, with no cap", function()
+    -- The fixed widths are read on every refresh, so a caller-side change (the
+    -- `d` date toggle, a relayout's new graph width) applies on the next render
+    -- even when no item is newly laid out.
+    it("re-reads col_widths on every refresh", function()
+        local w = 4
         local model = {
-            flex = nil,
             columns = {},
-            col_sticky = function() return { 1 } end,
-            items = { { data = "abcdefghij" }, { data = "ab" } },
+            col_widths = function() return { [1] = w } end,
+            items = { { data = "ab" } },
             display = function(d) return { line = { { text = d } } } end,
         }
-        refresh_columns(nil, model, 1, 1) -- width 10 → grows to 10 (no cap)
-        assert.equals(10, model.columns[1])
-        refresh_columns(nil, model, 2, 2) -- width 2 → sticky, stays 10
-        assert.equals(10, model.columns[1])
+        refresh_columns(nil, model, 1, 1)
+        assert.equals(4, model.columns[1])
+        w = 9
+        assert.is_true(refresh_columns(nil, model, 1, 1))
+        assert.equals(9, model.columns[1])
+        assert.is_false(refresh_columns(nil, model, 1, 1))
     end)
 end)

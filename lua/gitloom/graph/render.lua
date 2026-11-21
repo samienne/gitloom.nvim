@@ -969,6 +969,57 @@ function M.get_column_chars(opts, columns, emphasis)
     return result
 end
 
+-- ── Row column widths (specification.md §6) ─────────────────────────────────
+-- The date, author and graph columns are aligned at FIXED widths, never measured
+-- from the rows on screen (so nothing bounces while scrolling). The window hands
+-- these to the listview as its fixed column widths.
+
+M.AUTHOR_WIDTH = 18 -- `author_width`'s default (§8)
+
+--- `v` when it is an integer >= `min`, else nil (the option-validation rule of §8:
+--- an invalid value is ignored and the default applies).
+local function int_at_least(v, min)
+    if type(v) == "number" and v >= min and v % 1 == 0 then return v end
+    return nil
+end
+
+--- The author column's text width (§6, §8 `author_width`, default 18): a value
+--- that is not a positive integer falls back to the default.
+---@param opts GraphOptions
+---@return integer
+function M.author_width(opts)
+    return int_at_least(opts.author_width, 1) or M.AUTHOR_WIDTH
+end
+
+--- The graph column's floor (§8 `graph_min_width`, default 0): a value that is not
+--- a non-negative integer falls back to the default.
+---@param opts GraphOptions
+---@return integer
+function M.graph_min_width(opts)
+    return int_at_least(opts.graph_min_width, 0) or 0
+end
+
+--- The widest graph drawn by `items[from..to]` (default: all), in cells (§6):
+--- every graph row an item renders — its node line (`columns`, which the dual
+--- mode's second row continues at the same width), each `above` line and its
+--- `merge` line. `get_column_chars` draws two cells per lane column (the glyph
+--- and its connector), mirrored or not, so this needs no rendering.
+---@param items OrderItem[]
+---@param from integer?
+---@param to integer?
+---@return integer
+function M.graph_width(items, from, to)
+    local n = 0
+    for i = from or 1, to or #items do
+        local it = items[i]
+        if it then
+            n = math.max(n, #(it.columns or {}), #(it.merge or {}))
+            for _, line in ipairs(it.above or {}) do n = math.max(n, #line) end
+        end
+    end
+    return 2 * n
+end
+
 --- A short one-line label for a snippet row (spec §15.3): the commit subject,
 --- a collapsed head's region count, or a packed marker-group's marker count.
 ---@param item OrderItem
@@ -1413,7 +1464,10 @@ function M.display_item(opts, item, selection_state, cone, sel_cursor, head_bran
         local ref_items = get_ref_items(item.commit, item.ref_colors, item.ref_levels, M.node_drawn(item))
 
         local date_item = rh(git.format_date(item.commit.date, opts) .. " ", palette.date)
-        local author_item = rh((item.commit.author or "") .. " ", palette.author)
+        -- Exactly `author_width` cells (§6): the listview pads a short name; a
+        -- long one is cut here, with `…`, so the gap after it survives.
+        local author_item = rh(util.truncate(item.commit.author or "", M.author_width(opts)) .. " ",
+            palette.author)
         local graph_item = M.get_column_chars(opts, item.columns, emphasis) -- the node line
 
         -- Stacked virtual rows above (the split fan-in, plus any `gutter` handover
