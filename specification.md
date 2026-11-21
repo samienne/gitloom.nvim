@@ -1128,7 +1128,10 @@ and each cell's `left`/`right` connectivity is swapped before glyphs are
 derived, so the graph reads right-to-left with lane 1 at the **right** edge of
 the graph column, nearest the commit message. The graph column is right-aligned
 (padded on the left) so vertical wires stay column-aligned across rows of
-differing lane counts. Setting `mirror = false` (§8) renders it the
+differing lane counts. Because the graph column has **one width for the whole
+view** (§6), its right edge, and with it lane 1 and the start of the message,
+sits at the same screen column on every row and does not move while scrolling;
+it can move only on a relayout. Setting `mirror = false` (§8) renders it the
 conventional way, left-to-right with lane 1 at the left.
 
 Mirroring is purely a rendering transform: the commit ordering, the lane
@@ -1788,13 +1791,39 @@ A commit row displays, left to right:
 5. ref decorations — placed by the **label mode** (§6.1); by default pinned to
    the **right edge** of the row
 
-The date, author, and graph are width-aligned across visible rows. To avoid the
-aligned widths **bouncing** as different-length values scroll past, a column can
-be *sticky* — it only grows, never shrinks: the **author** column is sticky with
-a cap (max 25, longer names truncate), and under mirroring (§5.4) the **graph**
-column is sticky too (its right-aligned content would otherwise shift as the lane
-width changes). The message and refs share the remaining width **per row** (not as
-a fixed aligned column, so navigation stays line-by-line): in the default mode the
+The date, author, and graph are **aligned columns of fixed width**. No column
+width is measured from the rows on screen, so no width changes while scrolling:
+there is no **bounce** as different-length values scroll past, and a column does
+not shrink to nothing when the visible rows are all non-commit rows. Each width
+comes from one rule:
+
+- **Date** — a function of the date mode alone, never measured from the commits.
+  In **absolute** mode it is the widest text `date_format` can produce: the format
+  is applied to a fixed set of probe dates covering every month and weekday and
+  two-digit day and hour values, so a format with names (`%B`, `%a`, in the
+  current locale) gets its longest name. In **relative** mode it is the longest
+  phrase of the relative vocabulary: `59 seconds ago` / `59 minutes ago`, 14
+  cells (a year count would need five digits to be longer). The width changes
+  only when the date mode toggles (`d`).
+- **Author** — exactly `author_width` cells (§8, default `18`). A shorter name
+  is padded and a longer one is truncated with `…`.
+- **Graph** — the widest graph drawn by any row of the **whole current view**
+  (every row of the projection, §10, including split / merge Lines and packed
+  marker rows), not only the visible rows, and at least `graph_min_width` (§8).
+  The rule is the same in both mirror modes (§5.4). The width stays fixed while
+  scrolling and is recomputed, so it may **shrink**, on every **relayout**: a
+  reflow (§10.5), such as a collapse / expand, a pin, a visibility or
+  branch-mode change, or a sort-mode or layout-policy change. The mirror toggle
+  is not a relayout and keeps the width, which is the same in both modes. While commits are still **streaming** in (§3.1), each appended batch
+  may only **widen** it, never narrow it. The projection that follows the end of
+  the stream (§3.1, §10.5) is a relayout, so it sets the exact whole-view width.
+
+So the message starts at a fixed column within a view in both mirror modes, and
+under mirroring lane 1 does too, since it is drawn at the graph's right edge.
+The date and author cells are each followed by a one-cell gap.
+
+The message and refs share the remaining width **per row** (not as a fixed
+aligned column, so navigation stays line-by-line): in the default mode the
 refs are right-aligned at the window edge and the message fills the gap, truncated
 with `…` when it does not fit.
 
@@ -2184,7 +2213,7 @@ one row per head. **Pinned anchors and junction rows are never packed** — each
 its own line so the anchors stay legible.
 
 **Sizing.** Panes are **content-driven within a cap**, computed so the size is
-stable (no scroll-induced bounce, §6 sticky principle):
+stable (no scroll-induced bounce, the §6 principle for the row columns):
 
 - **Header.** From the seeds the header rebuilds the **minimal connecting subgraph**
   (above) by the two reachability passes, then condenses linear runs and lays the
@@ -2194,7 +2223,7 @@ stable (no scroll-induced bounce, §6 sticky principle):
   `H = (#pinned tips above the cutoff) + 1`, build, and grow `H` by one — re-deriving
   the cutoff at the new height each round — until the rows fit. To avoid the main
   view's height twitching, `H` **grows immediately but shrinks only on settle**
-  (debounced), the same anti-bounce rule as sticky columns; the tip is pinned at the
+  (debounced), an anti-bounce rule like the fixed column widths of §6; the tip is pinned at the
   top so growth happens at the bottom. When the fold
   exceeds `header_max`, the surplus collapses into a trailing **`+N above`**
   indicator (the tip + the seam-nearest rows are kept). The header **vanishes**
@@ -2329,6 +2358,7 @@ their own (one muted hue).
 ```
 GraphOptions = { win, palette, merge_style, layout_policy, icons, branches,
                  sort_mode, mirror, highlight, date_format, date_mode,
+                 author_width, graph_min_width,
                  message_min, label_mode, dual_bracket, diff, working_tree,
                  scrolloff, search, persist, progress, zindex, lane_label_colors }
 MergeStyle   = { allow_merge_on_split, merge_on_separate_line, split_on_separate_line }
@@ -2424,9 +2454,17 @@ Endpoint     = Commit | "index" | "worktree"
   conventional left-to-right layout. Purely a rendering transform; ordering and
   lane layout are unchanged. Toggle live with `M`.
 - `date_format` — `os.date` format string for absolute dates (default
-  `%Y-%m-%d %H:%M`), rendered in the author's local time.
+  `%Y-%m-%d %H:%M`), rendered in the author's local time. The date column is as
+  wide as the widest text the format can produce (§6).
 - `date_mode` — `absolute` (default) or `relative`; selects the initial date
   rendering (§6). Toggle live with `d`.
+- `author_width` — the fixed width of the author column in display cells
+  (default `18`); a longer name is truncated with `…` (§6). A value that is not a
+  positive integer is ignored, and the default applies.
+- `graph_min_width` — the minimum width of the graph column in display cells
+  (default `0`, no floor). The graph column is as wide as the widest graph in the
+  current view, and never narrower than this (§6). A value that is not a
+  non-negative integer is ignored, and the default applies.
 - `message_min` — the minimum width always kept for the message (default `24`);
   the right-pinned refs use the rest of the free width, with overflow becoming
   `+N` (§6).
